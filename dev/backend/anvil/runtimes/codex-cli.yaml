@@ -1,0 +1,55 @@
+# 内置运行时定义：Codex CLI（design §2.2）。非交互模式用 `codex exec`。
+id: codex-cli
+display_name: Codex CLI
+version_range: ">=0.1.0"
+
+discovery:
+  strategies:
+    - type: path_lookup
+      command: codex
+    - type: npm_global
+      package: "@openai/codex"
+    - type: fixed_path
+      candidates:
+        - "/usr/local/bin/codex"
+        - "/opt/homebrew/bin/codex"
+  version_probe:
+    args: ["--version"]
+    parse: "regex:(\\d+\\.\\d+\\.\\d+)"
+
+invocation:
+  args:
+    - "exec"
+    - "--skip-git-repo-check"
+    - "{{ prompt }}"
+  cwd: "{{ workspace_path }}"
+  env:
+    ANVIL_TASK_ID: "{{ task_id }}"
+    ANVIL_AGENT_SLUG: "{{ agent_slug }}"
+    ANVIL_ENDPOINT: "http://127.0.0.1:7317"
+    ANVIL_TOKEN: "{{ session_token }}"
+  timeout_seconds: 3600
+  exit_code_success: [0]
+
+capabilities:
+  managed_mcp: false
+  managed_skills: false
+  tool_level_grant: inherit
+  session_resume: false
+  streaming_output: true
+  supports_subagents: false
+  model_selection: true
+  thinking_effort: false
+
+projection:
+  # Codex CLI 读取 AGENTS.md 作为项目指令。
+  instruction:
+    target: "{{ workspace_path }}/AGENTS.md"
+    format: markdown
+    strategy: overwrite_managed_block
+
+health:
+  probe_prompt: "Reply with exactly: ANVIL_OK"
+  expect_contains: "ANVIL_OK"
+  timeout_seconds: 90
+  args: ["exec", "--skip-git-repo-check", "{{ probe_prompt }}"]

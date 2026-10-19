@@ -1,0 +1,12 @@
+# 工具组合预设（design §5 立场五：工具清单是带预算的一等配置）。
+# 用户可在 <DATA_DIR>/tools.yaml 覆盖同名预设。
+presets:
+  minimal:
+    max_tool_tokens: 1200
+    allowlist: []
+  backend-default:
+    max_tool_tokens: 3500
+    allowlist: []
+  full:
+    max_tool_tokens: 8000
+    allowlist: []

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anvil"
+version = "0.1.0"
+description = "Anvil backend (FastAPI)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pyyaml>=6.0",
+    "langgraph>=0.2.40",
+    "langgraph-checkpoint-sqlite>=2.0",
+]
+
+[project.optional-dependencies]
+windows = ["pywin32>=306"]
+
+[tool.setuptools.packages.find]
+include = ["anvil*"]

@@ -1,0 +1,301 @@
+"""Role endpoints (§10 roles 段 + SE §3)."""
+from __future__ import annotations
+
+import json
+import re
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+from .. import services
+from ..deps import get_db
+from ..schemas import RoleIn, RoleOut, ToolsIn
+from ..services import llm
+
+router = APIRouter()
+
+
+@router.post("/roles/auto", status_code=201, response_model=RoleOut)
+def auto_create_role(body: dict, conn=Depends(get_db)):
+    """从自然人一句描述自动生成角色（能力/定位/职责/系统提示）并创建。
+
+    owner 2026-10-19：定义角色时可以「一句话生成」其能力与定位作为基础背景。
+    """
+    import uuid
+
+    brief = str(body.get("brief") or "").strip()
+    if not brief:
+        raise HTTPException(status_code=422, detail="brief is required")
+    slug = str(body.get("slug") or "").strip()
+    if not slug:
+        ascii_part = re.sub(r"[^a-z0-9]+", "-", brief.lower()).strip("-")[:20]
+        slug = (ascii_part or "role") + "-" + uuid.uuid4().hex[:5]
+    if services.roles.get(conn, slug) is not None:
+        raise HTTPException(status_code=409, detail=f"role {slug} already exists")
+    prompt = (
+        "根据以下对 AI 角色的简短描述，生成该角色的完整画像，只返回 JSON（不要 markdown 代码块）：\n"
+        f"角色描述：{brief}\n\n"
+        "JSON 字段：\n"
+        '  "display_name": 简短中文名（如「后端工程师」）\n'
+        '  "description": 一句人类可读的角色定位（不进提示词）\n'
+        '  "working_mode": 工作模式（自主性/协作方式/关注点）\n'
+        '  "skill_description": 职业技能描述\n'
+        '  "capabilities": 领域能力权重对象（如 {"python":0.9,"sql":0.85}）\n'
+        '  "responsibilities": 职责列表（3-5 条）\n'
+        '  "system_prompt": 系统提示（角色身份与行为准则；须写出：在任务会话中主动用 '
+        'anvil task comment 同步进展、用 anvil task mention @协作角色；需要人类决策时 @human）\n'
+    )
+    try:
+        text = llm.generate(prompt)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"LLM 调用失败: {exc}")
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    try:
+        data = json.loads(m.group(0)) if m else {}
+    except json.JSONDecodeError:
+        data = {}
+    definition = {
+        "kind": "member",
+        "description": data.get("description") or brief,
+        "runtime": {"id": "claude-code"},
+        "workspace": {"repos": []},
+        "tools": {},
+        "concurrency": {"max_parallel": 2},
+        "capabilities": data.get("capabilities") or {},
+        "working_mode": data.get("working_mode"),
+        "skill_description": data.get("skill_description"),
+        "system_prompt": data.get("system_prompt") or "",
+        "responsibilities": data.get("responsibilities") or [],
+    }
+    display_name = str(data.get("display_name") or body.get("display_name") or slug)
+    return services.roles.create(conn, slug=slug, display_name=display_name, definition=definition)
+
+
+@router.post("/roles", status_code=201, response_model=RoleOut)
+def create_role(body: RoleIn, conn=Depends(get_db)):
+    definition = body.model_dump()
+    definition.pop("slug", None)
+    definition.pop("display_name", None)
+    return services.roles.create(conn, slug=body.slug, display_name=body.display_name, definition=definition)
+
+
+@router.get("/roles", response_model=list[RoleOut])
+def list_roles(conn=Depends(get_db)):
+    return services.roles.list_all(conn)
+
+
+@router.get("/roles/{slug}", response_model=RoleOut)
+def get_role(slug: str, conn=Depends(get_db)):
+    role = services.roles.get(conn, slug)
+    if role is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    return role
+
+
+@router.put("/roles/{slug}", response_model=RoleOut)
+def update_role(slug: str, body: RoleIn, conn=Depends(get_db)):
+    role = services.roles.get(conn, slug)
+    if role is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    definition = body.model_dump()
+    definition.pop("slug", None)
+    definition.pop("display_name", None)
+    services.roles.update(conn, slug, display_name=body.display_name, definition=definition)
+    return services.roles.get(conn, slug)  # type: ignore[return-value]
+
+
+@router.delete("/roles/{slug}", status_code=204)
+def delete_role(slug: str, conn=Depends(get_db)):
+    if not services.roles.delete(conn, slug):
+        raise HTTPException(status_code=404, detail="role not found")
+    return None
+
+
+@router.get("/roles/{slug}/home")
+def role_home(slug: str, conn=Depends(get_db)):
+    tree = services.roles.home_tree(conn, slug)
+    if tree is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    return tree
+
+
+@router.get("/roles/{slug}/home/file")
+def role_home_file(slug: str, path: str, conn=Depends(get_db)):
+    """只读展示角色 home 内文件（design §10；默认只读，编辑请用「给角色发指令」）。"""
+    file = services.roles.read_home_file(conn, slug, path)
+    if file is None:
+        raise HTTPException(status_code=404, detail="file not found or path out of home")
+    return file
+
+
+@router.get("/roles/{slug}/home/history")
+def role_home_history(slug: str, path: str | None = None, conn=Depends(get_db)):
+    if services.roles.get(conn, slug) is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    return {"slug": slug, "path": path, "commits": services.roles.home_history(conn, slug, path)}
+
+
+@router.get("/roles/{slug}/versions")
+def role_versions(slug: str, conn=Depends(get_db)):
+    if services.roles.get(conn, slug) is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    return services.roles.list_versions(conn, slug)
+
+
+@router.post("/roles/{slug}/rollback/{version}")
+def rollback_role(slug: str, version: int, conn=Depends(get_db)):
+    role = services.roles.rollback(conn, slug, version)
+    if role is None:
+        raise HTTPException(status_code=404, detail="role or version not found")
+    return role
+
+
+@router.post("/roles/{slug}/message")
+def message_role(slug: str, body: dict, request: Request, conn=Depends(get_db)):
+    """向角色直接发指令（design §10 唤醒源之一）：创建无任务 run 并立即派发。"""
+    if services.roles.get(conn, slug) is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    message = str(body.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=422, detail="message is required")
+    run = services.runs.create_run(conn, slug, None, prompt=message)
+    orch = getattr(request.app.state, "orchestrator", None)
+    if orch:
+        try:
+            orch.pump(request.app.state.db_path, run["id"], "wake", {})
+        except Exception:  # noqa: BLE001
+            pass
+    return run
+
+
+@router.get("/roles/{slug}/metrics")
+def role_metrics(slug: str, conn=Depends(get_db)):
+    """角色执行指标（design §10 / §6.5）：run 分布 + 成本 + 任务吞吐。"""
+    if services.roles.get(conn, slug) is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    runs = conn.execute(
+        "SELECT status, COUNT(*) AS n FROM runs WHERE role_slug=? GROUP BY status", (slug,)
+    ).fetchall()
+    runs_by_status = {r["status"]: r["n"] for r in runs}
+    cost = conn.execute(
+        "SELECT COALESCE(SUM(usd),0) AS s FROM cost_ledger WHERE role_slug=?", (slug,)
+    ).fetchone()["s"]
+    done = conn.execute(
+        "SELECT COUNT(*) AS n FROM tasks WHERE assignee=? AND status IN ('done','closed')", (slug,)
+    ).fetchone()["n"]
+    total = conn.execute(
+        "SELECT COUNT(*) AS n FROM tasks WHERE assignee=?", (slug,)
+    ).fetchone()["n"]
+    return {
+        "role": slug,
+        "runs": sum(runs_by_status.values()),
+        "runs_by_status": runs_by_status,
+        "tasks_total": total,
+        "tasks_done": done,
+        "cost_used_usd": cost,
+    }
+
+
+@router.get("/roles/{slug}/tools")
+def role_tools(slug: str, conn=Depends(get_db)):
+    if services.roles.get(conn, slug) is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    return services.roles.get_tools(conn, slug)
+
+
+@router.put("/roles/{slug}/tools")
+def update_role_tools(slug: str, body: ToolsIn, conn=Depends(get_db)):
+    if services.roles.get(conn, slug) is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    tools, estimate = services.roles.update_tools(
+        conn, slug, body.preset, body.allowlist, body.max_tool_tokens,
+    )
+    if estimate is not None:
+        raise HTTPException(status_code=422, detail=estimate)
+    return tools
+
+
+@router.get("/roles/{slug}/effective-config")
+def effective_config(slug: str, conn=Depends(get_db)):
+    cfg = services.roles.effective_config(conn, slug)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    return cfg
+
+
+@router.get("/roles/{slug}/catalog")
+def role_catalog(slug: str, conn=Depends(get_db)):
+    if services.roles.get(conn, slug) is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    tools = services.roles.get_tools(conn, slug)
+    return {"skills": tools.get("skills", []), "mcp": tools.get("mcp", [])}
+
+
+@router.put("/roles/{slug}/catalog")
+def update_role_catalog(slug: str, body: dict, conn=Depends(get_db)):
+    if services.roles.get(conn, slug) is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    skills = [str(s) for s in (body.get("skills") or [])]
+    mcp = [str(m) for m in (body.get("mcp") or [])]
+    return services.roles.update_catalog(conn, slug, skills, mcp)
+
+
+@router.get("/roles/{slug}/profile")
+def role_profile(slug: str, conn=Depends(get_db)):
+    if services.roles.get(conn, slug) is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    return services.roles.get_profile(conn, slug)
+
+
+@router.put("/roles/{slug}/profile")
+def update_role_profile(slug: str, body: dict, conn=Depends(get_db)):
+    if services.roles.get(conn, slug) is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    system_prompt = str(body.get("system_prompt") or "")
+    responsibilities = [str(r) for r in (body.get("responsibilities") or [])]
+    return services.roles.update_profile(conn, slug, system_prompt, responsibilities)
+
+
+@router.post("/roles/{slug}/generate")
+def generate_role(slug: str, body: dict, conn=Depends(get_db)):
+    """调大模型，根据 human 对角色的一句描述，自动生成工作模式/技能描述/职责/系统提示。"""
+    if services.roles.get(conn, slug) is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    brief = str(body.get("brief") or "").strip()
+    if not brief:
+        raise HTTPException(status_code=422, detail="brief is required")
+    prompt = (
+        "根据以下对 AI 角色的简短描述，生成该角色的完整画像，只返回 JSON（不要 markdown 代码块）：\n"
+        f"角色描述：{brief}\n\n"
+        'JSON 字段：\n'
+        '  "working_mode": 工作模式（一句话：自主性/协作方式/关注点）\n'
+        '  "skill_description": 职业技能描述（一句话，擅长什么）\n'
+        '  "responsibilities": 职责列表（3-5 条字符串）\n'
+        '  "system_prompt": 系统提示（一段话：角色身份与行为准则；须明确写出该角色在团队协作时'
+        '会主动在任务会话用 anvil task comment 同步思考进展、用 anvil task mention @提及'
+        '需要协作的其它角色；若该角色负责规划/设计，须先产出方案/设计并 @human 请确认、'
+        '收到 human 确认后再实施）\n'
+    )
+    try:
+        text = llm.generate(prompt)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"LLM 调用失败: {exc}")
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    data = json.loads(m.group(0)) if m else {}
+    return data
+
+
+@router.post("/roles/{slug}/clone", status_code=201, response_model=RoleOut)
+def clone_role(slug: str, conn=Depends(get_db)):
+    src = services.roles.get(conn, slug)
+    if src is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    from ..util import jloads
+    definition = jloads(src["definition_json"], {})
+    new_slug = f"{slug}-clone"
+    return services.roles.create(conn, slug=new_slug, display_name=f"{src['display_name']} (clone)", definition=definition)
+
+
+@router.post("/tools/estimate")
+def estimate_tools(body: dict, conn=Depends(get_db)):
+    allowlist = body.get("allowlist", [])
+    return {"estimate": services.roles.estimate_tokens(allowlist)}

@@ -1,0 +1,99 @@
+# 内置运行时定义（随包分发）。design.md §2.2/§2.6。
+id: claude-code
+display_name: Claude Code
+version_range: ">=1.0.0"
+
+discovery:
+  strategies:
+    - type: path_lookup
+      command: claude
+    - type: npm_global
+      package: "@anthropic-ai/claude-code"
+    - type: fixed_path
+      candidates:
+        - "%LOCALAPPDATA%\\Programs\\claude\\claude.exe"
+        - "/usr/local/bin/claude"
+        - "/opt/homebrew/bin/claude"
+  version_probe:
+    args: ["--version"]
+    parse: "regex:(\\d+\\.\\d+\\.\\d+)"
+
+invocation:
+  args:
+    - "--print"
+    - "--permission-mode"
+    - "{{ permission_mode }}"
+    - "{{ prompt }}"
+  cwd: "{{ workspace_path }}"
+  env:
+    ANVIL_TASK_ID: "{{ task_id }}"
+    ANVIL_AGENT_SLUG: "{{ agent_slug }}"
+    ANVIL_ENDPOINT: "http://127.0.0.1:7317"
+    ANVIL_TOKEN: "{{ session_token }}"
+  timeout_seconds: 3600
+  exit_code_success: [0]
+
+# 常驻会话（每角色一个长期进程；唤醒 = stdin 投递消息；空闲超时退出后 --resume 恢复上下文）
+session:
+  mode: persistent            # persistent | one-shot
+  idle_release_minutes: 15
+  input_format: stream_json
+  args_new:
+    - "--print"
+    - "--permission-mode"
+    - "{{ permission_mode }}"
+    - "--input-format"
+    - "stream-json"
+    - "--output-format"
+    - "stream-json"
+    - "--verbose"
+    - "--session-id"
+    - "{{ session_id }}"
+  args_resume:
+    - "--print"
+    - "--permission-mode"
+    - "{{ permission_mode }}"
+    - "--input-format"
+    - "stream-json"
+    - "--output-format"
+    - "stream-json"
+    - "--verbose"
+    - "--resume"
+    - "{{ session_id }}"
+
+capabilities:
+  managed_mcp: true
+  managed_skills: true
+  tool_level_grant: exact
+  session_resume: true
+  streaming_output: true
+  supports_subagents: true
+  model_selection: true
+  thinking_effort: true
+
+projection:
+  instruction:
+    target: "{{ workspace_path }}/CLAUDE.md"
+    format: markdown
+    strategy: overwrite_managed_block
+  skills:
+    target: "{{ workspace_path }}/.claude/skills/"
+    format: directory_of_md
+    strategy: symlink_or_copy
+  mcp:
+    target: "{{ workspace_path }}/.claude/settings.json"
+    format: json
+    pointer: "mcpServers"
+    schema: claude_mcp_v1
+
+health:
+  probe_prompt: "Reply with exactly: ANVIL_OK"
+  expect_contains: "ANVIL_OK"
+  timeout_seconds: 60
+  args: ["--print", "{{probe_prompt}}"]
+
+# 运行时自身的默认 skill / MCP 目录（角色绑定后据此提供勾选加载）
+catalog:
+  skills_dir: "~/.claude/skills"
+  mcp_config: "~/.claude.json"
+  mcp_pointer: "mcpServers"

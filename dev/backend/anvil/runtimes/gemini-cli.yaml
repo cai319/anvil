@@ -1,0 +1,67 @@
+# 内置运行时定义：Gemini CLI（design §2.2）。非交互模式用 `--prompt`。
+id: gemini-cli
+display_name: Gemini CLI
+version_range: ">=0.1.0"
+
+discovery:
+  strategies:
+    - type: path_lookup
+      command: gemini
+    - type: npm_global
+      package: "@google/gemini-cli"
+    - type: fixed_path
+      candidates:
+        - "/usr/local/bin/gemini"
+        - "/opt/homebrew/bin/gemini"
+  version_probe:
+    args: ["--version"]
+    parse: "regex:(\\d+\\.\\d+\\.\\d+)"
+
+invocation:
+  args:
+    - "--prompt"
+    - "{{ prompt }}"
+  cwd: "{{ workspace_path }}"
+  env:
+    ANVIL_TASK_ID: "{{ task_id }}"
+    ANVIL_AGENT_SLUG: "{{ agent_slug }}"
+    ANVIL_ENDPOINT: "http://127.0.0.1:7317"
+    ANVIL_TOKEN: "{{ session_token }}"
+  timeout_seconds: 3600
+  exit_code_success: [0]
+
+capabilities:
+  managed_mcp: true
+  managed_skills: true
+  tool_level_grant: server
+  session_resume: false
+  streaming_output: true
+  supports_subagents: false
+  model_selection: true
+  thinking_effort: false
+
+projection:
+  # Gemini CLI 读取 GEMINI.md 作为项目指令。
+  instruction:
+    target: "{{ workspace_path }}/GEMINI.md"
+    format: markdown
+    strategy: overwrite_managed_block
+  skills:
+    target: "{{ workspace_path }}/.gemini/skills/"
+    format: directory_of_md
+    strategy: symlink_or_copy
+  mcp:
+    target: "{{ workspace_path }}/.gemini/settings.json"
+    format: json
+    pointer: "mcpServers"
+
+health:
+  probe_prompt: "Reply with exactly: ANVIL_OK"
+  expect_contains: "ANVIL_OK"
+  timeout_seconds: 90
+  args: ["--prompt", "{{ probe_prompt }}"]
+
+catalog:
+  skills_dir: "~/.gemini/skills"
+  mcp_config: "~/.gemini/settings.json"
+  mcp_pointer: "mcpServers"
