@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import API, auth_headers, role_payload, runtime_payload
+from tests.conftest import API, auth_headers, role_payload, runtime_payload, human_headers  # noqa: E402
 
 pytestmark = [
     pytest.mark.usefixtures("client"),
@@ -79,7 +79,7 @@ async def test_unbind_member(client):
     await _seed(client)
     ws = (await _ws(client, name="c3")).json()
     await client.post(f"{API}/workspaces/{ws['id']}/members", json={"role_slug": "backend-eng", "access": "write"}, headers=auth_headers())
-    r = await client.delete(f"{API}/workspaces/{ws['id']}/members/backend-eng", headers=auth_headers())
+    r = await client.delete(f"{API}/workspaces/{ws['id']}/members/backend-eng", headers=human_headers())
     assert r.status_code in (200, 204)
     members = (await client.get(f"{API}/workspaces/{ws['id']}/members", headers=auth_headers())).json()
     assert not any(m["role_slug"] == "backend-eng" for m in members)
@@ -142,7 +142,7 @@ async def test_channel_full_flow(client):
     await _seed(client)
     ws = (await _ws(client, name="c10")).json()
     d = (await client.post(f"{API}/board/decompose", json={"goal": "g", "workspace_id": ws["id"]}, headers=auth_headers())).json()
-    await client.post(f"{API}/board/drafts/approve", json={"draft_ids": [d["id"]]}, headers=auth_headers())
+    await client.post(f"{API}/board/drafts/approve", json={"draft_ids": [d["id"]]}, headers=human_headers())
     tasks = (await client.get(f"{API}/tasks", params={"workspace_id": ws["id"]}, headers=auth_headers())).json()
     task = tasks[0]
     tid = task["id"]
@@ -151,6 +151,6 @@ async def test_channel_full_flow(client):
         await client.post(f"{API}/workspaces/{ws['id']}/members", json={"role_slug": role, "access": "write"}, headers=auth_headers())
         assert (await client.post(f"{API}/tasks/{tid}/claim", json={}, headers=auth_headers(role))).status_code == 200
         assert (await client.post(f"{API}/tasks/{tid}/submit", json={"summary": "x"}, headers=auth_headers(role))).status_code == 200
-    assert (await client.post(f"{API}/tasks/{tid}/review", json={"approve": True}, headers=auth_headers())).status_code == 200
+    assert (await client.post(f"{API}/tasks/{tid}/review", json={"approve": True}, headers=human_headers())).status_code == 200
     body = (await client.get(f"{API}/tasks/{tid}", headers=auth_headers())).json()
     assert body["status"] == "done"

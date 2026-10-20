@@ -53,6 +53,7 @@ export function Channels() {
   };
 
   const unbind = async (m: Member) => {
+    if (!window.confirm(`确定将「${m.role_slug}」移出该频道？`)) return;
     try {
       await api.removeMember(selected!, m.role_slug);
       setMembers(await api.listMembers(selected!));

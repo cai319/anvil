@@ -191,9 +191,12 @@ def task_cmd(
     tag: str = typer.Option(None, "--tag", help="按标签过滤 list"),
     parent: str = typer.Option(None, "--parent", help="父任务 id"),
     title: str = typer.Option(None, "--title", help="任务标题（create 用）"),
+    description: str = typer.Option(None, "--description", help="任务描述（create 用）"),
     summary: str = typer.Option(None, "--summary", help="submit 摘要"),
     paths: str = typer.Option(None, "--paths", help="认领范围路径（逗号分隔）"),
-    force: bool = typer.Option(False, "--force", help="delete 时强制删除（含活跃 run/子任务）"),
+    force: bool = typer.Option(False, "--force", help="delete 强制；comment/mention 知情越过 held"),
+    expect_activity: int = typer.Option(None, "--expect-activity",
+                                        help="Held Draft：发送时依据的最新活动 id"),
     json_out: bool = typer.Option(False, "--json", help="输出 JSON"),
 ):
     """anvil task <list|show|create|claim|unclaim|heartbeat|submit|comment|mention|cancel|reopen|delete|block> …"""
@@ -206,15 +209,20 @@ def task_cmd(
     method, path, payload = "GET", "/api/v1/tasks", None
     params = None
     if action == "list":
-        params = {k: v for k, v in (("type", type_), ("tag", tag)) if v}
+        params = {k: v for k, v in (("type", type_), ("tag", tag),
+                                    ("parent_id", parent)) if v}
     elif action == "show":
         method, path = "GET", f"/api/v1/tasks/{tid}"
     elif action == "create":
         p = {"title": title or body or "untitled"}
         if type_:
             p["type"] = type_
+        if description:
+            p["description"] = description
         if parent:
             p["parent_id"] = parent
+        if AGENT_SLUG:
+            p["created_by"] = f"agent:{AGENT_SLUG}"
         method, path, payload = "POST", "/api/v1/tasks", p
     elif action == "claim":
         p = {"paths": [x.strip() for x in paths.split(",")]} if paths else {}
@@ -226,9 +234,19 @@ def task_cmd(
     elif action == "submit":
         method, path, payload = "POST", f"/api/v1/tasks/{tid}/submit", {"summary": summary or body}
     elif action == "comment":
-        method, path, payload = "POST", f"/api/v1/tasks/{tid}/comment", {"body": body}
+        payload = {"body": body}
+        if expect_activity:
+            payload["expect_activity_id"] = expect_activity
+        if force:
+            payload["force"] = True
+        method, path = "POST", f"/api/v1/tasks/{tid}/comment"
     elif action == "mention":
-        method, path, payload = "POST", f"/api/v1/tasks/{tid}/mention", {"target": to, "message": body}
+        payload = {"target": to, "message": body}
+        if expect_activity:
+            payload["expect_activity_id"] = expect_activity
+        if force:
+            payload["force"] = True
+        method, path = "POST", f"/api/v1/tasks/{tid}/mention"
     elif action == "cancel":
         method, path, payload = "POST", f"/api/v1/tasks/{tid}/cancel", {}
     elif action == "reopen":
@@ -371,6 +389,107 @@ def ws_cmd(
         _emit(_call("GET", f"/api/v1/workspaces/{ws_id}/diff"), json_out)
     else:
         raise typer.Exit(2)
+
+
+# ---- role（Agent 自行扩展团队）--------------------------------------------
+
+
+role_app = typer.Typer(help="角色扩展（Agent 创建新 agent）")
+app.add_typer(role_app, name="role")
+
+
+@role_app.command("expand")
+def role_expand(
+    brief: str = typer.Option(..., "--brief", help="新 agent 的一句话定位"),
+    task: str = typer.Option(DEFAULT_TASK, "--task", help="关联任务 id（会通知 human）"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """创建一个新 agent（继承你的 runtime；每日配额有限）。"""
+    out = _call("POST", "/api/v1/roles/expand", {"brief": brief, "task_id": task})
+    if json_out:
+        _emit(out, True)
+    else:
+        typer.echo(f"新 agent 已创建：{out['display_name']}（{out['slug']}）")
+
+
+# ---- action（Action Cards：Agent 准备，人类执行）---------------------------
+
+
+action_app = typer.Typer(help="Action Cards（危险操作先申请，人类批准后执行）")
+app.add_typer(action_app, name="action")
+
+
+@action_app.command("prepare")
+def action_prepare(
+    kind: str = typer.Option(..., "--kind", help="task.cancel | task.reopen"),
+    task: str = typer.Option(DEFAULT_TASK, "--task", help="任务 id"),
+    reason: str = typer.Option("", "--reason", help="申请原因"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """准备一张操作卡片，等待人类批准（不会直接执行）。"""
+    out = _call("POST", "/api/v1/action-cards", {
+        "kind": kind, "task_id": task, "reason": reason,
+    })
+    if json_out:
+        _emit(out, True)
+    else:
+        typer.echo(f"操作卡片已创建：{out['id']}（pending，等待人类批准）")
+
+
+@action_app.command("list")
+def action_list(
+    status: str = typer.Option("", "--status", help="pending|rejected|executed|failed"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """列出操作卡片。"""
+    params = {"status": status} if status else None
+    cards = _call("GET", "/api/v1/action-cards", params=params)
+    if json_out:
+        _emit(cards, True)
+        return
+    for c in cards:
+        typer.echo(f"{c['id'][:8]}  {c['status']:9s}  {c['kind']:12s}  {c.get('reason') or ''}")
+
+
+# ---- inbox（Agent 拉模式收件箱）-------------------------------------------
+
+
+inbox_app = typer.Typer(help="Agent 收件箱（拉模式）")
+app.add_typer(inbox_app, name="inbox")
+
+
+@inbox_app.command("check")
+def inbox_check(
+    task: str = typer.Option(DEFAULT_TASK, "--task", help="任务 id（默认 $ANVIL_TASK_ID）"),
+    limit: int = typer.Option(30, "--limit"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """拉取 cursor 之后的未读消息（不推进 cursor）。"""
+    out = _call("GET", "/api/v1/me/inbox", params={"task_id": task, "limit": limit})
+    if json_out:
+        _emit(out, True)
+        return
+    typer.echo(f"未读 {out['unread']} 条（cursor={out['cursor']}）")
+    for it in out["items"]:
+        typer.echo(f"[{it['id']}] {it['role']} · {it['kind']}: {it['text'][:200]}")
+    if not out["items"]:
+        typer.echo("（无未读消息）")
+    else:
+        typer.echo(f"处理完后：anvil inbox commit --task {task} --up-to {out['items'][-1]['id']}")
+
+
+@inbox_app.command("commit")
+def inbox_commit(
+    up_to: int = typer.Option(..., "--up-to", help="已处理到的最大消息 id"),
+    task: str = typer.Option(DEFAULT_TASK, "--task", help="任务 id（默认 $ANVIL_TASK_ID）"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """提交 cursor（只前进；崩溃未提交会重复投递，at-least-once）。"""
+    out = _call("POST", "/api/v1/me/inbox/commit", {"task_id": task, "up_to": up_to})
+    if json_out:
+        _emit(out, True)
+    else:
+        typer.echo(f"cursor 已提交：{out['cursor']}")
 
 
 # ---- step（工作流步骤）----------------------------------------------------

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type Role } from "../api/client";
+import { api, isOnboardingRole, type Role } from "../api/client";
 
 type Tab = "basic" | "instruction" | "tools" | "catalog" | "home" | "permissions" | "runtime";
 
@@ -98,6 +98,7 @@ export function Roles() {
   };
 
   const remove = async (r: Role) => {
+    if (!window.confirm(`确定删除角色「${r.display_name}（${r.slug}）」？该操作不可恢复。`)) return;
     try {
       await api.deleteRole(r.slug);
       if (selected === r.slug) setSelected(null);
@@ -176,8 +177,11 @@ export function Roles() {
             <li key={r.slug} className={selected === r.slug ? "active" : ""}>
               <a href="#" onClick={(e) => { e.preventDefault(); setSelected(r.slug); setTab("basic"); }}>
                 {r.display_name} <small>({r.slug})</small>
+                {isOnboardingRole(r) && <span className="badge badge-in_progress" title="默认助理，不可删除">默认助理</span>}
               </a>
-              <button onClick={() => remove(r)} className="danger">删</button>
+              {!isOnboardingRole(r) && (
+                <button onClick={() => remove(r)} className="danger">删</button>
+              )}
             </li>
           ))}
         </ul>

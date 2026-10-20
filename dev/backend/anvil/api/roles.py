@@ -7,7 +7,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .. import services
-from ..deps import get_db
+from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import RoleIn, RoleOut, ToolsIn
 from ..services import llm
 
@@ -15,7 +15,8 @@ router = APIRouter()
 
 
 @router.post("/roles/auto", status_code=201, response_model=RoleOut)
-def auto_create_role(body: dict, conn=Depends(get_db)):
+def auto_create_role(body: dict, conn=Depends(get_db),
+                     auth: Auth = Depends(require_human)):
     """从自然人一句描述自动生成角色（能力/定位/职责/系统提示）并创建。
 
     owner 2026-10-19：定义角色时可以「一句话生成」其能力与定位作为基础背景。
@@ -70,6 +71,103 @@ def auto_create_role(body: dict, conn=Depends(get_db)):
     return services.roles.create(conn, slug=slug, display_name=display_name, definition=definition)
 
 
+@router.post("/roles/expand", status_code=201, response_model=RoleOut)
+def expand_role(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    """Agent 自行扩展团队（Raft 风格）：创建新 agent 并继承创建者的 runtime。
+
+    约束：仅 Agent 会话可调用；每日至多 N 个（默认 3）；总角色数上限；
+    不继承/不允许设置 tools、permission_mode 以外的高权限字段。
+    """
+    import uuid
+    from datetime import datetime, timedelta, timezone
+
+    from .. import config
+    from ..util import now_iso
+
+    if not auth.role or auth.role == "human":
+        raise HTTPException(status_code=403, detail="only an agent session can expand the team")
+    creator = services.roles.get(conn, auth.role)
+    if creator is None:
+        raise HTTPException(status_code=404, detail="creator role not found")
+    brief = str(body.get("brief") or "").strip()
+    if not brief:
+        raise HTTPException(status_code=422, detail="brief is required")
+
+    since = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    used = conn.execute(
+        "SELECT COUNT(*) AS n FROM audit WHERE role_slug=? AND action='role_expand' AND created_at>=?",
+        (auth.role, since)).fetchone()["n"]
+    if used >= config.AGENT_ROLE_EXPAND_DAILY:
+        raise HTTPException(status_code=429, detail="daily role expansion quota exhausted")
+    total = conn.execute("SELECT COUNT(*) AS n FROM roles").fetchone()["n"]
+    if total >= config.MAX_ROLES:
+        raise HTTPException(status_code=409, detail=f"role limit {config.MAX_ROLES} reached")
+
+    creator_def = creator.get("definition") or {}
+    creator_runtime = creator_def.get("runtime")
+    if not isinstance(creator_runtime, dict):
+        creator_runtime = {"id": creator_runtime or "claude-code"}
+    runtime = {"id": creator_runtime.get("id") or "claude-code"}
+    for k in ("permission_mode", "model"):
+        if creator_runtime.get(k):
+            runtime[k] = creator_runtime[k]
+
+    prompt = (
+        "你是团队里的 agent，正在扩展一个新 agent。根据下面的 brief 生成完整画像，"
+        "只返回 JSON（不要 markdown 代码块）：\n"
+        f"brief：{brief}\n\n"
+        '字段：display_name、description、capabilities（对象）、responsibilities（3-5 条）、'
+        "system_prompt（身份与行为准则；要求主动用 anvil task comment 同步进展、"
+        "用 anvil task mention 协作、需要人类决策时 @human）。"
+    )
+    data: dict = {}
+    try:
+        text = llm.generate(prompt)
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            data = json.loads(m.group(0))
+    except Exception:  # noqa: BLE001 —— LLM 不可用时退化为简单画像
+        data = {}
+
+    slug = str(body.get("slug") or "").strip()
+    if not slug:
+        slug = "agent-" + uuid.uuid4().hex[:6]
+    if services.roles.get(conn, slug) is not None:
+        raise HTTPException(status_code=409, detail=f"role {slug} already exists")
+    display_name = str(data.get("display_name") or brief[:20] or slug)
+    definition = {
+        "kind": "member",
+        "created_by": f"agent:{auth.role}",
+        "description": data.get("description") or brief,
+        "runtime": runtime,
+        "workspace": {"repos": []},
+        "tools": {},
+        "concurrency": {"max_parallel": 1},
+        "capabilities": data.get("capabilities") or {},
+        "responsibilities": data.get("responsibilities") or ["按分配的任务 brief 执行"],
+        "system_prompt": data.get("system_prompt") or (
+            f"你是 {display_name}，由 {auth.role} 创建。按任务 brief 执行，"
+            "主动用 anvil task comment 同步进展、用 anvil task mention 协作，"
+            "需要人类决策时 @human。"),
+    }
+    role = services.roles.create(conn, slug=slug, display_name=display_name,
+                                 definition=definition)
+    conn.execute(
+        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (auth.role, None, "role_expand",
+         __import__("json").dumps({"slug": slug, "brief": brief}, ensure_ascii=False),
+         now_iso()))
+    task_id = body.get("task_id")
+    if task_id and services.tasks.get(conn, task_id) is not None:
+        services.tasks.comment(conn, task_id, auth.role,
+                               f"创建了新 agent：{display_name}（{slug}）\n{brief}")
+        services.tasks.mention(conn, task_id, auth.role, "human",
+                               f"我创建了新 agent {display_name}（{slug}）：{brief}")
+    conn.commit()
+    return role
+
+
 @router.post("/roles", status_code=201, response_model=RoleOut)
 def create_role(body: RoleIn, conn=Depends(get_db)):
     definition = body.model_dump()
@@ -92,7 +190,8 @@ def get_role(slug: str, conn=Depends(get_db)):
 
 
 @router.put("/roles/{slug}", response_model=RoleOut)
-def update_role(slug: str, body: RoleIn, conn=Depends(get_db)):
+def update_role(slug: str, body: RoleIn, conn=Depends(get_db),
+                auth: Auth = Depends(require_human)):
     role = services.roles.get(conn, slug)
     if role is None:
         raise HTTPException(status_code=404, detail="role not found")
@@ -104,8 +203,12 @@ def update_role(slug: str, body: RoleIn, conn=Depends(get_db)):
 
 
 @router.delete("/roles/{slug}", status_code=204)
-def delete_role(slug: str, conn=Depends(get_db)):
-    if not services.roles.delete(conn, slug):
+def delete_role(slug: str, conn=Depends(get_db), auth: Auth = Depends(require_human)):
+    try:
+        deleted = services.roles.delete(conn, slug)
+    except Exception as exc:  # ConflictError
+        raise HTTPException(status_code=409, detail=str(exc))
+    if not deleted:
         raise HTTPException(status_code=404, detail="role not found")
     return None
 
@@ -142,7 +245,8 @@ def role_versions(slug: str, conn=Depends(get_db)):
 
 
 @router.post("/roles/{slug}/rollback/{version}")
-def rollback_role(slug: str, version: int, conn=Depends(get_db)):
+def rollback_role(slug: str, version: int, conn=Depends(get_db),
+                  auth: Auth = Depends(require_human)):
     role = services.roles.rollback(conn, slug, version)
     if role is None:
         raise HTTPException(status_code=404, detail="role or version not found")
@@ -203,7 +307,8 @@ def role_tools(slug: str, conn=Depends(get_db)):
 
 
 @router.put("/roles/{slug}/tools")
-def update_role_tools(slug: str, body: ToolsIn, conn=Depends(get_db)):
+def update_role_tools(slug: str, body: ToolsIn, conn=Depends(get_db),
+                      auth: Auth = Depends(require_human)):
     if services.roles.get(conn, slug) is None:
         raise HTTPException(status_code=404, detail="role not found")
     tools, estimate = services.roles.update_tools(
@@ -231,7 +336,8 @@ def role_catalog(slug: str, conn=Depends(get_db)):
 
 
 @router.put("/roles/{slug}/catalog")
-def update_role_catalog(slug: str, body: dict, conn=Depends(get_db)):
+def update_role_catalog(slug: str, body: dict, conn=Depends(get_db),
+                        auth: Auth = Depends(require_human)):
     if services.roles.get(conn, slug) is None:
         raise HTTPException(status_code=404, detail="role not found")
     skills = [str(s) for s in (body.get("skills") or [])]
@@ -247,7 +353,8 @@ def role_profile(slug: str, conn=Depends(get_db)):
 
 
 @router.put("/roles/{slug}/profile")
-def update_role_profile(slug: str, body: dict, conn=Depends(get_db)):
+def update_role_profile(slug: str, body: dict, conn=Depends(get_db),
+                        auth: Auth = Depends(require_human)):
     if services.roles.get(conn, slug) is None:
         raise HTTPException(status_code=404, detail="role not found")
     system_prompt = str(body.get("system_prompt") or "")
@@ -285,7 +392,7 @@ def generate_role(slug: str, body: dict, conn=Depends(get_db)):
 
 
 @router.post("/roles/{slug}/clone", status_code=201, response_model=RoleOut)
-def clone_role(slug: str, conn=Depends(get_db)):
+def clone_role(slug: str, conn=Depends(get_db), auth: Auth = Depends(require_human)):
     src = services.roles.get(conn, slug)
     if src is None:
         raise HTTPException(status_code=404, detail="role not found")

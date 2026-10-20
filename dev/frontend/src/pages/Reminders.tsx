@@ -57,6 +57,7 @@ export function Reminders() {
   };
 
   const remove = async (id: string) => {
+    if (!window.confirm("确定删除该提醒？删除后不会再触发。")) return;
     try {
       await api.deleteReminder(id);
       await refresh();

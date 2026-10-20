@@ -33,14 +33,23 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
         sid = str(s.get("id") or s.get("step_id") or "")
         if not sid:
             raise ConflictError("workflow step missing id")
+        role = str(s.get("role") or s.get("role_slug") or "")
+        from . import roles as roles_service
+        if role and roles_service.is_onboarding(conn, role):
+            raise ConflictError(f"step {sid}: onboarding assistant cannot execute workflow steps")
+        reviewer = str(s.get("reviewer") or "").strip() or None
+        if reviewer and reviewer == role:
+            raise ConflictError(
+                f"step {sid}: reviewer must differ from implementer ({role})")
         conn.execute(
             "INSERT INTO workflow_steps (workflow_id, step_id, title, role_slug, instructions, "
-            "depends_on_json, acceptance_json, gate, status, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (wid, sid, str(s.get("title") or sid), str(s.get("role") or s.get("role_slug") or ""),
+            "depends_on_json, acceptance_json, gate, reviewer, contract, status, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (wid, sid, str(s.get("title") or sid), role,
              str(s.get("instructions") or s.get("description") or ""),
              jdumps(s.get("depends_on") or []), jdumps(s.get("acceptance") or []),
-             1 if s.get("gate") else 0, "pending", now),
+             1 if s.get("gate") else 0, reviewer, str(s.get("contract") or "") or None,
+             "pending", now),
         )
     conn.execute(
         "UPDATE tasks SET status='in_progress', assignee=NULL, lease_expires_at=NULL, "
@@ -83,6 +92,20 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
     """注入给角色的步骤说明（替代任务级协议）。"""
     deps = "、".join(step["depends_on"]) or "无"
     acceptance = "\n".join(f"- {a}" for a in step["acceptance"]) or "-（无）"
+    contract = (step.get("contract") or "").strip()
+    dep_contracts = []
+    by_id = {x["step_id"]: x for x in workflow.get("steps", [])}
+    for d in step["depends_on"]:
+        up = by_id.get(d) or {}
+        if (up.get("contract") or "").strip():
+            dep_contracts.append(f"[{d} {up.get('title','')}] {up['contract'].strip()}")
+    contracts_block = ""
+    if contract or dep_contracts:
+        contracts_block = "\n契约（必须遵守，违反即视为失败）：\n"
+        if dep_contracts:
+            contracts_block += "上游契约：\n" + "\n".join(f"- {c}" for c in dep_contracts) + "\n"
+        if contract:
+            contracts_block += f"本步骤契约：\n{contract}\n"
     title = (task or {}).get("title") or ""
     desc = (task or {}).get("description") or ""
     return (
@@ -93,7 +116,8 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
         f"依赖步骤（已完成）：{deps}\n"
         f"验收标准：\n{acceptance}\n\n"
         f"任务背景：\n{desc}\n\n"
-        f"步骤说明：\n{step['instructions'] or '（无额外说明，按标题与验收标准执行）'}\n\n"
+        f"步骤说明：\n{step['instructions'] or '（无额外说明，按标题与验收标准执行）'}\n"
+        f"{contracts_block}\n"
         f"完成后必须执行：`anvil step submit {workflow['id']} {step['step_id']} --summary \"完成摘要\"`。\n"
         "不要调用 `anvil task submit` / `anvil task claim`。\n"
     )
@@ -233,7 +257,8 @@ def retry_step(conn: sqlite3.Connection, wid: str, step_id: str) -> dict:
     return get_workflow(conn, wid)  # type: ignore[return-value]
 
 
-def fail_step(conn: sqlite3.Connection, wid: str, step_id: str, reason: str) -> None:
+def fail_step(conn: sqlite3.Connection, wid: str, step_id: str, reason: str,
+              category: str = "agent_error") -> None:
     """run 失败/失联时标记步骤失败并通知人类。"""
     wf = get_workflow(conn, wid)
     if wf is None:
@@ -242,8 +267,9 @@ def fail_step(conn: sqlite3.Connection, wid: str, step_id: str, reason: str) -> 
     if step is None or step["status"] != "running":
         return
     conn.execute(
-        "UPDATE workflow_steps SET status='failed', summary=?, ended_at=?, updated_at=? "
-        "WHERE workflow_id=? AND step_id=?", (reason, now_iso(), now_iso(), wid, step_id))
+        "UPDATE workflow_steps SET status='failed', summary=?, failure_reason=?, "
+        "ended_at=?, updated_at=? WHERE workflow_id=? AND step_id=?",
+        (reason, category, now_iso(), now_iso(), wid, step_id))
     conn.execute(
         "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
         "VALUES (?,?,?,?,?)",

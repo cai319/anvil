@@ -16,7 +16,7 @@ import asyncio
 
 import pytest
 
-from tests.conftest import API, auth_headers, role_payload, runtime_payload, task_payload
+from tests.conftest import API, auth_headers, role_payload, runtime_payload, task_payload, human_headers  # noqa: E402
 
 pytestmark = [
     pytest.mark.usefixtures("client"),
@@ -42,11 +42,11 @@ async def test_review_approve_and_reject(client):
     await _task(client, id_="T-1")
     await client.post(f"{API}/tasks/T-1/claim", json={}, headers=auth_headers())
     await client.post(f"{API}/tasks/T-1/submit", json={"summary": "v1"}, headers=auth_headers())
-    rej = await client.post(f"{API}/tasks/T-1/review", json={"approve": False}, headers=auth_headers())
+    rej = await client.post(f"{API}/tasks/T-1/review", json={"approve": False}, headers=human_headers())
     assert rej.status_code == 200
     assert (await client.get(f"{API}/tasks/T-1")).json()["status"] == "in_progress"
     await client.post(f"{API}/tasks/T-1/submit", json={"summary": "v2"}, headers=auth_headers())
-    appr = await client.post(f"{API}/tasks/T-1/review", json={"approve": True}, headers=auth_headers())
+    appr = await client.post(f"{API}/tasks/T-1/review", json={"approve": True}, headers=human_headers())
     assert appr.status_code == 200
     assert (await client.get(f"{API}/tasks/T-1")).json()["status"] == "done"
 
@@ -95,7 +95,7 @@ async def test_submit_blocked_until_children_done(client):
     # 子任务做完 → 父可 submit
     await client.post(f"{API}/tasks/T-CHILD/claim", json={}, headers=auth_headers("other-role"))
     await client.post(f"{API}/tasks/T-CHILD/submit", json={"summary": "y"}, headers=auth_headers("other-role"))
-    await client.post(f"{API}/tasks/T-CHILD/review", json={"approve": True}, headers=auth_headers("other-role"))
+    await client.post(f"{API}/tasks/T-CHILD/review", json={"approve": True}, headers=human_headers())
     r2 = await client.post(f"{API}/tasks/T-PARENT/submit", json={"summary": "x"}, headers=auth_headers())
     assert r2.status_code == 200
 
@@ -181,19 +181,19 @@ async def test_concurrency_gate_role_max_parallel(client):
     """角色 max_parallel=2，第 3 个 run 被并发闸门拦（§5.6）。"""
     await _seed(client)
     # 实现需暴露并发闸门判定；此处断言闸门接口/状态可查
-    r = await client.get(f"{API}/budget", headers=auth_headers())
+    r = await client.get(f"{API}/budget", headers=human_headers())
     assert r.status_code in (200, 404)
 
 
 async def test_freeze_all(client):
     """全场冻结：POST /control/freeze-all → 停新 run/claim，resume-all 恢复。"""
     await _seed(client)
-    f = await client.post(f"{API}/control/freeze-all", headers=auth_headers())
+    f = await client.post(f"{API}/control/freeze-all", headers=human_headers())
     assert f.status_code == 200
     await _task(client, id_="T-FZ")
     r = await client.post(f"{API}/tasks/T-FZ/claim", json={}, headers=auth_headers())
     assert r.status_code in (409, 423, 429)  # 冻结态拒新认领
-    res = await client.post(f"{API}/control/resume-all", headers=auth_headers())
+    res = await client.post(f"{API}/control/resume-all", headers=human_headers())
     assert res.status_code == 200
 
 

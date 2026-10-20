@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import API, auth_headers, role_payload, runtime_payload
+from tests.conftest import API, auth_headers, role_payload, runtime_payload, human_headers  # noqa: E402
 
 pytestmark = [
     pytest.mark.usefixtures("client"),
@@ -61,7 +61,7 @@ async def test_approve_lands_tasks_with_deps(client):
     await _seed(client)
     d = (await client.post(f"{API}/board/decompose", json={"goal": "g"}, headers=auth_headers())).json()
     r = await client.post(
-        f"{API}/board/drafts/approve", json={"draft_ids": [d["id"]]}, headers=auth_headers()
+        f"{API}/board/drafts/approve", json={"draft_ids": [d["id"]]}, headers=human_headers()
     )
     assert r.status_code == 200
     # 落板后应产生 todo 任务
@@ -73,7 +73,7 @@ async def test_decompose_pipeline_with_roles_and_deps(client):
     """PM 规划：design-dev-test 模板产出 设计→实现→测试，带角色 + 线性依赖。"""
     await _seed(client)
     d = (await client.post(f"{API}/board/decompose", json={"goal": "g", "template": "design-dev-test"}, headers=auth_headers())).json()
-    await client.post(f"{API}/board/drafts/approve", json={"draft_ids": [d["id"]]}, headers=auth_headers())
+    await client.post(f"{API}/board/drafts/approve", json={"draft_ids": [d["id"]]}, headers=human_headers())
     tasks = (await client.get(f"{API}/tasks", headers=auth_headers())).json()
     by = {t["title"].split(" — ")[0]: t for t in tasks if t["title"].startswith(("设计", "实现", "测试"))}
     assert set(by) == {"设计", "实现", "测试"}
@@ -91,7 +91,7 @@ async def test_review_approve_mentions_downstream(client):
     await client.post(f"{API}/tasks", json={"id": "T-IMP", "title": "实现", "assignees": ["developer"], "depends_on": ["T-DES"]}, headers=auth_headers())
     await client.post(f"{API}/tasks/T-DES/claim", json={}, headers=auth_headers("designer"))
     await client.post(f"{API}/tasks/T-DES/submit", json={"summary": "x"}, headers=auth_headers("designer"))
-    await client.post(f"{API}/tasks/T-DES/review", json={"approve": True}, headers=auth_headers())
+    await client.post(f"{API}/tasks/T-DES/review", json={"approve": True}, headers=human_headers())
     tl = (await client.get(f"{API}/tasks/T-IMP/timeline", headers=auth_headers())).json()
     mentions = [e for e in tl if e["kind"] == "mention"]
     assert any(m["payload"]["target"] == "developer" and "已完成" in m["payload"]["message"] for m in mentions)
@@ -101,7 +101,7 @@ async def test_reject_draft(client):
     """reject 驳回 draft，不落板。"""
     await _seed(client)
     d = (await client.post(f"{API}/board/decompose", json={"goal": "g"}, headers=auth_headers())).json()
-    r = await client.post(f"{API}/board/drafts/reject", json={"draft_id": d["id"]}, headers=auth_headers())
+    r = await client.post(f"{API}/board/drafts/reject", json={"draft_id": d["id"]}, headers=human_headers())
     assert r.status_code == 200
     assert r.json()["status"] == "rejected"
 
@@ -140,7 +140,7 @@ async def test_self_claim_default_flow(client):
     """自认领默认流程：拆解落板 → agent 自认领 → 提交 → 评审 → done（手动指派降为可选）。"""
     await _seed(client)
     d = (await client.post(f"{API}/board/decompose", json={"goal": "g"}, headers=auth_headers())).json()
-    await client.post(f"{API}/board/drafts/approve", json={"draft_ids": [d["id"]]}, headers=auth_headers())
+    await client.post(f"{API}/board/drafts/approve", json={"draft_ids": [d["id"]]}, headers=human_headers())
     tasks = (await client.get(f"{API}/tasks", headers=auth_headers())).json()
     task = tasks[0]
     tid = task["id"]
@@ -148,7 +148,7 @@ async def test_self_claim_default_flow(client):
     role = task["assignees"][0] if task["assignees"] else "backend-eng"
     assert (await client.post(f"{API}/tasks/{tid}/claim", json={}, headers=auth_headers(role))).status_code == 200
     assert (await client.post(f"{API}/tasks/{tid}/submit", json={"summary": "x"}, headers=auth_headers(role))).status_code == 200
-    assert (await client.post(f"{API}/tasks/{tid}/review", json={"approve": True}, headers=auth_headers())).status_code == 200
+    assert (await client.post(f"{API}/tasks/{tid}/review", json={"approve": True}, headers=human_headers())).status_code == 200
     body = (await client.get(f"{API}/tasks/{tid}", headers=auth_headers())).json()
     assert body["status"] == "done"
 

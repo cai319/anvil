@@ -4,7 +4,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import services
-from ..deps import Auth, get_auth, get_db
+from ..deps import Auth, get_auth, get_db, require_human
+from ..services.tasks import ConflictError
 
 router = APIRouter()
 
@@ -53,12 +54,15 @@ def create_draft(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth
 
 
 @router.post("/board/drafts/approve")
-def approve_drafts(body: dict, conn=Depends(get_db)):
-    return services.board.approve(conn, body.get("draft_ids", []))
+def approve_drafts(body: dict, conn=Depends(get_db), auth: Auth = Depends(require_human)):
+    try:
+        return services.board.approve(conn, body.get("draft_ids", []))
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @router.post("/board/drafts/reject")
-def reject_draft(body: dict, conn=Depends(get_db)):
+def reject_draft(body: dict, conn=Depends(get_db), auth: Auth = Depends(require_human)):
     did = body.get("draft_id")
     if not did:
         raise HTTPException(status_code=422, detail="draft_id is required")

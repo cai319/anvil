@@ -18,6 +18,7 @@ def collect(conn: sqlite3.Connection) -> dict:
     items.extend(_lessons(conn))
     items.extend(_proposals(conn))
     items.extend(_workflow_gates(conn))
+    items.extend(_action_cards(conn))
     items.sort(key=lambda i: i["created_at"] or "", reverse=True)
     return {"count": len(items), "items": items}
 
@@ -66,6 +67,10 @@ def _mentions(conn: sqlite3.Connection) -> list[dict]:
             continue
         p = jloads(r["payload_json"], {})
         msg = str(p.get("message", ""))
+        if r["role_slug"] == "workflow" and "工作流全部步骤完成" in msg:
+            tst = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
+            if tst and tst["status"] in ("in_review", "done"):
+                continue
         if p.get("event") == "step_failed" or "执行失败" in msg:
             if p.get("event") == "step_failed":
                 step = conn.execute(
@@ -104,6 +109,22 @@ def _drafts(conn: sqlite3.Connection) -> list[dict]:
             "id": f"draft:{r['id']}", "kind": "draft", "title": f"工作流草案 — {r['goal']}",
             "detail": f"by {r['created_by']} · {n} 个子任务 · 批准后按依赖自动派发",
             "task_id": r["source_task"], "created_at": r["created_at"],
+        })
+    return out
+
+
+def _action_cards(conn: sqlite3.Connection) -> list[dict]:
+    """Agent 准备的危险/管理操作：等待自然人一键执行或拒绝。"""
+    from . import actions as actions_service
+
+    out = []
+    for c in actions_service.pending_for_inbox(conn):
+        out.append({
+            "id": f"action:{c['id']}", "kind": "action",
+            "title": f"操作申请：{c['label']}",
+            "detail": f"by {c['role_slug']} · 任务 {c['task_id']}"
+                      + (f" · {c['reason'][:50]}" if c.get("reason") else ""),
+            "task_id": c["task_id"], "created_at": c["created_at"],
         })
     return out
 

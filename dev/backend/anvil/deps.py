@@ -5,7 +5,7 @@ import os
 import sqlite3
 from dataclasses import dataclass
 
-from fastapi import Header, HTTPException, Request
+from fastapi import Depends, Header, HTTPException, Request
 
 from . import config
 from .db import open_conn
@@ -61,3 +61,10 @@ def get_auth(
     if config.AUTH_TOKEN and x_anvil_session != config.AUTH_TOKEN:
         raise HTTPException(status_code=401, detail="invalid X-Anvil-Session")
     return Auth(session=x_anvil_session, role=x_anvil_role)
+
+
+def require_human(auth: Auth = Depends(get_auth)) -> Auth:
+    """人工确认点硬边界：Agent 角色令牌不得代替自然人执行审批/删除/重置（HITL）。"""
+    if auth.role and auth.role != "human":
+        raise HTTPException(status_code=403, detail="this operation requires a human")
+    return auth

@@ -91,3 +91,43 @@ def test_gate_reject_resets_step(conn):
     step1 = next(s for s in wf["steps"] if s["step_id"] == "S1")
     assert step1["status"] == "pending"
     assert _advance(conn, wf) == ["S1"]  # 重新调度
+
+
+def test_reviewer_must_differ_from_implementer(conn):
+    """builder 永不是 verifier：reviewer 不得等于执行角色。"""
+    from anvil.util import ConflictError
+    bad = {"steps": [{"id": "S1", "title": "x", "role": "dev", "reviewer": "dev"}]}
+    with pytest.raises(ConflictError):
+        wf_service.create_workflow(conn, "T1", bad)
+    good = {"steps": [{"id": "S1", "title": "x", "role": "dev", "reviewer": "qa"}]}
+    wf = wf_service.create_workflow(conn, "T1", good)
+    assert wf["steps"][0]["reviewer"] == "qa"
+
+
+def test_contract_flows_to_downstream_prompt(conn):
+    definition = {
+        "verification": [{"cell": "功能路径", "method": "E2E", "verifier_role": "qa"}],
+        "steps": [
+            {"id": "S1", "title": "接口", "role": "dev",
+             "contract": "Facts live apart from whims; API v1 字段不可删除"},
+            {"id": "S2", "title": "实现", "role": "dev", "depends_on": ["S1"],
+             "contract": "所有金额用 Decimal"},
+        ],
+    }
+    wf = wf_service.create_workflow(conn, "T1", definition)
+    assert wf["definition"]["verification"][0]["cell"] == "功能路径"
+    s2 = next(s for s in wf["steps"] if s["step_id"] == "S2")
+    assert s2["contract"] == "所有金额用 Decimal"
+    prompt = wf_service.step_prompt(wf, s2, {"title": "t", "description": "d"})
+    assert "上游契约" in prompt and "API v1 字段不可删除" in prompt
+    assert "所有金额用 Decimal" in prompt
+
+
+def test_fail_step_records_attribution(conn):
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    wf_service.advance(conn, wf["id"], starter=lambda *a: {"id": "r1"})
+    wf_service.fail_step(conn, wf["id"], "S1", "platform_timeout", "environment")
+    step = next(s for s in wf_service.get_workflow(conn, wf["id"])["steps"] if s["step_id"] == "S1")
+    assert step["status"] == "failed"
+    assert step["failure_reason"] == "environment"

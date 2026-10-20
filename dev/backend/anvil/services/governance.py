@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .. import config
-from ..util import ConflictError, jdumps, jloads, now_iso
+from ..util import ConflictError, jdumps, jloads, new_id, now_iso
 
 # 四层闸门的默认值（design §5.6）。仅当 settings 中显式写入时覆盖。
 DEFAULT_MAX_PARALLEL_SYSTEM = 6
@@ -185,6 +186,8 @@ def tick(conn: sqlite3.Connection, force: bool = False, dispatch: bool = True,
             (c["role_slug"], c["task_id"], "lease_expired", jdumps({}), now),
         )
 
+    _cleaner_check(conn)
+
     # 到期的 reminder（design §6.4）：cron / at / when 三种形态，触发时创建无任务 run。
     from . import reminders as reminders_service  # 惰性导入避免循环
     fired = reminders_service.fire_due_reminders(conn)
@@ -262,6 +265,40 @@ def _terminate_runs(conn: sqlite3.Connection, task_id: str, role_slug: str | Non
                 pm.terminate(r["native_session_id"])
             except Exception:  # noqa: BLE001
                 pass
+
+
+def _cleaner_check(conn: sqlite3.Connection) -> int:
+    """MEMORY.md 体积监控（零 token）：超限时给角色排一条自修剪提醒，每天至多一次。"""
+    if not config.CLEANER_ENABLED:
+        return 0
+    today = datetime.now(timezone.utc).date().isoformat()
+    now = now_iso()
+    n = 0
+    for role in conn.execute("SELECT slug FROM roles WHERE enabled=1").fetchall():
+        slug = role["slug"]
+        key = f"cleaner:{slug}"
+        if get_setting(conn, key) == today:
+            continue
+        path = Path(config.AGENTS_DIR) / slug / "MEMORY.md"
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        if size <= config.CLEANER_MAX_BYTES:
+            continue
+        prompt = (
+            f"你的 MEMORY.md 已有 {size} 字节，超过建议大小（{config.CLEANER_MAX_BYTES} 字节）。"
+            "请回顾近期任务与 notes：合并重复要点、删除过时内容、保留仍然准确的事实，"
+            "把值得共享的经验用 `anvil lesson propose` 提出，保持记忆精简（建议 ≤300 行）。"
+        )
+        conn.execute(
+            "INSERT INTO reminders (id, role_slug, kind, fire_at, prompt, status, next_fire_at, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (new_id(), slug, "at", now, prompt, "pending", now, now),
+        )
+        set_setting(conn, key, today)
+        n += 1
+    return n
 
 
 def _claim_allowed(conn: sqlite3.Connection, task: dict, role: str) -> bool:

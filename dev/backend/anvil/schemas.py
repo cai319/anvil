@@ -187,6 +187,8 @@ class DepIn(BaseModel):
 
 class CommentIn(BaseModel):
     body: str
+    expect_activity_id: int | None = None  # Held Draft：发送时依据的最新活动 id
+    force: bool = False                    # 知情越过 held
 
 
 # ---- Memory / notes / proposals / lessons --------------------------------

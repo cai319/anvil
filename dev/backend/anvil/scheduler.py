@@ -90,8 +90,76 @@ class Scheduler:
                 WHERE s.status='running' AND r.status IN ('failed','abandoned')"""
         ).fetchall()
         for r in rows:
-            workflow_service.fail_step(conn, r["workflow_id"], r["step_id"],
-                                       r["failure_class"] or r["rs"])
+            fc = r["failure_class"] or r["rs"]
+            category = "environment" if fc in ("platform_timeout", "spawn_error") else "agent_error"
+            workflow_service.fail_step(conn, r["workflow_id"], r["step_id"], fc, category)
+        self._nudge_stalled(conn)
+
+    def _nudge_stalled(self, conn) -> None:
+        """步骤 run 挂起且长时间无活动 → 唤醒角色续跑；超过上限判失败（防永久卡住）。"""
+        now = datetime.now(timezone.utc)
+        rows = conn.execute(
+            """SELECT s.workflow_id, s.step_id, s.role_slug, s.run_id, s.last_nudge_at,
+                      s.nudge_count, r.status AS run_status, w.task_id AS task_id,
+                      (SELECT MAX(a.created_at) FROM activities a WHERE a.run_id=s.run_id) AS last_act,
+                      s.started_at
+                 FROM workflow_steps s
+                 JOIN workflows w ON w.id = s.workflow_id
+                 LEFT JOIN runs r ON r.id = s.run_id
+                WHERE s.status='running'"""
+        ).fetchall()
+        for r in rows:
+            rs = r["run_status"]
+            # run 丢失/已结束但步骤仍 running：重置为 pending，让 advance 重新启动
+            if rs is None or rs == "completed":
+                conn.execute(
+                    "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, "
+                    "updated_at=? WHERE workflow_id=? AND step_id=?",
+                    (now.isoformat(), r["workflow_id"], r["step_id"]))
+                conn.commit()
+                continue
+            if rs != "suspended":
+                continue  # 仍在运行/投影中
+            last = r["last_act"] or r["started_at"]
+            if not last:
+                continue
+            try:
+                parsed = datetime.fromisoformat(last)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                elapsed = (now - parsed).total_seconds()
+            except (ValueError, TypeError):
+                continue
+            if elapsed < config.STEP_NUDGE_SECONDS:
+                continue
+            if r["last_nudge_at"]:
+                try:
+                    since = (now - datetime.fromisoformat(r["last_nudge_at"])).total_seconds()
+                except (ValueError, TypeError):
+                    since = config.STEP_NUDGE_SECONDS
+                if since < config.STEP_NUDGE_SECONDS:
+                    continue
+            if int(r["nudge_count"] or 0) >= config.STEP_MAX_NUDGES:
+                workflow_service.fail_step(
+                    conn, r["workflow_id"], r["step_id"],
+                    f"步骤停滞：{r['nudge_count']} 次唤醒后仍未提交", "environment")
+                continue
+            try:
+                self.orchestrator.pump(self.db_path, r["run_id"], "resume", {})
+            except Exception:  # noqa: BLE001
+                continue
+            conn.execute(
+                "UPDATE workflow_steps SET last_nudge_at=?, nudge_count=nudge_count+1, updated_at=? "
+                "WHERE workflow_id=? AND step_id=?",
+                (now.isoformat(), now.isoformat(), r["workflow_id"], r["step_id"]))
+            conn.execute(
+                "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
+                "VALUES (?,?,?,?,?)",
+                (r["role_slug"], r["task_id"], "step_nudge",
+                 __import__("json").dumps({"workflow_id": r["workflow_id"],
+                                           "step_id": r["step_id"]}, ensure_ascii=False),
+                 now.isoformat()))
+            conn.commit()
 
     def _pump_created(self, conn) -> None:
         for r in conn.execute("SELECT id FROM runs WHERE status='created'").fetchall():

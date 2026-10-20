@@ -105,7 +105,8 @@ def is_onboarding(conn: sqlite3.Connection, slug: str) -> bool:
 WEEKLY_REVIEW_PROMPT = (
     "回顾本周完成的任务与 notes，把散落的要点合并进 MEMORY.md，删掉已经过时的内容，"
     "把值得共享的用 `anvil lesson propose` 提出来。检查 MEMORY.md 是否超过 300 行，"
-    "超了就精简。"
+    "超了就精简。同时检查自己的 description（角色定位）是否仍准确；若已漂移，"
+    "用 lesson propose 记录建议并 @human 说明，不要自行改写。"
 )
 
 
@@ -230,6 +231,10 @@ def update(conn: sqlite3.Connection, slug: str, **fields) -> dict | None:
 
 
 def delete(conn: sqlite3.Connection, slug: str) -> bool:
+    role = get(conn, slug)
+    if role and jloads(role.get("definition_json") or "{}", {}).get("kind") == "onboarding":
+        from ..util import ConflictError
+        raise ConflictError("built-in onboarding assistant cannot be deleted")
     cur = conn.execute("DELETE FROM roles WHERE slug=?", (slug,))
     conn.commit()
     return cur.rowcount > 0

@@ -1,10 +1,13 @@
 """Task endpoints: CRUD + manual assign + agent-side transitions (§3.1/§10)."""
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 
 from .. import services
-from ..deps import Auth, get_auth, get_db
+from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import ClaimIn, CommentIn, DepIn, ReviewIn, SubmitIn, TaskIn, TaskOut, TaskPatch
 from ..services.tasks import ConflictError
 from . import events
@@ -46,7 +49,8 @@ def _resume_after_review(request: Request, conn, tid: str, approve: bool) -> Non
 
 @router.post("", status_code=201, response_model=TaskOut)
 def create_task(body: TaskIn, conn=Depends(get_db)):
-    return services.tasks.create(
+    try:
+        return services.tasks.create(
         conn, id=body.id, title=body.title, type=body.type, priority=body.priority,
         tags=body.tags, repo=body.repo, workspace_id=body.workspace_id, base_branch=body.base_branch,
         scope_paths=body.scope_paths, description=body.description,
@@ -55,16 +59,22 @@ def create_task(body: TaskIn, conn=Depends(get_db)):
         created_by=body.created_by,
         parent_id=body.parent_id, depends_on=body.depends_on,
         cost_budget_usd=body.cost_budget_usd,
-    )
+        )
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @router.post("/{tid}/assign", response_model=TaskOut)
-def assign_roles(tid: str, body: dict, conn=Depends(get_db)):
+def assign_roles(tid: str, body: dict, conn=Depends(get_db),
+                 auth: Auth = Depends(require_human)):
     """绑定任务参与角色（团队协作，多角色）。body: {roles: [slug, ...]}"""
     if services.tasks.get(conn, tid) is None:
         raise HTTPException(status_code=404, detail="task not found")
     roles = [str(r) for r in (body.get("roles") or [])]
-    result = services.tasks.assign_roles(conn, tid, roles)
+    try:
+        result = services.tasks.assign_roles(conn, tid, roles)
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     events.publish("task", {"id": tid, "kind": "assign"})
     return result
 
@@ -72,9 +82,11 @@ def assign_roles(tid: str, body: dict, conn=Depends(get_db)):
 @router.get("", response_model=list[TaskOut])
 def list_tasks(status: str | None = Query(default=None), assignee: str | None = Query(default=None),
                workspace_id: str | None = Query(default=None), type: str | None = Query(default=None),
-               tag: str | None = Query(default=None), conn=Depends(get_db)):
+               tag: str | None = Query(default=None),
+               parent_id: str | None = Query(default=None), conn=Depends(get_db)):
     return services.tasks.list_all(conn, status=status, assignee=assignee,
-                                   workspace_id=workspace_id, type=type, tag=tag)
+                                   workspace_id=workspace_id, type=type, tag=tag,
+                                   parent_id=parent_id)
 
 
 @router.get("/{tid}", response_model=TaskOut)
@@ -127,7 +139,7 @@ def task_bids(tid: str, conn=Depends(get_db)):
 
 @router.delete("/{tid}", status_code=204)
 def delete_task(tid: str, force: bool = False, conn=Depends(get_db),
-                auth: Auth = Depends(get_auth)):
+                auth: Auth = Depends(require_human)):
     """物理删除任务（含 runs/评论/依赖）。有活跃 run 或子任务时需 force=true。"""
     try:
         deleted = services.tasks.delete(conn, tid, force=force, role=auth.role)
@@ -140,7 +152,7 @@ def delete_task(tid: str, force: bool = False, conn=Depends(get_db),
 
 
 @router.post("/{tid}/cancel", response_model=TaskOut)
-def cancel_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+def cancel_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(require_human)):
     try:
         result = services.tasks.cancel(conn, tid, auth.role)
     except LookupError:
@@ -150,7 +162,7 @@ def cancel_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
 
 
 @router.post("/{tid}/reopen", response_model=TaskOut)
-def reopen_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+def reopen_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(require_human)):
     try:
         result = services.tasks.reopen(conn, tid, auth.role)
     except LookupError:
@@ -160,7 +172,8 @@ def reopen_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
 
 
 @router.patch("/{tid}", response_model=TaskOut)
-def patch_task(tid: str, body: TaskPatch, conn=Depends(get_db)):
+def patch_task(tid: str, body: TaskPatch, conn=Depends(get_db),
+               auth: Auth = Depends(require_human)):
     t = services.tasks.update(conn, tid, **body.model_dump(exclude_none=True))
     if t is None:
         raise HTTPException(status_code=404, detail="task not found")
@@ -219,7 +232,8 @@ def submit_task(tid: str, body: SubmitIn, request: Request, conn=Depends(get_db)
 
 
 @router.post("/{tid}/review", response_model=TaskOut)
-def review_task(tid: str, body: ReviewIn, request: Request, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+def review_task(tid: str, body: ReviewIn, request: Request, conn=Depends(get_db),
+                auth: Auth = Depends(require_human)):
     try:
         result = services.tasks.review(conn, tid, body.approve, auth.role)
     except LookupError:
@@ -234,6 +248,9 @@ def review_task(tid: str, body: ReviewIn, request: Request, conn=Depends(get_db)
 @router.post("/{tid}/comment", response_model=TaskOut)
 def comment_task(tid: str, body: CommentIn, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     _assert_session_task(auth, tid)
+    held = _held_response(conn, tid, auth, body.model_dump())
+    if held is not None:
+        return held
     try:
         result = services.tasks.comment(conn, tid, auth.role or "human", body.body)
     except LookupError:
@@ -248,8 +265,11 @@ def mention_task(tid: str, body: dict, request: Request, conn=Depends(get_db), a
     _assert_session_task(auth, tid)
     if services.tasks.get(conn, tid) is None:
         raise HTTPException(status_code=404, detail="task not found")
+    held = _held_response(conn, tid, auth, body)
+    if held is not None:
+        return held
     target = str(body.get("target") or "human")
-    message = str(body.get("message") or "")
+    message = _strip_leading_mention(conn, str(body.get("message") or ""), target)
     result = services.tasks.mention(conn, tid, auth.role or "human", target, message)
     # @的是角色（非 human）且是任务参与角色 → 唤醒该角色（挂起中则 resume 续跑，否则新起 run）
     if target != "human":
@@ -283,6 +303,51 @@ def mention_task(tid: str, body: dict, request: Request, conn=Depends(get_db), a
                         pass
     events.publish("task", {"id": tid, "kind": "mention", "target": target})
     return result
+
+
+def _held_response(conn, tid: str, auth: Auth, body: dict):
+    """Held Draft（简化版）：Agent 发送时若基于旧版本，返回 409 + 期间新内容。
+
+    人类消息不参与；`force=true` 表示知情越过。
+    """
+    if not auth.role or auth.role == "human" or body.get("force"):
+        return None
+    expect = body.get("expect_activity_id")
+    if expect is None:
+        return None
+    try:
+        expect = int(expect)
+    except (TypeError, ValueError):
+        return None
+    latest = conn.execute(
+        "SELECT COALESCE(MAX(id),0) AS m FROM activities WHERE task_id=?", (tid,)
+    ).fetchone()["m"]
+    if latest <= expect:
+        return None
+    from ..services import agent_inbox
+    rows = conn.execute(
+        "SELECT id, role_slug, kind, payload_json, created_at FROM activities "
+        "WHERE task_id=? AND id>? ORDER BY id LIMIT 3", (tid, expect)
+    ).fetchall()
+    return JSONResponse(status_code=409, content={
+        "detail": "held",
+        "latest_activity_id": latest,
+        "items": [{"id": r["id"], "role": r["role_slug"] or "system", "kind": r["kind"],
+                   "text": agent_inbox._text(r)} for r in rows],
+    })
+
+
+def _strip_leading_mention(conn, message: str, target: str) -> str:
+    """消息开头的 @target / @显示名 去掉（时间线用独立标签展示，避免重复）。"""
+    names = [target]
+    row = conn.execute("SELECT display_name FROM roles WHERE slug=?", (target,)).fetchone()
+    if row and row["display_name"]:
+        names.append(row["display_name"])
+    for name in names:
+        m = re.match(rf"^@\s*{re.escape(name)}\s*[，,:：]?\s*", message, flags=re.IGNORECASE)
+        if m:
+            return message[m.end():]
+    return message
 
 
 def _assignee_slugs(conn, tid: str) -> list[str]:

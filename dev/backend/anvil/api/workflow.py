@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import services
-from ..deps import Auth, get_auth, get_db
+from ..deps import Auth, get_auth, get_db, require_human
 from ..services.tasks import ConflictError
 from . import events
 
@@ -35,7 +35,7 @@ def submit_step(wid: str, sid: str, body: dict, conn=Depends(get_db),
 
 @router.post("/workflows/{wid}/steps/{sid}/review")
 def review_step(wid: str, sid: str, body: dict, conn=Depends(get_db),
-                auth: Auth = Depends(get_auth)):
+                auth: Auth = Depends(require_human)):
     """人工审核 gate 步骤（通过/驳回）。"""
     try:
         wf = services.workflow.review_step(
@@ -49,7 +49,8 @@ def review_step(wid: str, sid: str, body: dict, conn=Depends(get_db),
 
 
 @router.post("/workflows/{wid}/steps/{sid}/retry")
-def retry_step(wid: str, sid: str, conn=Depends(get_db)):
+def retry_step(wid: str, sid: str, conn=Depends(get_db),
+               auth: Auth = Depends(require_human)):
     """人工重试失败/驳回的步骤。"""
     wf = services.workflow.retry_step(conn, wid, sid)
     if wf is None:

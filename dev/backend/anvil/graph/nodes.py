@@ -140,7 +140,20 @@ def _instruction_md(role: dict) -> str:
         return ""
 
 
-def _conversation_transcript(conn: sqlite3.Connection, task_id: str | None) -> str:
+def _clip_text(text: str, max_chars: int) -> str:
+    """P0-3 注入预算：超出字符上限时保留尾部，并显式标注截断（避免 context rot）。"""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    tail = text[-max_chars:]
+    # 尽量从行边界开始，避免半行
+    nl = tail.find("\n")
+    if 0 <= nl < 200:
+        tail = tail[nl + 1:]
+    return "…（更早的会话已省略）\n" + tail
+
+
+def _conversation_transcript(conn: sqlite3.Connection, task_id: str | None,
+                             max_chars: int = 4000) -> str:
     """把任务会话时间线（评论 + @提及 + 认领/提交/评审）拼成对话记录，作为续跑上下文。"""
     if not task_id:
         return ""
@@ -159,7 +172,7 @@ def _conversation_transcript(conn: sqlite3.Connection, task_id: str | None) -> s
             lines.append(f"[{role}] 提交了评审")
         elif e["kind"] == "review":
             lines.append(f"[{role}] 评审 {'通过' if p.get('approve') else '驳回'}")
-    return "\n".join(lines)
+    return _clip_text("\n".join(lines), max_chars)
 
 
 def _prompt(task: dict | None, transcript: str = "", extra: str = "") -> str:
@@ -169,7 +182,8 @@ def _prompt(task: dict | None, transcript: str = "", extra: str = "") -> str:
     return "\n\n".join(p for p in parts if p)
 
 
-def _recent_transcript(conn: sqlite3.Connection, task_id: str | None, limit: int = 24) -> str:
+def _recent_transcript(conn: sqlite3.Connection, task_id: str | None, limit: int = 24,
+                       max_chars: int = 1800) -> str:
     """最近 N 条任务会话（评论/@提及/提交/评审），用于步骤/回复上下文注入。"""
     if not task_id:
         return ""
@@ -186,7 +200,7 @@ def _recent_transcript(conn: sqlite3.Connection, task_id: str | None, limit: int
             lines.append(f"[{role}] 提交了评审")
         elif e["kind"] == "review":
             lines.append(f"[{role}] 评审 {'通过' if p.get('approve') else '驳回'}")
-    return "\n".join(lines)
+    return _clip_text("\n".join(lines), max_chars)
 
 
 def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> str:
@@ -197,10 +211,18 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
     """
     prompt = run.get("prompt") or ""
     if run.get("step_id"):
-        recent = _recent_transcript(conn, run.get("task_id"))
+        from ..services import agent_inbox
+        task_id = run.get("task_id")
         parts = [prompt]
-        if recent:
-            parts.append("## 任务会话（最近交互，含 @ 你的反馈）\n" + recent)
+        if task_id:
+            unread = agent_inbox.unread_count(conn, run["role_slug"], task_id)
+            if unread:
+                items = agent_inbox.items(conn, run["role_slug"], task_id, limit=3)
+                lines = "\n".join(f"- [{i['role']}] {i['text'][:300]}" for i in items)
+                parts.append(
+                    f"## 未读会话（{unread} 条，最近 3 条）\n{lines}\n\n"
+                    f"处理完反馈后执行 `anvil inbox commit {task_id} --up-to <最大消息 id>`；"
+                    f"完整未读用 `anvil inbox check {task_id}` 按需拉取（拉模式）。")
         parts.append(render.STEP_PROTOCOL)
         return "\n\n".join(p for p in parts if p)
     # 工作流任务上的非步骤 run = 被 @ 的会话回复（包括历史遗留无标记的 run），

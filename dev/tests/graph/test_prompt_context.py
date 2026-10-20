@@ -31,8 +31,9 @@ def test_step_prompt_includes_recent_mentions(conn):
                                   step_id="S3", workflow_id="wf-1")
     task = {"title": "跳棋", "description": "实现跳棋"}
     prompt = nodes._prompt_for_run(conn, run, task)
-    assert "接口字段少了 moveId" in prompt          # 最近会话被注入
-    assert "## 任务会话" in prompt
+    assert "接口字段少了 moveId" in prompt          # 未读反馈进入上下文
+    assert "## 未读会话" in prompt
+    assert "anvil inbox check" in prompt            # 拉模式指针
     assert "交叉确认" in prompt                     # 挑战式协作协议
     assert "anvil step submit" in prompt
 
@@ -46,3 +47,14 @@ def test_reply_prompt_uses_reply_protocol(conn):
     assert "只做讨论" in prompt
     assert "anvil task claim" not in prompt         # 不会让回复 run 去 claim 任务
     assert "anvil step submit" not in prompt
+
+
+def test_step_prompt_uses_agent_inbox_and_stays_small(conn):
+    for i in range(60):
+        tasks_service.comment(conn, "T1", "pm", f"{i}:" + "长内容" * 100)
+    run = runs_service.create_run(conn, "developer", "T1",
+                                  prompt="## 工作流步骤 S3：实现", step_id="S3",
+                                  workflow_id="wf-1")
+    prompt = nodes._prompt_for_run(conn, run, {"title": "跳棋", "description": "实现"})
+    assert "## 未读会话" in prompt and "anvil inbox check" in prompt
+    assert len(prompt) < 6000  # 不把全量历史 push 进上下文

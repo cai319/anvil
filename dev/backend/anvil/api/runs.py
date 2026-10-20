@@ -7,7 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .. import config, services
-from ..deps import Auth, get_auth, get_db
+from ..deps import Auth, get_auth, get_db, require_human
 from ..platform import factory
 from ..util import now_iso
 
@@ -145,25 +145,28 @@ def _reset(run_id: str, mode: str, request: Request, conn) -> dict:
 
 
 @router.post("/runs/{rid}/restart")
-def restart_run(rid: str, request: Request, conn=Depends(get_db)):
+def restart_run(rid: str, request: Request, conn=Depends(get_db),
+                auth: Auth = Depends(require_human)):
     """restart：结束进程、保留会话记忆，重新拉起（design §6.3）。"""
     return _reset(rid, "restart", request, conn)
 
 
 @router.post("/runs/{rid}/session-reset")
-def session_reset(rid: str, request: Request, conn=Depends(get_db)):
+def session_reset(rid: str, request: Request, conn=Depends(get_db),
+                  auth: Auth = Depends(require_human)):
     """session reset：丢弃会话上下文，保留 MEMORY.md 与 notes。"""
     return _reset(rid, "session", request, conn)
 
 
 @router.post("/runs/{rid}/full-reset")
-def full_reset(rid: str, request: Request, conn=Depends(get_db)):
+def full_reset(rid: str, request: Request, conn=Depends(get_db),
+               auth: Auth = Depends(require_human)):
     """full reset：会话与记忆全清，仅保留 profile/instruction；先自动备份 home。"""
     return _reset(rid, "full", request, conn)
 
 
 @router.delete("/runs/{rid}", status_code=204)
-def release_run(rid: str, conn=Depends(get_db)):
+def release_run(rid: str, conn=Depends(get_db), auth: Auth = Depends(require_human)):
     """释放进程（design §10 DELETE /runs/{id}）。"""
     run = services.runs.get_run(conn, rid)
     if run is None:

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, subscribeEvents, type Role, type Run, type Task, type TimelineEvent } from "../api/client";
+import { api, subscribeEvents, type Role, type Run, type Task, type TimelineEvent, type Workflow } from "../api/client";
+import { roleStatusFromWorkflow } from "../workflowStatus";
 
 /** 任务详情「子任务」页签：每个参与角色当前的会话状态 + 执行日志 + 历史上下文。 */
 
@@ -40,22 +41,32 @@ function describeEvent(ev: TimelineEvent): string {
   }
 }
 
-export function RoleSessions({ task, roles }: { task: Task; roles: Role[] }) {
+export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Role[]; workflow?: Workflow | null }) {
   const [runs, setRuns] = useState<Run[]>([]);
+  const [runsLoaded, setRunsLoaded] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [subTab, setSubTab] = useState<"log" | "timeline">("log");
   const [logs, setLogs] = useState<Record<string, string>>({});
   const [timelines, setTimelines] = useState<Record<string, TimelineEvent[]>>({});
 
   useEffect(() => {
-    const load = () => {
-      api.listTaskRuns(task.id).then(setRuns).catch(() => {});
+    let lastLogAt = 0;
+    const load = (ev?: { topic?: string }) => {
+      if (expanded && ev?.topic === "tick" && Date.now() - lastLogAt > 3000) {
+        lastLogAt = Date.now();
+        api.getRunLog(expanded)
+          .then((r) => setLogs((prev) => ({ ...prev, [expanded]: r.exists ? r.content : "（该会话暂无日志）" })))
+          .catch(() => {});
+      }
+      api.listTaskRuns(task.id)
+        .then((r) => { setRuns(r); setRunsLoaded(true); })
+        .catch(() => setRunsLoaded(true));
     };
     load();
     return subscribeEvents((ev) => {
-      if (ev.topic === "task" || ev.topic === "tick") load();
+      if (ev.topic === "task" || ev.topic === "tick") load(ev);
     });
-  }, [task.id, task.status]);
+  }, [task.id, task.status, expanded]);
 
   const latestByRole = new Map<string, Run>();
   for (const r of runs) {
@@ -63,6 +74,11 @@ export function RoleSessions({ task, roles }: { task: Task; roles: Role[] }) {
     if (!cur || (r.started_at ?? "") > (cur.started_at ?? "")) latestByRole.set(r.role_slug, r);
   }
   const claims = new Map((task.role_claims ?? []).map((c) => [c.role_slug, c]));
+  // 工作流任务优先展示该角色最后一个「步骤 run」，避免被后来的回复 run 干扰
+  const stepRunByRole = new Map<string, string>();
+  for (const st of workflow?.steps ?? []) {
+    if (st.run_id) stepRunByRole.set(st.role_slug, st.run_id);
+  }
   const slugs = (task.assignees?.length ? task.assignees : [...claims.keys()]);
   const roleName = (slug: string) => roles.find((r) => r.slug === slug)?.display_name ?? slug;
 
@@ -90,8 +106,9 @@ export function RoleSessions({ task, roles }: { task: Task; roles: Role[] }) {
       )}
       {slugs.map((slug) => {
         const claim = claims.get(slug);
-        const run = latestByRole.get(slug);
-        const st = roleStatus(claim, run);
+        const stepRunId = stepRunByRole.get(slug);
+        const run = (stepRunId && runs.find((r) => r.id === stepRunId)) || latestByRole.get(slug);
+        const st = roleStatusFromWorkflow(workflow, slug) ?? roleStatus(claim, run);
         const isOpen = expanded === run?.id && !!run;
         return (
           <div key={slug} className="rs-row-wrap">
@@ -109,7 +126,7 @@ export function RoleSessions({ task, roles }: { task: Task; roles: Role[] }) {
                   {RUN_LABEL[run.status] ?? run.status} · {run.started_at?.slice(11, 19)}
                 </span>
               ) : (
-                <span className="rs-run muted">尚无会话</span>
+                <span className="rs-run muted">{runsLoaded ? "尚无会话" : "加载中…"}</span>
               )}
               <span className="rs-chevron">{isOpen ? "▾" : "▸"}</span>
             </button>
@@ -124,8 +141,13 @@ export function RoleSessions({ task, roles }: { task: Task; roles: Role[] }) {
                   <a href={`/runs/${run.id}`}>打开完整会话页 →</a>
                 </div>
                 <div className="rs-tabs">
-                  <button className={`small ${subTab === "log" ? "primary" : ""}`} onClick={() => setSubTab("log")}>执行内容（日志）</button>
+                  <button className={`small ${subTab === "log" ? "primary" : ""}`} onClick={() => setSubTab("log")}>完整交互（上下文 / 模型 / 工具）</button>
                   <button className={`small ${subTab === "timeline" ? "primary" : ""}`} onClick={() => setSubTab("timeline")}>历史上下文（时间线）</button>
+                  <button className="small" onClick={() => {
+                    api.getRunLog(run.id)
+                      .then((r) => setLogs((prev) => ({ ...prev, [run.id]: r.exists ? r.content : "（该会话暂无日志）" })))
+                      .catch(() => {});
+                  }}>刷新日志</button>
                 </div>
                 {subTab === "log" ? (
                   <pre className="run-log">{logs[run.id] ?? "加载中…"}</pre>

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import API, auth_headers, role_payload, runtime_payload
+from tests.conftest import API, auth_headers, human_headers, role_payload, runtime_payload
 
 pytestmark = [pytest.mark.usefixtures("client")]
 
@@ -14,7 +14,7 @@ async def test_role_catalog_save_and_read(client):
     r = await client.put(
         f"{API}/roles/dev/catalog",
         json={"skills": ["pdf", "xlsx"], "mcp": ["codegraph"]},
-        headers=auth_headers(),
+        headers=human_headers(),
     )
     assert r.status_code == 200
     assert r.json()["skills"] == ["pdf", "xlsx"]
@@ -39,7 +39,7 @@ async def test_role_profile_save_and_read(client):
     r = await client.put(
         f"{API}/roles/dev/profile",
         json={"system_prompt": "你是后端工程师", "responsibilities": ["api", "db"]},
-        headers=auth_headers(),
+        headers=human_headers(),
     )
     assert r.status_code == 200
     assert r.json()["system_prompt"] == "你是后端工程师"

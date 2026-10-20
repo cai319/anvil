@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import services
-from ..deps import get_db
+from ..deps import Auth, get_db, require_human
 from ..schemas import RuntimeIn, RuntimeOut
 
 router = APIRouter()
@@ -91,7 +91,8 @@ def runtime_catalog(rid: str, conn=Depends(get_db)):
 
 
 @router.put("/{rid}", response_model=RuntimeOut)
-def update_runtime(rid: str, body: RuntimeIn, conn=Depends(get_db)):
+def update_runtime(rid: str, body: RuntimeIn, conn=Depends(get_db),
+                   auth: Auth = Depends(require_human)):
     rt = services.runtime.get(conn, rid)
     if rt is None:
         raise HTTPException(status_code=404, detail="runtime not found")
@@ -102,7 +103,8 @@ def update_runtime(rid: str, body: RuntimeIn, conn=Depends(get_db)):
 
 
 @router.delete("/{rid}", status_code=204)
-def delete_runtime(rid: str, conn=Depends(get_db)):
+def delete_runtime(rid: str, conn=Depends(get_db),
+                   auth: Auth = Depends(require_human)):
     if not services.runtime.delete(conn, rid):
         raise HTTPException(status_code=404, detail="runtime not found")
     return None

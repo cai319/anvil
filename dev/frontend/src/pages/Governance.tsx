@@ -22,18 +22,21 @@ export function Governance() {
   const [budget, setBudget] = useState<BudgetInfo | null>(null);
   const [audit, setAudit] = useState<AuditRow[]>([]);
   const [costs, setCosts] = useState<{ total_usd: number; by_role: { role: string; usd: number }[] } | null>(null);
+  const [tokens, setTokens] = useState<{ total_tokens: number; input_tokens: number; output_tokens: number } | null>(null);
   const [limits, setLimits] = useState({ max_parallel_system: 6, max_parallel_runtime: 4, daily_cost_budget_usd: "" });
   const [error, setError] = useState<string | null>(null);
 
   const refresh = async () => {
     try {
-      const [f, b, a, c] = await Promise.all([
-        api.getFreeze(), api.getBudget(), api.listAudit(), api.getCosts(),
+      const [f, b, a, c, t] = await Promise.all([
+        api.getFreeze(), api.getBudget(), api.listAudit(), api.getCosts(), api.getTokens(),
       ]);
       setFrozen(f.frozen);
       setBudget(b as BudgetInfo);
       setAudit(a as AuditRow[]);
       setCosts(c);
+      setTokens({ total_tokens: t.total_tokens, input_tokens: t.input_tokens,
+                  output_tokens: t.output_tokens });
       const bb = b as BudgetInfo;
       setLimits({
         max_parallel_system: bb.max_parallel_system ?? 6,
@@ -79,7 +82,8 @@ export function Governance() {
         <button onClick={toggle} className={frozen ? "danger" : ""}>
           {frozen ? "解除全场冻结" : "全场冻结"}
         </button>
-        {budget && <span>累计成本 ${budget.cost_used_usd.toFixed(4)} · 今日 ${(budget.cost_today_usd ?? 0).toFixed(4)}</span>}
+        {tokens && <span>累计 Token {tokens.total_tokens.toLocaleString()}（入 {tokens.input_tokens.toLocaleString()} / 出 {tokens.output_tokens.toLocaleString()}）</span>}
+        {budget && <span className="muted">成本账本 ${budget.cost_used_usd.toFixed(4)}</span>}
       </div>
 
       <section>

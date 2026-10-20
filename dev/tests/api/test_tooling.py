@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from anvil import config
-from tests.conftest import API, app_factory, auth_headers, role_payload, runtime_payload
+from tests.conftest import API, app_factory, auth_headers, role_payload, runtime_payload, human_headers  # noqa: E402
 
 
 @pytest.fixture
@@ -52,7 +52,7 @@ async def test_skill_crud_versions_and_projection(client):
 
     # 角色勾选 skill → 派发后投影到 .claude/skills/<name>/SKILL.md
     await client.put(f"{API}/roles/qa-role/catalog", json={"skills": ["my-skill"], "mcp": []},
-                     headers=auth_headers())
+                     headers=human_headers())
     run = (await client.post(f"{API}/runs", json={"role_slug": "qa-role"}, headers=auth_headers())).json()
     home = Path(run["worktree_path"]) if run["worktree_path"] else Path(config.AGENTS_DIR) / "qa-role"
     # 无任务 run 用角色 home 作为工作区
@@ -60,7 +60,7 @@ async def test_skill_crud_versions_and_projection(client):
     assert target.is_file()
     assert "v2 content" in target.read_text(encoding="utf-8")
 
-    deleted = await client.delete(f"{API}/skills/{sid}", headers=auth_headers())
+    deleted = await client.delete(f"{API}/skills/{sid}", headers=human_headers())
     assert deleted.status_code == 204
 
 
@@ -104,13 +104,13 @@ async def test_mcp_crud_probe_and_projection(client, tmp_path):
 
     # 角色勾选 MCP → 投影到 settings.json
     await client.put(f"{API}/roles/qa-role/catalog", json={"skills": [], "mcp": ["fake-mcp"]},
-                     headers=auth_headers())
+                     headers=human_headers())
     await client.post(f"{API}/runs", json={"role_slug": "qa-role"}, headers=auth_headers())
     settings = Path(config.AGENTS_DIR) / "qa-role" / ".claude" / "settings.json"
     assert settings.is_file()
     assert "fake-mcp" in settings.read_text(encoding="utf-8")
 
-    deleted = await client.delete(f"{API}/mcp/servers/{mid}", headers=auth_headers())
+    deleted = await client.delete(f"{API}/mcp/servers/{mid}", headers=human_headers())
     assert deleted.status_code == 204
 
 

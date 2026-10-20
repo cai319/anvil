@@ -86,7 +86,7 @@ export function Knowledge() {
             <li key={l.id}>
               {l.content}
               <div className="muted">#{l.tags.join(" #")} · repo={l.repo} · {l.approved_at?.slice(0, 10)}</div>
-              <button className="small danger" onClick={() => act(() => api.deleteLesson(l.id))}>删除</button>
+              <button className="small danger" onClick={() => { if (window.confirm("确定删除该条经验？删除后不可恢复。")) act(() => api.deleteLesson(l.id)); }}>删除</button>
             </li>
           ))}
         </ul>

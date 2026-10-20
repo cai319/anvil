@@ -77,6 +77,8 @@ export const api = {
     description?: string; assignees?: string[]; plan_first?: boolean; planner?: string;
   }): Promise<Task> =>
     req("POST", "/tasks", { title, scope_paths: ["**"], ...opts }).then((r) => json<Task>(r)),
+  listTaskChildren: (parentId: string): Promise<Task[]> =>
+    fetch(`${BASE}/tasks?parent_id=${encodeURIComponent(parentId)}`).then((r) => json<Task[]>(r)),
   listTaskRuns: (taskId: string): Promise<Run[]> =>
     fetch(`${BASE}/runs?task_id=${encodeURIComponent(taskId)}`).then((r) => json<Run[]>(r)),
   getTaskWorkflow: (taskId: string): Promise<Workflow> =>
@@ -93,6 +95,10 @@ export const api = {
   }> => req("POST", `/tasks/${id}/dispatch`).then((r) => json(r)),
   autoCreateRole: (brief: string): Promise<Role> =>
     req("POST", "/roles/auto", { brief }).then((r) => json<Role>(r)),
+  approveActionCard: (id: string): Promise<unknown> =>
+    req("POST", `/action-cards/${id}/approve`, {}).then((r) => json(r)),
+  rejectActionCard: (id: string): Promise<unknown> =>
+    req("POST", `/action-cards/${id}/reject`, {}).then((r) => json(r)),
   getInbox: (): Promise<{ count: number; items: InboxItem[] }> =>
     fetch(`${BASE}/inbox`).then((r) => json<{ count: number; items: InboxItem[] }>(r)),
   rejectDraftById: (id: string): Promise<unknown> =>
@@ -185,6 +191,10 @@ export const api = {
   getFreeze: (): Promise<{ frozen: boolean }> => fetch(`${BASE}/control/freeze`).then((r) => json(r)),
   freezeAll: (): Promise<{ frozen: boolean }> => req("POST", "/control/freeze-all").then((r) => json(r)),
   resumeAll: (): Promise<{ frozen: boolean }> => req("POST", "/control/resume-all").then((r) => json(r)),
+  getTokens: (): Promise<{
+    input_tokens: number; output_tokens: number; total_tokens: number;
+    today_total_tokens: number; by_role: { role: string; total_tokens: number }[];
+  }> => fetch(`${BASE}/tokens`).then((r) => json(r)),
   getBudget: (): Promise<{ role: string; cost_used_usd: number }> =>
     fetch(`${BASE}/budget`).then((r) => json(r)),
   listAudit: (opts?: { limit?: number; role?: string; action?: string }): Promise<unknown[]> => {
@@ -356,9 +366,14 @@ export interface AnvilEvent {
   at: string;
 }
 
+/** onboarding 助理（Cindy）是系统默认角色，不参与任务成员选择。 */
+export function isOnboardingRole(r: Role): boolean {
+  return (r.definition as Record<string, unknown> | undefined)?.kind === "onboarding";
+}
+
 export interface InboxItem {
   id: string;
-  kind: "review" | "mention" | "draft" | "lesson" | "proposal" | "gate";
+  kind: "review" | "mention" | "draft" | "lesson" | "proposal" | "gate" | "action";
   title: string;
   detail: string;
   task_id: string | null;
@@ -374,6 +389,9 @@ export interface WorkflowStep {
   depends_on: string[];
   acceptance: string[];
   gate: boolean;
+  reviewer: string | null;
+  contract: string | null;
+  failure_reason: string | null;
   status: "pending" | "running" | "submitted" | "approved" | "rejected" | "failed" | "skipped";
   run_id: string | null;
   summary: string | null;
@@ -386,7 +404,10 @@ export interface Workflow {
   id: string;
   task_id: string;
   status: "running" | "done" | "failed";
-  definition: { feedback_rules?: string[] };
+  definition: {
+    feedback_rules?: string[];
+    verification?: { cell: string; method: string; verifier_role?: string }[];
+  };
   steps: WorkflowStep[];
   created_at: string;
   updated_at: string;
@@ -483,14 +504,35 @@ export interface McpServer {
 }
 
 /** 订阅 SSE 事件流（§11.2），返回取消订阅函数。 */
-export function subscribeEvents(onEvent: (ev: AnvilEvent) => void): () => void {
+// 全应用共享一条 SSE 连接：HTTP/1.1 每域名最多 6 个连接，
+// 每个页面各开一条会把连接池占满，导致后续请求排队、页面像卡死。
+type EventListener = (ev: AnvilEvent) => void;
+let sharedES: EventSource | null = null;
+const listeners = new Set<EventListener>();
+
+function ensureEventSource(): EventSource {
+  if (sharedES) return sharedES;
   const es = new EventSource(`${BASE}/events`);
   es.onmessage = (e) => {
     try {
-      onEvent(JSON.parse(e.data) as AnvilEvent);
+      const ev = JSON.parse(e.data) as AnvilEvent;
+      listeners.forEach((fn) => fn(ev));
     } catch {
       /* 忽略无法解析的心跳/其他行 */
     }
   };
-  return () => es.close();
+  sharedES = es;
+  return es;
+}
+
+export function subscribeEvents(onEvent: EventListener): () => void {
+  ensureEventSource();
+  listeners.add(onEvent);
+  return () => {
+    listeners.delete(onEvent);
+    if (listeners.size === 0 && sharedES) {
+      sharedES.close();
+      sharedES = null;
+    }
+  };
 }

@@ -121,7 +121,7 @@ export function Tooling() {
           {skills.map((s) => (
             <li key={s.id}>
               <strong>{s.name}</strong> <span className="muted">{s.description}</span>
-              <button className="small danger" onClick={async () => { await api.deleteSkill(s.id); await refresh(); }}>删除</button>
+              <button className="small danger" onClick={async () => { if (!window.confirm(`确定删除 skill「${s.name}」？`)) return; await api.deleteSkill(s.id); await refresh(); }}>删除</button>
             </li>
           ))}
         </ul>
@@ -154,7 +154,7 @@ export function Tooling() {
               <span className="muted">工具 {s.tools?.length ?? 0}</span>
               <div className="card-actions">
                 <button className="small" onClick={() => testServer(s)}>握商探测</button>
-                <button className="small danger" onClick={async () => { await api.deleteMcpServer(s.id); await refresh(); }}>删除</button>
+                <button className="small danger" onClick={async () => { if (!window.confirm(`确定删除 MCP server「${s.name}」？`)) return; await api.deleteMcpServer(s.id); await refresh(); }}>删除</button>
               </div>
               {probe[s.id] && <div className="muted">{probe[s.id]}</div>}
             </li>

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import API, auth_headers, role_payload, runtime_payload, task_payload
+from tests.conftest import API, auth_headers, role_payload, runtime_payload, task_payload, human_headers  # noqa: E402
 
 pytestmark = [pytest.mark.usefixtures("client")]
 
@@ -21,7 +21,7 @@ async def test_timeline_merges_actions_and_comments(client):
     await client.post(f"{API}/tasks/T-TL/claim", json={}, headers=auth_headers("qa-role"))
     await client.post(f"{API}/tasks/T-TL/comment", json={"body": "我来处理"}, headers=auth_headers("qa-role"))
     await client.post(f"{API}/tasks/T-TL/submit", json={"summary": "完成"}, headers=auth_headers("qa-role"))
-    await client.post(f"{API}/tasks/T-TL/review", json={"approve": True}, headers=auth_headers("reviewer"))
+    await client.post(f"{API}/tasks/T-TL/review", json={"approve": True}, headers=human_headers())
 
     r = await client.get(f"{API}/tasks/T-TL/timeline", headers=auth_headers())
     assert r.status_code == 200

@@ -21,6 +21,12 @@ with open(os.environ["FAKE_ARGV_LOG"], "a") as f:
 print(json.dumps({"type": "system", "subtype": "init", "session_id": sid}), flush=True)
 for line in sys.stdin:
     time.sleep(0.2)
+    print(json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "text", "text": "working"},
+        {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}],
+        "usage": {"input_tokens": 10, "output_tokens": 2}}}), flush=True)
+    print(json.dumps({"type": "user", "message": {"content": [
+        {"type": "tool_result", "content": "file.txt"}]}}), flush=True)
     print(json.dumps({"type": "result", "subtype": "success", "result": "OK",
                       "total_cost_usd": 0.01}), flush=True)
 '''
@@ -106,6 +112,16 @@ def test_same_process_reused_and_resume_after_exit(env):
     assert _wait(lambda: not mgr.status("qa-role")["alive"])
     _deliver(mgr, conn, fake, log, run["id"], "third")
     assert _wait(lambda: _run_status(db_path, run["id"]) == "suspended")
+    # run 日志记录完整上下文与模型/工具交互
+    c = open_conn(db_path)
+    run_row = runs_service.get_run(c, run["id"])
+    c.close()
+    run_log = open(run_row["log_path"], encoding="utf-8").read()
+    assert "USER（上下文/提示词）" in run_log and "first" in run_log
+    assert "[tool_use] Bash" in run_log
+    assert "[tool_result] file.txt" in run_log
+    assert "[result]" in run_log
+
     modes = [line.split()[0] for line in log.read_text().splitlines()]
     assert modes == ["new", "resume"]
     sids = {line.split()[1] for line in log.read_text().splitlines()}

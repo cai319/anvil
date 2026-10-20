@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import API, auth_headers
+from tests.conftest import API, auth_headers, human_headers  # noqa: E402
 
 pytestmark = pytest.mark.usefixtures("client")
 
@@ -49,7 +49,7 @@ async def test_proposal_create_and_approve(client):
     assert r.status_code == 201
     pid = r.json().get("id")
     assert pid
-    approve = await client.post(f"{API}/proposals/{pid}/approve", headers=auth_headers())
+    approve = await client.post(f"{API}/proposals/{pid}/approve", headers=human_headers())
     assert approve.status_code == 200
 
 

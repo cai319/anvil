@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import API, auth_headers, role_payload, runtime_payload
+from tests.conftest import API, auth_headers, human_headers, role_payload, runtime_payload
 
 pytestmark = pytest.mark.usefixtures("client")
 
@@ -28,10 +28,10 @@ async def test_role_crud(client):
     assert r.status_code == 201, r.text
     got = await client.get(f"{API}/roles/qa-role")
     assert got.status_code == 200
-    upd = await client.put(f"{API}/roles/qa-role", json=role_payload(display_name="QA2"))
+    upd = await client.put(f"{API}/roles/qa-role", json=role_payload(display_name="QA2"), headers=human_headers())
     assert upd.status_code == 200
     assert upd.json()["display_name"] == "QA2"
-    dele = await client.delete(f"{API}/roles/qa-role")
+    dele = await client.delete(f"{API}/roles/qa-role", headers=human_headers())
     assert dele.status_code in (200, 204)
     gone = await client.get(f"{API}/roles/qa-role")
     assert gone.status_code == 404
@@ -56,7 +56,7 @@ async def test_tools_budget_over_limit_rejected(client):
         "preset": "backend-default",
         "allowlist": [{"server": "git", "tools": ["status", "diff", "add", "commit", "log", "branch"]}],
     }
-    r = await client.put(f"{API}/roles/qa-role/tools", json=over)
+    r = await client.put(f"{API}/roles/qa-role/tools", json=over, headers=human_headers())
     assert r.status_code == 422
     assert "estimate" in r.json() or "detail" in r.json()
 
@@ -89,7 +89,7 @@ async def test_config_snapshot_frozen(client):
     snap = await client.get(f"{API}/roles/qa-role/effective-config")
     before = snap.json()
     # 改角色工具 → 快照应保持创建时版本（此处只验证读取端点存在，冻结逻辑 M2 断言）
-    await client.put(f"{API}/roles/qa-role/tools", json={"preset": "backend-default"})
+    await client.put(f"{API}/roles/qa-role/tools", json={"preset": "backend-default"}, headers=human_headers())
     after = await client.get(f"{API}/roles/qa-role/effective-config")
     assert after.status_code == 200
     assert after.json() != before  # 当前配置变了；快照冻结在 run 层断言（见 test_tasks S-config）

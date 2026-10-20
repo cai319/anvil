@@ -55,6 +55,22 @@ ROLE_SESSION_TOKEN_DAYS = int(_env("ANVIL_ROLE_TOKEN_DAYS", "30"))
 # --print 模式下没有交互授权通道，default 会让 agent 停在「等待授权」。
 DEFAULT_PERMISSION_MODE = _env("ANVIL_DEFAULT_PERMISSION_MODE", "bypassPermissions")
 
+# CIC（Constructed Initial Context）：空闲释放后若会话上下文超过阈值，不再 --resume，
+# 而是新建会话并注入 5 块构造上下文（MEMORY 头/最近消息/最近动作/唤醒）。
+CIC_THRESHOLD_TOKENS = int(_env("ANVIL_CIC_THRESHOLD_TOKENS", "128000"))
+
+# Cleaner：本地检查角色 MEMORY.md 体积（零 token），超限时给该角色排一次自修剪提醒（每天至多一次）。
+CLEANER_ENABLED = _env("ANVIL_CLEANER", "1") != "0"
+CLEANER_MAX_BYTES = int(_env("ANVIL_CLEANER_MAX_BYTES", "12000"))
+
+# 工作流步骤停滞看门狗：步骤 run 挂起且无活动超过阈值 → 唤醒角色续跑；超过次数判失败并通知人。
+STEP_NUDGE_SECONDS = float(_env("ANVIL_STEP_NUDGE_SECONDS", "600"))
+STEP_MAX_NUDGES = int(_env("ANVIL_STEP_MAX_NUDGES", "3"))
+
+# Agent 自行扩展团队（Raft 风格）：继承创建者 runtime；受每日配额与总角色数限制。
+AGENT_ROLE_EXPAND_DAILY = int(_env("ANVIL_AGENT_ROLE_EXPAND_DAILY", "3"))
+MAX_ROLES = int(_env("ANVIL_MAX_ROLES", "20"))
+
 # 自动派发（默认关）：todo 任务是否由调度器自动 wake 第一个角色。关闭时派发完全由「指派并执行」手动决定。
 AUTO_DISPATCH = _env("ANVIL_AUTO_DISPATCH", "0") == "1"
 

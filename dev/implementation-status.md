@@ -162,6 +162,9 @@
   `anvil board draft --kind workflow`；Cindy 协议改为产出 workflow（steps + gate），不再拆任务。
 - 收件箱新增 `gate` 类型（步骤审核，就地通过/驳回）。
 - 大厅只显示高层任务（移除角色卡列）；任务详情页签：会话 / 工作流 / 角色运行时。
+- **会话流优化**：任务详情会话支持类型筛选（全部/对话/@提及/运行/评审）、默认只显示最近 40 条
+  并可「显示更早」分页、容器固定高度内部滚动（62vh）、仅在接近底部时自动滚动。
+  @ 提及消息的发送/存储/渲染会去掉正文开头重复的 `@角色`，只保留标签一次。
 - **跨角色协作与挑战**：步骤 run 的提示词注入最近任务会话（含 @ 反馈）；工作流任务上被 @ 的角色
   使用 REPLY_PROTOCOL（只讨论、不 claim/submit）；STEP_PROTOCOL 要求关键产出后主动 @ 相关角色
   交叉确认/挑战、发现上游问题直接指出、并在提交摘要中说明反馈处理结果；Cindy 规划时把交叉评审点
@@ -171,11 +174,113 @@
   并就地通过/驳回/重试；支持缩放与「适应宽度」。列表视图可切换。
 - 已有「跳棋」任务的 10 个子任务已迁移为 10 个 workflow 步骤（S1/S10 为审核门）。
 
+## P0 修复（2026-10-19，安全优先）
+
+### P0-1 人工确认点硬边界（human-only）
+- 新增 `deps.require_human`：带角色身份的会话令牌（Agent）调用人工确认端点一律 **403**。
+- 覆盖：
+  - 任务：`PATCH /tasks/{id}`、`DELETE /tasks/{id}`、`cancel`、`reopen`、`assign`、`review`
+  - 工作流：gate `review`、`retry`
+  - 草案/知识/提案：`board/drafts/approve|reject`、lesson/proposal `approve|reject`
+  - 运行：`restart`、`session-reset`、`full-reset`、`DELETE /runs/{id}`
+  - 治理：`PUT /budget`、`freeze-all`、`resume-all`
+  - 角色/运行时变更：角色 auto-create/update/tools/catalog/profile/clone/delete/rollback、
+    运行时 update/delete
+- 实测：Agent 令牌审核任务/修改角色均返回 403；自然人访问收件箱正常。
+- 安全回归测试：`tests/api/test_security_human_only.py`。
+
+### P0-2 builder ≠ verifier（第一阶段）
+- `workflow_steps.reviewer` 字段：Cindy 规划时为 gate 步骤指定验证角色；
+  `create_workflow` 强制 **reviewer ≠ 执行角色**（相同则拒绝创建）。
+- Cindy 协议新增「builder 永不是 verifier」与 gate 验证者要求；前端图谱/列表展示验证者。
+- 说明：完整「验证步骤先于 gate 通过」的执行链仍属 P1。
+
+### P0-3 上下文注入预算
+- 步骤/回复提示词注入最近会话限制 **1800 字符**；普通任务转录限制 **4000 字符**；
+  超出保留尾部并显式标注「更早的会话已省略」。
+- 测试：`tests/graph/test_prompt_context.py::test_transcript_is_clipped_to_budget`。
+
+## P1 实施（2026-10-19）
+
+### P1-1 Agent Inbox（拉模式）
+- 新表 `role_inbox_cursors`（role × task）；`services/agent_inbox.py`：`items`（check，不推进）、
+  `commit`（cursor 只前进，at-least-once）、`unread_count`。
+- API：`GET /me/inbox?task_id=`、`POST /me/inbox/commit`；CLI：`anvil inbox check|commit`。
+- 步骤提示词改为「未读 N 条 + 最近 3 条 + 拉取/提交指针」，不再全量 push 会话；STEP_PROTOCOL
+  要求先 `anvil inbox check`、处理完 `commit` cursor。
+
+### P1-2 Held Draft（简化）
+- `comment` / `mention` 支持 `expect_activity_id` 与 `force`；Agent 基于旧版本发送时返回
+  **409 held + 期间新内容**，可选择重写 / 原样（force）/ 沉默；人类消息不受影响。
+- CLI：`anvil task comment|mention --expect-activity <id> [--force]`。
+
+### P1-3 CIC 冷唤醒（简化）
+- `role_sessions.last_context_tokens` 记录结果事件 token；空闲释放后若超过
+  `ANVIL_CIC_THRESHOLD_TOKENS`（默认 128K）→ 不 `--resume`，新建会话并注入构造上下文：
+  MEMORY.md 头部 / 最近 25 条消息 / 最近 12 条动作；不宣布重置、不列未决问题。
+- 阈值可配；测试覆盖构造内容与三负规则。
+
+### P1-4 身份保鲜（轻量）
+- 周复盘 prompt 增加「检查 description 是否漂移；用 lesson propose + @human，不自行改写」。
+
+## P2 实施（2026-10-19）
+
+### P2-1 契约先行（contract-first）
+- `workflow_steps.contract`：Cindy 规划时为实现步骤写不变量/接口承诺；创建时落库。
+- 步骤提示词自动注入**上游步骤契约** + 本步骤契约（违反视为失败）；规划协议要求实现步骤必须写 contract。
+- 前端工作流图谱/列表展示契约。
+
+### P2-2 验证矩阵
+- 工作流定义顶层 `verification`（cell / method / verifier_role）；Cindy 协议要求产出；
+- `GET /tasks/{id}/workflow` 返回；前端工作流页签展示矩阵。
+
+### P2-3 失败归因
+- `workflow_steps.failure_reason`：调度器把 run 失败映射为 `environment`（timeout/spawn）或
+  `agent_error`；步骤失败通知带归因，前端展示。
+
+### P2-4 Action Cards（HITL 一等原语）
+- 新表 `action_cards`；服务/API/CLI：Agent 只能 `anvil action prepare`（白名单 `task.cancel`、
+  `task.reopen`），自然人批准后**以人的身份执行**；拒绝则不执行。
+- 收件箱新增「操作申请」类型（就地批准执行/拒绝）；批准端点 human-only。
+- 测试：`tests/api/test_action_cards.py`。
+
+## Raft 式子任务与团队扩展（2026-10-19）
+
+- **临时子任务**：Agent 用 `anvil task create --title ... --description ... --parent $ANVIL_TASK_ID`
+  创建子任务；自动继承父任务的 repo/workspace/base_branch；可被其他角色 `anvil task claim` 认领。
+  子任务**不进入大厅**，只在父任务详情新增的「子任务」页签展示（状态/认领角色/直达）。
+- **API**：`GET /tasks?parent_id=` 过滤子任务。
+- **Agent 自行扩展团队**：`POST /roles/expand` / `anvil role expand --brief "..."`：
+  创建新 agent 并**继承创建者的 runtime/permission_mode**；新角色为普通 member，不能设置 tools/高权限字段；
+  每日配额 `ANVIL_AGENT_ROLE_EXPAND_DAILY`（默认 3）、总角色上限 `ANVIL_MAX_ROLES`（默认 20）；
+  创建动作写 audit `role_expand`，并在关联任务里 @human 通知。
+- **协议**：STEP_PROTOCOL 增加「拆分临时工作 → 子任务 + @目标角色」「扩展团队 → role expand」指引。
+- 测试：`tests/api/test_subtasks.py`、`tests/api/test_role_expand.py`。
+
+## Token 统计（2026-10-19，替代不准确的「今日成本」）
+
+- 新表 `token_usage`：daemon 从 CLI `result.usage`（兼容 `modelUsage` 聚合）记录
+  input/output/cache_read/cache_creation，带 role/task/run 维度。
+- `GET /tokens` 聚合：总输入（含 cache）/ 总输出 / 总 token / 今日 / 按角色 / 按日。
+- 前端顶栏：**「Token 总消耗（入 X / 出 Y）」**；治理页展示累计 Token；成本账本保留用于预算闸门。
+- 说明：历史运行未保存 token 用量，统计从下一次 agent 回合开始累积；成本字段不再作为顶栏展示。
+
+## P3 实施（2026-10-19）
+
+### P3-1 Cleaner（记忆自修剪）
+- 每轮 tick 本地检查角色 `MEMORY.md` 体积（零 token）；超过 `ANVIL_CLEANER_MAX_BYTES`（默认 12KB）
+  且当天未提醒 → 生成一条自修剪 reminder（合并重复、删过时、lesson propose、≤300 行）；
+  `settings cleaner:<role>` 保证每天至多一次；`ANVIL_CLEANER=0` 关闭。
+- 测试：`tests/test_cleaner.py`。
+
+### 尚未实施（P3 其余）
+- trace coverage / mutation testing 接入、CIC 多模型 judge 评测、Activity Unread/Saved、DM UI。
+
 ## 验证
 
 ```bash
 cd dev
-python3 -m pytest tests/ -q          # 156 passed, 21 skipped
+python3 -m pytest tests/ -q          # 174 passed, 21 skipped
 cd frontend && npm run build         # tsc + vite build
 ```
 

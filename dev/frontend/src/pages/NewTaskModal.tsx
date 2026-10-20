@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, type Role, type Task } from "../api/client";
+import { api, isOnboardingRole, type Role, type Task } from "../api/client";
 
 const AVATAR_COLORS = ["#6d7cff", "#34d399", "#fbbf24", "#60a5fa", "#f472b6", "#2dd4bf", "#fb923c", "#a78bfa"];
 function avatarColor(slug: string): string {
@@ -19,6 +19,8 @@ export function NewTaskModal({ roles, onClose, onCreated }: {
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const candidates = roles.filter((r) => !isOnboardingRole(r));
 
   const toggle = (slug: string) =>
     setSelected((prev) => prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug]);
@@ -63,8 +65,8 @@ export function NewTaskModal({ roles, onClose, onCreated }: {
         <div className="field">
           <span>参与成员（{selected.length} 已选）</span>
           <div className="member-list">
-            {roles.length === 0 && <p className="muted">暂无角色，请先在角色工坊创建。</p>}
-            {roles.map((r) => {
+            {candidates.length === 0 && <p className="muted">暂无角色，请先在角色工坊创建。</p>}
+            {candidates.map((r) => {
               const desc = typeof r.definition?.description === "string" ? r.definition.description : "";
               const picked = selected.includes(r.slug);
               return (

@@ -25,7 +25,7 @@ from pathlib import Path
 
 from .. import config
 from ..db import open_conn
-from ..util import now_iso
+from ..util import jdumps, jloads, now_iso
 
 # 不泄漏给子进程的编排器会话变量（与 platform/darwin.py 保持一致）
 _SESSION_ENV_PREFIXES = ("CLAUDE_CODE_",)
@@ -39,6 +39,28 @@ def _clean_env(extra: dict[str, str]) -> dict[str, str]:
     }
     merged.update(extra)
     return merged
+
+
+def extract_usage(ev: dict) -> dict:
+    """从 result 事件提取 usage；兼容 modelUsage（camelCase）聚合。"""
+    usage = ev.get("usage")
+    if isinstance(usage, dict) and usage:
+        return usage
+    mu = ev.get("modelUsage")
+    if isinstance(mu, dict):
+        mapping = {
+            "input_tokens": "inputTokens",
+            "output_tokens": "outputTokens",
+            "cache_read_input_tokens": "cacheReadInputTokens",
+            "cache_creation_input_tokens": "cacheCreationInputTokens",
+        }
+        agg = {}
+        for snake, camel in mapping.items():
+            agg[snake] = sum(
+                int((v or {}).get(camel) or 0) for v in mu.values() if isinstance(v, dict))
+        if any(agg.values()):
+            return agg
+    return {}
 
 
 def frame_user_message(text: str) -> str:
@@ -61,6 +83,11 @@ class _Role:
     queue: list[tuple[str, str | None, str | None]] = field(default_factory=list)
     current_run_id: str | None = None
     current_task_id: str | None = None
+    context_tokens: int = 0
+    cic_pending: bool = False
+    suppress_exit: bool = False
+    current_log_path: str | None = None
+    log_lock: threading.Lock = field(default_factory=threading.Lock)
     lock: threading.Lock = field(default_factory=threading.Lock)
     reader: threading.Thread | None = None
     stop: bool = False
@@ -151,17 +178,24 @@ class DaemonManager:
                args_resume: list[str], ctx: dict, cwd: str, env: dict) -> None:
         from ..graph.render import render_template
 
-        row = conn.execute("SELECT session_id, token FROM role_sessions WHERE role_slug=?",
-                           (r.role,)).fetchone()
+        row = conn.execute(
+            "SELECT session_id, token, last_context_tokens FROM role_sessions WHERE role_slug=?",
+            (r.role,)).fetchone()
         resume = bool(row and row["session_id"])
-        sid = row["session_id"] if resume else str(uuid.uuid4())
+        if resume and row["last_context_tokens"] and \
+                int(row["last_context_tokens"]) >= config.CIC_THRESHOLD_TOKENS:
+            # 会话过大：不 resume，按 CIC 构造新会话首输入（见 _build_cic）
+            resume = False
+            r.cic_pending = True
+        sid = (row["session_id"] if resume else str(uuid.uuid4()))
         token = (row["token"] if row else None) or self._issue_token(conn, r.role)
 
         tpl = args_resume if resume else args_new
         full_ctx = dict(ctx, session_id=sid, session_token=token)
         args = [render_template(str(a), full_ctx) for a in tpl]
         merged_env = _clean_env(dict(env, ANVIL_TOKEN=token, ANVIL_AGENT_SLUG=r.role))
-        merged_env.pop("ANVIL_TASK_ID", None)  # 常驻进程跨任务：任务 id 以每条消息为准
+        # ANVIL_TASK_ID 保留 spawn 时的任务 id（跨任务时以消息前缀为准），
+        # 避免 agent 执行 `anvil inbox check` 等命令时 task_id 为空。
 
         kwargs: dict = dict(
             cwd=cwd, env=merged_env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -177,6 +211,7 @@ class DaemonManager:
         r.busy = False
         r.last_active = time.time()
         r.stop = False
+        r.suppress_exit = False
         self._db_upsert(conn, r, status="starting")
         r.reader = threading.Thread(
             target=self._reader_loop, args=(r,), daemon=True, name=f"anvil-role-{r.role}")
@@ -198,6 +233,9 @@ class DaemonManager:
     def _deliver_locked(self, conn, r: _Role, prompt: str,
                         run_id: str | None, task_id: str | None) -> None:
         prefix = f"当前任务 ID：{task_id}\n（环境变量 ANVIL_TASK_ID 可能已过期，请以此为准）\n\n" if task_id else ""
+        if r.cic_pending:
+            prefix = self._build_cic(conn, r.role, task_id) + "\n\n" + prefix
+            r.cic_pending = False
         text = prefix + prompt
         r.queue.append((text, run_id, task_id))
         if not r.busy:
@@ -209,6 +247,7 @@ class DaemonManager:
             r.busy_since = None
             r.current_run_id = None
             r.current_task_id = None
+            r.current_log_path = None
             self._db_upsert(conn, r, status="idle")
             return
         text, run_id, task_id = r.queue.pop(0)
@@ -216,6 +255,9 @@ class DaemonManager:
         r.busy_since = time.time()
         r.current_run_id = run_id
         r.current_task_id = task_id
+        row = conn.execute("SELECT log_path FROM runs WHERE id=?", (run_id,)).fetchone() if run_id else None
+        r.current_log_path = row["log_path"] if row else None
+        self._append_run_log(r, f"\n===== USER（上下文/提示词） @ {now_iso()} =====\n{text}\n")
         self._db_upsert(conn, r, status="busy")
         try:
             if r.proc and r.proc.stdin:
@@ -234,19 +276,37 @@ class DaemonManager:
                 continue
             if not line.startswith("{"):
                 self._log(r.role, line)  # claude 的警告行（如 unrecognized_model）
+                if "Prompt is too long" in line:
+                    self._reset_for_cic(r)
+                    break
                 continue
             try:
                 ev = json.loads(line)
             except json.JSONDecodeError:
                 self._log(r.role, line)
                 continue
+            self._append_run_log(r, self._format_event(ev))
             etype = ev.get("type")
             if etype == "system" and ev.get("session_id"):
                 r.session_id = ev["session_id"]
             elif etype == "result":
+                if "Prompt is too long" in line:
+                    self._reset_for_cic(r)
+                    break
                 self._on_turn_result(r, ev)
             elif etype == "assistant":
                 self._log(r.role, self._assistant_text(ev))
+                usage = (ev.get("message") or {}).get("usage") or {}
+                if usage:
+                    try:
+                        ctx = sum(int(usage.get(k) or 0) for k in (
+                            "input_tokens", "cache_read_input_tokens",
+                            "cache_creation_input_tokens"))
+                        if ctx:
+                            r.context_tokens = ctx
+                        self._record_usage(r, usage)
+                    except (TypeError, ValueError):
+                        pass
         # 进程退出
         code = proc.poll()
         with r.lock:
@@ -259,16 +319,106 @@ class DaemonManager:
             self._db_upsert(conn, r, status="dead", pid=None)
         finally:
             conn.close()
-        if self.on_exit and not self._shutting_down:
+        if self.on_exit and not self._shutting_down and not r.suppress_exit:
             try:
                 self.on_exit(r.role, 0 if code is None else code)
             except Exception:  # noqa: BLE001
                 pass
 
+    def _append_run_log(self, r: _Role, text: str | None) -> None:
+        if not text or not r.current_log_path:
+            return
+        try:
+            with r.log_lock:
+                with open(r.current_log_path, "a", encoding="utf-8") as f:
+                    f.write(text if text.endswith("\n") else text + "\n")
+        except OSError:
+            pass
+
+    @staticmethod
+    def _format_event(ev: dict) -> str | None:
+        """把 stream-json 事件格式化为可读的「上下文/模型/工具」记录。"""
+        t = ev.get("type")
+        if t == "system":
+            if ev.get("subtype") == "init":
+                return (f"[system] init session={ev.get('session_id')} "
+                        f"model={ev.get('model') or ev.get('model_id') or '-'}")
+            return None
+        if t in ("assistant", "user"):
+            msg = ev.get("message") or {}
+            blocks = msg.get("content")
+            if not isinstance(blocks, list):
+                return None
+            out: list[str] = []
+            for b in blocks:
+                if not isinstance(b, dict):
+                    continue
+                bt = b.get("type")
+                if bt == "text":
+                    out.append(f"[{t}] {b.get('text', '')}")
+                elif bt == "tool_use":
+                    out.append(f"[tool_use] {b.get('name')} {jdumps(b.get('input') or {})}")
+                elif bt == "tool_result":
+                    content = b.get("content")
+                    if isinstance(content, list):
+                        content = "\n".join(
+                            x.get("text", "") for x in content if isinstance(x, dict))
+                    out.append(f"[tool_result] {content}")
+            return "\n".join(out) if out else None
+        if t == "result":
+            usage = ev.get("usage") or {}
+            out = [f"[result] usage={jdumps(usage)} cost={ev.get('total_cost_usd')}"]
+            if ev.get("result") is not None:
+                out.append(str(ev.get("result")))
+            return "\n".join(out)
+        return None
+
+    def _record_usage(self, r: _Role, usage: dict) -> None:
+        try:
+            from . import tokens as tokens_service
+            conn = open_conn(self.db_path)
+            try:
+                tokens_service.record(conn, r.role, r.current_task_id, r.current_run_id, usage)
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _reset_for_cic(self, r: _Role) -> None:
+        """Prompt 过长：本会话已不可用，终止进程并在下次唤醒用 CIC 新会话。"""
+        r.cic_pending = True
+        r.suppress_exit = True
+        try:
+            r.context_tokens = max(int(r.context_tokens or 0),
+                                   int(config.CIC_THRESHOLD_TOKENS) + 1)
+        except Exception:  # noqa: BLE001
+            pass
+        proc = r.proc
+        if proc is not None:
+            try:
+                if proc.stdin:
+                    proc.stdin.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        self._log(r.role, "[anvil] context too long → 将在下次唤醒用 CIC 新会话")
+
     def _on_turn_result(self, r: _Role, ev: dict) -> None:
         conn = open_conn(self.db_path)
         try:
             r.last_active = time.time()
+            usage = extract_usage(ev)
+            try:
+                tokens = sum(int(usage.get(k) or 0) for k in (
+                    "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+                if tokens:
+                    r.context_tokens = tokens
+
+            except (TypeError, ValueError):
+                pass
             cost = ev.get("total_cost_usd")
             if cost:
                 try:
@@ -324,27 +474,87 @@ class DaemonManager:
         finally:
             conn.close()
 
+    def _build_cic(self, conn, role: str, task_id: str | None) -> str:
+        """Constructed Initial Context（简化 3 块）：MEMORY 头 / 最近消息 / 最近动作。
+
+        三条负规则：不宣布重置、不列未决问题清单、超过 2 小时的内容只给指针。
+        """
+        blocks: list[str] = []
+        mem_path = Path(config.AGENTS_DIR) / role / "MEMORY.md"
+        try:
+            mem = mem_path.read_text(encoding="utf-8")[:4000].strip()
+        except OSError:
+            mem = ""
+        if mem:
+            blocks.append("## 记忆（MEMORY.md 头部，无需重读全文）\n" + mem)
+        if task_id:
+            rows = conn.execute(
+                "SELECT id, role_slug, kind, payload_json FROM activities "
+                "WHERE task_id=? AND kind IN ('comment','mention','step') "
+                "ORDER BY id DESC LIMIT 25", (task_id,)
+            ).fetchall()
+            lines = []
+            for r in reversed(rows):
+                p = jloads(r["payload_json"], {})
+                if r["kind"] == "comment":
+                    txt = str(p.get("body", ""))
+                elif r["kind"] == "mention":
+                    txt = f"@{p.get('target','')}: {p.get('message','')}"
+                else:
+                    txt = f"步骤 {p.get('step','')} → {p.get('status','')}"
+                lines.append(f"- [{r['role_slug'] or 'system'}] {txt[:400]}")
+            if lines:
+                blocks.append("## 最近 25 条消息\n" + "\n".join(lines))
+            acts = conn.execute(
+                "SELECT role_slug, action FROM audit WHERE task_id=? ORDER BY id DESC LIMIT 12",
+                (task_id,)
+            ).fetchall()
+            if acts:
+                blocks.append("## 最近动作\n" + "\n".join(
+                    f"- {a['role_slug'] or 'system'}: {a['action']}" for a in reversed(acts)))
+        return "\n\n".join(blocks)
+
     def _db_upsert(self, conn, r: _Role, status: str, pid: int | None = -1,
                    error: str | None = None) -> None:
         if pid == -1:
             pid = r.proc.pid if r.proc else None
         conn.execute(
             "INSERT INTO role_sessions (role_slug, session_id, token, pid, status, busy_since, "
-            "last_active_at, last_error, updated_at) VALUES (?,?,?,?,?,?,?,?,?) "
+            "last_active_at, last_context_tokens, last_error, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(role_slug) DO UPDATE SET session_id=excluded.session_id, token=excluded.token, "
             "pid=excluded.pid, status=excluded.status, busy_since=excluded.busy_since, "
-            "last_active_at=excluded.last_active_at, last_error=excluded.last_error, updated_at=excluded.updated_at",
+            "last_active_at=excluded.last_active_at, "
+            "last_context_tokens=COALESCE(excluded.last_context_tokens, role_sessions.last_context_tokens), "
+            "last_error=excluded.last_error, updated_at=excluded.updated_at",
             (r.role, r.session_id or "", r.token, pid, status,
              datetime.fromtimestamp(r.busy_since, tz=timezone.utc).isoformat() if r.busy_since else None,
              datetime.fromtimestamp(r.last_active, tz=timezone.utc).isoformat() if r.last_active else None,
-             error, now_iso()),
+             r.context_tokens or None, error, now_iso()),
         )
         conn.commit()
 
     def _heal_db(self) -> None:
-        """启动自愈：上一实例遗留的 role_sessions 标记为 dead（session_id 保留供 resume）。"""
+        """启动自愈：终止上一实例遗留的孤儿角色进程，session_id 保留供 resume。"""
         conn = open_conn(self.db_path)
         try:
+            rows = conn.execute(
+                "SELECT role_slug, pid FROM role_sessions WHERE pid IS NOT NULL").fetchall()
+            for r in rows:
+                pid = r["pid"]
+                if not pid:
+                    continue
+                try:
+                    # 只终止确实是 claude 的进程，避免 PID 复用误杀
+                    out = subprocess.run(
+                        ["ps", "-o", "command=", "-p", str(pid)],
+                        capture_output=True, text=True, timeout=3).stdout
+                    if "claude" in out:
+                        os.kill(int(pid), 15)
+                        self._log(r["role_slug"],
+                                  f"[anvil] 启动自愈：终止上一实例遗留进程 pid={pid}")
+                except Exception:  # noqa: BLE001
+                    pass
             conn.execute("UPDATE role_sessions SET status='dead', pid=NULL, updated_at=? "
                          "WHERE status IN ('starting','idle','busy')", (now_iso(),))
             conn.commit()

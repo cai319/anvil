@@ -564,8 +564,8 @@ dd { margin: 0; }
   color: var(--muted); margin-bottom: 8px; }
 .wf-legend-item { display: inline-flex; align-items: center; gap: 5px; }
 .wf-legend-item i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
-.wf-graph-scroll { overflow: auto; max-height: 600px; border: 1px solid var(--border);
-  border-radius: 12px; background: var(--bg-soft); }
+.wf-graph-scroll { overflow: auto; height: min(62vh, 600px); min-height: 320px;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--bg-soft); }
 .wf-graph { position: relative; }
 .wf-edges { position: absolute; inset: 0; pointer-events: none; }
 .wf-node { position: absolute; display: flex; flex-direction: column; gap: 3px; padding: 8px 10px;
@@ -586,3 +586,27 @@ dd { margin: 0; }
 .wf-detail-text { font-size: 12px; white-space: pre-wrap; color: var(--text); }
 .wf-zoom { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
 .wf-zoom .small { padding: 1px 8px; }
+
+/* ---- 会话流长度控制 ------------------------------------------------------ */
+.session-thread { max-height: 62vh; overflow-y: auto; padding-right: 4px; }
+.thread-head { display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  position: sticky; top: 0; z-index: 1; background: var(--bg); padding: 4px 0; }
+.thread-filters { display: flex; gap: 4px; flex-wrap: wrap; }
+.load-earlier { margin: 6px 0; }
+
+/* ---- 验证矩阵 / 契约 ------------------------------------------------------ */
+.wf-matrix { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 11px;
+  color: var(--muted); margin: 4px 0 8px; }
+.wf-matrix-cell { background: var(--surface-2, #1b2133); border: 1px solid var(--border);
+  border-radius: 6px; padding: 2px 8px; }
+.wf-contract { white-space: pre-wrap; }
+
+/* ---- 长路径 / 长英文换行（会话、侧栏、工作流、收件箱）------------------- */
+.thread-text { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.thread-meta { flex-wrap: wrap; }
+.side-p, .side-list li, .wf-detail-text, .wf-contract, .wf-deps, .wf-summary,
+.rs-timeline li, .inbox-item, .child-title, .card strong, .run-log,
+.session-meta, .thread-meta .mono {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}

@@ -97,7 +97,12 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const update = () => setFitScale(Math.max(0.45, Math.min(1, el.clientWidth / width)));
+    // 竖向布局：横向填满容器（可放大），纵向自然滚动
+    const update = () => {
+      const w = Math.max(1, el.clientWidth - 8);
+      const s = w / width;
+      setFitScale(Math.max(0.3, Math.min(2.5, s)));
+    };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
@@ -125,7 +130,8 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
           <button className="small" title="缩小" onClick={() => setZoom(Math.max(0.3, scale - 0.15))}>−</button>
           <span className="muted">{Math.round(scale * 100)}%</span>
           <button className="small" title="放大" onClick={() => setZoom(Math.min(1.6, scale + 0.15))}>＋</button>
-          <button className="small" onClick={() => setZoom(null)}>适应宽度</button>
+          <button className="small" title="横向填满容器（纵向滚动查看全图）"
+            onClick={() => setZoom(null)}>适应宽度</button>
         </span>
       </div>
 
@@ -187,6 +193,11 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
               {STATUS_META[step.status].label}
             </span>
           </div>
+          {step.reviewer && <div className="muted">验证者（builder ≠ verifier）：{step.reviewer}</div>}
+          {step.contract && (
+            <div className="muted">契约：<span className="wf-contract">{step.contract}</span></div>
+          )}
+          {step.failure_reason && <div className="muted">失败归因：{step.failure_reason}</div>}
           {step.depends_on.length > 0 && (
             <div className="muted">依赖：{step.depends_on.join("、")}</div>
           )}

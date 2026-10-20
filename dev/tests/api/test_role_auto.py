@@ -6,7 +6,7 @@ import json
 import pytest
 
 pytest.importorskip("anvil.main")
-from tests.conftest import auth_headers  # noqa: E402
+from tests.conftest import auth_headers, human_headers  # noqa: E402
 
 GEN = {
     "display_name": "后端工程师",
@@ -21,7 +21,7 @@ GEN = {
 
 async def test_auto_create_role_from_brief(client, monkeypatch):
     monkeypatch.setattr("anvil.api.roles.llm.generate", lambda prompt: json.dumps(GEN))
-    r = await client.post("/api/v1/roles/auto", headers=auth_headers(),
+    r = await client.post("/api/v1/roles/auto", headers=human_headers(),
                           json={"brief": "负责后端 API 和数据库的工程师"})
     assert r.status_code == 201, r.text
     role = r.json()
@@ -36,5 +36,5 @@ async def test_auto_create_role_from_brief(client, monkeypatch):
 
 
 async def test_auto_create_role_requires_brief(client, monkeypatch):
-    r = await client.post("/api/v1/roles/auto", headers=auth_headers(), json={"brief": ""})
+    r = await client.post("/api/v1/roles/auto", headers=human_headers(), json={"brief": ""})
     assert r.status_code == 422

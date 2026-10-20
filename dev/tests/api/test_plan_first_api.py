@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip("anvil.main")
-from tests.conftest import auth_headers, role_payload, runtime_payload, task_payload  # noqa: E402
+from tests.conftest import auth_headers, role_payload, runtime_payload, task_payload, human_headers  # noqa: E402
 
 
 @pytest.fixture
@@ -67,7 +67,7 @@ async def test_agent_can_submit_draft_and_human_approves(client, seeded):
     assert r.status_code == 201, r.text
     did = r.json()["id"]
     # 人工批准（human session）
-    r2 = await client.post("/api/v1/board/drafts/approve", headers=auth_headers(),
+    r2 = await client.post("/api/v1/board/drafts/approve", headers=human_headers(),
                            json={"draft_ids": [did]})
     assert r2.status_code == 200 and r2.json()["landed"] == [did]
     s1 = await client.get("/api/v1/tasks/S1", headers=auth_headers())

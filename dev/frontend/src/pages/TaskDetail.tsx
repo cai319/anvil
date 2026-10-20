@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { api, subscribeEvents, type BoardDraft, type Role, type Task, type TimelineEvent, type Workflow } from "../api/client";
+import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type Role, type Task, type TimelineEvent, type Workflow } from "../api/client";
 import { RoleSessions } from "./RoleSessions";
 import { WorkflowGraph } from "./WorkflowGraph";
+import { roleStatusFromWorkflow } from "../workflowStatus";
 
 const STATUS_LABEL: Record<Task["status"], string> = {
   todo: "待办",
@@ -43,8 +44,15 @@ function describe(ev: TimelineEvent): { text: string; runStatus?: string; mentio
   switch (ev.kind) {
     case "comment":
       return { text: String(p.body ?? "") };
-    case "mention":
-      return { text: String(p.message ?? ""), mention: String(p.target ?? "human") };
+    case "mention": {
+      const target = String(p.target ?? "human");
+      const raw = String(p.message ?? "");
+      const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return {
+        text: raw.replace(new RegExp(`^@\\s*${escaped}\\s*[，,:：]?\\s*`, "i"), ""),
+        mention: target,
+      };
+    }
     case "submit":
       return { text: "提交了评审" + (p.summary ? `：${p.summary}` : "") };
     case "review":
@@ -66,6 +74,14 @@ function describe(ev: TimelineEvent): { text: string; runStatus?: string; mentio
   }
 }
 
+const TL_FILTERS = [
+  { key: "all", label: "全部" },
+  { key: "dialog", label: "对话" },
+  { key: "mention", label: "@提及" },
+  { key: "run", label: "运行" },
+  { key: "review", label: "评审" },
+] as const;
+
 export function TaskDetail({ id }: { id: string }) {
   const [task, setTask] = useState<Task | null>(null);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
@@ -77,14 +93,21 @@ export function TaskDetail({ id }: { id: string }) {
   const [gone, setGone] = useState(false);
   const [drafts, setDrafts] = useState<BoardDraft[]>([]);
   const [dispatchNote, setDispatchNote] = useState<string | null>(null);
-  const [tab, setTab] = useState<"chat" | "workflow" | "runtime">("chat");
+  const [tab, setTab] = useState<"chat" | "workflow" | "subtasks" | "runtime">("chat");
+  const [tlKind, setTlKind] = useState<"all" | "dialog" | "mention" | "run" | "review">("all");
+  const [tlLimit, setTlLimit] = useState(40);
+  const threadRef = useRef<HTMLElement>(null);
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
+  const [children, setChildren] = useState<Task[]>([]);
   const [wfView, setWfView] = useState<"graph" | "list">("graph");
   const [busy, setBusy] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
 
   const refreshWorkflow = () =>
     api.getTaskWorkflow(id).then(setWorkflow).catch(() => setWorkflow(null));
+
+  const refreshChildren = () =>
+    api.listTaskChildren(id).then(setChildren).catch(() => []);
 
   const refresh = () =>
     Promise.all([api.getTask(id), api.getTaskTimeline(id)])
@@ -103,6 +126,7 @@ export function TaskDetail({ id }: { id: string }) {
     if (gone) return; // 任务已删除：不再刷新、不再订阅事件
     refresh();
     refreshWorkflow();
+    refreshChildren();
     api.listRoles().then(setRoles).catch(() => {});
     const refreshDrafts = () => api.listDrafts(id).then(setDrafts).catch(() => {});
     refreshDrafts();
@@ -110,14 +134,24 @@ export function TaskDetail({ id }: { id: string }) {
       if (ev.topic === "tick" || (ev.topic === "task" && ev.payload.id === id)) {
         refresh();
         refreshWorkflow();
+        refreshChildren();
         refreshDrafts();
       }
     });
   }, [id, gone]);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [timeline.length]);
+    const el = threadRef.current;
+    const nearBottom = !el || el.scrollHeight - el.scrollTop - el.clientHeight < 140;
+    if (nearBottom) endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [timeline.length, tlKind, tlLimit]);
+
+  const filteredTimeline = timeline.filter((ev) => {
+    if (tlKind === "all") return true;
+    if (tlKind === "dialog") return ev.kind === "comment" || ev.kind === "mention";
+    return ev.kind === tlKind;
+  });
+  const visibleTimeline = filteredTimeline.slice(-tlLimit);
 
   if (gone)
     return (
@@ -142,12 +176,14 @@ export function TaskDetail({ id }: { id: string }) {
     }
   };
 
+  const assignableRoles = roles.filter((r) => !isOnboardingRole(r));
+
   const send = async () => {
     const text = comment.trim();
     if (!text) return;
     // 自动解析消息中的 @角色（slug 或显示名），命中参与角色即走 mention（唤醒 + 时间线标黄）
     const byToken = new Map<string, string>();
-    roles.forEach((r) => {
+    assignableRoles.forEach((r) => {
       byToken.set(r.slug.toLowerCase(), r.slug);
       if (r.display_name) byToken.set(r.display_name.toLowerCase(), r.slug);
     });
@@ -202,6 +238,9 @@ export function TaskDetail({ id }: { id: string }) {
         <button className={`tab ${tab === "workflow" ? "active" : ""}`} onClick={() => setTab("workflow")}>
           工作流 {workflow && <span className="tab-count">{workflow.steps.filter((s) => s.status === "approved").length}/{workflow.steps.length}</span>}
         </button>
+        <button className={`tab ${tab === "subtasks" ? "active" : ""}`} onClick={() => setTab("subtasks")}>
+          子任务 {children.length > 0 && <span className="tab-count">{children.length}</span>}
+        </button>
         <button className={`tab ${tab === "runtime" ? "active" : ""}`} onClick={() => setTab("runtime")}>
           角色运行时 {(task.assignees ?? []).length > 0 && <span className="tab-count">{task.assignees.length}</span>}
         </button>
@@ -216,7 +255,7 @@ export function TaskDetail({ id }: { id: string }) {
               <>
                 <select value={assignee} onChange={(e) => setAssignee(e.target.value)} title="选择要指派的角色">
                   <option value="">选择角色…</option>
-                  {roles.map((r) => (
+                  {assignableRoles.map((r) => (
                     <option key={r.slug} value={r.slug}>{r.display_name}</option>
                   ))}
                 </select>
@@ -328,12 +367,25 @@ export function TaskDetail({ id }: { id: string }) {
             </section>
           )}
 
-          <section className="session-thread">
-            <h2 className="pane-title">会话 · {timeline.length} 条交互</h2>
-            {timeline.length === 0 && (
-              <p className="muted empty">暂无交互 —— 认领、评论、提交、评审、运行都会出现在这里。</p>
+          <section className="session-thread" ref={threadRef}>
+            <div className="thread-head">
+              <h2 className="pane-title">会话 · {filteredTimeline.length} 条</h2>
+              <div className="thread-filters">
+                {TL_FILTERS.map((f) => (
+                  <button key={f.key} className={`small ${tlKind === f.key ? "primary" : ""}`}
+                    onClick={() => setTlKind(f.key)}>{f.label}</button>
+                ))}
+              </div>
+            </div>
+            {filteredTimeline.length > tlLimit && (
+              <button className="small load-earlier" onClick={() => setTlLimit((n) => n + 40)}>
+                显示更早的 {filteredTimeline.length - tlLimit} 条
+              </button>
             )}
-            {timeline.map((ev) => {
+            {filteredTimeline.length === 0 && (
+              <p className="muted empty">当前筛选下没有交互。</p>
+            )}
+            {visibleTimeline.map((ev) => {
               const d = describe(ev);
               const role = ev.role ?? "human";
               return (
@@ -370,7 +422,7 @@ export function TaskDetail({ id }: { id: string }) {
           <div className="session-compose">
             <select value={asRole} onChange={(e) => setAsRole(e.target.value)} title="发送身份（默认 human）">
               <option value="human">human（你）</option>
-              {roles.map((r) => (
+              {assignableRoles.map((r) => (
                 <option key={r.slug} value={r.slug}>{r.display_name}</option>
               ))}
             </select>
@@ -409,15 +461,18 @@ export function TaskDetail({ id }: { id: string }) {
           <h3 className="side-h">参与角色</h3>
           <ul className="side-list">
             {(task.role_claims ?? []).length === 0 && <li className="muted">（未绑定多角色）</li>}
-            {(task.role_claims ?? []).map((c) => (
-              <li key={c.role_slug}>
-                <strong>{c.role_slug}</strong>{" "}
-                <span className={`status status-${c.status === "submitted" ? "in_review" : c.status === "approved" ? "done" : c.status === "working" ? "in_progress" : "todo"}`}>
-                  {ROLE_CLAIM_LABEL[c.status] ?? c.status}
-                </span>
-                {c.summary && <div className="muted">{c.summary}</div>}
-              </li>
-            ))}
+            {(task.role_claims ?? []).map((c) => {
+              const wfSt = roleStatusFromWorkflow(workflow, c.role_slug);
+              const cls = wfSt?.cls ?? (c.status === "submitted" ? "in_review" : c.status === "approved" ? "done" : c.status === "working" ? "in_progress" : "todo");
+              const label = wfSt?.label ?? ROLE_CLAIM_LABEL[c.status] ?? c.status;
+              return (
+                <li key={c.role_slug}>
+                  <strong>{c.role_slug}</strong>{" "}
+                  <span className={`status status-${cls}`}>{label}</span>
+                  {c.summary && <div className="muted">{c.summary}</div>}
+                </li>
+              );
+            })}
           </ul>
 
           <h3 className="side-h">验收标准</h3>
@@ -449,6 +504,17 @@ export function TaskDetail({ id }: { id: string }) {
               </p>
               {workflow.definition?.feedback_rules?.length ? (
                 <p className="muted">反馈路径：{workflow.definition.feedback_rules.join("；")}</p>
+              ) : null}
+              {workflow.definition?.verification?.length ? (
+                <div className="wf-matrix">
+                  <span className="muted">验证矩阵：</span>
+                  {workflow.definition.verification.map((v, i) => (
+                    <span key={i} className="wf-matrix-cell">
+                      <strong>{v.cell}</strong> · {v.method}
+                      {v.verifier_role ? ` · ${v.verifier_role}` : ""}
+                    </span>
+                  ))}
+                </div>
               ) : null}
               <div className="role-picker" style={{ margin: "4px 0 10px" }}>
                 <button className={`small ${wfView === "graph" ? "primary" : ""}`}
@@ -486,10 +552,13 @@ export function TaskDetail({ id }: { id: string }) {
                         <div className="wf-title">
                           {st.title}
                           <span className="wf-role">{st.role_slug}</span>
+                          {st.reviewer && <span className="wf-role">验证：{st.reviewer}</span>}
                           {st.gate && <span className="badge wf-gate">审核门</span>}
                           <span className={`status status-${cls}`}>{label}</span>
                         </div>
                         {st.depends_on?.length > 0 && <div className="muted wf-deps">依赖：{st.depends_on.join("、")}</div>}
+                        {st.contract && <div className="muted wf-deps">契约：{st.contract}</div>}
+                        {st.failure_reason && <div className="muted wf-deps">失败归因：{st.failure_reason}</div>}
                         {st.summary && <div className="muted wf-summary">{st.summary}</div>}
                       </div>
                       <div className="wf-actions">
@@ -523,7 +592,25 @@ export function TaskDetail({ id }: { id: string }) {
         </div>
       )}
 
-      {tab === "runtime" && <RoleSessions task={task} roles={roles} />}
+      {tab === "subtasks" && (
+        <div className="child-tasks">
+          {children.length === 0 && (
+            <p className="muted">暂无临时子任务。Agent 可用 `anvil task create --parent …` 创建，供其他角色认领。</p>
+          )}
+          {children.map((c) => (
+            <a key={c.id} className="child-task" href={`/tasks/${c.id}`}>
+              <span className="child-title">{c.title}</span>
+              <span className={`status status-${c.status === "in_progress" ? "in_progress" : c.status === "in_review" ? "in_review" : c.status === "done" ? "done" : c.status === "closed" ? "closed" : "todo"}`}>
+                {STATUS_LABEL[c.status]}
+              </span>
+              <span className="muted">{c.assignees?.length ? c.assignees.join("、") : "无人认领"}</span>
+              <span className="muted mono">{c.id.slice(0, 8)}</span>
+            </a>
+          ))}
+        </div>
+      )}
+
+      {tab === "runtime" && <RoleSessions task={task} roles={roles} workflow={workflow} />}
     </div>
   );
 }

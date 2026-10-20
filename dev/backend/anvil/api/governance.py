@@ -4,7 +4,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, Request
 
 from .. import services
-from ..deps import Auth, get_auth, get_db
+from ..services import tokens as tokens_service
+from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import TaskOut
 from . import events
 
@@ -29,12 +30,12 @@ def set_freeze(body: dict, conn=Depends(get_db)):
 
 
 @router.post("/control/freeze-all")
-def freeze_all(conn=Depends(get_db)):
+def freeze_all(conn=Depends(get_db), auth: Auth = Depends(require_human)):
     return services.governance.set_freeze(conn, True)
 
 
 @router.post("/control/resume-all")
-def resume_all(conn=Depends(get_db)):
+def resume_all(conn=Depends(get_db), auth: Auth = Depends(require_human)):
     return services.governance.set_freeze(conn, False)
 
 
@@ -45,7 +46,7 @@ def get_budget(conn=Depends(get_db)):
 
 
 @router.put("/budget")
-def update_budget(body: dict, conn=Depends(get_db)):
+def update_budget(body: dict, conn=Depends(get_db), auth: Auth = Depends(require_human)):
     """设置系统级/运行时级并发上限与日成本预算（design §5.6 / §6.5）。
 
     只更新请求里出现的字段；`daily_cost_budget_usd: ""` 表示清除预算（不限）。
@@ -63,6 +64,14 @@ def inject_budget(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_aut
     result = services.governance.inject_cost(conn, role, usd)
     events.publish("cost", {"role": role, "usd": usd, **result})
     return result
+
+
+@router.get("/tokens")
+def token_summary(scope: str | None = None,
+                  date_from: str | None = Query(default=None, alias="from"),
+                  date_to: str | None = Query(default=None, alias="to"),
+                  conn=Depends(get_db)):
+    return tokens_service.summary(conn, scope=scope, date_from=date_from, date_to=date_to)
 
 
 @router.get("/costs")

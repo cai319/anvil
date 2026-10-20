@@ -1,0 +1,248 @@
+{
+  "leader": "cindy",
+  "feedback_rules": [
+    "需求歧义或验收标准变更：执行角色 @pm 澄清；若影响范围、依赖或排期，@cindy 由 leader 调整工作流，必要时升级 human。",
+    "接口契约或设计规格冲突：developer/tester @designer 裁决；designer 无法裁决或涉及 PRD 条款时 @pm。",
+    "实现缺陷：tester 在 S6/S8 中 @developer，必须附复现步骤、预期/实际、日志或截图、P0-P3 级别。P0（无法开始对局、非法落子、胜负判定错误、AI 卡死或产生非法着法）立即阻塞主线并升级 human。",
+    "修复后回归失败，或同类 P0 连续两个修复周期未关闭：developer @cindy，由 leader 决定是否暂停放行并升级 human。",
+    "设计走查问题：designer 在 S9 @developer 并给出修正建议；P0/P1 必须进入 S7 修复，P2/P3 由 PM 在 S10 决定是否作为遗留问题接受。",
+    "依赖、范围或排期调整：任何角色 @cindy；由 leader 修订工作流并 @human 审批，禁止自行越界修改 scope 外文件。",
+    "发布决策：仅 PM 在 S10 可给出发布结论；存在未关闭 P0/P1、验收项不通过或关键风险未被接受时，必须升级 human 决策。",
+    "安全、合规或外部依赖问题（如依赖安装/浏览器环境不可用）：立即 @cindy 并升级 human。"
+  ],
+  "children": [
+    {
+      "id": "S1",
+      "title": "需求规格与验收基线（PRD）",
+      "type": "design",
+      "role": "pm",
+      "depends_on": [],
+      "acceptance": [
+        "PRD 明确 2 人中国跳棋规则：对角两营各 10 子、6 方向相邻单步、跳过相邻一子落空位、连续跳、回合切换、胜负判定、无合法走法时的处理；规则无歧义。",
+        "明确先后手流程：开局前人类可选择先手或后手；AI 先手时自动走第一步；两种流程均有可测试描述。",
+        "明确 AI 能力边界：难度档位（至少 1 档，建议 3 档）、每步思考时限 ≤2 秒、只允许输出合法着法、AI 异常/超时的降级策略。",
+        "明确 Web 交付形态、技术栈建议（Vite + TypeScript，测试工具 Vitest/Playwright）、目标浏览器（Chrome/Edge/Safari 最近两个大版本）、目录结构与运行方式。",
+        "docs/acceptance-criteria.md 中每条需求均给出 Given/When/Then 验收标准，覆盖先手/后手、单步、连跳、非法走子、胜负、重开、AI 合法性。",
+        "无未决的 P0 需求歧义；产物仅修改 docs/prd.md 与 docs/acceptance-criteria.md。"
+      ],
+      "scope_paths": [
+        "docs/prd.md",
+        "docs/acceptance-criteria.md"
+      ],
+      "description": "基于任务目标输出 PRD 与可执行验收标准，锁定棋盘/走子/胜负规则、AI 边界、先后手流程、技术栈与交付形态，作为设计、实现与测试的唯一需求基线。"
+    },
+    {
+      "id": "S2",
+      "title": "交互视觉设计与 UI↔引擎接口基线",
+      "type": "design",
+      "role": "designer",
+      "depends_on": [
+        "S1"
+      ],
+      "acceptance": [
+        "docs/design-spec.md 定义页面结构、棋盘坐标与渲染规范（尺寸、孔位、棋子、选中/合法落点/最后一步高亮、连跳预览与动画）、响应式与基础无障碍要求。",
+        "docs/design-spec.md 定义完整交互状态流转：选子→合法落点→单步/连跳确认→AI 思考（禁止人类落子）→结算→重开，以及非法操作提示。",
+        "docs/interface-contract.md 定义 UI 与引擎的数据契约：棋盘表示、阵营/回合、合法走法查询、走子请求与响应、AI 走子、先后手设置、错误码；字段和类型可直接映射为 TypeScript。",
+        "契约覆盖连跳选择、AI 思考态、游戏结束、重开等状态，并说明 UI 与 AI 的调用边界（同步/异步、超时处理）。",
+        "设计与 PRD 验收条款逐条映射且无冲突；开发与测试方可仅凭该契约并行工作。",
+        "产物仅修改 docs/design-spec.md、docs/interface-contract.md、docs/assets/**。"
+      ],
+      "scope_paths": [
+        "docs/design-spec.md",
+        "docs/interface-contract.md",
+        "docs/assets/**"
+      ],
+      "description": "基于 PRD 产出交互/视觉规格与 UI↔引擎接口契约，固定状态机、数据结构和错误约定，作为实现与测试并行的设计基线。"
+    },
+    {
+      "id": "S3",
+      "title": "工程脚手架、游戏引擎与 AI 实现",
+      "type": "implementation",
+      "role": "developer",
+      "depends_on": [
+        "S2"
+      ],
+      "acceptance": [
+        "初始化可构建的 Vite + TypeScript 工程：package.json、tsconfig.json、vite.config.ts、playwright.config.ts、最小入口占位；配置 typecheck/test/e2e 脚本；npm install 与 npm run build 成功。",
+        "实现 2 人中国跳棋引擎：对角两营各 10 子初始布局、6 方向相邻单步、跳过相邻单子落入空位、连续跳与多跳路径、回合切换、胜负判定、非法着法拒绝，规则与 PRD 完全一致。",
+        "实现 AI：合法着法生成 + 启发式评估 + minimax/alpha-beta 搜索（深度可配置），每步 ≤2 秒返回合法着法；人类先手与 AI 先手均可运行。",
+        "对外 API 严格符合 docs/interface-contract.md，提供可被 Vitest 直接导入的纯函数/类；package.json 配置 typecheck 与 test 脚本。",
+        "引擎与 AI 具备确定性测试入口（固定局面可复现），不依赖浏览器环境。",
+        "不修改 src/ui/** 与 src/styles/**；提交代码通过 TypeScript 检查，无编译错误。"
+      ],
+      "scope_paths": [
+        "src/engine/**",
+        "src/ai/**",
+        "src/types/**",
+        "package.json",
+        "tsconfig.json",
+        "vite.config.ts",
+        "playwright.config.ts",
+        "index.html",
+        "src/main.ts",
+        ".gitignore"
+      ],
+      "description": "搭建前端工程并实现规则引擎与 AI，严格遵循接口契约；入口文件先提供最小占位，由 S4 接管为正式 UI。"
+    },
+    {
+      "id": "S4",
+      "title": "Web UI、棋盘交互与 AI 对战集成",
+      "type": "implementation",
+      "role": "developer",
+      "depends_on": [
+        "S3"
+      ],
+      "acceptance": [
+        "开始页支持选择先手/后手并开始对局；两种选择下回合归属与 AI 首步行为正确。",
+        "棋盘交互完整：选子、合法落点高亮、单步落子、连跳路径选择与确认、非法操作提示、最后一步高亮；落子后状态与引擎一致。",
+        "AI 回合自动走子且不阻塞 UI，显示思考中状态；AI 思考期间人类不可落子，快速连点不产生重复走子。",
+        "显示当前回合、双方阵营、胜负/和棋结算与重开入口；界面符合 docs/design-spec.md 与响应式要求。",
+        "npm run build 产出可静态部署的 dist，npm run dev 可本地运行；README.md 含安装、启动、构建、测试与玩法说明。",
+        "与 S3 引擎/契约一致，无 TypeScript 错误；在 Chrome 最新版完成先手与后手各一局手工冒烟。"
+      ],
+      "scope_paths": [
+        "index.html",
+        "src/main.ts",
+        "src/ui/**",
+        "src/styles/**",
+        "public/**",
+        "README.md"
+      ],
+      "description": "实现正式 Web 界面并集成引擎/AI，完成先后手选择、棋盘交互、AI 回合、结算与重开，交付可运行、可构建的单页应用。"
+    },
+    {
+      "id": "S5",
+      "title": "测试计划与用例设计（规则/引擎/E2E）",
+      "type": "verification",
+      "role": "tester",
+      "depends_on": [
+        "S1",
+        "S2"
+      ],
+      "acceptance": [
+        "docs/test-plan.md 包含测试范围、环境、数据、通过标准、风险与回归策略，并逐条映射 PRD 验收标准。",
+        "tests/unit 下提供引擎用例：初始布局、6 方向单步、跳子、连续跳、非法走法、回合切换、胜负判定、AI 输出合法性与思考时限。",
+        "tests/e2e 下提供 Playwright 用例骨架：先手完整对局、后手完整对局、AI 思考态禁止落子、非法操作提示、重开流程。",
+        "用例字段与 docs/interface-contract.md 一致；断言明确预期结果，可在实现完成后直接执行。",
+        "不修改 src/**、package.json 与测试配置；如测试运行配置缺失，记录并 @developer 由 S3 补齐。"
+      ],
+      "scope_paths": [
+        "tests/**",
+        "docs/test-plan.md"
+      ],
+      "description": "在需求与接口基线完成后先行编写测试计划、单元与 E2E 用例，与 S3/S4 实现并行，为后续执行与回归提供完整验收网。"
+    },
+    {
+      "id": "S6",
+      "title": "自动化与手工测试执行、缺陷反馈",
+      "type": "verification",
+      "role": "tester",
+      "depends_on": [
+        "S3",
+        "S4",
+        "S5"
+      ],
+      "acceptance": [
+        "执行 tests/unit 与 tests/e2e，记录命令、环境、构建版本与原始结果；覆盖 PRD 全部验收条款及先手/后手两种流程。",
+        "输出 docs/test-report.md：用例总数、通过/失败/阻塞统计、失败原因与复现入口。",
+        "每个缺陷包含复现步骤、预期/实际、日志或截图、严重级别（P0-P3），并在任务会话中 @developer。",
+        "P0/P1 缺陷全部登记且状态可追踪；测试结论明确是否可进入 S7 缺陷修复阶段。",
+        "测试数据与结果保存在 test-results/**，不修改 src/** 与 docs 下的需求/设计文档。"
+      ],
+      "scope_paths": [
+        "tests/**",
+        "docs/test-report.md",
+        "test-results/**"
+      ],
+      "description": "在实现完成后执行全量自动化与手工测试，输出缺陷清单与测试报告，驱动 S7 修复。"
+    },
+    {
+      "id": "S7",
+      "title": "缺陷修复与回归",
+      "type": "bugfix",
+      "role": "developer",
+      "depends_on": [
+        "S6",
+        "S9"
+      ],
+      "acceptance": [
+        "关闭 S6 测试报告与 S9 走查报告中的全部 P0/P1 缺陷；P2 缺陷有明确结论（修复或记录为不阻塞遗留问题）。",
+        "每个修复补充或更新对应回归用例（单元或 E2E），完整测试套件通过且不破坏既有通过用例。",
+        "npm run build 与 npm test 通过；在任务会话中逐条说明缺陷修复情况与回归证据。",
+        "如发现缺陷源于需求/契约歧义，@pm 或 @designer 确认后再改，禁止静默变更验收口径。",
+        "修改范围限于 src/**、tests/**、package.json 与必要的构建配置。"
+      ],
+      "scope_paths": [
+        "src/**",
+        "tests/**",
+        "package.json",
+        "vite.config.ts",
+        "tsconfig.json"
+      ],
+      "description": "修复测试与设计走查发现的缺陷，补充回归用例并复跑，确保主线回到可交付状态。"
+    },
+    {
+      "id": "S8",
+      "title": "集成验收测试与发布验证",
+      "type": "verification",
+      "role": "tester",
+      "depends_on": [
+        "S7"
+      ],
+      "acceptance": [
+        "基于最终构建产物（npm run build 的 dist）执行全量单元、E2E 与手工验收，逐条核对 docs/acceptance-criteria.md。",
+        "验证关键路径：先手/后手、AI 首步、单步与连跳、非法走子拦截、AI 思考时限与合法性、胜负结算、重开、刷新后行为。",
+        "输出 docs/acceptance-report.md：环境、构建版本、逐条验收结论、截图/日志、遗留问题与发布建议。",
+        "无未关闭的 P0/P1 缺陷；P2/P3 已记录且不影响验收结论。",
+        "不修改 src/** 与需求/设计文档，仅更新测试与报告文件。"
+      ],
+      "scope_paths": [
+        "tests/**",
+        "docs/acceptance-report.md",
+        "test-results/**"
+      ],
+      "description": "对集成后的最终产物执行验收与回归，逐条核对验收标准并给出是否可发布的测试结论。"
+    },
+    {
+      "id": "S9",
+      "title": "集成产物 UX/视觉走查",
+      "type": "verification",
+      "role": "designer",
+      "depends_on": [
+        "S4"
+      ],
+      "acceptance": [
+        "按 docs/design-spec.md 逐项核对布局、棋盘渲染、选中/落点高亮、AI 思考态、结算页面与响应式表现。",
+        "分别以人类先手和 AI 先手各完成一局走查，覆盖连跳操作与非法操作提示。",
+        "输出 docs/ux-review.md：问题截图、严重级别（P0-P3）、对应设计条款与修正建议；P0/P1 在任务中 @developer。",
+        "给出明确结论（通过/有条件通过/不通过）；若为有条件通过，列出进入 S7 的必修项。",
+        "不修改 src/** 与需求/设计文档，仅新增/更新 docs/ux-review.md。"
+      ],
+      "scope_paths": [
+        "docs/ux-review.md"
+      ],
+      "description": "在 UI 集成完成后对实际产物做体验与视觉走查，输出可执行的修正清单，作为 S7 的输入之一。"
+    },
+    {
+      "id": "S10",
+      "title": "需求验收与发布评审",
+      "type": "verification",
+      "role": "pm",
+      "depends_on": [
+        "S8",
+        "S9"
+      ],
+      "acceptance": [
+        "逐条核对 docs/acceptance-criteria.md，确认全部 P0 验收项通过、P1 项有明确结论。",
+        "汇总 S6/S8 测试结论与 S9 UX 结论，确认无未关闭 P0/P1 缺陷或已获人类接受。",
+        "输出 docs/release-review.md，给出发布决策（发布/有条件发布/不发布）、遗留风险与后续建议。",
+        "发布决策与依据在任务会话中同步，并 @human 提交最终评审结论。",
+        "不修改实现与测试文件，仅新增/更新 docs/release-review.md。"
+      ],
+      "scope_paths": [
+        "docs/release-review.md"
+      ],
+      "description": "基于测试与走查证据完成最终需求验收和发布评审，向人类提交明确的发布结论与遗留风险。"
+    }
+  ]
+}

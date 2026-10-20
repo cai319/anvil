@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import API, auth_headers, role_payload, runtime_payload, task_payload
+from tests.conftest import API, auth_headers, role_payload, runtime_payload, task_payload, human_headers  # noqa: E402
 
 pytestmark = pytest.mark.usefixtures("client")
 
@@ -40,7 +40,7 @@ async def test_task_crud_and_manual_assign(client):
     got = await client.get(f"{API}/tasks/T-0001")
     assert got.status_code == 200 and got.json()["status"] == "todo"
     pat = await client.patch(
-        f"{API}/tasks/T-0001", json={"assignee": "qa-role"}, headers=auth_headers()
+        f"{API}/tasks/T-0001", json={"assignee": "qa-role"}, headers=human_headers()
     )
     assert pat.status_code == 200
     assert pat.json()["assignee"] == "qa-role"
@@ -60,7 +60,7 @@ async def test_S1_happy_path(client):
     )
     assert sub.status_code == 200
     rev = await client.post(
-        f"{API}/tasks/T-0001/review", json={"approve": True}, headers=auth_headers()
+        f"{API}/tasks/T-0001/review", json={"approve": True}, headers=human_headers()
     )
     assert rev.status_code == 200
     final = (await client.get(f"{API}/tasks/T-0001")).json()
@@ -76,7 +76,7 @@ async def test_S2_reject_back_to_in_progress(client):
         f"{API}/tasks/T-0001/submit", json={"summary": "v1"}, headers=auth_headers()
     )
     rev = await client.post(
-        f"{API}/tasks/T-0001/review", json={"approve": False}, headers=auth_headers()
+        f"{API}/tasks/T-0001/review", json={"approve": False}, headers=human_headers()
     )
     assert rev.status_code == 200
     body = (await client.get(f"{API}/tasks/T-0001")).json()
@@ -128,7 +128,7 @@ async def test_S8_reject_loop_triggers_cost_gate(client):
             f"{API}/tasks/T-LOOP/submit", json={"summary": "retry"}, headers=auth_headers()
         )
         await client.post(
-            f"{API}/tasks/T-LOOP/review", json={"approve": False}, headers=auth_headers()
+            f"{API}/tasks/T-LOOP/review", json={"approve": False}, headers=human_headers()
         )
     # 成本达限 → 新 claim / 新 run 被闸门拦截（具体阈值待 owner 定，此处断言存在拦截）
     body = (await client.get(f"{API}/tasks/T-LOOP")).json()

@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import services
-from ..deps import Auth, get_auth, get_db
+from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import InstructionIn, LessonIn, MemoryAppendIn, NoteWriteIn, ProposalIn
 from ..util import ConflictError
 from . import events
@@ -70,7 +70,7 @@ def create_proposal(body: ProposalIn, conn=Depends(get_db), auth: Auth = Depends
 
 
 @router.post("/proposals/{pid}/approve")
-def approve_proposal(pid: str, conn=Depends(get_db)):
+def approve_proposal(pid: str, conn=Depends(get_db), auth: Auth = Depends(require_human)):
     """审批通过：把提案字段落到角色配置（§9.2 审批档）。"""
     p = services.memory.approve_proposal(conn, pid)
     if p is None:
@@ -80,7 +80,7 @@ def approve_proposal(pid: str, conn=Depends(get_db)):
 
 
 @router.post("/proposals/{pid}/reject")
-def reject_proposal(pid: str, conn=Depends(get_db)):
+def reject_proposal(pid: str, conn=Depends(get_db), auth: Auth = Depends(require_human)):
     p = services.memory.reject_proposal(conn, pid)
     if p is None:
         raise HTTPException(status_code=404, detail="proposal not found")
@@ -117,7 +117,7 @@ def update_lesson(lid: str, body: dict, conn=Depends(get_db)):
 
 
 @router.post("/lessons/{lid}/approve")
-def approve_lesson(lid: str, conn=Depends(get_db)):
+def approve_lesson(lid: str, conn=Depends(get_db), auth: Auth = Depends(require_human)):
     try:
         lesson = services.memory.approve_lesson(conn, lid)
     except ConflictError as exc:
@@ -129,7 +129,7 @@ def approve_lesson(lid: str, conn=Depends(get_db)):
 
 
 @router.post("/lessons/{lid}/reject")
-def reject_lesson(lid: str, conn=Depends(get_db)):
+def reject_lesson(lid: str, conn=Depends(get_db), auth: Auth = Depends(require_human)):
     lesson = services.memory.reject_lesson(conn, lid)
     if lesson is None:
         raise HTTPException(status_code=404, detail="lesson not found")

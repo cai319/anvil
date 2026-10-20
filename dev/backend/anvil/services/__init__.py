@@ -1,4 +1,4 @@
-from . import board, governance, inbox, memory, reminders, roles, runtime, runs, tasks, tooling, workspace
+from . import actions, agent_inbox, board, governance, inbox, memory, reminders, roles, runtime, runs, tasks, tooling, workspace
 
-__all__ = ["board", "governance", "inbox", "memory", "reminders", "roles", "runtime", "runs", "tasks",
+__all__ = ["actions", "agent_inbox", "board", "governance", "inbox", "memory", "reminders", "roles", "runtime", "runs", "tasks",
            "tooling", "workspace"]

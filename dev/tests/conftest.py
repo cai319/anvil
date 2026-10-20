@@ -50,6 +50,11 @@ def auth_headers(role: str = TEST_ROLE, session: str = TEST_SESSION) -> dict:
     }
 
 
+def human_headers(session: str = TEST_SESSION) -> dict:
+    """自然人身份：人工确认点（评审/审批/删除/重置）只接受该身份。"""
+    return {"X-Anvil-Session": session, "X-Anvil-Role": "human"}
+
+
 # ---- 种子数据 factory（各测试文件复用） ---------------------------------
 
 

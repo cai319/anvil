@@ -69,6 +69,13 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
            depends_on: list[str] | None = None, cost_budget_usd: float | None = None) -> dict:
     tid = id or new_id()
     now = now_iso()
+    _assert_assignable(conn, assignees or [])
+    if parent_id:
+        # 子任务继承父任务的仓库/频道/基线，保证 worktree 与 diff 校验可用
+        parent = get(conn, parent_id) or {}
+        repo = repo or parent.get("repo")
+        workspace_id = workspace_id or parent.get("workspace_id")
+        base_branch = base_branch or parent.get("base_branch")
     conn.execute(
         """INSERT INTO tasks (id, title, type, status, priority, tags_json, repo, workspace_id,
                               base_branch, scope_paths_json, description, acceptance_json,
@@ -88,6 +95,15 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
     return get(conn, tid)  # type: ignore[return-value]
 
 
+def _assert_assignable(conn: sqlite3.Connection, roles: list[str]) -> None:
+    """onboarding 助理是系统默认角色，不能作为任务参与成员。"""
+    from . import roles as roles_service
+
+    for slug in roles:
+        if roles_service.is_onboarding(conn, slug):
+            raise ConflictError(f"{slug} is the built-in onboarding assistant and cannot join tasks")
+
+
 def get(conn: sqlite3.Connection, tid: str) -> dict | None:
     r = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
     if not r:
@@ -105,6 +121,7 @@ def assign_roles(conn: sqlite3.Connection, tid: str, roles: list[str]) -> dict:
     """绑定任务的参与角色（团队）。全量替换 task_assignees + 重置角色工作状态。"""
     if get(conn, tid) is None:
         raise LookupError(tid)
+    _assert_assignable(conn, roles)
     now = now_iso()
     conn.execute("DELETE FROM task_assignees WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM task_role_claims WHERE task_id=?", (tid,))
@@ -119,7 +136,7 @@ def assign_roles(conn: sqlite3.Connection, tid: str, roles: list[str]) -> dict:
 
 def list_all(conn: sqlite3.Connection, status: str | None = None, assignee: str | None = None,
              workspace_id: str | None = None, type: str | None = None,
-             tag: str | None = None) -> list[dict]:
+             tag: str | None = None, parent_id: str | None = None) -> list[dict]:
     q = "SELECT * FROM tasks"
     clauses, params = [], []
     if status:
@@ -130,6 +147,8 @@ def list_all(conn: sqlite3.Connection, status: str | None = None, assignee: str 
         clauses.append("workspace_id=?"); params.append(workspace_id)
     if type:
         clauses.append("type=?"); params.append(type)
+    if parent_id:
+        clauses.append("parent_id=?"); params.append(parent_id)
     if tag:
         # tags_json 是 JSON 数组，这里做精确元素匹配（带引号避免子串误命中）
         clauses.append("tags_json LIKE ?"); params.append(f'%"{tag}"%')

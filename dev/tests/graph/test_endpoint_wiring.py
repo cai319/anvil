@@ -8,6 +8,7 @@ from anvil import config
 from anvil.main import create_app
 from anvil.platform import factory
 
+from tests.conftest import human_headers
 from tests.graph.conftest import FakePM
 
 API = "/api/v1"
@@ -54,6 +55,6 @@ async def test_endpoint_run_claim_submit_review(client):
     assert (await client.post(f"{API}/tasks/T-1/submit", json={"summary": "x"}, headers=H)).status_code == 200
     assert (await client.get(f"{API}/runs/{rid}", headers=H)).json()["status"] == "reviewing"
 
-    assert (await client.post(f"{API}/tasks/T-1/review", json={"approve": True}, headers=H)).status_code == 200
+    assert (await client.post(f"{API}/tasks/T-1/review", json={"approve": True}, headers=human_headers())).status_code == 200
     assert (await client.get(f"{API}/tasks/T-1", headers=H)).json()["status"] == "done"
     assert (await client.get(f"{API}/runs/{rid}", headers=H)).json()["status"] == "completed"

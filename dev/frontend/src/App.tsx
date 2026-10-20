@@ -71,13 +71,21 @@ function useRoute(): { route: Route; navKey: number } {
   return { route: parseRoute(loc.path), navKey: loc.key };
 }
 
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
 function TopStatus() {
   const [frozen, setFrozen] = useState(false);
-  const [cost, setCost] = useState<number | null>(null);
+  const [tokens, setTokens] = useState<{ total: number; input: number; output: number } | null>(null);
 
   const refresh = () => {
     api.getFreeze().then((f) => setFrozen(f.frozen)).catch(() => {});
-    api.getBudget().then((b) => setCost(b.cost_used_usd)).catch(() => {});
+    api.getTokens().then((t) => setTokens({
+      total: t.total_tokens, input: t.input_tokens, output: t.output_tokens,
+    })).catch(() => {});
   };
 
   useEffect(() => {
@@ -99,7 +107,10 @@ function TopStatus() {
       <button onClick={toggle} className={frozen ? "danger" : "small"} title={frozen ? "解除全场冻结" : "全场冻结"}>
         {frozen ? "已冻结 · 点击解除" : "全场冻结"}
       </button>
-      <span className="chip">今日成本 ${cost == null ? "—" : cost.toFixed(4)}</span>
+      <span className="chip" title="累计 Token 消耗（输入含 cache；来自 CLI result.usage）">
+        Token {tokens == null ? "—" : fmtTokens(tokens.total)}
+        {tokens && <span className="muted">（入 {fmtTokens(tokens.input)} / 出 {fmtTokens(tokens.output)}）</span>}
+      </span>
     </>
   );
 }

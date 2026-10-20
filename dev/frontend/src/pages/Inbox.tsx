@@ -10,6 +10,7 @@ const KIND_LABEL: Record<InboxItem["kind"], string> = {
   lesson: "经验",
   proposal: "提案",
   gate: "审核门",
+  action: "操作申请",
 };
 
 const KIND_COLOR: Record<InboxItem["kind"], string> = {
@@ -19,6 +20,7 @@ const KIND_COLOR: Record<InboxItem["kind"], string> = {
   lesson: "#2f9e6e",
   proposal: "#c98a1e",
   gate: "#e08a3c",
+  action: "#f472b6",
 };
 
 type Tab = "all" | InboxItem["kind"];
@@ -31,6 +33,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "lesson", label: "经验" },
   { key: "proposal", label: "提案" },
   { key: "gate", label: "审核门" },
+  { key: "action", label: "操作申请" },
 ];
 
 export function Inbox() {
@@ -109,6 +112,21 @@ export function Inbox() {
               onClick={() => act(it.id, () => api.rejectProposal(raw))}>拒绝</button>
           </>
         );
+      case "action": {
+        const actionId = it.id.split(":", 2)[1];
+        return (
+          <>
+            <button className="primary small" disabled={disabled}
+              onClick={() => {
+                if (!window.confirm(`批准后将立即执行「${it.title}」，确定？`)) return;
+                act(it.id, () => api.approveActionCard(actionId));
+              }}>批准并执行</button>
+            <button className="small danger" disabled={disabled}
+              onClick={() => act(it.id, () => api.rejectActionCard(actionId))}>拒绝</button>
+            {it.task_id && <a className="small" href={`/tasks/${it.task_id}`}>看任务</a>}
+          </>
+        );
+      }
       case "gate": {
         const [, wid, sid] = it.id.split(":");
         return (

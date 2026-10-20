@@ -94,6 +94,11 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     depends_on_json  TEXT NOT NULL DEFAULT '[]',
     acceptance_json  TEXT NOT NULL DEFAULT '[]',
     gate             INTEGER NOT NULL DEFAULT 0,   -- 1 = 提交后需人工审核
+    reviewer         TEXT,                          -- 验证者角色（必须不同于执行角色）
+    contract         TEXT,                          -- 契约/不变量（contract-first）
+    failure_reason   TEXT,                          -- 失败归因（spec/contract/test/env/agent）
+    last_nudge_at    TEXT,                          -- 停滞看门狗：上次唤醒时间
+    nudge_count      INTEGER NOT NULL DEFAULT 0,    -- 停滞唤醒次数（超过上限判失败）
     status           TEXT NOT NULL DEFAULT 'pending',
     -- pending|running|submitted|approved|rejected|failed|skipped
     run_id           TEXT,
@@ -200,6 +205,19 @@ CREATE TABLE IF NOT EXISTS proposals (
     decided_at    TEXT
 );
 
+-- Token 消耗账本（run 的 result.usage；input 含 cache read/creation，output 为生成）
+CREATE TABLE IF NOT EXISTS token_usage (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    role_slug             TEXT,
+    task_id               TEXT,
+    run_id                TEXT,
+    input_tokens          INTEGER NOT NULL DEFAULT 0,
+    output_tokens         INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    recorded_at           TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS cost_ledger (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     role_slug   TEXT,
@@ -241,6 +259,29 @@ CREATE TABLE IF NOT EXISTS role_sessions (
     last_active_at TEXT,
     last_error     TEXT,
     updated_at     TEXT NOT NULL
+);
+
+-- Action Cards：Agent 只能 prepare，自然人批准后以人的身份执行（HITL 一等原语）
+CREATE TABLE IF NOT EXISTS action_cards (
+    id          TEXT PRIMARY KEY,
+    role_slug   TEXT NOT NULL,
+    task_id     TEXT,
+    kind        TEXT NOT NULL,                 -- task.cancel | task.reopen
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    reason      TEXT,
+    status      TEXT NOT NULL DEFAULT 'pending', -- pending|rejected|executed|failed
+    result_json TEXT,
+    created_at  TEXT NOT NULL,
+    decided_at  TEXT
+);
+
+-- Agent Inbox 拉模式 cursor（role × task；两阶段：check 读、commit 提交）
+CREATE TABLE IF NOT EXISTS role_inbox_cursors (
+    role_slug        TEXT NOT NULL,
+    task_id          TEXT NOT NULL,
+    last_activity_id INTEGER NOT NULL DEFAULT 0,
+    updated_at       TEXT NOT NULL,
+    PRIMARY KEY (role_slug, task_id)
 );
 
 -- Agent 会话令牌（design §10 末段：X-Anvil-Session 校验该会话能否操作目标任务）
@@ -466,6 +507,24 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE board_drafts ADD COLUMN kind TEXT NOT NULL DEFAULT 'tasks'")
     except sqlite3.OperationalError:
         pass
+    try:
+        conn.execute("ALTER TABLE workflow_steps ADD COLUMN reviewer TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE role_sessions ADD COLUMN last_context_tokens INTEGER")
+    except sqlite3.OperationalError:
+        pass
+    for col in ("last_nudge_at TEXT", "nudge_count INTEGER NOT NULL DEFAULT 0"):
+        try:
+            conn.execute(f"ALTER TABLE workflow_steps ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    for col in ("contract TEXT", "failure_reason TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE workflow_steps ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
     # 迁移：P0 可靠性——run 级超时 / 失败分类；P1-0——任务规划字段 / 草案关联任务
     for col in ("timeout_seconds INTEGER", "failure_class TEXT"):
         try:

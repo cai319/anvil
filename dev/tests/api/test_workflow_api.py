@@ -5,7 +5,7 @@ import pytest
 
 pytest.importorskip("anvil.main")
 from anvil.db import open_conn  # noqa: E402
-from tests.conftest import auth_headers, role_payload, runtime_payload, task_payload  # noqa: E402
+from tests.conftest import auth_headers, role_payload, runtime_payload, task_payload, human_headers  # noqa: E402
 
 WF_TREE = {
     "feedback_rules": ["阻塞 @pm"],
@@ -35,7 +35,7 @@ async def _draft(client):
 
 async def test_approve_workflow_draft_creates_workflow_not_tasks(client, seeded):
     did = await _draft(client)
-    r = await client.post("/api/v1/board/drafts/approve", headers=auth_headers(),
+    r = await client.post("/api/v1/board/drafts/approve", headers=human_headers(),
                           json={"draft_ids": [did]})
     assert r.json()["landed"] == [did]
     wf = await client.get("/api/v1/tasks/T-WF/workflow", headers=auth_headers())
@@ -53,7 +53,7 @@ async def test_approve_workflow_draft_creates_workflow_not_tasks(client, seeded)
 async def test_step_submit_gate_and_review(client, seeded, app):
     wid = None
     did = await _draft(client)
-    await client.post("/api/v1/board/drafts/approve", headers=auth_headers(),
+    await client.post("/api/v1/board/drafts/approve", headers=human_headers(),
                       json={"draft_ids": [did]})
     wid = (await client.get("/api/v1/tasks/T-WF/workflow", headers=auth_headers())).json()["id"]
 
@@ -74,7 +74,7 @@ async def test_step_submit_gate_and_review(client, seeded, app):
     gates = [i for i in inbox["items"] if i["kind"] == "gate"]
     assert len(gates) == 1
 
-    r = await client.post(f"/api/v1/workflows/{wid}/steps/S1/review", headers=auth_headers(),
+    r = await client.post(f"/api/v1/workflows/{wid}/steps/S1/review", headers=human_headers(),
                           json={"approve": True})
     step = next(s for s in r.json()["steps"] if s["step_id"] == "S1")
     assert step["status"] == "approved"
@@ -84,7 +84,7 @@ async def test_step_submit_gate_and_review(client, seeded, app):
 
 async def test_mention_on_workflow_creates_reply_run(client, seeded):
     did = await _draft(client)
-    await client.post("/api/v1/board/drafts/approve", headers=auth_headers(),
+    await client.post("/api/v1/board/drafts/approve", headers=human_headers(),
                       json={"draft_ids": [did]})
     r = await client.post("/api/v1/tasks/T-WF/mention",
                           headers={"X-Anvil-Session": "test-session", "X-Anvil-Role": "pm"},
