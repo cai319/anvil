@@ -214,7 +214,7 @@ export function Runtimes() {
               <td>{r.id}</td>
               <td>
                 <span className={`status status-${r.status}`}>{STATUS_LABEL[r.status] ?? r.status}</span>
-                {r.status !== "ready" && r.last_probe_log && (
+                {r.last_probe_log && (
                   <div className="muted" style={{ fontSize: 12, marginTop: 4, maxWidth: 420, whiteSpace: "normal" }}>
                     {r.last_probe_log}
                   </div>

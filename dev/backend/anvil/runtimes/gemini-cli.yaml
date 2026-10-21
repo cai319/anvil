@@ -6,14 +6,17 @@ version_range: ">=0.1.0"
 discovery:
   strategies:
     - type: path_lookup
+      command: gemini.exe          # Windows: 优先原生 exe
+    - type: path_lookup
       command: gemini
     - type: npm_global
       package: "@google/gemini-cli"
     - type: fixed_path
       candidates:
-        - "%APPDATA%\\npm\\gemini.cmd"                   # npm 全局安装
         - "%USERPROFILE%\\.local\\bin\\gemini.exe"       # 原生安装
         - "%LOCALAPPDATA%\\Microsoft\\WinGet\\Links\\gemini.exe"  # WinGet 安装
+        - "%APPDATA%\\npm\\node_modules\\@google\\gemini-cli\\bin\\gemini.exe"  # npm 包内原生 exe
+        - "%APPDATA%\\npm\\gemini.cmd"                   # npm wrapper（最后兜底）
         - "~/.local/bin/gemini"
         - "/usr/local/bin/gemini"
         - "/opt/homebrew/bin/gemini"

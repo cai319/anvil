@@ -6,17 +6,20 @@ version_range: ">=1.0.0"
 discovery:
   strategies:
     - type: path_lookup
+      command: claude.exe          # Windows: 优先原生 exe，避免 .cmd 的 %* 展开破坏 UTF-8
+    - type: path_lookup
       command: claude
     - type: npm_global
       package: "@anthropic-ai/claude-code"
     - type: fixed_path
       candidates:
-        - "%LOCALAPPDATA%\\Programs\\claude\\claude.exe"
         - "%USERPROFILE%\\.local\\bin\\claude.exe"       # Windows 原生安装
         - "%USERPROFILE%\\.claude\\local\\claude.exe"    # 旧版本地安装
-        - "%APPDATA%\\npm\\claude.cmd"                   # npm 全局安装
+        - "%LOCALAPPDATA%\\Programs\\claude\\claude.exe"
         - "%USERPROFILE%\\.bun\\bin\\claude.exe"         # Bun 安装
         - "%LOCALAPPDATA%\\Microsoft\\WinGet\\Links\\claude.exe"  # WinGet 安装
+        - "%APPDATA%\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"  # npm 包内原生 exe
+        - "%APPDATA%\\npm\\claude.cmd"                   # npm wrapper（最后兜底）
         - "~/.local/bin/claude"                          # macOS/Linux 原生安装
         - "/usr/local/bin/claude"
         - "/opt/homebrew/bin/claude"

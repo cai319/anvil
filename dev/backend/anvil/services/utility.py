@@ -101,6 +101,8 @@ def generate(conn: sqlite3.Connection, prompt: str, *, runtime_id: str | None = 
              timeout: float | None = None) -> str:
     """用 CLI 运行时执行一次一次性 prompt，返回其 stdout。"""
     rt, definition = _resolve_runtime(conn, runtime_id)
+    # Windows: 已注册的 .cmd/.bat 也尽量升级为原生 .exe，避免 cmd.exe 破坏中文参数。
+    executable = runtime_service.effective_executable(rt["executable_path"]) or rt["executable_path"]
     invocation = definition.get("invocation") or {}
     args_tpl = invocation.get("args") or []
     if not args_tpl:
@@ -128,7 +130,7 @@ def generate(conn: sqlite3.Connection, prompt: str, *, runtime_id: str | None = 
             cwd = tmp
         try:
             proc = subprocess.run(
-                [rt["executable_path"], *args],
+                [executable, *args],
                 cwd=cwd,
                 env=_clean_env(env),
                 capture_output=True,

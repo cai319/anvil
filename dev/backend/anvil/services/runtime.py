@@ -51,11 +51,107 @@ def _expand(path: str) -> str:
     return os.path.expanduser(os.path.expandvars(path))
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _find_exe_on_path(command: str) -> str | None:
+    """Windows: 在 PATH 中查找同名 .exe（可能在 .cmd 之后的目录）。"""
+    if not _is_windows() or not command:
+        return None
+    for raw in os.environ.get("PATH", "").split(os.pathsep):
+        directory = raw.strip().strip('"')
+        if not directory:
+            continue
+        candidate = Path(directory) / f"{command}.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _prefer_native_exe(executable: str | None, command: str | None = None) -> str | None:
+    """Windows: .cmd/.bat 经 cmd.exe 展开参数，可能破坏 UTF-8 中文；优先原生 .exe。"""
+    if not executable or not _is_windows():
+        return executable
+    p = Path(executable)
+    if p.suffix.lower() not in (".cmd", ".bat"):
+        return executable
+    stem = p.stem
+
+    # 1) 同目录同名 .exe
+    sibling = p.with_suffix(".exe")
+    if sibling.is_file():
+        return str(sibling)
+    # 2) PATH 中其它目录的同名 .exe
+    found = _find_exe_on_path(command or stem)
+    if found:
+        return found
+    # 3) 常见原生安装位置
+    up = os.environ.get("USERPROFILE")
+    local = os.environ.get("LOCALAPPDATA")
+    candidates: list[Path] = []
+    if up:
+        home = Path(up)
+        candidates += [
+            home / ".local" / "bin" / f"{stem}.exe",
+            home / ".claude" / "local" / f"{stem}.exe",
+        ]
+    if local:
+        local_app = Path(local)
+        candidates += [
+            local_app / "Programs" / stem / f"{stem}.exe",
+            local_app / "Microsoft" / "WinGet" / "Links" / f"{stem}.exe",
+        ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    # 4) npm 全局包内自带的原生 exe
+    packages = {
+        "claude": ("@anthropic-ai", "claude-code"),
+        "codex": ("@openai", "codex"),
+        "gemini": ("@google", "gemini-cli"),
+    }
+    appdata = os.environ.get("APPDATA")
+    if appdata and stem in packages:
+        scope, package = packages[stem]
+        root = Path(appdata) / "npm" / "node_modules" / scope / package
+        for candidate in (root / "bin" / f"{stem}.exe", root / f"{stem}.exe"):
+            if candidate.is_file():
+                return str(candidate)
+    return executable
+
+
+def effective_executable(executable: str | None) -> str | None:
+    """对外入口：Windows 下把 .cmd/.bat 升级为原生 .exe；找不到则保持原样。"""
+    return _prefer_native_exe(executable)
+
+
+def _wrapper_warning(executable: str) -> str | None:
+    if not _is_windows():
+        return None
+    if Path(executable).suffix.lower() in (".cmd", ".bat"):
+        return (
+            "使用 .cmd/.bat wrapper；Windows 下中文参数可能被 cmd.exe 破坏，"
+            "建议安装原生 .exe（如 %USERPROFILE%\\.local\\bin\\claude.exe）后重新扫描"
+        )
+    return None
+
+
+def _with_wrapper_warning(log: str | None, executable: str) -> str | None:
+    warning = _wrapper_warning(executable)
+    if not warning:
+        return log
+    return f"{log}；{warning}" if log else warning
+
+
 def _resolve_executable(strategies: list[dict]) -> str | None:
+    fallback: str | None = None
     for s in strategies or []:
         t = s.get("type")
+        command = None
         if t == "path_lookup":
-            p = shutil.which(s.get("command", ""))
+            command = s.get("command", "")
+            p = shutil.which(command)
         elif t == "manual":
             p = _expand(s.get("path", ""))
             p = p if (p and os.path.isfile(p)) else None
@@ -66,8 +162,13 @@ def _resolve_executable(strategies: list[dict]) -> str | None:
         else:
             p = None
         if p:
+            p = _prefer_native_exe(p, command)
+            # Windows: 先把 .cmd/.bat 作为兜底，继续尝试后续策略找原生 .exe。
+            if _is_windows() and Path(p).suffix.lower() in (".cmd", ".bat"):
+                fallback = fallback or p
+                continue
             return p
-    return None
+    return fallback
 
 
 # 各包管理器查询全局 bin 目录的命令。npm 返回 prefix（Unix 的 bin 在 prefix/bin，
@@ -94,9 +195,10 @@ def _find_executable(directory: Path, names: list[str]) -> str | None:
     """在目录中查找可执行文件；显式兼容 Windows 的 .exe/.cmd/.bat 布局。"""
     if not directory.is_dir():
         return None
+    suffixes = (".exe", "", ".cmd", ".bat") if _is_windows() else ("", ".exe", ".cmd", ".bat")
     for name in names:
-        for filename in (name, f"{name}.exe", f"{name}.cmd", f"{name}.bat"):
-            candidate = directory / filename
+        for suffix in suffixes:
+            candidate = directory / f"{name}{suffix}"
             if candidate.is_file():
                 return str(candidate)
     return None
@@ -158,19 +260,27 @@ def _satisfies_range(version: str | None, vr: str | None) -> bool:
 
 def _run_version_probe(executable: str, definition: dict | None) -> tuple[str, str | None, str | None]:
     """返回 (status, version, log)。definition 为 None 时用默认 --version。"""
+    executable = effective_executable(executable) or executable
     vp = (definition or {}).get("version_probe") or {}
     args = vp.get("args") or ["--version"]
     try:
         out = subprocess.run([executable, *args], capture_output=True, text=True, timeout=15)
     except Exception as exc:  # noqa: BLE001
-        return "unhealthy", None, str(exc)
+        return "unhealthy", None, _with_wrapper_warning(str(exc), executable)
     text = (out.stdout or out.stderr) or ""
     version = _parse_version(text, vp.get("parse"))
     if out.returncode == 0 and version:
         if not _satisfies_range(version, (definition or {}).get("version_range")):
-            return "unverified", version, f"version {version} outside {(definition or {}).get('version_range')}"
-        return "ready", version, None
-    return "unhealthy", version, (text.strip()[:200] or f"exit {out.returncode}")
+            return (
+                "unverified", version,
+                _with_wrapper_warning(
+                    f"version {version} outside {(definition or {}).get('version_range')}", executable),
+            )
+        return "ready", version, _with_wrapper_warning(None, executable)
+    return (
+        "unhealthy", version,
+        _with_wrapper_warning((text.strip()[:200] or f"exit {out.returncode}"), executable),
+    )
 
 
 def _discovery_log(definition: dict) -> str:
@@ -202,6 +312,7 @@ def register(conn: sqlite3.Connection, *, id: str, display_name: str, executable
              detected_version: str | None = None, status: str = "unverified",
              capabilities: dict | None = None) -> dict:
     capabilities = capabilities or {}
+    executable_path = effective_executable(executable_path) or executable_path
     conn.execute(
         """INSERT INTO runtimes (id, display_name, executable_path, detected_version,
                                  status, capabilities, enabled)
@@ -235,6 +346,7 @@ def register_definition(conn: sqlite3.Connection, definition: dict,
     strategies = (definition.get("discovery") or {}).get("strategies")
     if not executable and strategies:
         executable = _resolve_executable(strategies)
+    executable = effective_executable(executable) or executable
     if executable:
         status, version, log = _run_version_probe(executable, definition)
     else:
@@ -286,10 +398,12 @@ def probe(conn: sqlite3.Connection, rid: str) -> dict | None:
     if rt is None:
         return None
     definition = load_definitions().get(rid)
-    status, version, log = _run_version_probe(rt["executable_path"], definition)
+    executable = effective_executable(rt["executable_path"]) or rt["executable_path"]
+    status, version, log = _run_version_probe(executable, definition)
     conn.execute(
-        "UPDATE runtimes SET detected_version=?, status=?, last_probe_at=?, last_probe_log=? WHERE id=?",
-        (version, status, now_iso(), log, rid),
+        "UPDATE runtimes SET executable_path=?, detected_version=?, status=?, "
+        "last_probe_at=?, last_probe_log=? WHERE id=?",
+        (executable, version, status, now_iso(), log, rid),
     )
     conn.commit()
     return get(conn, rid)
@@ -313,7 +427,7 @@ def health_probe(conn: sqlite3.Connection, rid: str) -> dict | None:
     args = [str(a).replace("{{probe_prompt}}", probe_prompt) for a in (health.get("args") or ["--print", "{{probe_prompt}}"])]
     timeout = float(health.get("timeout_seconds") or 60)
     expect = health.get("expect_contains") or ""
-    executable = rt["executable_path"]
+    executable = effective_executable(rt["executable_path"]) or rt["executable_path"]
     with tempfile.TemporaryDirectory(prefix="anvil-health-") as tmp:
         try:
             proc = subprocess.run(
@@ -342,6 +456,7 @@ def discover(conn: sqlite3.Connection) -> list[dict]:
         executable = _resolve_executable((definition.get("discovery") or {}).get("strategies", []))
         if not executable:
             executable = definition.get("executable") or definition.get("executable_path")
+        executable = effective_executable(executable) or executable
         if executable:
             status, version, log = _run_version_probe(executable, definition)
         else:

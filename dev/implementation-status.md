@@ -153,10 +153,16 @@
   「运行时」tab 可改绑。`POST /roles/auto` 会把新角色绑定到实际使用的运行时。
 - **角色技能/MCP 定制绑定**：新角色默认 `skills=[]` / `mcp=[]`；角色详情「技能/MCP」tab
   按角色独立勾选并保存，互不影响；「全部不选并保存」可一键清空。投影只使用该角色的勾选项。
+- **生成画像诊断**：`/roles/{slug}/generate` 校验 4 个字段；缺失/为空时返回 502，
+  detail 带缺失字段、耗时与原始输出片段，同时写 `role profile generation incomplete` 日志。
+  前端遇到不完整结果时保留原有系统提示/职责，不再用空值覆盖。
+- **Windows .cmd wrapper 规避**：运行时发现/调用时优先原生 `.exe`；`path_lookup` 先查
+  `claude.exe` / `codex.exe` / `gemini.exe`，`.cmd/.bat` 仅作最后兜底并写入探测日志。
+  已有 `.cmd` 注册在 probe/spawn/utility 时自动升级为同目录/原生安装/包内的 `.exe`。
 - 测试：`tests/api/test_dispatch_onboarding.py`、`tests/api/test_role_auto.py`、
-  `tests/api/test_role_catalog.py`、`tests/api/test_role_runtime.py`、
-  `tests/api/test_runtime_definition.py`、`tests/test_catalog_projection.py`、
-  `tests/test_utility.py`。
+  `tests/api/test_role_catalog.py`、`tests/api/test_role_generate.py`、
+  `tests/api/test_role_runtime.py`、`tests/api/test_runtime_definition.py`、
+  `tests/test_catalog_projection.py`、`tests/test_utility.py`。
 
 ### 任务大厅 UI 重构（2026-10-19，参考 multica/raft）
 - **「＋ 新建任务」弹窗**：任务名称、任务描述、参与成员多选（可滚动列表，显示角色定位）；
@@ -294,7 +300,7 @@
 
 ```bash
 cd dev
-python3 -m pytest tests/ -q          # 210 passed, 21 skipped
+python3 -m pytest tests/ -q          # 219 passed, 21 skipped
 cd frontend && npm run build         # tsc + vite build
 ```
 

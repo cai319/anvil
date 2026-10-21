@@ -206,7 +206,23 @@ export function Roles() {
     try {
       const r = await api.generateRole(selected, brief.trim());
       setGenResult(r);
-      setProfile({ system_prompt: r.system_prompt ?? "", responsibilities: r.responsibilities ?? [] });
+      const hasSystemPrompt = typeof r.system_prompt === "string" && r.system_prompt.trim().length > 0;
+      const hasResponsibilities = Array.isArray(r.responsibilities)
+        && r.responsibilities.some((x) => String(x).trim().length > 0);
+      // 只覆盖有值的字段；生成结果不完整时保留人工已填/已保存的内容。
+      setProfile((prev) => ({
+        ...prev,
+        ...(hasSystemPrompt ? { system_prompt: r.system_prompt as string } : {}),
+        ...(hasResponsibilities ? { responsibilities: r.responsibilities as string[] } : {}),
+      }));
+      const missing: string[] = [];
+      if (!hasSystemPrompt) missing.push("系统提示");
+      if (!hasResponsibilities) missing.push("职责");
+      if (typeof r.working_mode !== "string" || !r.working_mode.trim()) missing.push("工作模式");
+      if (typeof r.skill_description !== "string" || !r.skill_description.trim()) missing.push("技能描述");
+      if (missing.length) {
+        setError(`生成结果不完整：${missing.join("、")} 为空；系统提示与职责已保留原内容。`);
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -339,6 +355,7 @@ export function Roles() {
                     <input value={brief} onChange={(e) => setBrief(e.target.value)} placeholder="一句话描述角色，如：负责后端 API 和数据库" style={{ flex: 1 }} />
                     <button onClick={generate} disabled={genBusy || !brief.trim()}>{genBusy ? "生成中…" : "生成"}</button>
                   </div>
+                  <p className="muted">生成会调用角色绑定的运行时；默认超时 120 秒（ANVIL_UTILITY_TIMEOUT）。</p>
                   {genResult && (
                     <dl>
                       <dt>工作模式</dt><dd>{genResult.working_mode || "—"}</dd>

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -12,6 +14,7 @@ from ..schemas import RoleIn, RoleOut, ToolsIn
 from ..services import utility
 
 router = APIRouter()
+logger = logging.getLogger("anvil.roles")
 
 
 def _extract_json(text: str) -> dict | None:
@@ -415,13 +418,58 @@ def generate_role(slug: str, body: dict, conn=Depends(get_db)):
     definition = role.get("definition") or {}
     runtime = definition.get("runtime")
     runtime_id = runtime.get("id") if isinstance(runtime, dict) else (str(runtime) if runtime else None)
+    started = time.monotonic()
     try:
         text = utility.generate(conn, prompt, runtime_id=runtime_id)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"生成画像失败: {exc}")
+        elapsed = time.monotonic() - started
+        raise HTTPException(status_code=502, detail=f"生成画像失败（{elapsed:.1f}s）: {exc}")
+
     data = _extract_json(text)
     if data is None:
-        raise HTTPException(status_code=502, detail="运行时未返回有效的 JSON 画像")
+        elapsed = time.monotonic() - started
+        snippet = (text or "")[:500]
+        logger.warning(
+            "role profile generation: no JSON slug=%s runtime=%s elapsed=%.1fs output=%r",
+            slug, runtime_id or "default", elapsed, (text or "")[:2000],
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"运行时未返回有效的 JSON 画像（{elapsed:.1f}s）。原始输出片段: {snippet}",
+        )
+
+    missing: list[str] = []
+    if not isinstance(data.get("working_mode"), str) or not data["working_mode"].strip():
+        missing.append("working_mode")
+    if not isinstance(data.get("skill_description"), str) or not data["skill_description"].strip():
+        missing.append("skill_description")
+    if not isinstance(data.get("system_prompt"), str) or not data["system_prompt"].strip():
+        missing.append("system_prompt")
+    responsibilities = data.get("responsibilities")
+    if not isinstance(responsibilities, list) or not any(
+        isinstance(x, str) and x.strip() for x in responsibilities
+    ):
+        missing.append("responsibilities")
+
+    elapsed = time.monotonic() - started
+    if missing:
+        snippet = (text or "")[:500]
+        logger.warning(
+            "role profile generation incomplete slug=%s runtime=%s elapsed=%.1fs missing=%s output=%r",
+            slug, runtime_id or "default", elapsed, missing, (text or "")[:2000],
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"运行时返回的画像不完整（{elapsed:.1f}s；缺少/为空：{', '.join(missing)}）。"
+                f"原始输出片段: {snippet}"
+            ),
+        )
+
+    logger.info(
+        "role profile generated slug=%s runtime=%s elapsed=%.1fs",
+        slug, runtime_id or "default", elapsed,
+    )
     return data
 
 

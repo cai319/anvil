@@ -101,6 +101,7 @@ def _render_persistent(conn: sqlite3.Connection, run: dict, task: dict | None,
         or definition.get("executable") or definition.get("executable_path")
         or runtime_id
     )
+    executable = runtime_service.effective_executable(executable) or executable
     rt_cfg = (effective.get("projection") or {}).get("runtime") or {}
     permission_mode = (rt_cfg.get("permission_mode") if isinstance(rt_cfg, dict) else None) or config.DEFAULT_PERMISSION_MODE
     sess = definition.get("session") or {}
@@ -255,6 +256,7 @@ def _render_invocation(conn: sqlite3.Connection, run: dict, task: dict | None,
         or definition.get("executable") or definition.get("executable_path")
         or runtime_id
     )
+    executable = runtime_service.effective_executable(executable) or executable
     rt_cfg = (effective.get("projection") or {}).get("runtime") or {}
     permission_mode = (rt_cfg.get("permission_mode") if isinstance(rt_cfg, dict) else None) or config.DEFAULT_PERMISSION_MODE
 

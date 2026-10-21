@@ -6,14 +6,17 @@ version_range: ">=0.1.0"
 discovery:
   strategies:
     - type: path_lookup
+      command: codex.exe           # Windows: 优先原生 exe
+    - type: path_lookup
       command: codex
     - type: npm_global
       package: "@openai/codex"
     - type: fixed_path
       candidates:
-        - "%APPDATA%\\npm\\codex.cmd"                    # npm 全局安装
         - "%USERPROFILE%\\.local\\bin\\codex.exe"        # 原生安装
         - "%LOCALAPPDATA%\\Microsoft\\WinGet\\Links\\codex.exe"  # WinGet 安装
+        - "%APPDATA%\\npm\\node_modules\\@openai\\codex\\bin\\codex.exe"  # npm 包内原生 exe
+        - "%APPDATA%\\npm\\codex.cmd"                    # npm wrapper（最后兜底）
         - "~/.local/bin/codex"
         - "/usr/local/bin/codex"
         - "/opt/homebrew/bin/codex"

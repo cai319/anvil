@@ -369,6 +369,12 @@ anvil init --with-roles
 claude --version
 ```
 
+> **Windows 重要：优先原生 `claude.exe`，不要用 `claude.cmd`。**
+> npm 安装的 `claude.cmd` 会经 `cmd.exe` 展开 `%*`，可能破坏 UTF-8 中文参数，
+> 表现为模型收到乱码、拒绝返回 JSON。推荐使用原生安装的
+> `%USERPROFILE%\.local\bin\claude.exe`。Anvil 在发现和调用时会自动优先 `.exe`；
+> 如果「运行时」页仍显示 `.cmd`，请点击「扫描本地运行时」或检查原生 exe 是否安装。
+
 若 `claude` 不在 PATH：
 
 - Claude Code 原生安装通常在 `%USERPROFILE%\.local\bin`；
@@ -1113,17 +1119,42 @@ venv 缺少 `langgraph`。执行 `pip install -r backend/requirements.txt`，再
 - 开发模式：`pip install -e agentcli` 装在启动后端所用的 venv 中，并且后端从该 venv 启动；
 - 打包模式：把 `anvil-dist` 目录加入 PATH，或把 `anvil` 复制到系统 PATH 中的目录。
 
-### Q13. 「AI 生成并创建 / 生成画像」失败
+### Q13. 「AI 生成并创建 / 生成画像」失败或只返回部分字段
 
-该功能现在通过 **CLI 运行时**执行，不再直连模型 API。错误信息会显示后端返回的 `detail`，常见原因：
+该功能通过 **CLI 运行时**执行，不再直连模型 API。错误信息会显示后端返回的 `detail`，常见原因：
 
 1. **没有可用运行时**：到「运行时」页扫描，确认至少一个 `ready`，并在「默认」列点击 **设为默认**。
 2. **运行时未登录/不可用**：先在终端执行 `claude --version` 并做一次最小调用；Codex / Gemini 同理。运行时自身的登录态或 `ANTHROPIC_*` 配置由它自己读取。
 3. **角色自己的运行时不可用**：角色详情「生成画像」优先使用角色绑定的运行时；可在角色配置里改回默认运行时。
 4. **超时**：默认 120 秒，可用 `ANVIL_UTILITY_TIMEOUT` 调整。
 5. **退出码/无输出**：错误信息会带上运行时的 stderr/退出码；据此检查运行时安装或登录。
+6. **Windows 下中文参数乱码 / 模型拒绝输出 JSON**：命中了 npm 的 `claude.cmd` wrapper。
+   `.cmd` 经 `cmd.exe` 展开 `%*` 时会破坏 UTF-8 中文参数。安装原生
+   `claude.exe`（`%USERPROFILE%\.local\bin\claude.exe`）并重新扫描；Anvil 会优先使用 `.exe`。
 
-> 该功能与 Agent 任务执行共用同一套运行时；只要运行时的健康检查能通过，生成画像通常也能工作。
+**只返回工作模式/技能描述，系统提示和职责为空：**
+
+后端会校验四个字段（`working_mode`、`skill_description`、`responsibilities`、`system_prompt`）；
+只要有一个缺失或为空就返回 502，`detail` 形如：
+
+```text
+运行时返回的画像不完整（12.3s；缺少/为空：system_prompt, responsibilities）。
+原始输出片段: {...}
+```
+
+排查步骤：
+
+1. 浏览器 DevTools → Network → 点击 generate 请求 → **Response**，查看 `detail` 与耗时（Timing）；
+2. 查看后端控制台/日志中的 `role profile generation incomplete ... output=...` 行：
+   - 源码模式：`python run_server.py` 的终端输出；
+   - 打包模式：从 PowerShell 启动并重定向：`.\anvil-server.exe *> anvil-server.log`；
+3. 确认角色绑定的运行时（角色详情 →「运行时」tab），以及该运行时 `claude --version` 是否正常；
+4. 如果是自定义运行时（如 `codeagent`），检查 `invocation.args` 是否把 `{{ prompt }}` 正确传给 CLI，
+   以及它输出的 JSON 是否包含上述四个字段；
+5. 如果耗时接近 120 秒，调大 `ANVIL_UTILITY_TIMEOUT` 或换更快的运行时/模型；
+6. 如果原始输出是乱码，确认已使用最新代码（运行时输出按 UTF-8 解码）。
+
+> 生成结果不完整时，前端会**保留原有的系统提示与职责**，不会再用空值覆盖；确认无误后再点「保存」。
 
 ---
 
