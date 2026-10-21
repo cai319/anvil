@@ -71,6 +71,16 @@ def frame_user_message(text: str) -> str:
     ) + "\n"
 
 
+def clear_session(conn, role: str, note: str = "session reset") -> None:
+    """清空角色常驻会话；下一次唤醒新建会话（不 --resume）。"""
+    conn.execute(
+        "UPDATE role_sessions SET session_id='', status='dead', pid=NULL, "
+        "last_context_tokens=NULL, last_error=?, updated_at=? WHERE role_slug=?",
+        (note, now_iso(), role),
+    )
+    conn.commit()
+
+
 @dataclass
 class _Role:
     role: str
@@ -158,7 +168,46 @@ class DaemonManager:
         if r is None:
             return
         with r.lock:
+            # 主动终止不算 agent 失败，不触发 on_exit / 自动清会话。
+            r.suppress_exit = True
             self._kill_locked(r, graceful=True)
+
+    def restart_process(self, role: str) -> None:
+        """终止常驻进程但保留 session_id；下一次唤醒 --resume 同一上下文。"""
+        r = self._roles.get(role)
+        if r is None:
+            return
+        with r.lock:
+            r.suppress_exit = True
+            r.queue.clear()
+            self._kill_locked(r, graceful=True)
+            r.busy = False
+            r.busy_since = None
+            r.current_run_id = None
+            r.current_task_id = None
+            r.current_log_path = None
+
+    def reset_session(self, role: str) -> None:
+        """终止常驻进程并清空 session_id；下一次唤醒新建上下文。"""
+        r = self._roles.get(role)
+        if r is not None:
+            with r.lock:
+                r.suppress_exit = True
+                r.queue.clear()
+                self._kill_locked(r, graceful=True)
+                r.session_id = None
+                r.context_tokens = 0
+                r.cic_pending = False
+                r.busy = False
+                r.busy_since = None
+                r.current_run_id = None
+                r.current_task_id = None
+                r.current_log_path = None
+        conn = open_conn(self.db_path)
+        try:
+            clear_session(conn, role, "session reset")
+        finally:
+            conn.close()
 
     def shutdown(self) -> None:
         # 停机路径：不触发 on_exit（否则会把 run 标 failed/abandoned，与 suspend 语义冲突）
@@ -307,16 +356,37 @@ class DaemonManager:
                         self._record_usage(r, usage)
                     except (TypeError, ValueError):
                         pass
-        # 进程退出
+        # 进程退出。stdout EOF 时 poll() 可能还是 None，wait 一下拿真实退出码，
+        # 否则非零退出会被误判成正常退出，失败后仍会 --resume 旧上下文。
         code = proc.poll()
+        if code is None:
+            try:
+                code = proc.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                code = None
+        # 失败后默认丢弃上下文：非零退出时下一次唤醒新建 session，
+        # 避免坏 context 被 --resume 反复复现（可用 ANVIL_RESET_SESSION_ON_FAILURE=0 关闭）。
+        auto_reset = (
+            code not in (None, 0)
+            and not r.suppress_exit
+            and not self._shutting_down
+            and config.RESET_SESSION_ON_FAILURE
+        )
         with r.lock:
             if r.proc is proc:
                 r.proc = None
                 r.busy = False
                 r.busy_since = None
+                if auto_reset:
+                    r.session_id = None
+                    r.context_tokens = 0
+                    r.cic_pending = False
         conn = open_conn(self.db_path)
         try:
-            self._db_upsert(conn, r, status="dead", pid=None)
+            note = f"auto reset after exit code {code}" if auto_reset else None
+            self._db_upsert(conn, r, status="dead", pid=None, error=note)
+            if auto_reset:
+                clear_session(conn, r.role, note or "auto reset after failure")
         finally:
             conn.close()
         if self.on_exit and not self._shutting_down and not r.suppress_exit:

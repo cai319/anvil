@@ -115,7 +115,23 @@ def _reset(run_id: str, mode: str, request: Request, conn) -> dict:
     run = services.runs.get_run(conn, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
+    from ..services import daemon as daemon_service
+
+    mgr = daemon_service.get_manager()
     _terminate(run)
+
+    # 常驻模式必须同时处理角色进程和 role_sessions：
+    # - restart：杀进程但保留 session_id，下一次 --resume 同一上下文；
+    # - session/full：杀进程并清空 session_id，下一次用 args_new 新建上下文。
+    if mgr and mgr.enabled:
+        if mode == "restart":
+            mgr.restart_process(run["role_slug"])
+        else:
+            mgr.reset_session(run["role_slug"])
+    elif mode in ("session", "full"):
+        # one-shot / daemon 未启用：清掉可能存在的旧角色会话记录。
+        daemon_service.clear_session(conn, run["role_slug"], "session reset")
+
     services.runs.set_native_session(conn, run_id, None)
 
     backup = None
@@ -131,8 +147,8 @@ def _reset(run_id: str, mode: str, request: Request, conn) -> dict:
             pass
         conn.commit()
 
-    # 三档重置都回到 created，由调度器重新 project + spawn（session-reset/full-reset
-    # 当前实现不携带原生会话 id，因为 `--print` 模式本身不持久会话）。
+    # 三档重置都回到 created，由调度器重新 project + spawn：
+    # restart 保留 session_id；session/full 已清空 session_id。
     services.runs.set_status(conn, run_id, "created")
     orch = getattr(request.app.state, "orchestrator", None)
     if orch:

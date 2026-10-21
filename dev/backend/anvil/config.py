@@ -52,6 +52,8 @@ UTILITY_TIMEOUT_SECONDS = float(_env("ANVIL_UTILITY_TIMEOUT", "120"))
 # scheduler）不启用，保持 one-shot 假进程路径可测。
 PERSISTENT_RUNTIME = _env("ANVIL_PERSISTENT_RUNTIME", "auto")  # auto | 1 | 0
 ROLE_IDLE_RELEASE_MINUTES = float(_env("ANVIL_IDLE_RELEASE_MINUTES", "15"))
+# 角色进程非零退出后，下一次唤醒是否丢弃旧 session 上下文新建会话。
+RESET_SESSION_ON_FAILURE = _env("ANVIL_RESET_SESSION_ON_FAILURE", "1") == "1"
 ROLE_SESSION_TOKEN_DAYS = int(_env("ANVIL_ROLE_TOKEN_DAYS", "30"))
 
 # 角色未显式配置 permission_mode 时的默认值。本地单用户环境用 bypassPermissions；

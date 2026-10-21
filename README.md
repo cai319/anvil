@@ -673,6 +673,7 @@ cd C:\path\to\aliceAgent\dev\dist\anvil-dist
 | `ANVIL_DEFAULT_RUNTIME` | `claude-code` | 默认运行时 ID |
 | `ANVIL_DEFAULT_PERMISSION_MODE` | `bypassPermissions` | 角色未显式配置时的权限模式 |
 | `ANVIL_PERSISTENT_RUNTIME` | `auto` | `auto`：生产入口启用常驻会话；`0` 强制回退 one-shot |
+| `ANVIL_RESET_SESSION_ON_FAILURE` | `1` | 角色进程非零退出后丢弃旧 session，下一次唤醒新建上下文；设为 `0` 保留 |
 | `ANVIL_IDLE_RELEASE_MINUTES` | `15` | 角色空闲释放时间（分钟） |
 | `ANVIL_SCHEDULER_INTERVAL` | `5.0` | 调度器扫描间隔（秒） |
 | `ANVIL_RUN_TIMEOUT` | `600` | 运行超时兜底（秒）；运行时 YAML 的 `timeout_seconds` 优先 |
@@ -844,11 +845,18 @@ npm run build      # tsc + vite build
 3. 用 `ANVIL_DATA_DIR` 指向复制过来的数据目录（或放到默认位置）；
 4. 在新机器上重新执行运行时发现（界面「扫描本地运行时」，或再次运行 `anvil init`），因为可执行文件路径会变化。
 
+> 角色 `home_path` 会在后端启动时自动重算为当前数据目录下的 `agents/<slug>`，不需要手动改数据库；
+> 请连同 `agents/` 目录一起复制。若只复制 `anvil.db`，会创建空 home（历史指令/记忆会丢失）。
+
 ### 12.3 重置
 
 - **不要直接删除 `anvil.db` 而保留 `agents/`**：状态与文件会不一致；
 - 想要“干净重来”时，停止后端后整体移走/删除数据目录，再重新 `anvil init`；
-- 角色级重置可在界面 Run 详情使用 `session-reset`（保留身份与记忆）或 `full-reset`（自动备份 home 后重置）。
+- 会话上下文重置：
+  - Run 详情 → **重启进程（保留上下文）**：保留 `session_id`，下次 `--resume`；
+  - Run 详情 → **重置会话（新上下文）**：终止常驻进程并清空 `session_id`，下次新建会话；
+  - Run 详情 → **全量重置（清记忆）**：会话与 `MEMORY.md` / `notes` 都清空（先备份 home）；
+  - 角色详情 →「运行时」→ **重置 Agent 会话**：无需存在 run，直接换新上下文（适合 Cindy）。
 
 ---
 
@@ -1158,6 +1166,36 @@ venv 缺少 `langgraph`。执行 `pip install -r backend/requirements.txt`，再
 6. 如果原始输出是乱码，确认已使用最新代码（运行时输出按 UTF-8 解码）。
 
 > 生成结果不完整时，前端会**保留原有的系统提示与职责**，不会再用空值覆盖；确认无误后再点「保存」。
+
+### Q14. 从 macOS 迁移到 Windows 后角色执行失败（如 Cindy）
+
+旧数据库里的 `roles.home_path` 是 macOS 绝对路径。后端启动时会自动：
+
+- 把 `home_path` 重算为 `<数据目录>\agents\<slug>`；
+- 补齐缺失的 home 目录与基础文件（`instruction.md`、`MEMORY.md`、`notes/`）。
+
+如果仍失败：
+
+1. 确认复制了 `data\agents\<slug>`（只复制 `anvil.db` 会得到空 home）；
+2. 查看 run 日志的 `failure_class`（`spawn_error` / `agent_exit_N`）；
+3. 确认该角色绑定的运行时在 Windows 上可用（优先原生 `.exe`，见 Q13）。
+
+### Q15. 角色失败后重启仍然失败 / Cindy 反复失败
+
+常驻会话默认会 `--resume` 同一 session；如果失败由上下文污染导致，简单重启进程会复用坏上下文。
+
+- 默认 `ANVIL_RESET_SESSION_ON_FAILURE=1`：进程非零退出后自动清空 `session_id`，下一次唤醒新建上下文；
+  - 常见非零退出：CLI 自身 fatal（认证 / 模型 / 网络 / 参数错误、未处理异常、崩溃）、
+    进程被 OS 或信号终止（OOM、任务管理器强杀等）；
+  - 常驻会话忙时超时（`platform_timeout`）也会重置会话，而不是继续 `--resume`；
+  - 正常 `exit 0`（含空闲释放）、后端优雅停机、主动 restart/reset/kill 不会触发自动清理；
+  - `spawn_error`（进程未启动）没有退出码，不会自动清理；
+- 手动：Run 详情 → **重置会话（新上下文）**；或角色详情 →「运行时」→ **重置 Agent 会话**；
+- 只想重启进程但保留上下文：Run 详情 → **重启进程（保留上下文）**；
+- 要连记忆一起清：Run 详情 → **全量重置（清记忆）**（先备份 home）；
+- 设为 `ANVIL_RESET_SESSION_ON_FAILURE=0` 可关闭失败后的自动清理。
+
+> 重置会话不会删除角色的 `instruction.md`、profile、`MEMORY.md` 或 `notes/`。
 
 ---
 

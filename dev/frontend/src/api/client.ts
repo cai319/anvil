@@ -206,6 +206,8 @@ export const api = {
     }).then((r) => json<Role>(r)),
   updateRoleRuntime: (slug: string, runtimeId: string): Promise<Role> =>
     req("PUT", `/roles/${slug}/runtime`, { id: runtimeId }).then((r) => json<Role>(r)),
+  resetRoleSession: (slug: string): Promise<{ slug: string; reset: string }> =>
+    req("POST", `/roles/${slug}/session-reset`, {}).then((r) => json(r)),
   deleteRole: (slug: string): Promise<void> => {
     return req("DELETE", `/roles/${slug}`).then((r) => {
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);

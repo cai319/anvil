@@ -563,6 +563,27 @@ export function Roles() {
                   <dl>
                     <dt>当前</dt><dd>{JSON.stringify(projection.runtime ?? {})}</dd>
                   </dl>
+
+                  <h3 style={{ marginTop: 16 }}>会话上下文</h3>
+                  <p className="muted">
+                    执行失败/挂起后，如果怀疑上下文已污染，先重置会话再重新派发；
+                    MEMORY.md 与 notes 会保留。
+                  </p>
+                  <div className="toolbar">
+                    <button
+                      className="danger"
+                      onClick={async () => {
+                        if (!window.confirm("重置 Agent 会话会终止该角色的常驻进程并丢弃当前对话上下文（保留 MEMORY.md 与 notes）。确定？")) return;
+                        try {
+                          await api.resetRoleSession(current.slug);
+                          setError(null);
+                          await refresh();
+                        } catch (e) {
+                          setError(String(e));
+                        }
+                      }}
+                    >重置 Agent 会话</button>
+                  </div>
                 </div>
               )}
             </>

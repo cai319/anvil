@@ -186,7 +186,9 @@ class Scheduler:
                                            {"exit_code": 1, "failure_class": "agent_exit_process"})
                     continue
                 if st.get("busy_since") and _elapsed_seconds(st["busy_since"]) > timeout:
-                    mgr.kill(role)  # type: ignore[union-attr]
+                    # 超时失败也按“新上下文重试”：终止常驻进程并清 session_id，
+                    # 避免下一次唤醒继续 --resume 卡死的上下文。
+                    mgr.reset_session(role)  # type: ignore[union-attr]
                     self.orchestrator.pump(self.db_path, r["id"], "process_exit",
                                            {"exit_code": 1, "failure_class": "platform_timeout"})
                 continue

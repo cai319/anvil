@@ -125,6 +125,19 @@
   `ANVIL_PERSISTENT_RUNTIME=0` 可强制回退 one-shot。
 - 实测验证：同一角色 @mention 二次唤醒 PID 不变；空闲释放后进程归零，再唤醒 `--resume` 同一 session 且回复上下文正确。
 
+### 会话重置 / 失败后上下文隔离（2026-10-21）
+- **restart**：终止角色常驻进程但保留 `role_sessions.session_id`，下一次唤醒 `--resume` 同一上下文。
+- **session-reset / full-reset**：终止常驻进程并清空 `role_sessions.session_id`（及
+  `last_context_tokens`），下一次 spawn 用 `args_new` 新建上下文；full-reset 另外清空
+  MEMORY/notes（先备份）。
+- **角色级 reset**：`POST /roles/{slug}/session-reset`（仅自然人），无需存在 run，便于 Cindy 等
+  角色在失败/挂起后直接换新上下文。
+- **失败自动清理**：`ANVIL_RESET_SESSION_ON_FAILURE=1`（默认）时，进程非零退出后自动清空
+  session_id，下一次唤醒新建会话，避免坏 context 被反复 `--resume`；设为 0 可保留。
+  常驻会话忙时超时（`platform_timeout`）由调度器显式 `reset_session`，同样换新上下文。
+- 测试：`tests/test_daemon.py`（reset/restart/failure auto-reset）、
+  `tests/api/test_role_session_reset.py`。
+
 ### 主页「实时活动」重构（2026-10-19，owner 反馈）
 - 右栏改为两块：**实时会话**（仅活跃 run，含挂起等待；卡片可点击进 `/runs/{id}`）
   + **最近活动（30 分钟）**（过滤心跳/删除，最多 20 条）。
@@ -155,6 +168,9 @@
   按角色独立勾选并保存，互不影响；「全部不选并保存」可一键清空。投影只使用该角色的勾选项。
 - **角色切换/新建状态隔离**：切换或新建角色时清空上一角色的生成画像、profile、日志等前端状态，
   并让进行中的生成响应失效；创建后自动选中新角色。后端画像本身按 role 存储，不继承。
+- **跨平台 home 修复**：启动时 `repair_home_paths` 把 `roles.home_path` 重算为
+  `AGENTS_DIR/<slug>` 并补齐 home 文件；`roles._row` 读取时也按当前数据目录归一化，
+  解决 macOS → Windows 迁移后角色 cwd 指向旧绝对路径的问题。
 - **生成画像诊断**：`/roles/{slug}/generate` 校验 4 个字段；缺失/为空时返回 502，
   detail 带缺失字段、耗时与原始输出片段，同时写 `role profile generation incomplete` 日志。
   前端遇到不完整结果时保留原有系统提示/职责，不再用空值覆盖。
@@ -165,7 +181,7 @@
   `tests/api/test_role_catalog.py`、`tests/api/test_role_generate.py`、
   `tests/api/test_role_profile.py`、`tests/api/test_role_runtime.py`、
   `tests/api/test_runtime_definition.py`、`tests/test_catalog_projection.py`、
-  `tests/test_utility.py`。
+  `tests/test_role_home_portability.py`、`tests/test_utility.py`。
 
 ### 任务大厅 UI 重构（2026-10-19，参考 multica/raft）
 - **「＋ 新建任务」弹窗**：任务名称、任务描述、参与成员多选（可滚动列表，显示角色定位）；
@@ -303,7 +319,7 @@
 
 ```bash
 cd dev
-python3 -m pytest tests/ -q          # 220 passed, 21 skipped
+python3 -m pytest tests/ -q          # 226 passed, 21 skipped
 cd frontend && npm run build         # tsc + vite build
 ```
 

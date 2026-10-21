@@ -234,6 +234,22 @@ def update_role_runtime(slug: str, body: dict, conn=Depends(get_db),
     return services.roles.get(conn, slug)  # type: ignore[return-value]
 
 
+@router.post("/roles/{slug}/session-reset")
+def reset_role_session(slug: str, conn=Depends(get_db),
+                       auth: Auth = Depends(require_human)):
+    """重置角色常驻会话上下文；保留 MEMORY.md / notes。"""
+    if services.roles.get(conn, slug) is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    from ..services import daemon as daemon_service
+
+    mgr = daemon_service.get_manager()
+    if mgr and mgr.enabled:
+        mgr.reset_session(slug)
+    else:
+        daemon_service.clear_session(conn, slug, "session reset")
+    return {"slug": slug, "reset": "session"}
+
+
 @router.delete("/roles/{slug}", status_code=204)
 def delete_role(slug: str, conn=Depends(get_db), auth: Auth = Depends(require_human)):
     try:

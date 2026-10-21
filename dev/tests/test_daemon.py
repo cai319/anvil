@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from anvil import config
 from anvil.db import connect, open_conn
 
 pytest.importorskip("anvil.graph")
@@ -126,3 +127,94 @@ def test_same_process_reused_and_resume_after_exit(env):
     assert modes == ["new", "resume"]
     sids = {line.split()[1] for line in log.read_text().splitlines()}
     assert len(sids) == 1  # 同一会话 id
+
+
+def _session_row(db_path, role="qa-role"):
+    c = open_conn(db_path)
+    try:
+        return c.execute(
+            "SELECT session_id, status FROM role_sessions WHERE role_slug=?", (role,)
+        ).fetchone()
+    finally:
+        c.close()
+
+
+def _deliver_script(mgr, conn, script, log, run_id, text="hello"):
+    runs_service.set_status(conn, run_id, "running")
+    return mgr.ensure_and_deliver(
+        conn, "qa-role",
+        executable=sys.executable,
+        args_new=[str(script), "--session-id", "{{session_id}}"],
+        args_resume=[str(script), "--resume", "{{session_id}}"],
+        ctx={}, cwd=str(script.parent), env={"FAKE_ARGV_LOG": str(log)},
+        prompt=text, run_id=run_id, task_id=None,
+    )
+
+
+def test_reset_session_starts_new_context(env):
+    conn, mgr, fake, log = env
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "first")
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    sid1 = mgr.status("qa-role")["session_id"]
+
+    mgr.reset_session("qa-role")
+    assert _wait(lambda: not mgr.status("qa-role")["alive"])
+    row = _session_row(mgr.db_path)
+    assert row["session_id"] == ""
+    assert row["status"] == "dead"
+
+    _deliver(mgr, conn, fake, log, run["id"], "second")
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    modes = [line.split()[0] for line in log.read_text().splitlines()]
+    sids = [line.split()[1] for line in log.read_text().splitlines()]
+    assert modes == ["new", "new"]
+    assert len(set(sids)) == 2
+    assert sid1 not in sids[1:]
+
+
+def test_restart_process_preserves_session(env):
+    conn, mgr, fake, log = env
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "first")
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    sid1 = mgr.status("qa-role")["session_id"]
+
+    mgr.restart_process("qa-role")
+    assert _wait(lambda: not mgr.status("qa-role")["alive"])
+
+    _deliver(mgr, conn, fake, log, run["id"], "second")
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    modes = [line.split()[0] for line in log.read_text().splitlines()]
+    sids = [line.split()[1] for line in log.read_text().splitlines()]
+    assert modes == ["new", "resume"]
+    assert sids == [sid1, sid1]
+
+
+FAIL_RUNTIME = '''
+import json, os, sys
+mode = "resume" if "--resume" in sys.argv else "new"
+sid = sys.argv[sys.argv.index("--resume" if mode == "resume" else "--session-id") + 1]
+with open(os.environ["FAKE_ARGV_LOG"], "a") as f:
+    f.write(mode + " " + sid + "\\n")
+print(json.dumps({"type": "system", "subtype": "init", "session_id": sid}), flush=True)
+for line in sys.stdin:
+    sys.exit(2)
+'''
+
+
+def test_failure_clears_session_for_next_wake(env, monkeypatch):
+    conn, mgr, fake, log = env
+    monkeypatch.setattr(config, "RESET_SESSION_ON_FAILURE", True)
+    fail = fake.parent / "fail_runtime.py"
+    fail.write_text(FAIL_RUNTIME, encoding="utf-8")
+
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver_script(mgr, conn, fail, log, run["id"], "boom")
+    assert _wait(lambda: not mgr.status("qa-role")["alive"])
+    assert _wait(lambda: _session_row(mgr.db_path)["session_id"] == "")
+
+    _deliver(mgr, conn, fake, log, run["id"], "retry")
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    modes = [line.split()[0] for line in log.read_text().splitlines()]
+    assert modes == ["new", "new"]
