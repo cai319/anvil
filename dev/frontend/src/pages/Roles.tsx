@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, isOnboardingRole, type Role, type Runtime } from "../api/client";
 
 type Tab = "basic" | "instruction" | "tools" | "catalog" | "home" | "permissions" | "runtime";
@@ -40,6 +40,7 @@ export function Roles() {
   const [runtimes, setRuntimes] = useState<Runtime[]>([]);
   const [runtimeId, setRuntimeId] = useState("");
   const [roleRuntimeId, setRoleRuntimeId] = useState("");
+  const generateSeq = useRef(0);
 
   const refresh = () => api.listRoles().then(setRoles).catch((e) => setError(String(e)));
 
@@ -71,12 +72,29 @@ export function Roles() {
     if (!selected) return;
     let cancelled = false;
     // 切换角色时立刻清空上一个角色的状态，避免串数据 / 旧请求回填。
+    generateSeq.current += 1;
     setConfig(null);
     setRoleRuntimeId("");
     setCatalog(null);
     setCatalogLoading(false);
     setSelSkills([]);
     setSelMcp([]);
+    setProfile({ system_prompt: "", responsibilities: [] });
+    const roleDef = roles.find((r) => r.slug === selected)?.definition as Record<string, any> | undefined;
+    setGenResult(
+      roleDef && (roleDef.working_mode || roleDef.skill_description)
+        ? { working_mode: roleDef.working_mode, skill_description: roleDef.skill_description }
+        : null,
+    );
+    setBrief("");
+    setGenBusy(false);
+    setVersions([]);
+    setMetrics(null);
+    setHomeFiles([]);
+    setHomeFile(null);
+    setMessage("");
+    setToolsForm({ preset: "", max_tool_tokens: "", allowlist: "[]" });
+    setError(null);
     api.getEffectiveConfig(selected).then((c) => {
       if (cancelled) return;
       setConfig(c);
@@ -127,10 +145,12 @@ export function Roles() {
       return;
     }
     try {
-      await api.createRole(slug, displayName, runtimeId);
+      const r = await api.createRole(slug, displayName, runtimeId);
       setSlug("");
       setDisplayName("");
       await refresh();
+      setSelected(r.slug);
+      setTab("basic");
     } catch (e) {
       setError(String(e));
     }
@@ -143,6 +163,9 @@ export function Roles() {
     try {
       const r = await api.autoCreateRole(autoBrief.trim(), runtimeId || undefined);
       setAutoBrief("");
+      setGenResult(null);
+      setProfile({ system_prompt: "", responsibilities: [] });
+      setBrief("");
       await refresh();
       setSelected(r.slug);
       setTab("basic");
@@ -201,10 +224,12 @@ export function Roles() {
 
   const generate = async () => {
     if (!selected || !brief.trim()) return;
+    const seq = ++generateSeq.current;
     setGenBusy(true);
     setError(null);
     try {
       const r = await api.generateRole(selected, brief.trim());
+      if (seq !== generateSeq.current) return; // 已切换角色，丢弃旧响应
       setGenResult(r);
       const hasSystemPrompt = typeof r.system_prompt === "string" && r.system_prompt.trim().length > 0;
       const hasResponsibilities = Array.isArray(r.responsibilities)
@@ -224,9 +249,9 @@ export function Roles() {
         setError(`生成结果不完整：${missing.join("、")} 为空；系统提示与职责已保留原内容。`);
       }
     } catch (e) {
-      setError(String(e));
+      if (seq === generateSeq.current) setError(String(e));
     } finally {
-      setGenBusy(false);
+      if (seq === generateSeq.current) setGenBusy(false);
     }
   };
 
