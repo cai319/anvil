@@ -25,7 +25,8 @@ async def seeded(client):
 
 
 async def test_agent_expands_team_and_notifies_human(client, seeded, monkeypatch):
-    monkeypatch.setattr("anvil.api.roles.llm.generate", lambda prompt: json.dumps(GEN))
+    monkeypatch.setattr("anvil.api.roles.utility.generate",
+                        lambda conn, prompt, **kwargs: json.dumps(GEN))
     r = await client.post(f"{API}/roles/expand", headers=auth_headers("pm"),
                           json={"brief": "负责 A* 寻路", "task_id": "T-EXP"})
     assert r.status_code == 201, r.text
@@ -41,7 +42,8 @@ async def test_agent_expands_team_and_notifies_human(client, seeded, monkeypatch
 
 
 async def test_expand_quota_and_human_forbidden(client, seeded, monkeypatch):
-    monkeypatch.setattr("anvil.api.roles.llm.generate", lambda prompt: json.dumps(GEN))
+    monkeypatch.setattr("anvil.api.roles.utility.generate",
+                        lambda conn, prompt, **kwargs: json.dumps(GEN))
     for i in range(3):
         r = await client.post(f"{API}/roles/expand", headers=auth_headers("pm"),
                               json={"brief": f"角色 {i}"})

@@ -6,7 +6,7 @@ import json
 import pytest
 
 pytest.importorskip("anvil.main")
-from tests.conftest import auth_headers, human_headers  # noqa: E402
+from tests.conftest import API, auth_headers, human_headers, runtime_payload  # noqa: E402
 
 GEN = {
     "display_name": "后端工程师",
@@ -20,7 +20,11 @@ GEN = {
 
 
 async def test_auto_create_role_from_brief(client, monkeypatch):
-    monkeypatch.setattr("anvil.api.roles.llm.generate", lambda prompt: json.dumps(GEN))
+    await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
+    monkeypatch.setattr(
+        "anvil.api.roles.utility.generate",
+        lambda conn, prompt, **kwargs: "生成结果：\n" + json.dumps(GEN, ensure_ascii=False) + "\n请确认。",
+    )
     r = await client.post("/api/v1/roles/auto", headers=human_headers(),
                           json={"brief": "负责后端 API 和数据库的工程师"})
     assert r.status_code == 201, r.text
@@ -33,8 +37,34 @@ async def test_auto_create_role_from_brief(client, monkeypatch):
     assert definition["system_prompt"].startswith("你是后端工程师")
     assert definition["responsibilities"] == GEN["responsibilities"]
     assert definition["capabilities"]["python"] == 0.9
+    assert definition["runtime"]["id"] == "claude-code"
+
+
+async def test_auto_create_role_binds_selected_runtime(client, monkeypatch):
+    await client.post(f"{API}/runtimes", json=runtime_payload("rt-b"), headers=auth_headers())
+    monkeypatch.setattr(
+        "anvil.api.roles.utility.generate",
+        lambda conn, prompt, **kwargs: json.dumps(GEN, ensure_ascii=False),
+    )
+    r = await client.post("/api/v1/roles/auto", headers=human_headers(),
+                          json={"brief": "负责后端 API 的工程师", "runtime_id": "rt-b"})
+    assert r.status_code == 201, r.text
+    assert r.json()["definition"]["runtime"]["id"] == "rt-b"
 
 
 async def test_auto_create_role_requires_brief(client, monkeypatch):
     r = await client.post("/api/v1/roles/auto", headers=human_headers(), json={"brief": ""})
     assert r.status_code == 422
+
+
+async def test_auto_create_role_surfaces_runtime_error(client, monkeypatch):
+    await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
+
+    def boom(conn, prompt, **kwargs):
+        raise RuntimeError("运行时调用失败")
+
+    monkeypatch.setattr("anvil.api.roles.utility.generate", boom)
+    r = await client.post("/api/v1/roles/auto", headers=human_headers(),
+                          json={"brief": "负责后端 API 的工程师"})
+    assert r.status_code == 502
+    assert "运行时调用失败" in r.json()["detail"]

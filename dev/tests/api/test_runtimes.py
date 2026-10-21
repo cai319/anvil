@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import API, auth_headers, runtime_payload
+from tests.conftest import API, auth_headers, human_headers, runtime_payload
 
 pytestmark = pytest.mark.usefixtures("client")
 
@@ -61,3 +61,32 @@ async def test_discover_returns_candidates(client):
     r = await client.post(f"{API}/runtimes/discover")
     assert r.status_code == 200
     assert isinstance(r.json(), list)
+
+
+async def test_default_runtime_get_and_set(client):
+    """默认运行时可由自然人设置，供 AI 生成画像/角色使用。"""
+    await _post_runtime(client)
+    r = await client.get(f"{API}/runtimes/default")
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == "claude-code"
+
+    r = await client.put(f"{API}/runtimes/default", headers=human_headers(),
+                         json={"id": "claude-code"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["id"] == "claude-code"
+    assert body["runtime"]["id"] == "claude-code"
+
+
+async def test_default_runtime_rejects_unknown_id(client):
+    await _post_runtime(client)
+    r = await client.put(f"{API}/runtimes/default", headers=human_headers(),
+                         json={"id": "no-such-runtime"})
+    assert r.status_code == 404
+
+
+async def test_default_runtime_set_requires_human(client):
+    await _post_runtime(client)
+    r = await client.put(f"{API}/runtimes/default", headers=auth_headers(),
+                         json={"id": "claude-code"})
+    assert r.status_code == 403

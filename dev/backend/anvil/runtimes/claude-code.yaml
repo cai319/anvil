@@ -12,6 +12,12 @@ discovery:
     - type: fixed_path
       candidates:
         - "%LOCALAPPDATA%\\Programs\\claude\\claude.exe"
+        - "%USERPROFILE%\\.local\\bin\\claude.exe"       # Windows 原生安装
+        - "%USERPROFILE%\\.claude\\local\\claude.exe"    # 旧版本地安装
+        - "%APPDATA%\\npm\\claude.cmd"                   # npm 全局安装
+        - "%USERPROFILE%\\.bun\\bin\\claude.exe"         # Bun 安装
+        - "%LOCALAPPDATA%\\Microsoft\\WinGet\\Links\\claude.exe"  # WinGet 安装
+        - "~/.local/bin/claude"                          # macOS/Linux 原生安装
         - "/usr/local/bin/claude"
         - "/opt/homebrew/bin/claude"
   version_probe:

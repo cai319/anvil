@@ -23,9 +23,10 @@ Anvil 是一个**单机、单用户**的本地多 Agent 协作编排服务。它
 10. [CLI 速查](#10-cli-速查)
 11. [测试](#11-测试)
 12. [数据备份、迁移与重置](#12-数据备份迁移与重置)
-13. [常见问题](#13-常见问题)
-14. [安全说明](#14-安全说明)
-15. [相关文档](#15-相关文档)
+13. [卸载与清理资源](#13-卸载与清理资源)
+14. [常见问题](#14-常见问题)
+15. [安全说明](#15-安全说明)
+16. [相关文档](#16-相关文档)
 
 ---
 
@@ -197,12 +198,17 @@ data/
 
 ### 3.3 模型与凭据
 
-Anvil 不保存模型凭据：
+Anvil 不保存模型凭据，所有模型调用都由运行时自己完成：
 
 - **Claude Code** 使用它自己的登录态或环境变量（`ANTHROPIC_*`）。请先在终端确认 `claude --version` 与一次最小调用可用。
 - **Codex CLI / Gemini CLI** 同理，先确认 `codex --version` / `gemini --version` 可用。
 - 如果使用环境变量认证，请在**启动后端的同一个 shell** 中导出变量——Anvil 会把环境继承给 Agent 子进程（仅过滤 `CLAUDE_CODE_*` 等编排器会话变量）。
-- 角色工坊的「AI 生成并创建」是可选功能，额外需要后端进程环境中有 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`（可选 `ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`）。
+- 角色工坊的「AI 生成并创建」和角色详情里的「生成画像」也**通过 CLI 运行时执行**，不再由后端直连模型 API，因此复用运行时自己的登录态，不需要额外配置 `ANTHROPIC_*`：
+  - 默认使用「运行时」页通过 **设为默认** 选定的运行时；
+  - 角色详情「生成画像」优先使用该角色绑定的运行时；
+  - 没有可用运行时会返回明确错误，请先在「运行时」页扫描并确认至少一个 `ready`。
+
+> 运行时自身的模型/网关配置（例如 Claude Code 的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL`）仍由运行时自己读取；Anvil 不保存、不转发这些凭据。
 
 ---
 
@@ -279,6 +285,8 @@ anvil init --with-roles
 
 - `anvil init` 需要后端已启动；
 - 若没有 `ready` 的运行时，先安装 CLI Agent 并确认它在 PATH 中，再执行一次 `anvil init`；
+- 打开「运行时」页，确认目标运行时为 `ready`，并点击「默认」列的 **设为默认**；
+  AI 生成画像/角色会使用这个默认运行时；
 - Cindy（规划助理）不需要手动创建，首次派发多角色任务时自动创建。
 
 ### 4.6 打开界面
@@ -367,7 +375,8 @@ claude --version
 - npm 全局安装通常在 `%APPDATA%\npm`；
 - 把对应目录加入用户 PATH，重新打开终端后再执行 `anvil init`。
 
-然后在界面「运行时」页点击 **扫描本地运行时**，或重新执行 `anvil init`。
+然后在界面「运行时」页点击 **扫描本地运行时**，或重新执行 `anvil init`；
+确认目标运行时为 `ready` 后，在「默认」列点击 **设为默认**，AI 生成画像/角色会使用它。
 
 ### 5.7 CMD 用户
 
@@ -423,22 +432,88 @@ npm run dev
 
 1. 点击 **扫描本地运行时**；
 2. 状态应为 `ready`（绿色）；`missing` 表示未安装或不在 PATH；
-3. 可点击 **健康检查** 做一次最小调用（会消耗少量模型额度）。
+3. 在页面顶部的 **默认运行时** 下拉框选择，或在「默认」列点击 **设为默认**；
+   它用于没有角色参与的 AI 工具调用。不设置时使用 `ANVIL_DEFAULT_RUNTIME`
+   （默认 `claude-code`），不可用时退到第一个 `ready` 运行时；
+4. 可点击 **健康检查** 做一次最小调用（会消耗少量模型额度）。
 
 内置运行时定义位于 `dev/backend/anvil/runtimes/`：
 
 | ID | 显示名 | 常驻会话 | 说明 |
 |---|---|---|---|
-| `claude-code` | Claude Code | ✅ | 默认运行时；支持 stream-json 常驻会话与 `--resume` |
+| `claude-code` | Claude Code | ✅ | 常用默认运行时；支持 stream-json 常驻会话与 `--resume` |
 | `codex-cli` | Codex CLI | ❌ | 回退 one-shot 模式 |
 | `gemini-cli` | Gemini CLI | ❌ | 回退 one-shot 模式 |
+
+#### 自定义运行时（如 `codeagent`）
+
+如果本机有一个 Claude Code 风格的自定义 CLI（例如 `codeagent`），在「运行时」页点击
+**新增自定义运行时**，直接编辑 YAML 即可：
+
+1. 修改 `id`、`display_name`；
+2. 把 `discovery.strategies[0].command` 改成你的命令名（或在 YAML 中写固定路径）；
+3. 按你的 CLI 调整 `invocation.args`（**必须包含 `{{ prompt }}`**；`{{ permission_mode }}`
+   会由 Anvil 渲染）；
+4. 如果该 CLI 读取的指令文件不是 `CLAUDE.md`，修改 `projection.instruction.target`；
+5. 点击 **保存并探测**；状态变为 `ready` 后即可使用。点击 **设为默认**，AI 生成画像/角色
+   就会使用它。
+
+默认模板（Claude 风格，界面中可一键重置）：
+
+```yaml
+id: codeagent
+display_name: codeagent
+version_range: ">=0.1.0"
+
+discovery:
+  strategies:
+    - type: path_lookup
+      command: codeagent
+  version_probe:
+    args: ["--version"]
+    parse: 'regex:(\d+\.\d+\.\d+)'
+
+invocation:
+  args:
+    - "--print"
+    - "--permission-mode"
+    - "{{ permission_mode }}"
+    - "{{ prompt }}"
+  cwd: "{{ workspace_path }}"
+  timeout_seconds: 3600
+  exit_code_success: [0]
+
+projection:
+  instruction:
+    target: "{{ workspace_path }}/CLAUDE.md"
+    format: markdown
+    strategy: overwrite_managed_block
+```
+
+保存后 YAML 会写入用户运行时目录：
+
+- Windows：`%APPDATA%\Anvil\runtimes\<id>.yaml`
+- macOS：`~/.config/Anvil/runtimes/<id>.yaml`
+
+编辑内置运行时同样会生成/覆盖该用户文件，内置 YAML 本身不会被修改。也可以手动把 YAML
+放到上述目录，然后点击「扫描本地运行时」。
 
 ### 7.2 准备角色
 
 两种方式：
 
 - **模板角色**：`anvil init --with-roles` 已导入 `developer` / `tester` / `reviewer`；
-- **界面创建**：角色工坊 → 新建角色，填写 slug 与显示名即可创建；创建后可在角色详情页继续编辑运行时、系统提示、工具等配置。也可以用「AI 生成并创建」根据一句话描述生成画像（需要后端有 `ANTHROPIC_*` 环境变量）。
+- **界面创建**：角色工坊 → 新建角色，填写 slug 与显示名，并在工具栏的运行时下拉框中选择
+  该角色要绑定的运行时（可绑定任意已注册运行时）。创建后可在角色详情页继续编辑系统提示、
+  工具等配置。也可以用「AI 生成并创建」根据一句话描述生成画像：它使用上方选择的运行时；
+  角色详情里的「生成画像」优先使用该角色自己的运行时。详见 [3.3 节](#33-模型与凭据)。
+
+创建后可在角色详情 →「运行时」tab 更改绑定。该操作只替换 `runtime`，不会影响
+`system_prompt`、职责、工具等其它配置。
+
+> **默认运行时的用途**：没有角色参与的 AI 工具调用（例如「AI 生成并创建」、角色未绑定
+> 运行时时的「生成画像」）统一使用「运行时」页选定的默认运行时。角色执行任务时始终使用
+> 角色自己绑定的运行时。
 
 每个角色会自动获得：
 
@@ -588,6 +663,7 @@ cd C:\path\to\aliceAgent\dev\dist\anvil-dist
 | `ANVIL_IDLE_RELEASE_MINUTES` | `15` | 角色空闲释放时间（分钟） |
 | `ANVIL_SCHEDULER_INTERVAL` | `5.0` | 调度器扫描间隔（秒） |
 | `ANVIL_RUN_TIMEOUT` | `600` | 运行超时兜底（秒）；运行时 YAML 的 `timeout_seconds` 优先 |
+| `ANVIL_UTILITY_TIMEOUT` | `120` | AI 生成画像/角色（经 CLI 运行时）的超时（秒） |
 | `ANVIL_STEP_NUDGE_SECONDS` | `600` | 工作流步骤停滞唤醒阈值 |
 | `ANVIL_STEP_MAX_NUDGES` | `3` | 步骤最大唤醒次数 |
 | `ANVIL_ONBOARDING` | `1` | 多角色任务是否启用 Cindy 规划 |
@@ -763,7 +839,190 @@ npm run build      # tsc + vite build
 
 ---
 
-## 13. 常见问题
+## 13. 卸载与清理资源
+
+> **警告**：删除数据目录不可恢复。执行前请先按第 12 节备份需要保留的角色 home、共享仓库
+> 与数据库。Anvil 不会自动删除你机器上的 Claude Code / Codex / Gemini 等运行时。
+
+### 13.1 停止服务与 Agent 进程
+
+macOS：
+
+```bash
+# 找到监听 7317 的进程
+lsof -nP -iTCP:7317 -sTCP:LISTEN
+
+kill <PID>          # 优先优雅停止
+# 若 15 秒后仍未退出
+kill -9 <PID>
+```
+
+Windows PowerShell：
+
+```powershell
+netstat -ano | findstr :7317
+taskkill /PID <PID> /F
+```
+
+- 优雅停止会终止角色常驻进程，并把活跃 run 转成 `suspended`；
+- 如果强制结束，建议检查是否有残留的角色 CLI 进程：
+  - macOS：`ps aux | grep -i claude`，确认没有 cwd 在 `<项目根>/data/agents` 下的进程；
+  - Windows：在任务管理器中检查 `claude.exe` / `codex.exe` / `gemini.exe` 等，确认没有
+    Anvil 角色进程。
+
+### 13.2 删除开发环境（源码模式）
+
+```bash
+cd <项目根>/dev
+
+# 1) 卸载 anvil CLI（editable 安装）
+.venv/bin/pip uninstall -y anvil-cli
+
+# 2) 删除虚拟环境、前端依赖与构建产物
+rm -rf .venv frontend/node_modules frontend/dist
+
+# 3) 清理 Python 缓存
+find . -name __pycache__ -type d -prune -exec rm -rf {} +
+rm -rf .pytest_cache
+```
+
+Windows PowerShell：
+
+```powershell
+cd C:\path\to\aliceAgent\dev
+
+.\.venv\Scripts\pip.exe uninstall -y anvil-cli
+
+Remove-Item -Recurse -Force .venv, frontend\node_modules, frontend\dist -ErrorAction SilentlyContinue
+Get-ChildItem -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force
+Remove-Item -Recurse -Force .pytest_cache -ErrorAction SilentlyContinue
+```
+
+> 如果曾在其它 Python 环境执行过 `pip install -e agentcli`（例如系统 Python），请在该环境
+> 也执行一次 `pip uninstall -y anvil-cli`。
+> `pip uninstall` 只删除命令注册，源码目录仍需手动删除。
+
+### 13.3 删除运行时数据
+
+默认数据目录：
+
+| 运行方式 | 位置 |
+|---|---|
+| 源码模式 | `<项目根>/data/` |
+| 打包模式 | `<anvil-dist 父目录>/data/`（例如 `dev/dist/data`） |
+
+如果设置过 `ANVIL_DATA_DIR`，请删除该变量指向的目录。
+
+macOS：
+
+```bash
+rm -rf <项目根>/data
+```
+
+Windows PowerShell：
+
+```powershell
+Remove-Item -Recurse -Force C:\path\to\aliceAgent\data
+```
+
+数据目录包含：
+
+- `agents/`：角色 home、记忆、日志、产出；
+- `repos/`：共享 Git 仓库；
+- `worktrees/`：运行 worktree；
+- `anvil.db` / `anvil-graph.db`：状态与检查点；
+- `backups/`：历史重置产生的备份。
+
+如果只想清理运行状态、保留代码产出：保留 `data/repos/` 和需要的 `data/agents/<slug>/`，
+删除数据库、`worktrees/` 等其它内容，再重新执行 `anvil init`。
+
+### 13.4 删除用户运行时定义
+
+自定义/覆盖的运行时 YAML：
+
+- Windows：`%APPDATA%\Anvil\runtimes`
+- macOS：`~/.config/Anvil/runtimes`
+
+```bash
+rm -rf ~/.config/Anvil/runtimes          # macOS
+```
+
+```powershell
+Remove-Item -Recurse -Force "$env:APPDATA\Anvil\runtimes"
+```
+
+如果设置过 `ANVIL_USER_RUNTIMES_DIR`，删除该变量指向的目录。
+
+### 13.5 删除打包产物
+
+```bash
+rm -rf <项目根>/dev/dist <项目根>/dev/build
+```
+
+```powershell
+Remove-Item -Recurse -Force C:\path\to\aliceAgent\dev\dist, C:\path\to\aliceAgent\dev\build
+```
+
+- 如果曾把 `anvil-dist` 加入 PATH，请从用户环境变量中移除该目录；
+- 如果创建过桌面快捷方式、计划任务或系统服务，也一并删除。
+
+### 13.6 清理环境变量与临时文件
+
+删除为 Anvil 设置的 `ANVIL_*` 环境变量，尤其是：
+
+- `ANVIL_DATA_DIR`
+- `ANVIL_AUTH_TOKEN`
+- `ANVIL_USER_RUNTIMES_DIR`
+- `ANVIL_PORT`
+
+Windows 用户环境变量可通过「系统属性 → 环境变量」删除，或：
+
+```powershell
+[Environment]::SetEnvironmentVariable("ANVIL_DATA_DIR", $null, "User")
+[Environment]::SetEnvironmentVariable("ANVIL_AUTH_TOKEN", $null, "User")
+```
+
+清理临时日志：
+
+```bash
+rm -f /tmp/anvil-*.log                   # macOS
+```
+
+```powershell
+Remove-Item "$env:TEMP\anvil-*.log" -ErrorAction SilentlyContinue
+```
+
+确认端口已释放：
+
+```bash
+lsof -nP -iTCP:7317 -sTCP:LISTEN         # 应无输出
+```
+
+```powershell
+netstat -ano | findstr :7317              # 应无输出
+```
+
+### 13.7 彻底删除源码目录
+
+```bash
+rm -rf <项目根>
+```
+
+```powershell
+Remove-Item -Recurse -Force C:\path\to\aliceAgent
+```
+
+> 这会同时删除源码、数据目录和所有未备份内容；执行前请确认备份已完成。
+
+### 13.8 关于 Claude Code 等运行时
+
+Anvil 只是调用本机已安装的 CLI Agent，卸载 Anvil **不需要**卸载它们。如果确实要移除，
+请按各工具自己的文档操作（例如 Claude Code 的 npm 安装可用
+`npm uninstall -g @anthropic-ai/claude-code`；原生安装按其官方卸载说明）。
+
+---
+
+## 14. 常见问题
 
 ### Q1. 浏览器打开 7317 是 404 / 空白页
 
@@ -783,7 +1042,14 @@ cd dev/frontend && npm install && npm run build
 
 - 确认 CLI Agent 已安装：`claude --version` / `codex --version` / `gemini --version`；
 - 确认它在当前 shell 的 PATH 中（Windows 注意重新打开终端使 PATH 生效）；
-- 在界面「运行时」页重新点击 **扫描本地运行时**。
+- 在界面「运行时」页重新点击 **扫描本地运行时**；
+- Windows 常见安装位置（新版会自动尝试）：
+  - 原生安装：`%USERPROFILE%\.local\bin\claude.exe`（该目录默认不在 PATH 中）；
+  - npm 全局安装：`%APPDATA%\npm\claude.cmd`；
+  - 旧版本地安装：`%USERPROFILE%\.claude\local\claude.exe`；
+  - Bun：`%USERPROFILE%\.bun\bin\claude.exe`；
+  - WinGet：`%LOCALAPPDATA%\Microsoft\WinGet\Links\claude.exe`。
+- 若仍为 `missing`，查看状态列下方的**探测日志**，它会列出已尝试的 PATH、npm 全局包与固定路径。
 
 ### Q4. Windows 启动报 `No module named 'win32job'`
 
@@ -843,9 +1109,21 @@ venv 缺少 `langgraph`。执行 `pip install -r backend/requirements.txt`，再
 - 开发模式：`pip install -e agentcli` 装在启动后端所用的 venv 中，并且后端从该 venv 启动；
 - 打包模式：把 `anvil-dist` 目录加入 PATH，或把 `anvil` 复制到系统 PATH 中的目录。
 
+### Q13. 「AI 生成并创建 / 生成画像」失败
+
+该功能现在通过 **CLI 运行时**执行，不再直连模型 API。错误信息会显示后端返回的 `detail`，常见原因：
+
+1. **没有可用运行时**：到「运行时」页扫描，确认至少一个 `ready`，并在「默认」列点击 **设为默认**。
+2. **运行时未登录/不可用**：先在终端执行 `claude --version` 并做一次最小调用；Codex / Gemini 同理。运行时自身的登录态或 `ANTHROPIC_*` 配置由它自己读取。
+3. **角色自己的运行时不可用**：角色详情「生成画像」优先使用角色绑定的运行时；可在角色配置里改回默认运行时。
+4. **超时**：默认 120 秒，可用 `ANVIL_UTILITY_TIMEOUT` 调整。
+5. **退出码/无输出**：错误信息会带上运行时的 stderr/退出码；据此检查运行时安装或登录。
+
+> 该功能与 Agent 任务执行共用同一套运行时；只要运行时的健康检查能通过，生成画像通常也能工作。
+
 ---
 
-## 14. 安全说明
+## 15. 安全说明
 
 Anvil 面向**本机、单用户**场景，默认假设只有你一个人使用这台机器：
 
@@ -857,7 +1135,7 @@ Anvil 面向**本机、单用户**场景，默认假设只有你一个人使用�
 
 ---
 
-## 15. 相关文档
+## 16. 相关文档
 
 | 文档 | 内容 |
 |---|---|

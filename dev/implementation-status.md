@@ -139,10 +139,20 @@
   单角色任务直接派发；已有待审草案时返回 `pending_review` 不重复规划；`ANVIL_ONBOARDING=0` 关闭。
 - **前端**：任务详情「派发（先由 Cindy 规划）」；大厅拖拽/指派走 dispatch；
   规划中提示「草案将出现在收件箱」。
-- **角色 AI 生成创建**：`POST /roles/auto {brief}` —— 自然人一句话描述 → LLM 生成
+- **角色 AI 生成创建**：`POST /roles/auto {brief}` —— 自然人一句话描述 → **默认 CLI 运行时**生成
   display_name/description/capabilities/responsibilities/system_prompt 并直接创建角色；
   角色工坊新增「AI 生成并创建」输入。`RoleOut` 现暴露 `definition`。
-- 测试：`tests/api/test_dispatch_onboarding.py`、`tests/api/test_role_auto.py`。
+- **默认运行时选择**：`GET/PUT /runtimes/default`（PUT 仅自然人）。AI 生成画像/角色经
+  `services/utility.py` 调用该运行时；角色详情「生成画像」优先使用角色自己的运行时。
+  不再依赖后端单独配置 `ANTHROPIC_*`（owner 2026-10-21）。
+- **运行时 YAML 编辑**：`GET/PUT /runtimes/{id}/definition`（PUT 仅自然人）。运行时页可
+  新增自定义运行时（如 `codeagent`）或覆盖内置定义；保存后自动探测并落库。YAML 写入
+  用户运行时目录（Windows `%APPDATA%\Anvil\runtimes`，macOS `~/.config/Anvil/runtimes`）。
+- **角色运行时绑定**：`PUT /roles/{slug}/runtime`（仅自然人）只替换 runtime，保留
+  system_prompt/职责/工具等其它定义。角色工坊创建角色时可选任意已注册运行时；角色详情
+  「运行时」tab 可改绑。`POST /roles/auto` 会把新角色绑定到实际使用的运行时。
+- 测试：`tests/api/test_dispatch_onboarding.py`、`tests/api/test_role_auto.py`、
+  `tests/api/test_role_runtime.py`、`tests/api/test_runtime_definition.py`、`tests/test_utility.py`。
 
 ### 任务大厅 UI 重构（2026-10-19，参考 multica/raft）
 - **「＋ 新建任务」弹窗**：任务名称、任务描述、参与成员多选（可滚动列表，显示角色定位）；
@@ -280,7 +290,7 @@
 
 ```bash
 cd dev
-python3 -m pytest tests/ -q          # 174 passed, 21 skipped
+python3 -m pytest tests/ -q          # 207 passed, 21 skipped
 cd frontend && npm run build         # tsc + vite build
 ```
 

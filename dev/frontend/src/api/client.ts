@@ -36,6 +36,7 @@ export interface Runtime {
   detected_version: string | null;
   status: string;
   last_probe_at: string | null;
+  last_probe_log: string | null;
 }
 
 export interface Role {
@@ -49,7 +50,21 @@ export interface Role {
 }
 
 async function json<T>(res: Response): Promise<T> {
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    // FastAPI 的错误原因在响应体 detail 里；只显示状态码会丢失最有用的诊断信息。
+    const raw = await res.text().catch(() => "");
+    let detail = raw.trim();
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed?.detail === "string") detail = parsed.detail;
+      else if (parsed?.detail != null) detail = JSON.stringify(parsed.detail);
+    } catch {
+      // 非 JSON 响应：保留原文
+    }
+    throw new Error(
+      detail ? `${res.status} ${res.statusText}: ${detail}` : `${res.status} ${res.statusText}`,
+    );
+  }
   return res.json() as Promise<T>;
 }
 
@@ -93,8 +108,8 @@ export const api = {
     mode: "planning" | "pending_review" | "direct";
     planner?: string; run?: Run; runs?: Run[]; draft_id?: string;
   }> => req("POST", `/tasks/${id}/dispatch`).then((r) => json(r)),
-  autoCreateRole: (brief: string): Promise<Role> =>
-    req("POST", "/roles/auto", { brief }).then((r) => json<Role>(r)),
+  autoCreateRole: (brief: string, runtimeId?: string): Promise<Role> =>
+    req("POST", "/roles/auto", { brief, runtime_id: runtimeId || undefined }).then((r) => json<Role>(r)),
   approveActionCard: (id: string): Promise<unknown> =>
     req("POST", `/action-cards/${id}/approve`, {}).then((r) => json(r)),
   rejectActionCard: (id: string): Promise<unknown> =>
@@ -128,6 +143,14 @@ export const api = {
   listRuntimes: (): Promise<Runtime[]> => fetch(`${BASE}/runtimes`).then((r) => json<Runtime[]>(r)),
   discoverRuntimes: (): Promise<Runtime[]> =>
     req("POST", "/runtimes/discover").then((r) => json<Runtime[]>(r)),
+  getDefaultRuntime: (): Promise<{ id: string; runtime: Runtime | null }> =>
+    fetch(`${BASE}/runtimes/default`).then((r) => json(r)),
+  setDefaultRuntime: (id: string): Promise<{ id: string; runtime: Runtime | null }> =>
+    req("PUT", "/runtimes/default", { id }).then((r) => json(r)),
+  getRuntimeDefinition: (id: string): Promise<{ id: string; yaml: string; source: string; builtin: boolean }> =>
+    fetch(`${BASE}/runtimes/${encodeURIComponent(id)}/definition`).then((r) => json(r)),
+  putRuntimeDefinition: (id: string, yaml: string): Promise<Runtime> =>
+    req("PUT", `/runtimes/${encodeURIComponent(id)}/definition`, { yaml }).then((r) => json(r)),
   checkRuntimeHealth: (id: string): Promise<{ ok: boolean | null; status: string; detail?: string; log?: string }> =>
     req("POST", `/runtimes/${id}/health`, {}).then((r) => json(r)),
 
@@ -172,15 +195,17 @@ export const api = {
     fetch(`${BASE}/roles/${slug}/profile`).then((r) => json(r)),
   updateRoleProfile: (slug: string, system_prompt: string, responsibilities: string[]): Promise<{ system_prompt: string; responsibilities: string[] }> =>
     req("PUT", `/roles/${slug}/profile`, { system_prompt, responsibilities }).then((r) => json(r)),
-  createRole: (slug: string, displayName: string): Promise<Role> =>
+  createRole: (slug: string, displayName: string, runtimeId?: string): Promise<Role> =>
     req("POST", "/roles", {
       slug,
       display_name: displayName,
-      runtime: {},
+      runtime: runtimeId ? { id: runtimeId } : {},
       workspace: { home: `agents/${slug}/`, repos: [] },
       tools: {},
       concurrency: {},
     }).then((r) => json<Role>(r)),
+  updateRoleRuntime: (slug: string, runtimeId: string): Promise<Role> =>
+    req("PUT", `/roles/${slug}/runtime`, { id: runtimeId }).then((r) => json<Role>(r)),
   deleteRole: (slug: string): Promise<void> => {
     return req("DELETE", `/roles/${slug}`).then((r) => {
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);

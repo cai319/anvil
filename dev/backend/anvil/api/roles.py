@@ -9,9 +9,24 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import RoleIn, RoleOut, ToolsIn
-from ..services import llm
+from ..services import utility
 
 router = APIRouter()
+
+
+def _extract_json(text: str) -> dict | None:
+    """从运行时输出中取第一个完整 JSON 对象（兼容前后夹杂说明文字）。"""
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            data, _ = decoder.raw_decode(text[i:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
 
 
 @router.post("/roles/auto", status_code=201, response_model=RoleOut)
@@ -45,19 +60,17 @@ def auto_create_role(body: dict, conn=Depends(get_db),
         '  "system_prompt": 系统提示（角色身份与行为准则；须写出：在任务会话中主动用 '
         'anvil task comment 同步进展、用 anvil task mention @协作角色；需要人类决策时 @human）\n'
     )
+    runtime_id = str(body.get("runtime_id") or "").strip() or None
     try:
-        text = llm.generate(prompt)
+        resolved_runtime_id = utility.resolve_runtime_id(conn, runtime_id)
+        text = utility.generate(conn, prompt, runtime_id=runtime_id)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"LLM 调用失败: {exc}")
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    try:
-        data = json.loads(m.group(0)) if m else {}
-    except json.JSONDecodeError:
-        data = {}
+        raise HTTPException(status_code=502, detail=f"生成画像失败: {exc}")
+    data = _extract_json(text) or {}
     definition = {
         "kind": "member",
         "description": data.get("description") or brief,
-        "runtime": {"id": "claude-code"},
+        "runtime": {"id": resolved_runtime_id},
         "workspace": {"repos": []},
         "tools": {},
         "concurrency": {"max_parallel": 2},
@@ -122,11 +135,9 @@ def expand_role(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth)
     )
     data: dict = {}
     try:
-        text = llm.generate(prompt)
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if m:
-            data = json.loads(m.group(0))
-    except Exception:  # noqa: BLE001 —— LLM 不可用时退化为简单画像
+        text = utility.generate(conn, prompt, runtime_id=runtime["id"])
+        data = _extract_json(text) or {}
+    except Exception:  # noqa: BLE001 —— 运行时不可用时退化为简单画像
         data = {}
 
     slug = str(body.get("slug") or "").strip()
@@ -199,6 +210,24 @@ def update_role(slug: str, body: RoleIn, conn=Depends(get_db),
     definition.pop("slug", None)
     definition.pop("display_name", None)
     services.roles.update(conn, slug, display_name=body.display_name, definition=definition)
+    return services.roles.get(conn, slug)  # type: ignore[return-value]
+
+
+@router.put("/roles/{slug}/runtime", response_model=RoleOut)
+def update_role_runtime(slug: str, body: dict, conn=Depends(get_db),
+                        auth: Auth = Depends(require_human)):
+    """把角色绑定到指定运行时；保留其它角色配置（system_prompt 等）。"""
+    role = services.roles.get(conn, slug)
+    if role is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    rid = str(body.get("id") or "").strip()
+    if not rid:
+        raise HTTPException(status_code=422, detail="id is required")
+    if services.runtime.get(conn, rid) is None:
+        raise HTTPException(status_code=404, detail="runtime not found")
+    definition = role.get("definition") or {}
+    definition["runtime"] = {"id": rid}
+    services.roles.update(conn, slug, display_name=role["display_name"], definition=definition)
     return services.roles.get(conn, slug)  # type: ignore[return-value]
 
 
@@ -364,8 +393,9 @@ def update_role_profile(slug: str, body: dict, conn=Depends(get_db),
 
 @router.post("/roles/{slug}/generate")
 def generate_role(slug: str, body: dict, conn=Depends(get_db)):
-    """调大模型，根据 human 对角色的一句描述，自动生成工作模式/技能描述/职责/系统提示。"""
-    if services.roles.get(conn, slug) is None:
+    """用角色自己的运行时（未配置时用默认运行时）生成工作模式/技能描述/职责/系统提示。"""
+    role = services.roles.get(conn, slug)
+    if role is None:
         raise HTTPException(status_code=404, detail="role not found")
     brief = str(body.get("brief") or "").strip()
     if not brief:
@@ -382,12 +412,16 @@ def generate_role(slug: str, body: dict, conn=Depends(get_db)):
         '需要协作的其它角色；若该角色负责规划/设计，须先产出方案/设计并 @human 请确认、'
         '收到 human 确认后再实施）\n'
     )
+    definition = role.get("definition") or {}
+    runtime = definition.get("runtime")
+    runtime_id = runtime.get("id") if isinstance(runtime, dict) else (str(runtime) if runtime else None)
     try:
-        text = llm.generate(prompt)
+        text = utility.generate(conn, prompt, runtime_id=runtime_id)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"LLM 调用失败: {exc}")
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    data = json.loads(m.group(0)) if m else {}
+        raise HTTPException(status_code=502, detail=f"生成画像失败: {exc}")
+    data = _extract_json(text)
+    if data is None:
+        raise HTTPException(status_code=502, detail="运行时未返回有效的 JSON 画像")
     return data
 
 

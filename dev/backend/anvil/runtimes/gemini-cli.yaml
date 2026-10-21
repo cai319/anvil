@@ -11,6 +11,10 @@ discovery:
       package: "@google/gemini-cli"
     - type: fixed_path
       candidates:
+        - "%APPDATA%\\npm\\gemini.cmd"                   # npm 全局安装
+        - "%USERPROFILE%\\.local\\bin\\gemini.exe"       # 原生安装
+        - "%LOCALAPPDATA%\\Microsoft\\WinGet\\Links\\gemini.exe"  # WinGet 安装
+        - "~/.local/bin/gemini"
         - "/usr/local/bin/gemini"
         - "/opt/homebrew/bin/gemini"
   version_probe:

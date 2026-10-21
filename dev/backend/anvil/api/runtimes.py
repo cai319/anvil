@@ -1,9 +1,10 @@
 """Runtime endpoints (§10 runtimes 段 + SE §3)."""
 from __future__ import annotations
 
+import yaml
 from fastapi import APIRouter, Depends, HTTPException
 
-from .. import services
+from .. import config, services
 from ..deps import Auth, get_db, require_human
 from ..schemas import RuntimeIn, RuntimeOut
 
@@ -49,12 +50,70 @@ def discover_runtimes(conn=Depends(get_db)):
     return services.runtime.discover(conn)
 
 
+@router.get("/default")
+def get_default_runtime(conn=Depends(get_db)):
+    """当前默认运行时（AI 生成画像/角色使用）。"""
+    rid = services.utility.get_default_runtime_id(conn)
+    return {"id": rid, "runtime": services.runtime.get(conn, rid) if rid else None}
+
+
+@router.put("/default")
+def set_default_runtime(body: dict, conn=Depends(get_db),
+                        auth: Auth = Depends(require_human)):
+    rid = str(body.get("id") or "").strip()
+    if not rid:
+        raise HTTPException(status_code=422, detail="id is required")
+    rt = services.runtime.get(conn, rid)
+    if rt is None:
+        raise HTTPException(status_code=404, detail="runtime not found")
+    services.utility.set_default_runtime_id(conn, rid)
+    return {"id": rid, "runtime": rt}
+
+
 @router.get("/{rid}", response_model=RuntimeOut)
 def get_runtime(rid: str, conn=Depends(get_db)):
     rt = services.runtime.get(conn, rid)
     if rt is None:
         raise HTTPException(status_code=404, detail="runtime not found")
     return rt
+
+
+@router.get("/{rid}/definition")
+def get_runtime_definition(rid: str, conn=Depends(get_db)):
+    """返回运行时的 YAML 原文与来源，供 UI 编辑。"""
+    if services.runtime.get(conn, rid) is None:
+        raise HTTPException(status_code=404, detail="runtime not found")
+    definition = services.runtime.load_definitions().get(rid)
+    if not definition:
+        raise HTTPException(status_code=404, detail="runtime definition not found")
+    source = str(definition.get("_source") or "")
+    return {
+        "id": rid,
+        "yaml": str(definition.get("_raw") or ""),
+        "source": source,
+        "builtin": source.startswith(str(config.PACKAGE_RUNTIMES_DIR)),
+    }
+
+
+@router.put("/{rid}/definition", response_model=RuntimeOut)
+def put_runtime_definition(rid: str, body: dict, conn=Depends(get_db),
+                           auth: Auth = Depends(require_human)):
+    """新增/覆盖用户运行时定义：写 YAML → 探测 → 落库。"""
+    raw = str(body.get("yaml") or "")
+    if not raw.strip():
+        raise HTTPException(status_code=422, detail="yaml is required")
+    try:
+        definition = yaml.safe_load(raw) or {}
+    except yaml.YAMLError as exc:
+        raise HTTPException(status_code=422, detail=f"YAML 解析失败: {exc}")
+    if not isinstance(definition, dict):
+        raise HTTPException(status_code=422, detail="YAML 根节点必须是对象")
+    definition.setdefault("id", rid)
+    if str(definition["id"]) != rid:
+        raise HTTPException(
+            status_code=422,
+            detail=f"YAML 中的 id ({definition['id']}) 与路径 ({rid}) 不一致")
+    return services.runtime.register_definition(conn, definition, raw_yaml=raw)
 
 
 @router.post("/{rid}/probe", response_model=RuntimeOut)

@@ -70,26 +70,59 @@ def _resolve_executable(strategies: list[dict]) -> str | None:
     return None
 
 
+# 各包管理器查询全局 bin 目录的命令。npm 返回 prefix（Unix 的 bin 在 prefix/bin，
+# Windows 的 claude.cmd 直接在 prefix 下）；pnpm/bun 的 bin 子命令直接返回 bin 目录。
+_PACKAGE_MANAGER_BIN_ARGS = {
+    "npm": ["prefix", "-g"],
+    "pnpm": ["bin", "-g"],
+    "bun": ["pm", "bin", "-g"],
+}
+
+
+def _package_bin_names(package: str) -> list[str]:
+    """包名 → 可能的可执行文件名（claude-code → claude，gemini-cli → gemini）。"""
+    last = package.rsplit("/", 1)[-1]
+    names = [last]
+    for suffix in ("-cli", "-code"):
+        if last.endswith(suffix):
+            names.append(last[: -len(suffix)])
+            break
+    return names
+
+
+def _find_executable(directory: Path, names: list[str]) -> str | None:
+    """在目录中查找可执行文件；显式兼容 Windows 的 .exe/.cmd/.bat 布局。"""
+    if not directory.is_dir():
+        return None
+    for name in names:
+        for filename in (name, f"{name}.exe", f"{name}.cmd", f"{name}.bat"):
+            candidate = directory / filename
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
 def _npm_global(package: str) -> str | None:
-    """尽力定位全局 npm/pnpm/bun 包的 bin；命中率低时靠 path_lookup/fixed_path 兜底。"""
+    """尽力定位全局 npm/pnpm/bun 包的可执行文件；命中率低时靠 path_lookup/fixed_path 兜底。"""
     if not package:
         return None
-    last = package.rsplit("/", 1)[-1]
-    candidates = [last, last.replace("claude-code", "claude")]
-    for pm in ("npm", "pnpm", "bun"):
+    names = _package_bin_names(package)
+    for pm, bin_args in _PACKAGE_MANAGER_BIN_ARGS.items():
         exe = shutil.which(pm)
         if not exe:
             continue
         try:
-            prefix = subprocess.run([exe, "prefix", "-g"], capture_output=True, text=True, timeout=10).stdout.strip()
+            out = subprocess.run([exe, *bin_args], capture_output=True, text=True, timeout=10)
         except Exception:  # noqa: BLE001
             continue
+        prefix = (out.stdout or "").strip()
         if not prefix:
             continue
-        for name in candidates:
-            cand = Path(prefix) / "bin" / name
-            if cand.is_file():
-                return str(cand)
+        # 同时检查 prefix 本身（Windows npm 布局）和 prefix/bin（Unix npm 布局）。
+        for directory in (Path(prefix), Path(prefix) / "bin"):
+            found = _find_executable(directory, names)
+            if found:
+                return found
     return None
 
 
@@ -140,6 +173,28 @@ def _run_version_probe(executable: str, definition: dict | None) -> tuple[str, s
     return "unhealthy", version, (text.strip()[:200] or f"exit {out.returncode}")
 
 
+def _discovery_log(definition: dict) -> str:
+    """记录发现失败时尝试过的策略，供 UI / last_probe_log 诊断。"""
+    strategies = (definition.get("discovery") or {}).get("strategies") or []
+    tried: list[str] = []
+    for s in strategies:
+        t = s.get("type")
+        if t == "path_lookup":
+            tried.append(f"PATH 查找 {s.get('command')!r}")
+        elif t == "npm_global":
+            tried.append(f"npm 全局包 {s.get('package')!r}")
+        elif t == "fixed_path":
+            candidates = s.get("candidates") or []
+            tried.append("固定路径 " + " / ".join(str(c) for c in candidates))
+        elif t == "manual":
+            tried.append(f"手动路径 {s.get('path')!r}")
+        else:
+            tried.append(str(t))
+    if not tried:
+        return "未找到可执行文件（未配置发现策略）"
+    return "未找到可执行文件；已尝试：" + "；".join(tried)
+
+
 # ---- CRUD / 探针 ----------------------------------------------------------
 
 
@@ -163,18 +218,27 @@ def register(conn: sqlite3.Connection, *, id: str, display_name: str, executable
     return get(conn, id)  # type: ignore[return-value]
 
 
-def register_definition(conn: sqlite3.Connection, definition: dict) -> dict:
-    """手工注册：写 YAML 到用户目录 + 探针 + 落库（§2.6 第二层）。"""
+def register_definition(conn: sqlite3.Connection, definition: dict,
+                        *, raw_yaml: str | None = None) -> dict:
+    """手工注册：写 YAML 到用户目录 + 探针 + 落库（§2.6 第二层）。
+
+    raw_yaml 用于保留用户在 UI/文件中写的原始格式与注释；未提供时按 dict 序列化。
+    """
     rid = definition["id"]
     config.USER_RUNTIMES_DIR.mkdir(parents=True, exist_ok=True)
     yaml_path = config.USER_RUNTIMES_DIR / f"{rid}.yaml"
-    yaml_path.write_text(yaml.safe_dump(definition, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    text = raw_yaml if raw_yaml is not None else yaml.safe_dump(
+        definition, allow_unicode=True, sort_keys=False)
+    yaml_path.write_text(text, encoding="utf-8")
 
     executable = definition.get("executable") or definition.get("executable_path")
     strategies = (definition.get("discovery") or {}).get("strategies")
     if not executable and strategies:
         executable = _resolve_executable(strategies)
-    status, version, log = ("missing", None, None) if not executable else _run_version_probe(executable, definition)
+    if executable:
+        status, version, log = _run_version_probe(executable, definition)
+    else:
+        status, version, log = "missing", None, _discovery_log(definition)
 
     conn.execute(
         """INSERT INTO runtimes (id, display_name, executable_path, detected_version, status,
@@ -281,7 +345,7 @@ def discover(conn: sqlite3.Connection) -> list[dict]:
         if executable:
             status, version, log = _run_version_probe(executable, definition)
         else:
-            status, version, log = "missing", None, None
+            status, version, log = "missing", None, _discovery_log(definition)
         conn.execute(
             """INSERT INTO runtimes (id, display_name, executable_path, detected_version, status,
                                      capabilities, definition_hash, last_probe_at, last_probe_log, enabled)

@@ -276,6 +276,8 @@ DELETE /api/v1/runtimes/{id}                 删除自定义运行时（内置�
 ## 第三章 角色模型
 
 > **实现口径（owner 2026-10-18 决策）**：角色在 v1 基础上补齐了三点——① `system_prompt`（系统级行为准则）+ `responsibilities`（职责列表），注入 `CLAUDE.md` managed block；② **skill/MCP 治理（M3）**：角色绑定运行时后，按该运行时自身的默认 skill/MCP 目录（YAML `catalog` 段）勾选加载，spawn 时把勾选的 skill symlink 到 `.claude/skills/`、把 MCP 写入 `.claude/settings.json`；③ **LLM 自动生成画像**（`POST /roles/{id}/generate`）：输入一句描述，调环境端点自动生成工作模式/技能描述/职责/系统提示，且 system_prompt 内置「主动评论同步进展、@提及协作角色」的交互行为。
+>
+> **实现口径变更（owner 2026-10-21）**：③ 改为通过 **CLI 运行时**执行（运行时页选定的默认运行时；角色详情优先用角色自身绑定的运行时），复用运行时自己的登录态/网关配置，**不再直连模型 API**，也不再要求后端单独配置 `ANTHROPIC_*`。
 
 ### 3.1 角色是什么
 

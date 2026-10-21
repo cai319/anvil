@@ -45,6 +45,9 @@ SCHEDULER_INTERVAL = float(_env("ANVIL_SCHEDULER_INTERVAL", "5.0"))
 # 运行超时（秒）：monitor 对超过此时长仍 running 的 run 终止并标 failed（防 agent 卡死）。
 RUN_TIMEOUT_SECONDS = float(_env("ANVIL_RUN_TIMEOUT", "600"))
 
+# Utility LLM 调用（AI 生成画像/角色）经默认 CLI 运行时执行；同步请求的超时（秒）。
+UTILITY_TIMEOUT_SECONDS = float(_env("ANVIL_UTILITY_TIMEOUT", "120"))
+
 # 常驻角色运行时（persistent daemon）：默认随生产服务启用；测试环境（create_app 未开
 # scheduler）不启用，保持 one-shot 假进程路径可测。
 PERSISTENT_RUNTIME = _env("ANVIL_PERSISTENT_RUNTIME", "auto")  # auto | 1 | 0

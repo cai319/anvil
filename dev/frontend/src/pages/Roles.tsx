@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, isOnboardingRole, type Role } from "../api/client";
+import { api, isOnboardingRole, type Role, type Runtime } from "../api/client";
 
 type Tab = "basic" | "instruction" | "tools" | "catalog" | "home" | "permissions" | "runtime";
 
@@ -36,6 +36,9 @@ export function Roles() {
   const [versions, setVersions] = useState<{ version: number; display_name: string; source: string; created_at: string }[]>([]);
   const [metrics, setMetrics] = useState<{ runs: number; tasks_total: number; tasks_done: number; cost_used_usd: number } | null>(null);
   const [toolsForm, setToolsForm] = useState({ preset: "", max_tool_tokens: "", allowlist: "[]" });
+  const [runtimes, setRuntimes] = useState<Runtime[]>([]);
+  const [runtimeId, setRuntimeId] = useState("");
+  const [roleRuntimeId, setRoleRuntimeId] = useState("");
 
   const refresh = () => api.listRoles().then(setRoles).catch((e) => setError(String(e)));
 
@@ -43,10 +46,32 @@ export function Roles() {
     refresh();
   }, []);
 
+  // 运行时候选：优先默认运行时，否则第一个 ready。
+  useEffect(() => {
+    (async () => {
+      try {
+        const items = await api.listRuntimes();
+        setRuntimes(items);
+        let preferred = items.find((r) => r.status === "ready")?.id || items[0]?.id || "";
+        try {
+          const def = await api.getDefaultRuntime();
+          if (def.id && items.some((r) => r.id === def.id)) preferred = def.id;
+        } catch {
+          // 旧后端没有默认运行时接口
+        }
+        setRuntimeId((prev) => prev || preferred);
+      } catch {
+        // 运行时接口不可用时仍允许查看已有角色
+      }
+    })();
+  }, []);
+
   useEffect(() => {
     if (!selected) return;
     api.getEffectiveConfig(selected).then((c) => {
       setConfig(c);
+      const rt = (c.projection as Record<string, any> | undefined)?.runtime;
+      setRoleRuntimeId(typeof rt === "string" ? rt : (rt?.id ?? ""));
       const tools = (c.projection as Record<string, any> | undefined)?.tools ?? {};
       setToolsForm({
         preset: tools.preset ?? "",
@@ -70,8 +95,12 @@ export function Roles() {
 
   const create = async () => {
     if (!slug || !displayName) return;
+    if (!runtimeId) {
+      setError("请先选择一个可用运行时（可先在「运行时」页扫描）");
+      return;
+    }
     try {
-      await api.createRole(slug, displayName);
+      await api.createRole(slug, displayName, runtimeId);
       setSlug("");
       setDisplayName("");
       await refresh();
@@ -85,7 +114,7 @@ export function Roles() {
     setAutoBusy(true);
     setError(null);
     try {
-      const r = await api.autoCreateRole(autoBrief.trim());
+      const r = await api.autoCreateRole(autoBrief.trim(), runtimeId || undefined);
       setAutoBrief("");
       await refresh();
       setSelected(r.slug);
@@ -112,6 +141,18 @@ export function Roles() {
     if (!selected) return;
     try {
       await api.updateRoleCatalog(selected, selSkills, selMcp);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const saveRuntime = async () => {
+    if (!selected || !roleRuntimeId) return;
+    try {
+      await api.updateRoleRuntime(selected, roleRuntimeId);
+      const c = await api.getEffectiveConfig(selected);
+      setConfig(c);
+      await refresh();
     } catch (e) {
       setError(String(e));
     }
@@ -155,7 +196,16 @@ export function Roles() {
       <div className="toolbar">
         <input value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="slug" />
         <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="显示名" />
-        <button onClick={create}>新建角色</button>
+        <select value={runtimeId} onChange={(e) => setRuntimeId(e.target.value)} title="角色绑定的运行时">
+          {runtimes.length === 0 && <option value="">（无可用运行时）</option>}
+          {runtimeId && !runtimes.some((r) => r.id === runtimeId) && (
+            <option value={runtimeId}>{runtimeId}（未注册）</option>
+          )}
+          {runtimes.map((r) => (
+            <option key={r.id} value={r.id}>{r.display_name} · {r.status}</option>
+          ))}
+        </select>
+        <button onClick={create} disabled={!slug || !displayName || !runtimeId}>新建角色</button>
       </div>
       <div className="toolbar">
         <input
@@ -165,10 +215,13 @@ export function Roles() {
           placeholder="一句话描述角色，AI 生成能力与定位后创建：如「负责后端 API、数据库迁移和性能优化」"
           style={{ flex: 1 }}
         />
-        <button className="primary" onClick={autoCreate} disabled={autoBusy || !autoBrief.trim()}>
+        <button className="primary" onClick={autoCreate} disabled={autoBusy || !autoBrief.trim() || !runtimeId}>
           {autoBusy ? "生成中…" : "AI 生成并创建"}
         </button>
       </div>
+      {runtimes.length === 0 && (
+        <p className="muted">没有可用运行时：请先到「运行时」页扫描，或在角色创建前新增自定义运行时。</p>
+      )}
 
       <div className="roles-layout">
         <ul className="roles-list">
@@ -401,9 +454,25 @@ export function Roles() {
                 </div>
               )}
               {tab === "runtime" && (
-                <dl>
-                  <dt>运行时</dt><dd>{JSON.stringify(projection.runtime ?? {})}</dd>
-                </dl>
+                <div>
+                  <h3>绑定运行时</h3>
+                  <p className="muted">角色执行与「生成画像」会使用该运行时。</p>
+                  <div className="toolbar">
+                    <select value={roleRuntimeId} onChange={(e) => setRoleRuntimeId(e.target.value)}>
+                      {runtimes.length === 0 && <option value="">（无可用运行时）</option>}
+                      {roleRuntimeId && !runtimes.some((r) => r.id === roleRuntimeId) && (
+                        <option value={roleRuntimeId}>{roleRuntimeId}（未注册）</option>
+                      )}
+                      {runtimes.map((r) => (
+                        <option key={r.id} value={r.id}>{r.display_name} · {r.status}</option>
+                      ))}
+                    </select>
+                    <button className="primary" onClick={saveRuntime} disabled={!roleRuntimeId}>保存绑定</button>
+                  </div>
+                  <dl>
+                    <dt>当前</dt><dd>{JSON.stringify(projection.runtime ?? {})}</dd>
+                  </dl>
+                </div>
               )}
             </>
           )}
