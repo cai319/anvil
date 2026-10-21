@@ -151,8 +151,12 @@
 - **角色运行时绑定**：`PUT /roles/{slug}/runtime`（仅自然人）只替换 runtime，保留
   system_prompt/职责/工具等其它定义。角色工坊创建角色时可选任意已注册运行时；角色详情
   「运行时」tab 可改绑。`POST /roles/auto` 会把新角色绑定到实际使用的运行时。
+- **角色技能/MCP 定制绑定**：新角色默认 `skills=[]` / `mcp=[]`；角色详情「技能/MCP」tab
+  按角色独立勾选并保存，互不影响；「全部不选并保存」可一键清空。投影只使用该角色的勾选项。
 - 测试：`tests/api/test_dispatch_onboarding.py`、`tests/api/test_role_auto.py`、
-  `tests/api/test_role_runtime.py`、`tests/api/test_runtime_definition.py`、`tests/test_utility.py`。
+  `tests/api/test_role_catalog.py`、`tests/api/test_role_runtime.py`、
+  `tests/api/test_runtime_definition.py`、`tests/test_catalog_projection.py`、
+  `tests/test_utility.py`。
 
 ### 任务大厅 UI 重构（2026-10-19，参考 multica/raft）
 - **「＋ 新建任务」弹窗**：任务名称、任务描述、参与成员多选（可滚动列表，显示角色定位）；
@@ -290,7 +294,7 @@
 
 ```bash
 cd dev
-python3 -m pytest tests/ -q          # 207 passed, 21 skipped
+python3 -m pytest tests/ -q          # 210 passed, 21 skipped
 cd frontend && npm run build         # tsc + vite build
 ```
 

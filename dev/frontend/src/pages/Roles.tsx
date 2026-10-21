@@ -23,6 +23,7 @@ export function Roles() {
   const [autoBrief, setAutoBrief] = useState("");
   const [autoBusy, setAutoBusy] = useState(false);
   const [catalog, setCatalog] = useState<{ skills: { name: string; description: string }[]; mcp_servers: { name: string }[] } | null>(null);
+  const [catalogLoading, setCatalogLoading] = useState(false);
   const [selSkills, setSelSkills] = useState<string[]>([]);
   const [selMcp, setSelMcp] = useState<string[]>([]);
   const [profile, setProfile] = useState<{ system_prompt: string; responsibilities: string[] }>({ system_prompt: "", responsibilities: [] });
@@ -68,7 +69,16 @@ export function Roles() {
 
   useEffect(() => {
     if (!selected) return;
+    let cancelled = false;
+    // 切换角色时立刻清空上一个角色的状态，避免串数据 / 旧请求回填。
+    setConfig(null);
+    setRoleRuntimeId("");
+    setCatalog(null);
+    setCatalogLoading(false);
+    setSelSkills([]);
+    setSelMcp([]);
     api.getEffectiveConfig(selected).then((c) => {
+      if (cancelled) return;
       setConfig(c);
       const rt = (c.projection as Record<string, any> | undefined)?.runtime;
       setRoleRuntimeId(typeof rt === "string" ? rt : (rt?.id ?? ""));
@@ -78,19 +88,36 @@ export function Roles() {
         max_tool_tokens: tools.max_tool_tokens == null ? "" : String(tools.max_tool_tokens),
         allowlist: JSON.stringify(tools.allowlist ?? [], null, 2),
       });
-    }).catch((e) => setError(String(e)));
-    api.getRoleProfile(selected).then(setProfile).catch(() => {});
-    api.getRoleVersions(selected).then(setVersions).catch(() => {});
-    api.getRoleMetrics(selected).then(setMetrics).catch(() => {});
-    api.getRoleHome(selected).then((h) => setHomeFiles(h.files)).catch(() => {});
+    }).catch((e) => { if (!cancelled) setError(String(e)); });
+    api.getRoleProfile(selected).then((p) => { if (!cancelled) setProfile(p); }).catch(() => {});
+    api.getRoleVersions(selected).then((v) => { if (!cancelled) setVersions(v); }).catch(() => {});
+    api.getRoleMetrics(selected).then((m) => { if (!cancelled) setMetrics(m); }).catch(() => {});
+    api.getRoleHome(selected).then((h) => { if (!cancelled) setHomeFiles(h.files); }).catch(() => {});
+    return () => { cancelled = true; };
   }, [selected]);
 
-  // 切到「技能/MCP」tab 时，拉运行时默认 skill/MCP 目录 + 角色当前选择
+  // 切到「技能/MCP」tab 时，拉运行时可用目录 + 该角色当前选择。
+  // 默认 selections 为空；每个角色独立保存，切换角色时先清空，避免旧状态残留。
   useEffect(() => {
     if (tab !== "catalog" || !selected) return;
+    let cancelled = false;
+    setCatalog(null);
+    setSelSkills([]);
+    setSelMcp([]);
     const rtId = (config?.projection as Record<string, any> | undefined)?.runtime?.id;
-    if (rtId) api.getRuntimeCatalog(rtId).then(setCatalog).catch((e) => setError(String(e)));
-    api.getRoleCatalog(selected).then((r) => { setSelSkills(r.skills); setSelMcp(r.mcp); }).catch(() => {});
+    if (!rtId) {
+      setCatalogLoading(false);
+      return () => { cancelled = true; };
+    }
+    setCatalogLoading(true);
+    Promise.allSettled([
+      api.getRuntimeCatalog(rtId).then((c) => { if (!cancelled) setCatalog(c); })
+        .catch((e) => { if (!cancelled) setError(String(e)); }),
+      api.getRoleCatalog(selected).then((r) => {
+        if (!cancelled) { setSelSkills(r.skills); setSelMcp(r.mcp); }
+      }).catch((e) => { if (!cancelled) setError(String(e)); }),
+    ]).finally(() => { if (!cancelled) setCatalogLoading(false); });
+    return () => { cancelled = true; };
   }, [tab, selected, config]);
 
   const create = async () => {
@@ -141,6 +168,17 @@ export function Roles() {
     if (!selected) return;
     try {
       await api.updateRoleCatalog(selected, selSkills, selMcp);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const clearCatalog = async () => {
+    if (!selected) return;
+    setSelSkills([]);
+    setSelMcp([]);
+    try {
+      await api.updateRoleCatalog(selected, [], []);
     } catch (e) {
       setError(String(e));
     }
@@ -423,8 +461,16 @@ export function Roles() {
               )}
               {tab === "catalog" && (
                 <div>
-                  {!catalog ? (
-                    <p className="muted">加载运行时默认 skill/MCP 目录中…（请先在「运行时」tab 选择运行时）</p>
+                  <p className="muted">
+                    默认全部不勾选；选择按角色独立保存，互不影响。
+                    {roleRuntimeId
+                      ? <> 可用项来自运行时 <strong>{roleRuntimeId}</strong>。</>
+                      : " 请先在「运行时」tab 绑定运行时。"}
+                  </p>
+                  {catalogLoading ? (
+                    <p className="muted">加载中…</p>
+                  ) : !catalog ? (
+                    <p className="muted">请先在「运行时」tab 绑定运行时，或该运行时没有可用的 skill/MCP 目录。</p>
                   ) : (
                     <>
                       <h3>技能（skill）</h3>
@@ -448,7 +494,10 @@ export function Roles() {
                           </label>
                         ))}
                       </div>
-                      <button className="primary" onClick={saveCatalog}>保存选择</button>
+                      <div className="toolbar">
+                        <button onClick={clearCatalog}>全部不选并保存</button>
+                        <button className="primary" onClick={saveCatalog}>保存选择</button>
+                      </div>
                     </>
                   )}
                 </div>
