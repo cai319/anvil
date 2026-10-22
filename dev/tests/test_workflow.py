@@ -6,6 +6,7 @@ import json
 import pytest
 
 from anvil.db import connect
+from anvil.services import board as board_service
 from anvil.services import tasks as tasks_service
 from anvil.services import workflow as wf_service
 from anvil.util import ConflictError, now_iso
@@ -364,6 +365,18 @@ def test_dynamic_slice_loop_reject_then_next_slice(conn):
     assert _step(wf_service.get_workflow(conn, wf["id"]), "F1")["status"] == "pending"
 
 
+def test_slice_plan_blocked_while_workflow_revision_pending(conn):
+    """Cindy 的新 workflow 待审时，旧 loop 下不得继续展开切片。"""
+    wf = wf_service.create_workflow(conn, "T1", DYNAMIC_WF)
+    _advance(conn, wf)
+    board_service.create_draft(
+        conn, goal="修订 loop", source_task="T1", kind="workflow",
+        tree={"steps": [{"id": "S1", "title": "新结构", "role": "lead"}]})
+    with pytest.raises(ConflictError, match="revision is pending"):
+        wf_service.apply_slice_plan(conn, wf["id"], "P1", "lead", DYNAMIC_PLAN)
+    assert _step(wf_service.get_workflow(conn, wf["id"]), "P1")["status"] == "running"
+
+
 def test_dynamic_slice_plan_is_idempotent(conn):
     wf = wf_service.create_workflow(conn, "T1", DYNAMIC_WF)
     _advance(conn, wf)
@@ -382,16 +395,54 @@ def test_dynamic_plan_with_zero_slices_unblocks_final_step(conn):
     assert _advance(conn, wf) == ["F1"]
 
 
-def test_dynamic_slice_plan_rejects_conflicting_roles(conn):
+def test_dynamic_slice_plan_rejects_role_overrides(conn):
+    """运行期切片计划不能重新分配角色；loop 角色只能由 Cindy 定义。"""
     wf = wf_service.create_workflow(conn, "T1", DYNAMIC_WF)
     _advance(conn, wf)
     bad = {"slices": [{"id": "auth", "title": "认证", "execute_role": "auditor",
                        "verify_role": "auditor"}]}
-    with pytest.raises(ConflictError, match="verify role must differ"):
+    with pytest.raises(ConflictError, match="role fields are not allowed"):
         wf_service.apply_slice_plan(conn, wf["id"], "P1", "lead", bad)
+    # execute_steps 也不能携带 role
+    bad_step = {"slices": [{"id": "auth", "title": "认证", "execute_steps": [
+        {"id": "static", "title": "静态审计", "role": "auditor"}]}]}
+    with pytest.raises(ConflictError, match="must not specify a role"):
+        wf_service.apply_slice_plan(conn, wf["id"], "P1", "lead", bad_step)
     # 校验失败不应把计划步骤标记完成，角色可修正后重试
     step = _step(wf_service.get_workflow(conn, wf["id"]), "P1")
     assert step["status"] == "running"
+
+
+def test_dynamic_slice_plan_uses_loop_roles(conn):
+    """切片只提供工作粒度，生成步骤的角色必须来自 loop 模板。"""
+    wf = wf_service.create_workflow(conn, "T1", DYNAMIC_WF)
+    _advance(conn, wf)
+    wf = wf_service.apply_slice_plan(conn, wf["id"], "P1", "lead", DYNAMIC_PLAN)
+    by_id = {s["step_id"]: s for s in wf["steps"]}
+    assert by_id["P1.auth.static"]["role_slug"] == "auditor"
+    assert by_id["P1.auth.verify"]["role_slug"] == "reviewer"
+    assert by_id["P1.auth.fix"]["role_slug"] == "developer"
+    assert by_id["P1.auth.verify2"]["role_slug"] == "reviewer"
+    assert by_id["P1.auth.decide"]["role_slug"] == "lead"
+
+
+def test_dynamic_workflow_must_cover_all_bound_roles(conn):
+    """loop workflow 必须让任务绑定的每个角色都出现在步骤/阶段中。"""
+    task = tasks_service.create(conn, title="覆盖检查", assignees=["pm", "developer", "tester"])
+    definition = {
+        "steps": [
+            {"id": "P1", "title": "盘点", "role": "pm", "kind": "plan_slices"},
+            {"id": "F1", "title": "报告", "role": "pm", "depends_on": ["P1"]},
+        ],
+        "loop": {
+            "from": "P1",
+            "execute": {"role": "developer"},
+            "verify": {"role": "pm"},
+            "decide": {"role": "pm"},
+        },
+    }
+    with pytest.raises(ConflictError, match="missing: tester"):
+        wf_service.create_workflow(conn, task["id"], definition)
 
 
 def test_plan_slices_prompt_uses_step_plan(conn):
@@ -401,6 +452,8 @@ def test_plan_slices_prompt_uses_step_plan(conn):
     assert "切片计划职责" in prompt
     assert "anvil step plan" in prompt
     assert "execute → verify → fix → verify2 → decide" in prompt
+    assert "不得指定角色" in prompt
+    assert "--to cindy" in prompt
 
 
 def test_dynamic_slice_plan_rejects_unknown_dependency(conn):

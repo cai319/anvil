@@ -599,7 +599,11 @@ async def tick():
 > **Workflow 运行期切片（owner 2026-10-22）**：大型任务不再由 Cindy 预先切分。
 > Cindy 只定义工作流骨架——一个 `kind=plan_slices` 切片计划步骤 + 顶层 `loop` 模板；
 > 切片计划步骤由具备项目理解的角色运行，盘点目录/模块/依赖/风险面后通过
-> `anvil step plan <wf> <step> --file slices.json` 提交切片。服务端按 loop 模板为每片
+> `anvil step plan <wf> <step> --file slices.json` 提交切片。**切片计划只决定粒度与轮数，
+> 不得分配/覆盖角色**：execute/verify/fix/verify2/decide/scope 的角色只能由 Cindy 在 loop
+> 模板中定义，服务端会拒绝切片里的角色字段；任务绑定的每个角色都必须映射到某个静态步骤
+> 或 loop 阶段。执行角色若认为 loop 结构需要调整，必须 @cindy，由 Cindy 重新提交 workflow
+> 草案（批准后 supersede 旧 workflow）。服务端按 loop 模板为每片
 > 确定性展开 `scope? → execute[...] → verify → fix → verify2 → decide`：
 > 下一片依赖上一片 `decide`，decision 打回时 `fix/verify2` 重做；
 > 依赖切片计划步骤的静态下游步骤自动改挂到最后一片 `decide`。

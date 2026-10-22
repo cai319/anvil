@@ -212,6 +212,27 @@ async def test_plan_slices_api_expands_runtime_plan(client, seeded, app):
     assert len(r.json()["steps"]) == len(body["steps"])
 
 
+async def test_mention_cindy_triggers_replan(client, seeded, app):
+    """执行角色 @cindy 提出 loop 诉求 → 拉起 planner run，由 Cindy 重新定制 workflow。"""
+    await client.post("/api/v1/tasks", json=task_payload(
+        id="T-MENTION", assignees=["pm", "developer"]), headers=auth_headers())
+    r = await client.post("/api/v1/tasks/T-MENTION/mention", headers=auth_headers("pm"),
+                          json={"target": "cindy",
+                                "message": "这个项目需要增加安全复核阶段，请调整 loop"})
+    assert r.status_code == 200, r.text
+
+    conn = open_conn(app.state.db_path)
+    try:
+        row = conn.execute(
+            "SELECT role_slug, prompt FROM runs WHERE task_id='T-MENTION' "
+            "AND role_slug='cindy' ORDER BY started_at DESC LIMIT 1").fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert "安全复核阶段" in row["prompt"]
+    assert "workflow/loop" in row["prompt"]
+
+
 SLICED_TREE = {
     "feedback_rules": ["审计风险升级 @human"],
     "slices": [{

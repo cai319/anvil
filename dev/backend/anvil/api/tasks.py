@@ -263,7 +263,8 @@ def comment_task(tid: str, body: CommentIn, conn=Depends(get_db), auth: Auth = D
 def mention_task(tid: str, body: dict, request: Request, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """@提及某角色，注入注意事项/上下文；@的是角色时唤醒该角色（raft inbox：@ 即拉入）。"""
     _assert_session_task(auth, tid)
-    if services.tasks.get(conn, tid) is None:
+    task = services.tasks.get(conn, tid)
+    if task is None:
         raise HTTPException(status_code=404, detail="task not found")
     held = _held_response(conn, tid, auth, body)
     if held is not None:
@@ -301,6 +302,38 @@ def mention_task(tid: str, body: dict, request: Request, conn=Depends(get_db), a
                         orch.pump(request.app.state.db_path, run["id"], "wake", {})
                     except Exception:  # noqa: BLE001
                         pass
+        else:
+            # 非参与角色被 @：只有 planner/Cindy 具备 workflow 定制权。
+            # 执行角色对 loop 结构有诉求时 @cindy，这里为其拉起一次重规划 run。
+            planner = None
+            if target == services.roles.ONBOARDING_SLUG:
+                planner = target
+            elif target == (task.get("planner") or ""):
+                planner = target
+            if planner and task.get("status") not in ("done", "closed"):
+                if planner != services.roles.ONBOARDING_SLUG and \
+                        services.roles.get(conn, planner) is None:
+                    planner = None
+            if planner:
+                try:
+                    services.planning.start_planner_run(
+                        conn,
+                        request.app.state.db_path,
+                        getattr(request.app.state, "orchestrator", None),
+                        tid,
+                        planner,
+                        assignees=_assignee_slugs(conn, tid),
+                        extra_constraint=(
+                            f"{auth.role or 'human'} 通过 @{target} 提出 workflow/loop "
+                            f"调整诉求：\n{message}\n\n"
+                            "请重新审阅当前 workflow，必要时提交修订后的 workflow 草案；"
+                            "角色分配只能由 planner 在 workflow/loop 模板中定义，"
+                            "不要让执行角色在切片计划里覆盖。"),
+                        replace_active=True,
+                    )
+                    events.publish("task", {"id": tid, "kind": "plan", "planner": planner})
+                except Exception:  # noqa: BLE001 —— 规划失败不阻断已记录的 mention
+                    pass
     events.publish("task", {"id": tid, "kind": "mention", "target": target})
     return result
 

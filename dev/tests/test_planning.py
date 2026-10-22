@@ -74,6 +74,9 @@ def test_planning_protocol_uses_runtime_slicing():
     assert "plan_slices" in PLANNING_PROTOCOL
     assert "anvil step plan" in PLANNING_PROTOCOL
     assert "loop" in PLANNING_PROTOCOL
+    assert "角色分配只能由你" in PLANNING_PROTOCOL
+    assert "所有绑定角色都必须参与" in PLANNING_PROTOCOL
+    assert "--to cindy" in PLANNING_PROTOCOL
 
 
 def test_task_size_block_flags_audit_and_wide_scope():

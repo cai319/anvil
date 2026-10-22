@@ -541,21 +541,25 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
         slice_acceptance = _merge_unique(raw_slice.get("acceptance"))
         context = _slice_context(raw_slice)
 
-        execute_role = check_role(
-            raw_slice.get("execute_role") or raw_slice.get("role") or execute_default,
-            slice_id, "execute")
-        verify_role = check_role(
-            raw_slice.get("verify_role") or verify_default, slice_id, "verify")
-        fix_role = check_role(
-            raw_slice.get("fix_role") or fix_default or execute_role, slice_id, "fix")
-        verify2_role = check_role(
-            raw_slice.get("verify2_role") or verify2_default or verify_role,
-            slice_id, "verify2")
-        decision_role = check_role(
-            raw_slice.get("decision_role") or decision_default, slice_id, "decide")
-        lead_role = check_role(
-            raw_slice.get("lead_role") or scope_default or decision_role,
-            slice_id, "scope")
+        # 角色分配是 Cindy（planner）在 loop 模板中的专属职责；运行期切片计划
+        # 只能决定「这一片做什么、多少轮」，不能重新分配角色或 loop 阶段。
+        overrides = [
+            key for key in (
+                "role", "execute_role", "verify_role", "fix_role", "verify2_role",
+                "decision_role", "lead_role", "reviewer",
+            ) if key in raw_slice
+        ]
+        if overrides:
+            raise ConflictError(
+                f"slice {slice_id}: role fields are not allowed in a runtime slice plan "
+                f"({', '.join(overrides)}); roles are fixed by Cindy's loop template. "
+                "If the loop structure must change, mention Cindy to revise the workflow.")
+        execute_role = check_role(execute_default, slice_id, "execute")
+        verify_role = check_role(verify_default, slice_id, "verify")
+        fix_role = check_role(fix_default or execute_role, slice_id, "fix")
+        verify2_role = check_role(verify2_default or verify_role, slice_id, "verify2")
+        decision_role = check_role(decision_default, slice_id, "decide")
+        lead_role = check_role(scope_default or decision_role, slice_id, "scope")
         if execute_role == verify_role:
             raise ConflictError(
                 f"slice {slice_id}: verify role must differ from execute role")
@@ -616,14 +620,11 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
                 execute_spec.get("acceptance"))
             if not execute_acceptance:
                 execute_acceptance = ["按切片范围完成产出，并在提交摘要中附证据与遗留问题"]
-            ex_role = check_role(
-                raw_execute.get("role") or execute_role, slice_id, "execute")
-            if ex_role == verify_role:
+            if raw_execute.get("role"):
                 raise ConflictError(
-                    f"slice {slice_id}: execute step {slug} role must differ from verify role")
-            if ex_role == decision_role:
-                raise ConflictError(
-                    f"slice {slice_id}: execute step {slug} role must differ from decision role")
+                    f"slice {slice_id}: execute step {slug} must not specify a role; "
+                    "Cindy's loop.execute.role applies to all execute steps.")
+            ex_role = execute_role
             add({
                 "id": execute_id,
                 "title": f"{title} · {raw_execute.get('title') or execute_spec.get('title') or '执行'}",
@@ -782,6 +783,14 @@ def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
         if applied:
             conn.commit()
             return get_workflow(conn, wid)  # type: ignore[return-value]
+        # 新 workflow 草案待审时，禁止继续按旧 loop 展开切片；等待 Cindy 的新版本获批。
+        pending = conn.execute(
+            "SELECT 1 FROM board_drafts WHERE source_task=? AND kind='workflow' "
+            "AND status='pending' LIMIT 1", (wf["task_id"],)).fetchone()
+        if pending:
+            raise ConflictError(
+                "a workflow revision is pending approval; wait for it before submitting "
+                "the slice plan (loop roles are owned by the planner)")
         if step["status"] != "running":
             raise ConflictError(f"step {step_id} is {step['status']}, expected running")
 
@@ -854,6 +863,80 @@ def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
         raise
 
 
+def _phase_role(loop: dict, phase: str, default: str = "") -> str:
+    spec = loop.get(phase)
+    if isinstance(spec, dict):
+        return str(spec.get("role") or default).strip()
+    return default
+
+
+def _workflow_roles(definition: dict) -> set[str]:
+    """Collect every role that can take part in a workflow definition."""
+    roles: set[str] = set()
+    for step in definition.get("steps") or definition.get("children") or []:
+        if isinstance(step, dict):
+            role = str(step.get("role") or step.get("role_slug") or "").strip()
+            if role:
+                roles.add(role)
+    loop = definition.get("loop")
+    if isinstance(loop, dict):
+        execute = _phase_role(loop, "execute")
+        verify = _phase_role(loop, "verify")
+        decide = _phase_role(loop, "decide")
+        roles.update(r for r in (
+            _phase_role(loop, "scope", decide),
+            execute,
+            verify,
+            _phase_role(loop, "fix", execute),
+            _phase_role(loop, "verify2", verify),
+            decide,
+        ) if r)
+    for raw_slice in definition.get("slices") or []:
+        if not isinstance(raw_slice, dict):
+            continue
+        for key in ("role", "execute_role", "verify_role", "reviewer",
+                    "fix_role", "decision_role", "lead_role"):
+            role = str(raw_slice.get(key) or "").strip()
+            if role:
+                roles.add(role)
+        for ex in raw_slice.get("execute_steps") or []:
+            if isinstance(ex, dict):
+                role = str(ex.get("role") or "").strip()
+                if role:
+                    roles.add(role)
+    return roles
+
+
+def validate_role_coverage(conn: sqlite3.Connection, task_id: str | None,
+                           definition: dict) -> None:
+    """切片类 workflow 必须让任务绑定的每个角色都参与。
+
+    角色分配是 planner（Cindy）的专属职责；运行期切片计划不能新增/切换角色，
+    这条校验也防止 planner 在 loop 模板里静默漏掉某个已绑定角色。
+    """
+    if not task_id:
+        return
+    if not (definition.get("loop") or definition.get("slices")):
+        return
+    assignees = [
+        row["role_slug"] for row in conn.execute(
+            "SELECT role_slug FROM task_assignees WHERE task_id=? ORDER BY joined_at",
+            (task_id,))
+    ]
+    task = conn.execute("SELECT assignee FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if task and task["assignee"] and task["assignee"] not in assignees:
+        assignees.append(task["assignee"])
+    if not assignees:
+        return
+    roles = _workflow_roles(definition)
+    missing = [role for role in assignees if role not in roles]
+    if missing:
+        raise ConflictError(
+            "workflow must assign every bound task role to a step or loop phase; "
+            "missing: " + ", ".join(missing) + ". Add them explicitly, or remove "
+            "unneeded roles from the task before planning.")
+
+
 def validate_definition(conn: sqlite3.Connection, definition: dict) -> None:
     """落板/草案提交前的结构校验。
 
@@ -883,6 +966,7 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
     # ---- 预校验：id/依赖/环/decision 元数据 ----
     raw, plan = _plan_steps(conn, steps)
     _validate_loop(conn, definition, raw)
+    validate_role_coverage(conn, task_id, definition)
 
     wid = new_id()
     now = now_iso()
@@ -986,6 +1070,8 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
             contracts_block += f"本步骤契约：\n{contract}\n"
     title = (task or {}).get("title") or ""
     desc = (task or {}).get("description") or ""
+    mention_cmd = (f"anvil task mention {task['id']} --to cindy"
+                   if task and task.get("id") else "anvil task mention <任务ID> --to cindy")
     base = (
         f"## 工作流步骤 {step['step_id']}：{step['title']}\n"
         f"所属任务：{title}\n"
@@ -1048,9 +1134,16 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
             "JSON 格式：{\"rationale\":\"切片依据\",\"slices\":[{\"id\":\"auth\","
             "\"title\":\"认证与授权模块\",\"scope_paths\":[\"src/auth/**\"],"
             "\"objective\":\"...\",\"instructions\":\"...\",\"acceptance\":[...],"
-            "\"execute_role\":\"<角色>\",\"verify_role\":\"<角色>\",\"fix_role\":\"<角色>\","
-            "\"decision_role\":\"<角色>\",\"execute_steps\":[{\"id\":\"static\","
+            "\"execute_steps\":[{\"id\":\"static\","
             "\"title\":\"静态审计\",\"instructions\":\"...\",\"acceptance\":[...]}]}]}。\n"
+            "每提交一个 slice 就代表一轮完整 loop（scope → execute → verify → fix → verify2 → decide）；"
+            "slices 的数量就是你反馈的 loop 轮数。\n"
+            "切片只描述工作范围、粒度与轮数，**不得指定角色或 loop 阶段**"
+            "（不要写 execute_role/verify_role/fix_role/verify2_role/decision_role/lead_role，"
+            "也不要给 execute_steps 写 role）；角色由 Cindy 在 workflow 的 loop 模板中定义，"
+            "服务端会套用该模板。\n"
+            f"如果你认为 loop 结构（阶段/角色/轮次）需要调整，用 `{mention_cmd} \"具体诉求\"` "
+            "反馈，然后停止本轮等待 Cindy 的新 workflow；不要在旧模板下继续提交切片计划。\n"
             "切片 id 只能使用字母/数字/_/-，且不得重复。服务端会为每片自动生成 "
             "execute → verify → fix → verify2 → decide 闭环；下一片在上一片决策通过后开始。\n"
             "如果项目为空或没有可审计范围，可提交空 slices 并在 rationale 中说明。\n"

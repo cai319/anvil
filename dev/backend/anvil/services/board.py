@@ -96,6 +96,7 @@ def create_draft(conn: sqlite3.Connection, goal: str, tree: dict,
         from . import workflow as workflow_service
         tree = workflow_service.normalize_definition(conn, tree)
         workflow_service.validate_definition(conn, tree)
+        workflow_service.validate_role_coverage(conn, source_task, tree)
     did = new_id()
     conn.execute(
         "INSERT INTO board_drafts (id, workspace_id, goal, tree_json, status, created_by, created_at, source_task, kind) "

@@ -138,6 +138,34 @@ def _task_size_block(task: dict) -> str:
     return "\n".join(parts)
 
 
+def _workflow_summary(wf: dict) -> str:
+    """给重规划 planner 的当前 workflow 摘要（不逐条展开已生成的切片步骤）。"""
+    lines = [f"- workflow id: {wf.get('id')}", f"- status: {wf.get('status')}"]
+    definition = wf.get("definition") or {}
+    loop = definition.get("loop")
+    if isinstance(loop, dict):
+        phases = []
+        for phase in ("scope", "execute", "verify", "fix", "verify2", "decide"):
+            spec = loop.get(phase)
+            if isinstance(spec, dict):
+                phases.append(f"{phase}={spec.get('role') or '-'}")
+        if phases:
+            lines.append("- loop 模板：" + "；".join(phases))
+    steps = wf.get("steps") or []
+    static = [s for s in steps if not s.get("slice_key")]
+    for s in static[:40]:
+        lines.append(
+            f"- {s.get('step_id')} [{s.get('kind') or 'task'}] {s.get('title')} "
+            f"→ {s.get('role_slug')} ({s.get('status')})")
+    if len(static) > 40:
+        lines.append(f"- 其余 {len(static) - 40} 个静态步骤省略")
+    slice_steps = len(steps) - len(static)
+    if slice_steps:
+        lines.append(f"- 已展开切片步骤：{slice_steps} 个（按 loop 模板生成，未逐条列出）")
+    lines.append("- 如需调整，请提交新的 workflow 草案；批准后可 supersede 旧 workflow。")
+    return "\n".join(lines)
+
+
 def start_planner_run(conn: sqlite3.Connection, db_path: str, orchestrator,
                       task_id: str, planner: str, assignees: list[str] | None = None,
                       extra_constraint: str = "",
@@ -179,6 +207,13 @@ def start_planner_run(conn: sqlite3.Connection, db_path: str, orchestrator,
         prompt += "\n\n## 任务规模信息（用于判断是否需要切片）\n" + size_block
     if extra_constraint.strip():
         prompt += "\n\n## 规划约束（必须遵守）\n" + extra_constraint.strip()
+    try:
+        from . import workflow as workflow_service
+        wf = workflow_service.get_for_task(conn, task_id)
+    except Exception:  # noqa: BLE001 —— 摘要失败不影响规划
+        wf = None
+    if wf:
+        prompt += "\n\n## 当前 workflow（只读参考；如需调整请提交新草案）\n" + _workflow_summary(wf)
     run = runs_service.create_run(conn, planner, task_id, prompt=prompt)
     if orchestrator:
         try:
