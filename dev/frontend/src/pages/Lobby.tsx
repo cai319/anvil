@@ -76,9 +76,8 @@ async function moveTask(task: Task, target: Task["status"]): Promise<unknown> {
   if (s === target) return task;
   if (s === "todo" && target === "in_progress") {
     const team = task.assignees ?? [];
-    if (!team.length) throw new Error("任务没有参与成员——请打开任务详情添加成员");
-    await api.assignRoles(task.id, team);
-    // 多角色任务默认先由 onboarding 助理（Cindy）规划，草案经人工批准后再按依赖执行；
+    if (team.length) await api.assignRoles(task.id, team);
+    // 0 角色时 Cindy 先分析并建议角色；多角色任务默认先由 Cindy 规划；
     // 单角色任务直接派发。
     await api.dispatchTask(task.id);
     return task;

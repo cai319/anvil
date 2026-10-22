@@ -107,6 +107,7 @@ export const api = {
   dispatchTask: (id: string): Promise<{
     mode: "planning" | "pending_review" | "direct";
     planner?: string; run?: Run; runs?: Run[]; draft_id?: string;
+    draft_kind?: "tasks" | "workflow" | "role_suggestion";
   }> => req("POST", `/tasks/${id}/dispatch`).then((r) => json(r)),
   autoCreateRole: (brief: string, runtimeId?: string): Promise<Role> =>
     req("POST", "/roles/auto", { brief, runtime_id: runtimeId || undefined }).then((r) => json<Role>(r)),
@@ -116,10 +117,12 @@ export const api = {
     req("POST", `/action-cards/${id}/reject`, {}).then((r) => json(r)),
   getInbox: (): Promise<{ count: number; items: InboxItem[] }> =>
     fetch(`${BASE}/inbox`).then((r) => json<{ count: number; items: InboxItem[] }>(r)),
-  rejectDraftById: (id: string): Promise<unknown> =>
-    req("POST", "/board/drafts/reject", { draft_id: id }).then((r) => json(r)),
-  approveDraft: (draftIds: string[]): Promise<{ landed: string[] }> =>
-    req("POST", "/board/drafts/approve", { draft_ids: draftIds }).then((r) => json<{ landed: string[] }>(r)),
+  rejectDraftById: (id: string, feedback?: string): Promise<unknown> =>
+    req("POST", "/board/drafts/reject", { draft_id: id, feedback }).then((r) => json(r)),
+  approveDraft: (draftIds: string[]): Promise<{
+    landed: string[]; replans?: unknown[]; warnings?: string[]; runs?: Run[];
+  }> =>
+    req("POST", "/board/drafts/approve", { draft_ids: draftIds }).then((r) => json(r)),
   assignRoles: (id: string, roles: string[]): Promise<Task> =>
     req("POST", `/tasks/${id}/assign`, { roles }).then((r) => json<Task>(r)),
   assignTask: (id: string, assignee: string): Promise<Task> =>
@@ -398,6 +401,14 @@ export function isOnboardingRole(r: Role): boolean {
   return (r.definition as Record<string, unknown> | undefined)?.kind === "onboarding";
 }
 
+export interface InboxDraftMeta {
+  draft_kind?: "tasks" | "workflow" | "role_suggestion";
+  assessment?: string;
+  missing_capabilities?: string[];
+  suggested_roles?: { slug: string; display_name?: string; description?: string }[];
+  step_count?: number;
+}
+
 export interface InboxItem {
   id: string;
   kind: "review" | "mention" | "draft" | "lesson" | "proposal" | "gate" | "action";
@@ -405,6 +416,7 @@ export interface InboxItem {
   detail: string;
   task_id: string | null;
   created_at: string;
+  meta?: InboxDraftMeta;
 }
 
 export interface WorkflowStep {
@@ -444,11 +456,33 @@ export interface BoardDraft {
   id: string;
   goal: string;
   status: "pending" | "approved" | "rejected";
+  kind?: "tasks" | "workflow" | "role_suggestion";
   created_by: string;
   source_task: string | null;
   tree: {
     leader?: string;
     feedback_rules?: string[];
+    verification?: { cell: string; method: string; verifier_role?: string }[];
+    assessment?: string;
+    missing_capabilities?: string[];
+    suggested_roles?: {
+      slug: string;
+      display_name?: string;
+      description?: string;
+      runtime?: { id?: string };
+      capabilities?: Record<string, number>;
+      responsibilities?: string[];
+    }[];
+    steps?: {
+      id?: string;
+      title?: string;
+      role?: string;
+      depends_on?: string[];
+      acceptance?: string[];
+      gate?: boolean;
+      reviewer?: string;
+      contract?: string;
+    }[];
     children?: {
       id?: string;
       title?: string;

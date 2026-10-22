@@ -73,6 +73,11 @@ class RoleIn(BaseModel):
     slug: str
     display_name: str
     avatar_color: str | None = None
+    kind: str | None = None
+    description: str | None = None
+    capabilities: dict[str, Any] | None = None
+    working_mode: str | None = None
+    skill_description: str | None = None
     runtime: dict[str, Any] = Field(default_factory=dict)
     workspace: dict[str, Any] = Field(default_factory=dict)
     tools: dict[str, Any] = Field(default_factory=dict)

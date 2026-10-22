@@ -24,6 +24,27 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
         raise ConflictError("workflow has no steps")
     wid = new_id()
     now = now_iso()
+    # 同一 task 只保留一个 running workflow：新草案批准时 supersede 旧 workflow。
+    from . import runs as runs_service
+    for old in conn.execute(
+        "SELECT id FROM workflows WHERE task_id=? AND status='running'", (task_id,)
+    ).fetchall():
+        for st in conn.execute(
+            "SELECT run_id FROM workflow_steps WHERE workflow_id=? "
+            "AND status IN ('running','submitted')", (old["id"],)
+        ).fetchall():
+            if st["run_id"]:
+                try:
+                    runs_service.set_status(conn, st["run_id"], "abandoned", ended_at=now)
+                except Exception:  # noqa: BLE001
+                    pass
+        conn.execute(
+            "UPDATE workflow_steps SET status='failed', failure_reason='superseded', "
+            "ended_at=?, updated_at=? WHERE workflow_id=? AND status IN ('running','submitted')",
+            (now, now, old["id"]),
+        )
+        conn.execute("UPDATE workflows SET status='failed', updated_at=? WHERE id=?",
+                     (now, old["id"]))
     conn.execute(
         "INSERT INTO workflows (id, task_id, definition_json, status, created_by, "
         "created_at, approved_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",

@@ -36,6 +36,15 @@ async def test_multi_role_dispatch_plans_with_cindy(client, seeded):
     assert [x["role_slug"] for x in runs if x.get("task_id") == "T-MULTI"] == ["cindy"]
 
 
+async def test_zero_assignee_dispatch_plans_with_cindy(client, seeded):
+    await _create_task(client, "T-NOROLE", [])
+    r = await client.post("/api/v1/tasks/T-NOROLE/dispatch", headers=auth_headers())
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["mode"] == "planning"
+    assert body["planner"] == "cindy"
+
+
 async def test_single_role_dispatch_is_direct(client, seeded):
     await _create_task(client, "T-SINGLE", ["developer"])
     r = await client.post("/api/v1/tasks/T-SINGLE/dispatch", headers=auth_headers())

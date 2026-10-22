@@ -27,6 +27,7 @@ from .api import (
 )
 from .db import connect, open_conn
 from .services import daemon as daemon_service
+from .services import roles as roles_service
 from .services import runs as runs_service
 from .graph import build_graph, get_checkpointer
 from .graph.orchestrator import Orchestrator
@@ -75,6 +76,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     _init = connect(path)
+    # 跨平台/迁移修复：数据库里的角色 home_path 可能来自旧系统（如 macOS → Windows）。
+    roles_service.repair_home_paths(_init)
     _init.close()  # 建表后即关，之后每请求独立连接
 
     # 编排控制面：同步 LangGraph + SqliteSaver（长驻 app 生命周期）。

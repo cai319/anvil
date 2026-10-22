@@ -30,6 +30,22 @@ async def test_cindy_cannot_be_deleted_or_assigned(client, app):
     assert r.status_code == 409, r.text
 
 
+def test_cindy_cannot_claim_task(app):
+    from anvil.db import open_conn
+    from anvil.services import tasks as tasks_service
+    from anvil.util import ConflictError, now_iso
+
+    conn = open_conn(app.state.db_path)
+    roles_service.ensure_onboarding(conn)
+    now = now_iso()
+    conn.execute("INSERT INTO tasks (id,title,status,created_at,updated_at) "
+                 "VALUES ('T-CLAIM','t','todo',?,?)", (now, now))
+    conn.commit()
+    with pytest.raises(ConflictError):
+        tasks_service.claim(conn, "T-CLAIM", "cindy")
+    conn.close()
+
+
 def test_cindy_cannot_execute_workflow_step(app):
     from anvil.db import open_conn
     from anvil.services import workflow as wf_service

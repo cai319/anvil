@@ -1,11 +1,12 @@
 """目标拆解端点（编排闭环 A）：decompose / drafts / approve / reject。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..services.tasks import ConflictError
+from . import events
 
 router = APIRouter()
 
@@ -46,24 +47,71 @@ def create_draft(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth
     if auth.role and body.get("source_task") and auth.task_id and body["source_task"] != auth.task_id:
         raise HTTPException(status_code=403, detail="session not bound to this task")
     created_by = body.get("created_by") or (f"agent:{auth.role}" if auth.role else "human")
-    return services.board.create_draft(
-        conn, goal=goal, tree=tree, created_by=created_by,
-        workspace_id=body.get("workspace_id"), source_task=body.get("source_task"),
-        kind=str(body.get("kind") or "tasks"),
-    )
-
-
-@router.post("/board/drafts/approve")
-def approve_drafts(body: dict, conn=Depends(get_db), auth: Auth = Depends(require_human)):
     try:
-        return services.board.approve(conn, body.get("draft_ids", []))
+        return services.board.create_draft(
+            conn, goal=goal, tree=tree, created_by=created_by,
+            workspace_id=body.get("workspace_id"), source_task=body.get("source_task"),
+            kind=str(body.get("kind") or "tasks"),
+        )
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
 
+def _start_replans(request: Request, conn, result: dict) -> dict:
+    """执行 board 决策返回的重规划描述；失败只记 warning，不回滚已批准的角色。"""
+    runs = []
+    for replan in result.get("replans", []):
+        try:
+            run = services.planning.start_planner_run(
+                conn, request.app.state.db_path,
+                getattr(request.app.state, "orchestrator", None),
+                replan["task_id"], replan["planner"],
+                assignees=replan.get("assignees"),
+                extra_constraint=replan.get("extra_constraint", ""),
+                replace_active=bool(replan.get("replace_active")),
+            )
+            runs.append(run)
+            events.publish("task", {"id": replan["task_id"], "kind": "plan",
+                                    "planner": replan["planner"]})
+        except Exception as exc:  # noqa: BLE001
+            result.setdefault("warnings", []).append(f"replan failed: {exc}")
+    if runs:
+        result["runs"] = runs
+    return result
+
+
+@router.post("/board/drafts/approve")
+def approve_drafts(body: dict, request: Request, conn=Depends(get_db),
+                   auth: Auth = Depends(require_human)):
+    try:
+        result = services.board.approve(conn, body.get("draft_ids", []))
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return _start_replans(request, conn, result)
+
+
 @router.post("/board/drafts/reject")
-def reject_draft(body: dict, conn=Depends(get_db), auth: Auth = Depends(require_human)):
+def reject_draft(body: dict, request: Request, conn=Depends(get_db),
+                 auth: Auth = Depends(require_human)):
     did = body.get("draft_id")
     if not did:
         raise HTTPException(status_code=422, detail="draft_id is required")
-    return services.board.reject(conn, did)
+    try:
+        result = services.board.reject(
+            conn, did, feedback=body.get("feedback"))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    replan = result.get("replan")
+    if replan:
+        result["replans"] = [replan]
+        _start_replans(request, conn, result)
+    # 兼容旧客户端：驳回响应仍以 draft 字段为主体（status/tree/...）。
+    draft = result.get("draft") or {}
+    payload = {**draft, "replan": replan, "blocked": result.get("blocked")}
+    if result.get("runs"):
+        payload["runs"] = result["runs"]
+    if result.get("warnings"):
+        payload["warnings"] = result["warnings"]
+    return payload

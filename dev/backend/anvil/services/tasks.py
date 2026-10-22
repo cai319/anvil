@@ -134,6 +134,29 @@ def assign_roles(conn: sqlite3.Connection, tid: str, roles: list[str]) -> dict:
     return get(conn, tid)  # type: ignore[return-value]
 
 
+def add_assignees(conn: sqlite3.Connection, tid: str, roles: list[str]) -> dict:
+    """追加任务参与角色（非破坏性，保留已有 assignees/claims）。"""
+    t = get(conn, tid)
+    if t is None:
+        raise LookupError(tid)
+    _assert_assignable(conn, roles)
+    now = now_iso()
+    existing = set(t["assignees"])
+    added = [r for r in dict.fromkeys(roles) if r not in existing]
+    for r in added:
+        conn.execute(
+            "INSERT OR IGNORE INTO task_assignees (task_id, role_slug, joined_at) VALUES (?,?,?)",
+            (tid, r, now),
+        )
+    _init_role_claims(conn, tid, added, now)
+    if t.get("workspace_id"):
+        from . import workspace as workspace_service
+        for r in added:
+            workspace_service.add_member(conn, t["workspace_id"], r, "write")
+    conn.commit()
+    return get(conn, tid)  # type: ignore[return-value]
+
+
 def list_all(conn: sqlite3.Connection, status: str | None = None, assignee: str | None = None,
              workspace_id: str | None = None, type: str | None = None,
              tag: str | None = None, parent_id: str | None = None) -> list[dict]:
@@ -214,6 +237,9 @@ def _team_all_submitted(conn: sqlite3.Connection, tid: str, assignees: list[str]
 
 def claim(conn: sqlite3.Connection, tid: str, role: str, paths: list[str] | None = None) -> dict:
     """认领任务。单负责人任务保持排他；多角色任务允许每个参与角色并行认领。"""
+    from . import roles as roles_service
+    if roles_service.is_onboarding(conn, role):
+        raise ConflictError("onboarding assistant cannot claim tasks")
     conn.execute("BEGIN IMMEDIATE")
     try:
         t = get(conn, tid)
@@ -718,7 +744,8 @@ def _ignore_patterns(t: dict) -> list[str]:
 def _git_lines(root: Path, args: list[str]) -> list[str]:
     try:
         r = subprocess.run(
-            ["git", "-C", str(root), *args], capture_output=True, text=True, timeout=20
+            ["git", "-C", str(root), *args], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=20
         )
         return (r.stdout or "").splitlines() if r.returncode == 0 else []
     except Exception:  # noqa: BLE001

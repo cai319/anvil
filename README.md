@@ -537,11 +537,18 @@ projection:
 ### 7.3 创建并派发任务
 
 1. 任务大厅 → **＋ 新建任务**；
-2. 填写名称与描述，选择参与成员（可多选）；
+2. 填写名称与描述，选择参与成员（可多选；也可以先不选，由 Cindy 分析并建议角色）；
 3. 创建后进入任务详情，点击 **派发**：
    - **单角色**：直接唤醒该角色执行；
-   - **多角色**：先由 Cindy 产出工作流草案，草案出现在 **收件箱**；
-4. 在收件箱批准草案后，步骤按依赖关系自动派发。
+   - **多角色**：Cindy 基于任务已绑定的角色（Roster）规划，草案出现在 **收件箱**；
+   - **0 角色**：Cindy 先评估角色缺口，必要时提交 **角色建议**；
+4. 角色建议的审批：
+   - **批准**：按建议画像创建角色、绑定到任务，并自动重新规划 workflow；
+   - **驳回**：Cindy 只用现有角色重新规划；如果任务仍为 0 角色，会提示你先创建/绑定至少一个角色；
+5. 工作流草案批准后，步骤按依赖关系自动派发。
+
+> Cindy **只使用任务已绑定的角色**，不会虚构未绑定角色。角色建议中的能力、职责、系统提示会在
+> 批准时直接落成角色；v1 不做收件箱内联编辑，需要调整可驳回后手动创建角色再重新派发。
 
 ### 7.4 收件箱与人工确认
 
@@ -1196,6 +1203,48 @@ venv 缺少 `langgraph`。执行 `pip install -r backend/requirements.txt`，再
 - 设为 `ANVIL_RESET_SESSION_ON_FAILURE=0` 可关闭失败后的自动清理。
 
 > 重置会话不会删除角色的 `instruction.md`、profile、`MEMORY.md` 或 `notes/`。
+
+### Q16. Windows 上角色 init 后一直 0 输出
+
+常驻会话通过 stdin 投递 stream-json 消息。如果中文 prompt 被系统代码页/CRLF 破坏，CLI 可能
+只输出 `init` 事件，然后一直等不到有效输入，表现为“0 输出”。
+
+已修复：常驻进程的 stdin/stdout 显式使用 **UTF-8**，stdin 关闭 CRLF 转换（`newline="\n"`）。
+reader 遇到解码/管道异常时会记录完整 traceback 到 `role-session.log` 并终止子进程，
+不会静默卡死。所有 `text=True` 子进程（git / npm / health / MCP）也统一 UTF-8。
+
+> **历史乱码不会自动还原**：修复前产生并已写入文件的日志/消息，内容是“先用 GBK 解码
+> UTF-8 再按 UTF-8 保存”后的乱码字符串，无法可靠逆转换。请重启后端并开始一个**新 run**
+> 验证；旧日志仍会是乱码。
+
+如果仍出现：
+
+1. 确认已更新到最新代码并重启后端；
+2. 查看角色日志：
+   ```text
+   data\agents\<slug>\logs\role-session.log
+   ```
+   - 应能看到 `[anvil] spawn <claude.exe> ...`；
+   - 非 JSON 行是 CLI 的警告/错误（如模型、认证、网络）；
+   - 用 UTF-8 查看，避免编辑器按 GBK 打开造成“二次乱码”：
+     ```powershell
+     Get-Content -Raw -Encoding UTF8 data\agents\<slug>\logs\role-session.log
+     ```
+3. 查看 run 日志 `data\agents\<slug>\logs\run-<id>.log`：
+   - 有 `USER（上下文/提示词）` 和 `[system] init`，但没有 `[assistant]` / `[result]`，
+     说明 CLI 收到了启动参数但没有完成模型调用；
+4. 在同一个 PowerShell 环境做最小验证：
+   ```powershell
+   claude --print --permission-mode bypassPermissions "只回复 OK"
+   ```
+   - 如果这里也失败/为空，检查 Claude Code 登录、模型名、`ANTHROPIC_*` 网关变量；
+   - 如果这里正常，重点检查 `role-session.log` 的 spawn 行与非 JSON 警告；
+5. 可临时设置 `ANVIL_PERSISTENT_RUNTIME=0` 回退 one-shot 做对比：
+   - one-shot 正常、常驻失败 → 问题在 stream-json 管道/CLI 的常驻模式；
+   - 两者都失败 → 问题在运行时登录/模型/网络。
+
+> 注意：后端必须从带有 `ANTHROPIC_*` 环境变量的同一个 shell 启动；双击 exe 不会继承你在
+> 某个终端里临时设置的环境变量。优先使用原生 `claude.exe`（见 Q13）。
 
 ---
 

@@ -1,0 +1,88 @@
+"""角色感知规划的基础件：Roster、非破坏性绑定、规划标记、workflow supersede。"""
+from __future__ import annotations
+
+from anvil import config
+from anvil.db import connect
+from anvil.graph import nodes
+from anvil.services import planning
+from anvil.services import roles as roles_service
+from anvil.services import tasks as tasks_service
+from anvil.services import workflow as workflow_service
+from anvil.util import now_iso
+
+
+def test_add_assignees_is_non_destructive(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "AGENTS_DIR", tmp_path / "agents")
+    conn = connect(str(tmp_path / "t.db"))
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO tasks (id,title,status,created_at,updated_at) VALUES ('T1','t','todo',?,?)",
+        (now, now),
+    )
+    conn.execute(
+        "INSERT INTO task_assignees (task_id,role_slug,joined_at) VALUES ('T1','dev',?)", (now,)
+    )
+    conn.execute(
+        "INSERT INTO task_role_claims (task_id,role_slug,status,updated_at) "
+        "VALUES ('T1','dev','working',?)", (now,)
+    )
+    conn.commit()
+
+    tasks_service.add_assignees(conn, "T1", ["tester"])
+    task = tasks_service.get(conn, "T1")
+    assert task["assignees"] == ["dev", "tester"]
+    claims = {c["role_slug"]: c["status"] for c in task["role_claims"]}
+    assert claims["dev"] == "working"  # 已有 claim 不被清空
+    assert claims["tester"] == "pending"
+
+
+def test_build_roster_includes_capabilities_and_load(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "AGENTS_DIR", tmp_path / "agents")
+    conn = connect(str(tmp_path / "t.db"))
+    roles_service.create(conn, slug="dev", display_name="Dev", definition={
+        "runtime": {"id": "claude-code"},
+        "capabilities": {"python": 0.9},
+        "responsibilities": ["实现"],
+        "concurrency": {"max_parallel": 2},
+        "workspace": {"repos": ["repo-a"]},
+    })
+    roster = planning.build_roster(conn, "T1", ["dev"])
+    assert roster[0]["capabilities"]["python"] == 0.9
+    assert roster[0]["max_parallel"] == 2
+    assert roster[0]["repos"] == ["repo-a"]
+    assert roster[0]["active_runs"] == 0
+
+
+def test_plan_marker_avoids_reply_protocol(tmp_path):
+    conn = connect(str(tmp_path / "t.db"))
+    out = nodes._prompt_for_run(
+        conn,
+        {"role_slug": "cindy", "prompt": planning.PLAN_MARKER + "\n请基于 Roster 规划",
+         "task_id": None},
+        {"title": "t", "description": "d"},
+    )
+    assert "请基于 Roster 规划" in out
+    assert "只做讨论与回复" not in out
+
+
+def test_new_workflow_supersedes_old_running(tmp_path):
+    conn = connect(str(tmp_path / "t.db"))
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO tasks (id,title,status,created_at,updated_at) VALUES ('T1','t','todo',?,?)",
+        (now, now),
+    )
+    conn.commit()
+    wf1 = workflow_service.create_workflow(
+        conn, "T1", {"steps": [{"id": "S1", "title": "a", "role": "dev"}]})
+    conn.execute("UPDATE workflow_steps SET status='running' WHERE workflow_id=?",
+                 (wf1["id"],))
+    conn.commit()
+
+    workflow_service.create_workflow(
+        conn, "T1", {"steps": [{"id": "S1", "title": "b", "role": "dev"}]})
+
+    old = workflow_service.get_workflow(conn, wf1["id"])
+    assert old["status"] == "failed"
+    assert old["steps"][0]["status"] == "failed"
+    assert old["steps"][0]["failure_reason"] == "superseded"

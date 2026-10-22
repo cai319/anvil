@@ -270,21 +270,29 @@ export function TaskDetail({ id }: { id: string }) {
                 >指派并执行</button>
               </>
             )}
-            {task.assignees?.length > 0 && (task.status === "todo" || task.status === "in_progress") && (
+            {(task.status === "todo" || task.status === "in_progress") && (
               <button
                 className="primary"
                 disabled={busy}
-                title="多角色任务先由规划助理 Cindy 分析任务并设计工作流，草案经你批准后按依赖执行"
+                title="0 角色时 Cindy 会先分析并建议角色；多角色任务先由 Cindy 规划工作流，草案经你批准后按依赖执行"
                 onClick={() => act(async () => {
                   const res = await api.dispatchTask(id);
                   setDispatchNote(
                     res.mode === "planning"
-                      ? `规划助理 ${res.planner} 正在分析任务并设计工作流…草案将出现在收件箱，批准后自动派发子任务。`
+                      ? (task.assignees?.length
+                          ? `规划助理 ${res.planner} 正在分析任务并设计工作流…草案将出现在收件箱，批准后自动派发子任务。`
+                          : `规划助理 ${res.planner} 正在分析任务与角色缺口；若角色不足，会先提交角色建议等待你审批。`)
                       : res.mode === "pending_review"
-                        ? "已有待审工作流草案，请到收件箱审阅批准。"
+                        ? (res.draft_kind === "role_suggestion"
+                            ? "已有待审角色建议，请到收件箱审阅批准。"
+                            : "已有待审工作流草案，请到收件箱审阅批准。")
                         : "已直接派发参与角色。");
                 })}
-              >{task.assignees.length >= 2 ? "派发（先由 Cindy 规划）" : "派发并执行"}</button>
+              >{(task.assignees?.length ?? 0) === 0
+                  ? "派发（Cindy 分析并建议角色）"
+                  : (task.assignees?.length ?? 0) >= 2
+                    ? "派发（先由 Cindy 规划）"
+                    : "派发并执行"}</button>
             )}
             {task.plan_first && task.status === "todo" && (
               <button
@@ -328,18 +336,36 @@ export function TaskDetail({ id }: { id: string }) {
 
           {dispatchNote && <p className="muted">{dispatchNote}</p>}
 
-          {drafts.filter((d) => d.status === "pending").length > 0 && (
+          {drafts.some((d) => d.status === "pending" && d.kind === "role_suggestion") && (
+            <p className="muted">
+              有角色建议待审批，请到收件箱处理；批准后会自动创建角色、绑定任务并重新规划工作流。
+            </p>
+          )}
+          {drafts.filter((d) => d.status === "pending" && d.kind !== "role_suggestion").length > 0 && (
             <section className="session-thread">
               <h2 className="pane-title">工作流草案 · 待审批</h2>
-              {drafts.filter((d) => d.status === "pending").map((d) => (
+              {drafts.filter((d) => d.status === "pending" && d.kind !== "role_suggestion").map((d) => (
                 <div key={d.id} className="card" style={{ marginBottom: 8 }}>
                   <strong>{d.goal}</strong>
                   <div className="muted">
                     by {d.created_by}
                     {d.tree?.leader && <> · leader：{d.tree.leader}</>}
-                    {d.tree?.children && <> · {d.tree.children.length} 个子任务</>}
+                    {d.tree?.steps?.length
+                      ? <> · {d.tree.steps.length} 个步骤</>
+                      : d.tree?.children
+                        ? <> · {d.tree.children.length} 个子任务</>
+                        : null}
                   </div>
-                  {d.tree?.children && (
+                  {d.tree?.steps?.length ? (
+                    <ul className="muted" style={{ margin: "6px 0", paddingLeft: 18 }}>
+                      {d.tree.steps.map((s, i) => (
+                        <li key={s.id ?? i}>
+                          {s.id ? `${s.id} ` : ""}{s.title} → {s.role ?? "未指派"}
+                          {s.depends_on?.length ? `（依赖 ${s.depends_on.join("、")}）` : ""}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : d.tree?.children ? (
                     <ul className="muted" style={{ margin: "6px 0", paddingLeft: 18 }}>
                       {d.tree.children.map((c, i) => (
                         <li key={c.id ?? i}>
@@ -348,7 +374,7 @@ export function TaskDetail({ id }: { id: string }) {
                         </li>
                       ))}
                     </ul>
-                  )}
+                  ) : null}
                   {d.tree?.feedback_rules?.length ? (
                     <div className="muted">反馈路径：{d.tree.feedback_rules.join("；")}</div>
                   ) : null}

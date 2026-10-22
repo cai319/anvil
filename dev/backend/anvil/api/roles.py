@@ -184,10 +184,14 @@ def expand_role(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth)
 
 @router.post("/roles", status_code=201, response_model=RoleOut)
 def create_role(body: RoleIn, conn=Depends(get_db)):
-    definition = body.model_dump()
+    definition = body.model_dump(exclude_none=True)
     definition.pop("slug", None)
     definition.pop("display_name", None)
-    return services.roles.create(conn, slug=body.slug, display_name=body.display_name, definition=definition)
+    if definition.get("kind") == "onboarding":
+        raise HTTPException(status_code=422, detail="cannot create onboarding role via API")
+    definition.setdefault("kind", "member")
+    return services.roles.create(conn, slug=body.slug, display_name=body.display_name,
+                                 definition=definition)
 
 
 @router.get("/roles", response_model=list[RoleOut])
@@ -209,9 +213,11 @@ def update_role(slug: str, body: RoleIn, conn=Depends(get_db),
     role = services.roles.get(conn, slug)
     if role is None:
         raise HTTPException(status_code=404, detail="role not found")
-    definition = body.model_dump()
+    definition = body.model_dump(exclude_none=True)
     definition.pop("slug", None)
     definition.pop("display_name", None)
+    if definition.get("kind") == "onboarding":
+        raise HTTPException(status_code=422, detail="cannot convert role to onboarding via API")
     services.roles.update(conn, slug, display_name=body.display_name, definition=definition)
     return services.roles.get(conn, slug)  # type: ignore[return-value]
 

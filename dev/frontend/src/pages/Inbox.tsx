@@ -84,16 +84,20 @@ export function Inbox() {
         return (
           <a className="small button-like" href={`/tasks/${it.task_id}`}>去回复（会话上下文在任务详情）</a>
         );
-      case "draft":
+      case "draft": {
+        const isRoleSuggestion = it.meta?.draft_kind === "role_suggestion";
         return (
           <>
             <button className="primary small" disabled={disabled}
-              onClick={() => act(it.id, () => api.approveDraft([raw]))}>批准落板</button>
+              onClick={() => act(it.id, () => api.approveDraft([raw]))}>
+              {isRoleSuggestion ? "批准并创建角色" : "批准落板"}
+            </button>
             <button className="small danger" disabled={disabled}
               onClick={() => act(it.id, () => api.rejectDraftById(raw))}>驳回</button>
             {it.task_id && <a className="small" href={`/tasks/${it.task_id}`}>看任务</a>}
           </>
         );
+      }
       case "lesson":
         return (
           <>
@@ -171,6 +175,13 @@ export function Inbox() {
             <span className="muted mono" style={{ fontSize: 11 }}>{it.created_at?.slice(0, 19).replace("T", " ")}</span>
           </div>
           <div className="muted" style={{ margin: "4px 0 8px" }}>{it.detail}</div>
+          {it.meta?.draft_kind === "role_suggestion" && (it.meta.suggested_roles?.length ?? 0) > 0 && (
+            <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+              建议角色：
+              {it.meta.suggested_roles!.map((r) => `${r.display_name || r.slug}（${r.slug}）`).join("、")}
+              {it.meta.assessment ? ` · ${it.meta.assessment}` : ""}
+            </div>
+          )}
           <div className="card-actions" style={{ gap: 6 }}>{renderActions(it)}</div>
         </div>
       ))}

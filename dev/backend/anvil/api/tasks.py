@@ -356,33 +356,19 @@ def _assignee_slugs(conn, tid: str) -> list[str]:
 
 
 def _start_planner_run(conn, request: Request, tid: str, planner: str,
-                       assignees: list[str]):
-    """唤醒规划者（onboarding 助理 / 任务 planner）生成工作流草案。"""
-    from ..graph.render import PLANNING_PROTOCOL
-    from ..util import jloads
-
-    lines = []
-    for slug in assignees:
-        row = conn.execute("SELECT display_name, definition_json FROM roles WHERE slug=?",
-                           (slug,)).fetchone()
-        if row is None:
-            lines.append(f"- {slug}（@提及：anvil task mention {tid} --to {slug} \"消息\"）")
-            continue
-        definition = jloads(row["definition_json"], {})
-        desc = definition.get("description") or ""
-        resp = "、".join(definition.get("responsibilities") or [])
-        detail = "；".join(x for x in (desc, f"职责：{resp}" if resp else "") if x)
-        lines.append(
-            f"- {row['display_name']}（slug={slug}，@提及：anvil task mention {tid} --to {slug} \"消息\"）"
-            + (f"：{detail}" if detail else ""))
-    prompt = (PLANNING_PROTOCOL + "\n\n## 参与角色（Roster）\n" + "\n".join(lines))
-    run = services.runs.create_run(conn, planner, tid, prompt=prompt)
-    orch = getattr(request.app.state, "orchestrator", None)
-    if orch:
-        try:
-            orch.pump(request.app.state.db_path, run["id"], "wake", {})
-        except Exception:  # noqa: BLE001
-            pass
+                       assignees: list[str], extra_constraint: str = "",
+                       replace_active: bool = False):
+    """唤醒规划者（onboarding 助理 / 任务 planner）生成草案。"""
+    run = services.planning.start_planner_run(
+        conn,
+        request.app.state.db_path,
+        getattr(request.app.state, "orchestrator", None),
+        tid,
+        planner,
+        assignees=assignees,
+        extra_constraint=extra_constraint,
+        replace_active=replace_active,
+    )
     events.publish("task", {"id": tid, "kind": "plan", "planner": planner})
     return run
 
@@ -397,6 +383,8 @@ def plan_task(tid: str, request: Request, conn=Depends(get_db), auth: Auth = Dep
     planner = t.get("planner")
     if not planner:
         raise HTTPException(status_code=409, detail="task has no planner; set planner first")
+    if services.roles.get(conn, planner) is None:
+        raise HTTPException(status_code=409, detail=f"planner {planner} not found")
     assignees = _assignee_slugs(conn, tid)
     # onboarding 助理（Cindy）不是任务参与角色，但可以为任意任务做规划。
     if planner not in assignees and not services.roles.is_onboarding(conn, planner):
@@ -420,23 +408,34 @@ def dispatch_task(tid: str, request: Request, conn=Depends(get_db), auth: Auth =
     if t is None:
         raise HTTPException(status_code=404, detail="task not found")
     assignees = _assignee_slugs(conn, tid)
-    if not assignees:
-        raise HTTPException(status_code=409, detail="task has no assignees")
-
     pending = conn.execute(
-        "SELECT id FROM board_drafts WHERE source_task=? AND status='pending'", (tid,)
+        "SELECT id, kind FROM board_drafts WHERE source_task=? AND status='pending'", (tid,)
     ).fetchone()
     if pending:
-        return {"mode": "pending_review", "draft_id": pending["id"]}
+        return {"mode": "pending_review", "draft_id": pending["id"],
+                "draft_kind": pending["kind"] or "tasks"}
 
+    onboarding_enabled = os.environ.get("ANVIL_ONBOARDING", "1") != "0"
     planner = None
     if t.get("plan_first") and t.get("planner"):
         planner = t["planner"]
-    elif len(assignees) >= 2 and os.environ.get("ANVIL_ONBOARDING", "1") != "0":
-        onboarding = services.roles.ensure_onboarding(conn)
-        planner = onboarding["slug"]
+        if services.roles.get(conn, planner) is None:
+            raise HTTPException(status_code=409, detail=f"planner {planner} not found")
+    elif not assignees and onboarding_enabled:
+        # 没有绑定角色：Cindy 先评估并给出角色建议。
+        planner = services.roles.ensure_onboarding(conn)["slug"]
+    elif len(assignees) >= 2 and onboarding_enabled:
+        planner = services.roles.ensure_onboarding(conn)["slug"]
+
+    if not assignees and planner is None:
+        raise HTTPException(
+            status_code=409,
+            detail="task has no assignees and onboarding is disabled; bind at least one role",
+        )
 
     if planner:
+        if planner not in assignees and not services.roles.is_onboarding(conn, planner):
+            raise HTTPException(status_code=409, detail=f"planner {planner} is not a task assignee")
         run = _start_planner_run(conn, request, tid, planner, assignees)
         return {"mode": "planning", "planner": planner, "run": run}
 

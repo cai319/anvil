@@ -121,7 +121,14 @@
   run 转 suspended；启动时 `role_sessions` 全部标记 dead（session_id 保留）。
 - **成本自动记账**：`result` 事件的 `total_cost_usd` 直接写 `cost_ledger`（P3-1 提前落地）。
 - **角色级会话令牌**：常驻进程使用绑定 role 的长期 token（task_id=NULL），跨任务可用。
-- 测试：`tests/test_daemon.py`（同进程复用、忙时排队、退出后 --resume 同一 session_id）；
+- **Windows UTF-8 管道**：常驻进程 stdin/stdout 显式 UTF-8，stdin `newline="\n"`，避免中文
+  prompt 在系统代码页/CRLF 下被 CLI 当成无效 stream-json（表现为 init 后 0 输出）；
+  spawn 命令与 stdin 写失败会写入 `role-session.log`。
+  reader 解码/管道异常会记录完整 traceback 并终止子进程，不再静默卡死。
+  所有 `text=True` 子进程（git / npm / 运行时 health / MCP 握商）也统一 UTF-8，
+  避免 Windows 下 diff、会话日志等窗口出现乱码。
+- 测试：`tests/test_daemon.py`（同进程复用、忙时排队、退出后 --resume 同一 session_id、
+  UTF-8 管道、reader 崩溃保护）；
   `ANVIL_PERSISTENT_RUNTIME=0` 可强制回退 one-shot。
 - 实测验证：同一角色 @mention 二次唤醒 PID 不变；空闲释放后进程归零，再唤醒 `--resume` 同一 session 且回复上下文正确。
 
@@ -137,6 +144,24 @@
   常驻会话忙时超时（`platform_timeout`）由调度器显式 `reset_session`，同样换新上下文。
 - 测试：`tests/test_daemon.py`（reset/restart/failure auto-reset）、
   `tests/api/test_role_session_reset.py`。
+
+### Cindy 角色感知规划与角色建议（2026-10-22）
+- **Roster 扩展**：capabilities / working_mode / skill_description / runtime / 并发上限 /
+  当前活跃 run / 写权限仓库 / skills / MCP；Cindy 只使用 Roster 中的角色执行步骤。
+- **0 角色也可派发**：`POST /tasks/{id}/dispatch` 在 onboarding 开启时调用 Cindy 先评估角色缺口；
+  单角色仍直接执行；`ANVIL_ONBOARDING=0` 且无角色时 409。
+- **两类草案**：角色足够 → `kind=workflow`；不足/无角色 → `kind=role_suggestion`
+  （assessment / missing_capabilities / suggested_roles 结构化画像）。
+- **角色建议审批**：批准后按结构化 definition 创建角色（保留 capabilities/description 等）、
+  非破坏性追加 `task_assignees` + claims + workspace membership，并自动重规划；
+  驳回则用现有 Roster 重规划；0 角色驳回时 @human 提示先绑定角色。
+- **安全/一致性**：角色建议走 `services.roles.create`（HTTP `RoleIn` 不再丢字段）；
+  已存在 slug 只绑定不覆盖；创建失败补偿删除；Cindy 不能 claim 任务；规划 run 加
+  `[anvil:plan]` 标记，避免已有 workflow 时被误判为 REPLY_PROTOCOL；新 workflow 批准时
+  supersede 同任务旧的 running workflow。
+- 测试：`tests/api/test_role_suggestion_api.py`、`tests/test_planning.py`、
+  `tests/api/test_dispatch_onboarding.py`、`tests/api/test_onboarding_guard.py`、
+  `tests/api/test_inbox.py`。
 
 ### 主页「实时活动」重构（2026-10-19，owner 反馈）
 - 右栏改为两块：**实时会话**（仅活跃 run，含挂起等待；卡片可点击进 `/runs/{id}`）
@@ -319,7 +344,7 @@
 
 ```bash
 cd dev
-python3 -m pytest tests/ -q          # 226 passed, 21 skipped
+python3 -m pytest tests/ -q          # 242 passed, 21 skipped
 cd frontend && npm run build         # tsc + vite build
 ```
 

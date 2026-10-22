@@ -1,6 +1,8 @@
 """Role CRUD + private home + effective-config + tool budget."""
 from __future__ import annotations
 
+import logging
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -8,6 +10,8 @@ import yaml  # type: ignore
 
 from .. import config
 from ..util import ConflictError, jdumps, jloads, now_iso
+
+logger = logging.getLogger("anvil.roles")
 
 # Naive token estimate until the real estimator (M3) lands: fixed cost per tool.
 TOKENS_PER_TOOL = 500
@@ -43,6 +47,49 @@ def create(conn: sqlite3.Connection, *, slug: str, display_name: str,
     return get(conn, slug)  # type: ignore[return-value]
 
 
+def rollback_created(conn: sqlite3.Connection, slugs: list[str]) -> None:
+    """补偿删除本批新建角色（roles.create 内部 commit，不能依赖事务回滚）。"""
+    for slug in slugs:
+        conn.execute("DELETE FROM role_tools WHERE role_slug=?", (slug,))
+        conn.execute("DELETE FROM role_versions WHERE slug=?", (slug,))
+        conn.execute("DELETE FROM reminders WHERE role_slug=?", (slug,))
+        conn.execute("DELETE FROM roles WHERE slug=?", (slug,))
+        home = config.AGENTS_DIR / slug
+        if home.exists():
+            shutil.rmtree(home, ignore_errors=True)
+    conn.commit()
+
+
+def repair_home_paths(conn: sqlite3.Connection) -> int:
+    """跨平台/迁移修复：home_path 重算为 AGENTS_DIR/<slug>，并补齐目录与基础文件。
+
+    DB 里存的是创建时的绝对路径；数据目录从 macOS 迁到 Windows 后该路径不可用。
+    后端启动时调用一次，保证角色 cwd / home 文件读取使用当前系统的路径。
+    """
+    rows = conn.execute(
+        "SELECT slug, display_name, home_path, definition_json FROM roles"
+    ).fetchall()
+    if not rows:
+        return 0
+    config.AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+    repaired = 0
+    for r in rows:
+        slug = r["slug"]
+        definition = jloads(r["definition_json"], {})
+        home = _ensure_home(slug, r["display_name"], definition)
+        expected = str(home)
+        if r["home_path"] != expected:
+            conn.execute(
+                "UPDATE roles SET home_path=?, updated_at=? WHERE slug=?",
+                (expected, now_iso(), slug),
+            )
+            repaired += 1
+    if repaired:
+        conn.commit()
+        logger.warning("repaired role home paths: %d", repaired)
+    return repaired
+
+
 # ---- 内置 onboarding 助理（Cindy）：人类助理，负责任务分析与工作流设计 -----------------
 # owner 2026-10-19：多角色任务应先由「人类助理」分析任务、设计协作 workflow（谁先做什么、
 # 依赖顺序、反馈/升级路径），人工批准后再交给参与角色执行——而不是无中心群聊。
@@ -63,13 +110,18 @@ ONBOARDING_DEFINITION: dict = {
     "capabilities": {"planning": 0.95, "coordination": 0.9},
     "responsibilities": ["任务分析", "工作流设计", "角色协作编排", "升级路径定义"],
     "system_prompt": (
-        "你是人类（owner）的工程规划助理 Cindy。你的职责不是实现任务，而是分析任务并为参与角色"
-        "设计协作工作流。必须明确：谁主导、谁执行哪些子任务、阶段顺序与可并行关系（depends_on）、"
-        "每个子任务的验收标准与文件范围（scope_paths）、出问题向谁反馈、何时升级给人类。"
-        "典型形态：先由 PM/设计角色完成需求分解与接口基线，再由实现与测试并行推进"
-        "（测试可提前编写用例，但执行测试依赖实现），最后集成验证。"
-        "工作方式：用 anvil task comment 同步分析结论；用 anvil board draft 提交工作流草案；"
-        "用 anvil task mention --to human 请人类批准；批准前不要实现任何子任务。"
+        "你是人类（owner）的工程规划助理 Cindy。你的职责不是实现任务，而是先评估任务已绑定的"
+        "Roster 是否足够，再设计协作工作流。必须明确：谁主导、谁执行哪些子任务、阶段顺序与可并行"
+        "关系（depends_on）、每个子任务的验收标准与文件范围（scope_paths）、出问题向谁反馈、"
+        "何时升级给人类。大任务要按模块/目录/风险面切片，每个切片内部再拆细，并让不同角色"
+        "交叉验证、实时同步进展与问题。"
+        "角色可能已由 human 在建任务时绑定：只能使用 Roster 中的角色执行步骤，绝不虚构未绑定角色。"
+        "如果角色不足或没有绑定角色，不要生成 workflow 步骤；用 "
+        "`anvil board draft --kind role_suggestion` 提交新增角色建议（说明缺失能力与建议角色画像），"
+        "由 human 审批。若 human 拒绝新增角色，只能用现有角色规划；没有可用角色时停止并说明需要"
+        "human 先创建/绑定至少一个角色。"
+        "工作方式：用 anvil task comment 同步分析结论；用 anvil board draft 提交 workflow 或"
+        " role_suggestion；用 anvil task mention --to human 请人类审批；批准前不要实现任何子任务。"
     ),
 }
 
@@ -281,7 +333,8 @@ def home_history(conn: sqlite3.Connection, slug: str, rel_path: str | None = Non
     args = ["git", "-C", str(agent_root), "log", "--oneline", "--", f"{slug}/{rel_path}" if rel_path else slug]
     try:
         import subprocess
-        out = subprocess.run(args, capture_output=True, text=True, timeout=15)
+        out = subprocess.run(args, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=15)
         return [ln for ln in (out.stdout or "").splitlines() if ln.strip()]
     except Exception:  # noqa: BLE001
         return []
@@ -415,4 +468,6 @@ def _row(r) -> dict:
     d = dict(r)
     d["enabled"] = bool(d["enabled"])
     d["definition"] = jloads(d.get("definition_json") or "{}", {})  # 供 API/前端读取角色画像
+    # 跨平台/迁移：DB 里的绝对 home_path 可能来自旧系统；以当前数据目录为准。
+    d["home_path"] = str(config.AGENTS_DIR / d["slug"])
     return d

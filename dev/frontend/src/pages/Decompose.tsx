@@ -5,6 +5,7 @@ interface Draft {
   id: string;
   goal: string;
   status: "pending" | "approved" | "rejected";
+  kind?: "tasks" | "workflow" | "role_suggestion";
   tree?: { title: string; children?: { title: string }[] };
   created_at: string;
 }
@@ -73,8 +74,10 @@ export function Decompose() {
       </div>
 
       <ul className="drafts">
-        {drafts.length === 0 && <li className="muted">暂无拆解 —— 输入目标后点「拆解」，产出任务树草案需你审批落板。</li>}
-        {drafts.map((d) => (
+        {drafts.filter((d) => d.kind !== "role_suggestion").length === 0 && (
+          <li className="muted">暂无拆解 —— 输入目标后点「拆解」，产出任务树草案需你审批落板。</li>
+        )}
+        {drafts.filter((d) => d.kind !== "role_suggestion").map((d) => (
           <li key={d.id}>
             <strong>{d.goal}</strong>{" "}
             <span className={`status status-${d.status === "pending" ? "in_review" : d.status === "approved" ? "done" : "closed"}`}>

@@ -67,6 +67,13 @@ def _mentions(conn: sqlite3.Connection) -> list[dict]:
             continue
         p = jloads(r["payload_json"], {})
         msg = str(p.get("message", ""))
+        if p.get("event") == "role_suggestion_rejected":
+            bound = conn.execute(
+                "SELECT 1 FROM task_assignees WHERE task_id=? AND joined_at > ? LIMIT 1",
+                (tid, r["created_at"]),
+            ).fetchone()
+            if bound:
+                continue  # human 已绑定角色，提示不再滞留
         if r["role_slug"] == "workflow" and "工作流全部步骤完成" in msg:
             tst = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
             if tst and tst["status"] in ("in_review", "done"):
@@ -100,15 +107,41 @@ def _mentions(conn: sqlite3.Connection) -> list[dict]:
 def _drafts(conn: sqlite3.Connection) -> list[dict]:
     out = []
     for r in conn.execute(
-        "SELECT id, goal, tree_json, created_by, source_task, created_at "
+        "SELECT id, goal, tree_json, created_by, source_task, created_at, kind "
         "FROM board_drafts WHERE status='pending' ORDER BY created_at"
     ).fetchall():
         tree = jloads(r["tree_json"], {})
-        n = len(tree.get("children") or [])
+        kind = r["kind"] or "tasks"
+        meta: dict = {"draft_kind": kind}
+        if kind == "role_suggestion":
+            roles = tree.get("suggested_roles") or tree.get("roles") or []
+            missing = tree.get("missing_capabilities") or []
+            detail = f"by {r['created_by']} · 建议 {len(roles)} 个角色"
+            if missing:
+                detail += " · 缺失能力：" + "、".join(str(x) for x in missing[:6])
+            meta.update({
+                "assessment": tree.get("assessment") or "",
+                "missing_capabilities": missing,
+                "suggested_roles": [
+                    {"slug": x.get("slug"), "display_name": x.get("display_name"),
+                     "description": x.get("description")}
+                    for x in roles if isinstance(x, dict)
+                ],
+            })
+            title = f"角色建议 — {r['goal']}"
+        elif kind == "workflow":
+            n = len(tree.get("steps") or [])
+            detail = f"by {r['created_by']} · {n} 个步骤 · 批准后按依赖自动派发"
+            meta["step_count"] = n
+            title = f"工作流草案 — {r['goal']}"
+        else:
+            n = len(tree.get("children") or [])
+            detail = f"by {r['created_by']} · {n} 个子任务 · 批准后按依赖自动派发"
+            title = f"工作流草案 — {r['goal']}"
         out.append({
-            "id": f"draft:{r['id']}", "kind": "draft", "title": f"工作流草案 — {r['goal']}",
-            "detail": f"by {r['created_by']} · {n} 个子任务 · 批准后按依赖自动派发",
-            "task_id": r["source_task"], "created_at": r["created_at"],
+            "id": f"draft:{r['id']}", "kind": "draft", "title": title,
+            "detail": detail, "task_id": r["source_task"], "created_at": r["created_at"],
+            "meta": meta,
         })
     return out
 

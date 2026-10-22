@@ -226,6 +226,11 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
                     f"完整未读用 `anvil inbox check {task_id}` 按需拉取（拉模式）。")
         parts.append(render.STEP_PROTOCOL)
         return "\n\n".join(p for p in parts if p)
+    # 规划 run（Cindy / planner）：不能因为任务已有 workflow 就被误判为回复。
+    from ..services import planning as planning_service
+    if prompt.startswith(planning_service.PLAN_MARKER):
+        body = prompt[len(planning_service.PLAN_MARKER):].strip()
+        return _prompt(task, _conversation_transcript(conn, run.get("task_id")), body)
     # 工作流任务上的非步骤 run = 被 @ 的会话回复（包括历史遗留无标记的 run），
     # 一律用 REPLY_PROTOCOL，避免误 claim/submit 任务。
     is_reply = prompt.startswith("[anvil:reply]")
