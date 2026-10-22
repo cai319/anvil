@@ -6,6 +6,7 @@ import json
 import pytest
 
 from anvil.db import connect
+from anvil.services import tasks as tasks_service
 from anvil.services import workflow as wf_service
 from anvil.util import ConflictError, now_iso
 
@@ -244,6 +245,30 @@ def test_large_flat_workflow_without_decision_is_rejected(conn):
     ]
     with pytest.raises(ConflictError, match="flat serial chain"):
         wf_service.create_workflow(conn, "T1", {"steps": steps})
+
+
+def test_delete_task_cascades_workflow(conn):
+    wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    assert conn.execute("SELECT COUNT(*) AS n FROM workflows").fetchone()["n"] == 1
+    tasks_service.delete(conn, "T1", force=True)
+    assert tasks_service.get(conn, "T1") is None
+    assert conn.execute("SELECT COUNT(*) AS n FROM workflows").fetchone()["n"] == 0
+    assert conn.execute("SELECT COUNT(*) AS n FROM workflow_steps").fetchone()["n"] == 0
+
+
+def test_startup_cleanup_removes_orphan_workflow(conn):
+    """历史 delete 遗留的 workflow 在启动清理时被移除。"""
+    from anvil.main import _cleanup_orphans
+
+    wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    # 模拟旧版本：直接删 task，未级联 workflow
+    conn.execute("DELETE FROM tasks WHERE id='T1'")
+    conn.commit()
+    _cleanup_orphans(conn)
+    assert conn.execute("SELECT COUNT(*) AS n FROM workflows").fetchone()["n"] == 0
+    assert conn.execute("SELECT COUNT(*) AS n FROM workflow_steps").fetchone()["n"] == 0
 
 
 DYNAMIC_WF = {

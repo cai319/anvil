@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 
 from .. import config
-from ..util import jdumps, jloads, new_id, now_iso
+from ..util import decode_child_output, jdumps, jloads, new_id, now_iso
 from . import roles as roles_service
 from . import tasks as tasks_service
 
@@ -219,7 +219,7 @@ def get_run_log(conn: sqlite3.Connection, run_id: str) -> dict:
         prefix = f"... (truncated, showing last {len(data)} bytes)\n".encode()
         data = prefix + data
     return {"run_id": run_id, "log_path": str(p), "exists": True,
-            "content": data.decode("utf-8", errors="replace")}
+            "content": decode_child_output(data)}
 
 
 def get_snapshot(conn: sqlite3.Connection, run_id: str) -> dict | None:

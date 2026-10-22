@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import subprocess
 import sys
 import time
 
@@ -205,15 +206,15 @@ for line in sys.stdin:
 '''
 
 
-def test_spawn_uses_utf8_pipes(env, monkeypatch):
-    """Windows 中文 prompt/输出必须走 UTF-8，且 stdin 不做 CRLF 转换。"""
+def test_spawn_uses_binary_utf8_pipes(env, monkeypatch):
+    """stdin 用 UTF-8 字节帧（LF），stdout 走二进制管道由 reader 统一解码。"""
     conn, mgr, fake, log = env
     captured: dict = {}
 
     class FakeProc:
         pid = 12345
         stdin = None
-        stdout = io.StringIO("")
+        stdout = io.BytesIO(b"")
 
         def poll(self):
             return 0
@@ -236,9 +237,12 @@ def test_spawn_uses_utf8_pipes(env, monkeypatch):
     mgr._spawn(conn, r, sys.executable, ["--version"], ["--version"], {},
                str(fake.parent), {})
 
-    assert captured["encoding"] == "utf-8"
-    assert captured["errors"] == "replace"
-    assert captured["text"] is True
+    assert "text" not in captured or captured["text"] is False
+    assert "encoding" not in captured
+    assert captured["stdin"] == subprocess.PIPE
+    assert captured["stdout"] == subprocess.PIPE
+    frame = frame_user_message("中文").encode("utf-8")
+    assert frame.endswith(b"\n") and b"\r\n" not in frame
 
 
 def test_reader_crash_is_logged_and_process_terminated(env):

@@ -54,6 +54,37 @@ def _graph_db_path(db_path: str) -> str:
     return str(p.with_name(p.stem + "-graph.db"))
 
 
+def _cleanup_orphans(conn) -> None:
+    """清理 task 已删除但遗留的 workflow/steps/runs/sessions。
+
+    历史版本 delete_task 未级联 workflow；任务删除后调度器仍会推进孤儿步骤
+    并创建 run。启动时做一次幂等清理，避免孤儿继续烧 token。
+    """
+    orphan_wfs = conn.execute(
+        "SELECT id FROM workflows WHERE task_id NOT IN (SELECT id FROM tasks)"
+    ).fetchall()
+    for wf in orphan_wfs:
+        conn.execute("DELETE FROM workflow_steps WHERE workflow_id=?", (wf["id"],))
+        conn.execute("DELETE FROM workflows WHERE id=?", (wf["id"],))
+    for table in ("task_deps", "task_assignees", "task_role_claims"):
+        conn.execute(f"DELETE FROM {table} WHERE task_id NOT IN (SELECT id FROM tasks)")
+    conn.execute(
+        "DELETE FROM task_deps WHERE depends_on NOT IN (SELECT id FROM tasks)")
+    conn.execute(
+        "DELETE FROM runs WHERE task_id IS NOT NULL "
+        "AND task_id NOT IN (SELECT id FROM tasks)")
+    conn.execute(
+        "DELETE FROM sessions WHERE task_id IS NOT NULL "
+        "AND task_id NOT IN (SELECT id FROM tasks)")
+    conn.execute(
+        "DELETE FROM activities WHERE task_id IS NOT NULL "
+        "AND task_id NOT IN (SELECT id FROM tasks)")
+    conn.execute(
+        "DELETE FROM role_inbox_cursors WHERE task_id IS NOT NULL "
+        "AND task_id NOT IN (SELECT id FROM tasks)")
+    conn.commit()
+
+
 class _LocalTokenMiddleware(BaseHTTPMiddleware):
     """本地 token 轻校验（design §1.4 / §10）：所有写操作必须带 X-Anvil-Session。
 
@@ -76,6 +107,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     _init = connect(path)
+    # 历史删除遗留的孤儿 workflow/run：启动时清理，避免调度器继续推进已删除任务。
+    _cleanup_orphans(_init)
     # 跨平台/迁移修复：数据库里的角色 home_path 可能来自旧系统（如 macOS → Windows）。
     roles_service.repair_home_paths(_init)
     _init.close()  # 建表后即关，之后每请求独立连接

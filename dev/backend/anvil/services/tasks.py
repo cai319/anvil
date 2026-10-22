@@ -578,11 +578,17 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
     if children and force:
         conn.execute("UPDATE tasks SET parent_id=NULL WHERE parent_id=?", (tid,))
 
+    # 任务删除时一并清掉其 workflow，避免孤儿步骤继续被调度器推进。
+    for wf in conn.execute("SELECT id FROM workflows WHERE task_id=?", (tid,)).fetchall():
+        conn.execute("DELETE FROM workflow_steps WHERE workflow_id=?", (wf["id"],))
+        conn.execute("DELETE FROM workflows WHERE id=?", (wf["id"],))
     conn.execute("DELETE FROM runs WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM task_deps WHERE task_id=? OR depends_on=?", (tid, tid))
     conn.execute("DELETE FROM task_assignees WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM task_role_claims WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM activities WHERE task_id=?", (tid,))
+    conn.execute("DELETE FROM sessions WHERE task_id=?", (tid,))
+    conn.execute("DELETE FROM role_inbox_cursors WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM audit WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM tasks WHERE id=?", (tid,))
     # 留一条删除审计（task_id 仍可读，便于知道这个 id 曾经存在）

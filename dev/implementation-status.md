@@ -210,6 +210,21 @@
 - 测试：`tests/test_task_concurrency.py`（空闲 claim 不占额度 / 活跃 run 占额度 /
   独占 claim 提示 / assignee 自动派发）。
 
+### 任务详情显示优化（2026-10-22）
+- 侧栏长描述默认折叠为 6 行；用 ResizeObserver 按实际溢出显示「展开全文 / 收起描述」，
+  展开后最高 42vh 并在描述区内滚动，避免把任务信息面板撑得过长。
+- 长任务标题支持任意位置换行，状态徽章可随标题换行。
+
+### Windows 子进程输出编码（2026-10-22）
+- **one-shot spawn**：Windows 下给子进程注入 `PYTHONIOENCODING=utf-8`、
+  `PYTHONUTF8=1`、`PYTHONLEGACYWINDOWSSTDIO=0`，减少 Python 工具按 GBK 输出。
+- **常驻会话**：stdin 以 UTF-8 字节帧写入（LF 换行）；stdout/stderr 改为二进制管道，
+  reader 用 `decode_child_output` 逐行按 UTF-8 → 本地编码 → GB18030/GBK 回退解码，
+  避免中文 Windows 的 GBK 输出被 UTF-8 解码成乱码。
+- **运行日志读取**：`get_run_log` 同样使用 `decode_child_output`，兼容 UTF-8 与 GBK
+  行混排的历史日志。
+- 测试：`tests/test_log_encoding.py`、`tests/test_daemon.py`。
+
 ### 主页「实时活动」重构（2026-10-19，owner 反馈）
 - 右栏改为两块：**实时会话**（仅活跃 run，含挂起等待；卡片可点击进 `/runs/{id}`）
   + **最近活动（30 分钟）**（过滤心跳/删除，最多 20 条）。

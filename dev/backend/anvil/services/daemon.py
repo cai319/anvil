@@ -26,7 +26,7 @@ from pathlib import Path
 
 from .. import config
 from ..db import open_conn
-from ..util import jdumps, jloads, now_iso
+from ..util import decode_child_output, jdumps, jloads, now_iso
 
 # 不泄漏给子进程的编排器会话变量（与 platform/darwin.py 保持一致）
 _SESSION_ENV_PREFIXES = ("CLAUDE_CODE_",)
@@ -39,6 +39,12 @@ def _clean_env(extra: dict[str, str]) -> dict[str, str]:
         if not k.startswith(_SESSION_ENV_PREFIXES) and k not in _SESSION_ENV_KEYS
     }
     merged.update(extra)
+    if os.name == "nt":
+        # Windows 默认按系统 ANSI/OEM 代码页输出；强制 Python 子进程使用 UTF-8，
+        # 避免角色/tool 输出的中文在 stdout 日志里变成乱码。
+        merged.setdefault("PYTHONIOENCODING", "utf-8")
+        merged.setdefault("PYTHONUTF8", "1")
+        merged.setdefault("PYTHONLEGACYWINDOWSSTDIO", "0")
     return merged
 
 
@@ -247,21 +253,16 @@ class DaemonManager:
         # ANVIL_TASK_ID 保留 spawn 时的任务 id（跨任务时以消息前缀为准），
         # 避免 agent 执行 `anvil inbox check` 等命令时 task_id 为空。
 
+        # 二进制管道：由 _reader_loop 统一按 UTF-8/本地编码回退解码，
+        # 避免 Windows text 模式按 GBK 解码或把 \n 改写成 \r\n。
         kwargs: dict = dict(
             cwd=cwd, env=merged_env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
-            bufsize=1,
+            stderr=subprocess.STDOUT,
         )
         try:
             proc = subprocess.Popen([executable, *args], start_new_session=True, **kwargs)
         except TypeError:  # Windows 不支持 start_new_session
             proc = subprocess.Popen([executable, *args], **kwargs)
-        # Windows 的 text 模式默认把 \n 写成 \r\n；stream-json 是逐行 JSON，统一成 LF。
-        try:
-            if proc.stdin:
-                proc.stdin.reconfigure(newline="\n")
-        except Exception:  # noqa: BLE001
-            pass
         r.proc = proc
         self._log(r.role, f"[anvil] spawn {executable} {' '.join(str(a) for a in args)}")
         r.session_id = sid
@@ -319,7 +320,7 @@ class DaemonManager:
         self._db_upsert(conn, r, status="busy")
         try:
             if r.proc and r.proc.stdin:
-                r.proc.stdin.write(frame_user_message(text))
+                r.proc.stdin.write(frame_user_message(text).encode("utf-8"))
                 r.proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
             self._log(r.role, f"[anvil] stdin write failed: {exc}")
@@ -330,8 +331,8 @@ class DaemonManager:
         proc = r.proc
         assert proc is not None and proc.stdout is not None
         try:
-            for line in proc.stdout:
-                line = line.strip()
+            for raw in proc.stdout:
+                line = decode_child_output(raw).strip()
                 if not line:
                     continue
                 if not line.startswith("{"):

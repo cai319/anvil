@@ -108,9 +108,12 @@ export function TaskDetail({ id }: { id: string }) {
   const [roles, setRoles] = useState<Role[]>([]);
   const [assignee, setAssignee] = useState("");
   const [comment, setComment] = useState("");
+  const [descOpen, setDescOpen] = useState(false);
+  const [descOverflow, setDescOverflow] = useState(false);
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const descRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [gone, setGone] = useState(false);
   const [drafts, setDrafts] = useState<BoardDraft[]>([]);
@@ -172,6 +175,8 @@ export function TaskDetail({ id }: { id: string }) {
 
   useEffect(() => {
     if (gone) return; // 任务已删除：不再刷新、不再订阅事件
+    setDescOpen(false);  // 切换任务时收起描述
+    setDescOverflow(false);
     refresh();
     refreshWorkflow();
     refreshChildren();
@@ -221,6 +226,17 @@ export function TaskDetail({ id }: { id: string }) {
     if (!el) return;
     pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   };
+
+  // 描述被 6 行截断时显示“展开全文”；用实际布局高度判断，避免按字符数误判。
+  useEffect(() => {
+    const el = descRef.current;
+    if (!el) return;
+    const check = () => setDescOverflow(el.scrollHeight > el.clientHeight + 1);
+    check();
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [task?.description, descOpen]);
 
   const filteredTimeline = timeline.filter((ev) => {
     if (tlKind === "all") return true;
@@ -770,7 +786,15 @@ export function TaskDetail({ id }: { id: string }) {
           {task.description && (
             <>
               <h3 className="side-h">描述</h3>
-              <p className="side-p">{task.description}</p>
+              <div ref={descRef} className={`side-desc ${descOpen ? "expanded" : ""}`}>
+                {task.description}
+              </div>
+              {(descOpen || descOverflow) && (
+                <button type="button" className="small side-desc-toggle"
+                  onClick={() => setDescOpen((v) => !v)}>
+                  {descOpen ? "收起描述" : "展开全文"}
+                </button>
+              )}
             </>
           )}
 
