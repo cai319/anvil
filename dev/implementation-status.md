@@ -163,6 +163,53 @@
   `tests/api/test_dispatch_onboarding.py`、`tests/api/test_onboarding_guard.py`、
   `tests/api/test_inbox.py`。
 
+### Workflow 切片闭环与实时进展（2026-10-22）
+- **问题**：大型项目（如代码审计）由模型自由生成时容易退化成一条串行长链，
+  缺少「执行 → 验证 → 修复 → 决策 → 下一片」的闭环。
+- **运行期切片（plan_slices + loop）**：Cindy 不预先切片，只产出工作流骨架——
+  一个 `kind=plan_slices` 的切片计划步骤 + 一个 `loop` 闭环模板。切片计划步骤由
+  具备项目理解的角色（审计负责人/架构师/tech lead）执行：盘点目录/模块/依赖/风险面后，
+  用 `anvil step plan <wf> <step> --file slices.json` 提交切片清单。
+- **服务端确定性展开**：`services.workflow.apply_slice_plan` 按 loop 模板为每片生成
+  `<plan>.<slice>.scope? → execute[...] → verify → fix → verify2 → decide`；
+  下一片依赖上一片 `decide`；`decide` 为 `kind=decision`，
+  `on_reject=[fix, verify2]`、`max_rework=2`，approve 后解锁下一片。
+  切片计划步骤的下游静态步骤（如最终报告）会自动改挂到最后一片 `decide`。
+- **兼容静态切片**：若 human 已给出明确切片清单，仍支持 `slices` 定义，
+  `_expand_slices` 直接展开（保留兼容）。
+- **结构校验**：`validate_definition` 在草案创建/落板时拒绝「≥6 步、≥2 角色、
+  既无 decision 也无 plan_slices」的串行工作流，返回可执行的修正要求；
+  planner 可据 409 立即重写。
+- **实时进展**：步骤 running/submitted/planned/approved/rework/rejected/failed 自动写入
+  任务会话（`activities.kind=step`），前端会话时间线新增「工作流」筛选；决策步骤 prompt
+  列出整片各步骤的 summary/acceptance，决策角色据此评估。
+- **图谱折叠**：动态切片不展开全部步骤；图谱用一个「↻ 切片循环」节点表达逻辑闭环，
+  节点实时显示总片数/总步数、已完成片数、当前片·阶段（本片 done/total）和进度条；
+  点击循环节点会展开**当前片的单一闭环流程**
+  （scope → execute → verify → fix → verify2 → decide，当前阶段高亮），
+  详情面板自动滚入视野，
+  并可在切片列表中切换查看任意一片；列表视图按「循环 → 切片 → 步骤」三级折叠，
+  默认只显示骨架。
+- **规划协议**：大型/审计类任务必须用 `plan_slices + loop`；切片由执行角色在运行时
+  基于对项目的理解完成；`execute` 可拆细（inventory / static-audit / dataflow / poc），
+  每步必须 comment 进展、mention 交接、发现问题立即升级。
+- 测试：`tests/test_workflow.py`、`tests/api/test_workflow_api.py`、
+  `tests/test_planning.py`。
+
+### 子任务 claim / 并发修复（2026-10-22）
+- **并发闸门按活跃 run 计数**：只统计 `created/projecting/running` 的 run；
+  空闲 `claim`（in_progress 但没有 run）和 `suspended/submitted/reviewing` 会话不再占用
+  `max_parallel`，避免角色持有子任务后把自己的并发额度占满、无法被调度。
+- **子任务显式指派**：`anvil task create` 新增 `--assignee <角色>` / `--assignees a,b`；
+  `_assigned_roles` 在无 team assignees 时也会把单负责人 `assignee` 纳入自动派发。
+- **claim 冲突可执行提示**：单负责人任务被其他角色独占时，409 直接说明
+  “ask <owner> to unclaim or add you as a team assignee”，不再只返回笼统的 not claimable。
+- **协议约束**：`PROTOCOL` / `STEP_PROTOCOL` / `REPLY_PROTOCOL` 均要求
+  拆给别人的子任务用 `--assignee` 指定执行者，创建者不要 claim；已 claim 需先
+  `anvil task unclaim` 再 @ 对方认领。
+- 测试：`tests/test_task_concurrency.py`（空闲 claim 不占额度 / 活跃 run 占额度 /
+  独占 claim 提示 / assignee 自动派发）。
+
 ### 主页「实时活动」重构（2026-10-19，owner 反馈）
 - 右栏改为两块：**实时会话**（仅活跃 run，含挂起等待；卡片可点击进 `/runs/{id}`）
   + **最近活动（30 分钟）**（过滤心跳/删除，最多 20 条）。
@@ -211,7 +258,7 @@
 ### 任务大厅 UI 重构（2026-10-19，参考 multica/raft）
 - **「＋ 新建任务」弹窗**：任务名称、任务描述、参与成员多选（可滚动列表，显示角色定位）；
   创建后直达任务会话页。大厅工具栏不再内联勾选角色。
-- **任务详情页签**：`会话`（聊天室式交互时间线 + 以任意身份评论/@提及）｜`子任务`。
+- **任务详情页签**：`会话`（聊天室式交互时间线 + 以 human 身份评论/@提及；输入 @ 弹出角色联想）｜`子任务`。
 - **子任务页签**：① Cindy 落板的子任务树（状态 + 直达）；② 每个参与角色的当前会话状态
   （待办/进行中/待确认/完成/关闭）+ 最近 run；③ 点击角色行展开「执行内容（日志）」与
   「历史上下文（时间线）」，并可跳转完整 run 页面。SSE 实时刷新。

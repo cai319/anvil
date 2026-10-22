@@ -63,6 +63,25 @@ def test_plan_marker_avoids_reply_protocol(tmp_path):
     )
     assert "请基于 Roster 规划" in out
     assert "只做讨论与回复" not in out
+    # planner 不应被通用 PROTOCOL 的「必须 claim」覆盖（PLANNING_PROTOCOL 明确禁止 claim）
+    assert "第一步必须执行 `anvil task claim" not in out
+
+
+def test_planning_protocol_uses_runtime_slicing():
+    from anvil.graph.render import PLANNING_PROTOCOL
+
+    assert "不要由你预先切片" in PLANNING_PROTOCOL
+    assert "plan_slices" in PLANNING_PROTOCOL
+    assert "anvil step plan" in PLANNING_PROTOCOL
+    assert "loop" in PLANNING_PROTOCOL
+
+
+def test_task_size_block_flags_audit_and_wide_scope():
+    assert "plan_slices + loop" in planning._task_size_block(
+        {"title": "大型项目代码安全审计", "scope_paths": []})
+    assert "plan_slices + loop" in planning._task_size_block(
+        {"title": "普通任务", "scope_paths": ["a/**", "b/**", "c/**"]})
+    assert planning._task_size_block({"title": "普通任务"}) == ""
 
 
 def test_new_workflow_supersedes_old_running(tmp_path):

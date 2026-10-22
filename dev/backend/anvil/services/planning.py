@@ -16,6 +16,7 @@ from ..util import now_iso
 from . import roles as roles_service
 from . import runs as runs_service
 from . import runtime as runtime_service
+from . import tasks as tasks_service
 
 PLAN_MARKER = "[anvil:plan]"
 
@@ -109,6 +110,34 @@ def render_roster(conn: sqlite3.Connection, task_id: str, roster: list[dict]) ->
     return "\n".join(lines)
 
 
+def _task_size_block(task: dict) -> str:
+    """给 planner 的规模提示：帮助它判断是否需要按切片闭环组织。"""
+    parts: list[str] = []
+    if task.get("type"):
+        parts.append(f"- type: {task['type']}")
+    if task.get("tags"):
+        parts.append("- tags: " + "、".join(str(x) for x in task["tags"]))
+    if task.get("repo"):
+        parts.append(f"- repo: {task['repo']}")
+    if task.get("scope_paths"):
+        parts.append("- scope_paths: " + "、".join(str(x) for x in task["scope_paths"]))
+    if task.get("acceptance"):
+        parts.append(f"- 验收标准数量: {len(task['acceptance'])}")
+    hint = " ".join(str(x) for x in (
+        task.get("title"), task.get("description"), task.get("type"),
+        *(task.get("tags") or []),
+    ) if x).lower()
+    wide_scope = len(task.get("scope_paths") or []) >= 3
+    audit_like = any(k in hint for k in (
+        "审计", "安全", "渗透", "代码审查", "review", "audit", "security"))
+    if wide_scope or audit_like:
+        parts.append(
+            "- 规模提示：scope 较宽或审计/审查类任务，必须用 plan_slices + loop 组织："
+            "由执行角色在运行时盘点项目后切片，服务端按 loop 模板为每片生成"
+            "execute → verify → fix → verify2 → decide 小闭环。不要由规划者预先切分。")
+    return "\n".join(parts)
+
+
 def start_planner_run(conn: sqlite3.Connection, db_path: str, orchestrator,
                       task_id: str, planner: str, assignees: list[str] | None = None,
                       extra_constraint: str = "",
@@ -144,6 +173,10 @@ def start_planner_run(conn: sqlite3.Connection, db_path: str, orchestrator,
         + "\n\n## 参与角色（Roster）\n"
         + render_roster(conn, task_id, roster)
     )
+    task = tasks_service.get(conn, task_id) or {}
+    size_block = _task_size_block(task)
+    if size_block:
+        prompt += "\n\n## 任务规模信息（用于判断是否需要切片）\n" + size_block
     if extra_constraint.strip():
         prompt += "\n\n## 规划约束（必须遵守）\n" + extra_constraint.strip()
     run = runs_service.create_run(conn, planner, task_id, prompt=prompt)

@@ -1,11 +1,13 @@
 """Workflow 执行引擎：依赖推进、同角色串行、gate 人工审核、全部完成进入评审。"""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from anvil.db import connect
 from anvil.services import workflow as wf_service
-from anvil.util import now_iso
+from anvil.util import ConflictError, now_iso
 
 pytest.importorskip("anvil.graph")
 
@@ -131,3 +133,288 @@ def test_fail_step_records_attribution(conn):
     step = next(s for s in wf_service.get_workflow(conn, wf["id"])["steps"] if s["step_id"] == "S1")
     assert step["status"] == "failed"
     assert step["failure_reason"] == "environment"
+
+
+# ---- 切片闭环：scope → execute[...] → verify → fix → verify2 → decide ----
+
+SLICED = {
+    "feedback_rules": ["审计风险升级 @human"],
+    "slices": [
+        {
+            "id": "A",
+            "title": "认证模块",
+            "execute_role": "auditor",
+            "verify_role": "reviewer",
+            "fix_role": "developer",
+            "decision_role": "lead",
+            "execute_steps": [
+                {"id": "static", "title": "静态审计", "acceptance": ["覆盖入口"]},
+                {"id": "poc", "title": "PoC 复现", "acceptance": ["可复现"]},
+            ],
+            "verify": {"acceptance": ["独立复现"]},
+        },
+        {
+            "id": "B",
+            "title": "支付模块",
+            "execute_role": "auditor",
+            "verify_role": "reviewer",
+            "fix_role": "developer",
+            "decision_role": "lead",
+        },
+    ],
+}
+
+
+def _step(wf: dict, sid: str) -> dict:
+    return next(s for s in wf["steps"] if s["step_id"] == sid)
+
+
+def _finish(conn, wf: dict, sid: str, summary: str = "done") -> dict:
+    step = _step(wf_service.get_workflow(conn, wf["id"]), sid)
+    return wf_service.submit_step(conn, wf["id"], sid, step["role_slug"], summary)
+
+
+def test_slices_expand_to_per_slice_loop(conn):
+    wf = wf_service.create_workflow(conn, "T1", SLICED)
+    assert [s["step_id"] for s in wf["steps"]] == [
+        "A.scope", "A.static", "A.poc", "A.verify", "A.fix", "A.verify2", "A.decide",
+        "B.scope", "B.execute", "B.verify", "B.fix", "B.verify2", "B.decide",
+    ]
+    assert _step(wf, "A.poc")["depends_on"] == ["A.static"]
+    assert _step(wf, "A.verify")["depends_on"] == ["A.static", "A.poc"]
+    assert _step(wf, "A.decide")["kind"] == "decision"
+    assert _step(wf, "A.decide")["role_slug"] == "lead"
+    assert _step(wf, "A.decide")["on_reject"] == ["A.fix", "A.verify2"]
+    assert _step(wf, "A.decide")["max_rework"] == 2
+    # 下一片只在上一片决策之后开工
+    assert _step(wf, "B.scope")["depends_on"] == ["A.decide"]
+
+
+def test_decision_reject_loops_fix_and_verify2_then_unlocks_next_slice(conn):
+    wf = wf_service.create_workflow(conn, "T1", SLICED)
+    assert _advance(conn, wf) == ["A.scope"]
+    started: list[str] = []
+    for sid in ("A.scope", "A.static", "A.poc", "A.verify", "A.fix", "A.verify2"):
+        wf = _finish(conn, wf, sid)
+        started = _advance(conn, wf)
+    assert started == ["A.decide"]
+
+    # 决策打回：fix/verify2/decide 回到 pending，计数 +1
+    wf = wf_service.decide_step(conn, wf["id"], "A.decide", "lead", False, "证据不足")
+    assert _step(wf, "A.fix")["status"] == "pending"
+    assert _step(wf, "A.verify2")["status"] == "pending"
+    assert _step(wf, "A.decide")["status"] == "pending"
+    assert _step(wf, "A.decide")["rework_count"] == 1
+
+    # 返工闭环重跑 fix → verify2 → decide
+    assert _advance(conn, wf) == ["A.fix"]
+    wf = _finish(conn, wf, "A.fix")
+    assert _advance(conn, wf) == ["A.verify2"]
+    wf = _finish(conn, wf, "A.verify2")
+    assert _advance(conn, wf) == ["A.decide"]
+
+    # 通过后下一片才解锁
+    wf = wf_service.decide_step(conn, wf["id"], "A.decide", "lead", True, "通过")
+    assert _advance(conn, wf) == ["B.scope"]
+    assert _step(wf_service.get_workflow(conn, wf["id"]), "B.scope")["status"] == "running"
+
+
+def test_step_transitions_publish_activities(conn):
+    wf = wf_service.create_workflow(conn, "T1", SLICED)
+    _advance(conn, wf)
+    payloads = [json.loads(r["payload_json"]) for r in conn.execute(
+        "SELECT payload_json FROM activities WHERE task_id='T1' AND kind='step' ORDER BY id"
+    ).fetchall()]
+    assert any(p["step"] == "A.scope" and p["status"] == "running" for p in payloads)
+
+    wf = _finish(conn, wf, "A.scope", "范围确认")
+    payloads = [json.loads(r["payload_json"]) for r in conn.execute(
+        "SELECT payload_json FROM activities WHERE task_id='T1' AND kind='step' ORDER BY id"
+    ).fetchall()]
+    assert any(p["step"] == "A.scope" and p["status"] == "approved"
+               and p.get("summary") == "范围确认" for p in payloads)
+
+
+def test_large_flat_workflow_without_decision_is_rejected(conn):
+    steps = [
+        {"id": f"S{i}", "title": f"step {i}",
+         "role": ("pm", "developer", "tester")[i % 3],
+         "depends_on": [f"S{i - 1}"] if i > 1 else []}
+        for i in range(1, 9)
+    ]
+    with pytest.raises(ConflictError, match="flat serial chain"):
+        wf_service.create_workflow(conn, "T1", {"steps": steps})
+
+
+DYNAMIC_WF = {
+    "feedback_rules": ["P0 立即 @human"],
+    "steps": [
+        {"id": "P1", "title": "项目盘点与切片", "role": "lead", "kind": "plan_slices",
+         "instructions": "盘点项目并切片", "acceptance": ["切片可独立闭环"]},
+        {"id": "F1", "title": "最终报告", "role": "lead", "depends_on": ["P1"],
+         "instructions": "汇总所有切片结论", "acceptance": ["报告完整"]},
+    ],
+    "loop": {
+        "from": "P1",
+        "execute": {"role": "auditor", "instructions": "执行审计"},
+        "verify": {"role": "reviewer", "instructions": "独立复核"},
+        "fix": {"role": "developer", "instructions": "修复与补证"},
+        "verify2": {"role": "reviewer", "instructions": "复验"},
+        "decide": {"role": "lead", "instructions": "切片决策", "max_rework": 2},
+    },
+}
+
+DYNAMIC_PLAN = {
+    "rationale": "按模块切片",
+    "slices": [
+        {"id": "auth", "title": "认证模块", "scope_paths": ["src/auth/**"],
+         "acceptance": ["认证入口覆盖"],
+         "execute_steps": [
+             {"id": "static", "title": "静态审计", "acceptance": ["覆盖入口"]},
+             {"id": "poc", "title": "PoC 复现", "acceptance": ["可复现"]},
+         ]},
+        {"id": "pay", "title": "支付模块", "scope_paths": ["src/pay/**"]},
+    ],
+}
+
+
+def test_dynamic_slice_plan_expands_loops_and_rewires_final_step(conn):
+    wf = wf_service.create_workflow(conn, "T1", DYNAMIC_WF)
+    assert _advance(conn, wf) == ["P1"]  # 先跑切片计划
+
+    wf = wf_service.apply_slice_plan(conn, wf["id"], "P1", "lead", DYNAMIC_PLAN)
+    by_id = {s["step_id"]: s for s in wf["steps"]}
+    # 静态步骤先落库，切片步骤在计划提交后追加（rowid 顺序）
+    assert [s["step_id"] for s in wf["steps"]] == [
+        "P1", "F1",
+        "P1.auth.static", "P1.auth.poc", "P1.auth.verify", "P1.auth.fix",
+        "P1.auth.verify2", "P1.auth.decide",
+        "P1.pay.execute", "P1.pay.verify", "P1.pay.fix",
+        "P1.pay.verify2", "P1.pay.decide",
+    ]
+    assert by_id["P1"]["status"] == "approved"
+    assert "2 片" in by_id["P1"]["summary"]
+    assert by_id["P1.auth.verify"]["depends_on"] == ["P1.auth.static", "P1.auth.poc"]
+    assert by_id["P1.auth.decide"]["kind"] == "decision"
+    assert by_id["P1.auth.decide"]["on_reject"] == ["P1.auth.fix", "P1.auth.verify2"]
+    assert by_id["P1.auth.decide"]["source_step_id"] == "P1"
+    assert by_id["P1.auth.decide"]["slice_key"] == "auth"
+    # 下一片在上一片 decide 之后；最终步骤改挂到最后一片 decide
+    assert by_id["P1.pay.execute"]["depends_on"] == ["P1.auth.decide"]
+    assert by_id["F1"]["depends_on"] == ["P1.pay.decide"]
+    # 决策 prompt 汇总整片（按 slice_key 而非 plan 步骤前缀）
+    prompt = wf_service.step_prompt(
+        wf, by_id["P1.auth.decide"], {"title": "审计", "description": "大型项目"})
+    assert "所属切片 auth" in prompt
+    assert "P1.auth.static" in prompt and "P1.auth.verify2" in prompt
+    assert "P1.pay" not in prompt
+    assert _advance(conn, wf) == ["P1.auth.static"]
+
+
+def test_dynamic_slice_loop_reject_then_next_slice(conn):
+    wf = wf_service.create_workflow(conn, "T1", DYNAMIC_WF)
+    _advance(conn, wf)
+    wf = wf_service.apply_slice_plan(conn, wf["id"], "P1", "lead", DYNAMIC_PLAN)
+    assert _advance(conn, wf) == ["P1.auth.static"]
+
+    for sid in ("P1.auth.static", "P1.auth.poc", "P1.auth.verify",
+                "P1.auth.fix", "P1.auth.verify2"):
+        wf = _finish(conn, wf, sid)
+        _advance(conn, wf)
+    assert _step(wf_service.get_workflow(conn, wf["id"]), "P1.auth.decide")["status"] == "running"
+
+    wf = wf_service.decide_step(conn, wf["id"], "P1.auth.decide", "lead", False, "证据不足")
+    assert _step(wf, "P1.auth.fix")["status"] == "pending"
+    assert _step(wf, "P1.auth.verify2")["status"] == "pending"
+    assert _step(wf, "P1.auth.decide")["rework_count"] == 1
+
+    assert _advance(conn, wf) == ["P1.auth.fix"]
+    wf = _finish(conn, wf, "P1.auth.fix")
+    assert _advance(conn, wf) == ["P1.auth.verify2"]
+    wf = _finish(conn, wf, "P1.auth.verify2")
+    assert _advance(conn, wf) == ["P1.auth.decide"]
+    wf = wf_service.decide_step(conn, wf["id"], "P1.auth.decide", "lead", True, "通过")
+    assert _advance(conn, wf) == ["P1.pay.execute"]
+    # 最终报告仍要等最后一片决策通过
+    assert _step(wf_service.get_workflow(conn, wf["id"]), "F1")["status"] == "pending"
+
+
+def test_dynamic_slice_plan_is_idempotent(conn):
+    wf = wf_service.create_workflow(conn, "T1", DYNAMIC_WF)
+    _advance(conn, wf)
+    first = wf_service.apply_slice_plan(conn, wf["id"], "P1", "lead", DYNAMIC_PLAN)
+    second = wf_service.apply_slice_plan(conn, wf["id"], "P1", "lead", DYNAMIC_PLAN)
+    assert len(first["steps"]) == len(second["steps"])
+
+
+def test_dynamic_plan_with_zero_slices_unblocks_final_step(conn):
+    wf = wf_service.create_workflow(conn, "T1", DYNAMIC_WF)
+    _advance(conn, wf)
+    wf = wf_service.apply_slice_plan(
+        conn, wf["id"], "P1", "lead", {"slices": [], "rationale": "项目为空"})
+    assert _step(wf, "P1")["status"] == "approved"
+    assert _step(wf, "F1")["depends_on"] == []
+    assert _advance(conn, wf) == ["F1"]
+
+
+def test_dynamic_slice_plan_rejects_conflicting_roles(conn):
+    wf = wf_service.create_workflow(conn, "T1", DYNAMIC_WF)
+    _advance(conn, wf)
+    bad = {"slices": [{"id": "auth", "title": "认证", "execute_role": "auditor",
+                       "verify_role": "auditor"}]}
+    with pytest.raises(ConflictError, match="verify role must differ"):
+        wf_service.apply_slice_plan(conn, wf["id"], "P1", "lead", bad)
+    # 校验失败不应把计划步骤标记完成，角色可修正后重试
+    step = _step(wf_service.get_workflow(conn, wf["id"]), "P1")
+    assert step["status"] == "running"
+
+
+def test_plan_slices_prompt_uses_step_plan(conn):
+    wf = wf_service.create_workflow(conn, "T1", DYNAMIC_WF)
+    prompt = wf_service.step_prompt(
+        wf, _step(wf, "P1"), {"title": "审计", "description": "大型项目"})
+    assert "切片计划职责" in prompt
+    assert "anvil step plan" in prompt
+    assert "execute → verify → fix → verify2 → decide" in prompt
+
+
+def test_dynamic_slice_plan_rejects_unknown_dependency(conn):
+    wf = wf_service.create_workflow(conn, "T1", DYNAMIC_WF)
+    _advance(conn, wf)
+    bad = {"slices": [{"id": "auth", "title": "认证", "execute_steps": [
+        {"id": "static", "title": "静态审计", "depends_on": ["missing"]}]}]}
+    with pytest.raises(ConflictError, match="unknown dependency"):
+        wf_service.apply_slice_plan(conn, wf["id"], "P1", "lead", bad)
+    assert _step(wf_service.get_workflow(conn, wf["id"]), "P1")["status"] == "running"
+
+
+def test_plan_slices_requires_loop_template(conn):
+    definition = {"steps": [{"id": "P1", "title": "切片", "role": "lead",
+                             "kind": "plan_slices"}]}
+    with pytest.raises(ConflictError, match="requires a top-level `loop`"):
+        wf_service.create_workflow(conn, "T1", definition)
+
+
+def test_plan_slices_step_cannot_submit(conn):
+    wf = wf_service.create_workflow(conn, "T1", DYNAMIC_WF)
+    _advance(conn, wf)
+    with pytest.raises(ConflictError, match="use `anvil step plan`"):
+        wf_service.submit_step(conn, wf["id"], "P1", "lead", "done")
+
+
+def test_decision_prompt_lists_whole_slice_outputs(conn):
+    wf = wf_service.create_workflow(conn, "T1", SLICED)
+    for sid, summary in (("A.scope", "范围已确认"), ("A.static", "静态审计完成"),
+                         ("A.poc", "PoC 已复现")):
+        conn.execute(
+            "UPDATE workflow_steps SET status='approved', summary=? "
+            "WHERE workflow_id=? AND step_id=?", (summary, wf["id"], sid))
+    conn.commit()
+    wf = wf_service.get_workflow(conn, wf["id"])
+    prompt = wf_service.step_prompt(wf, _step(wf, "A.decide"),
+                                    {"title": "代码审计", "description": "审计大型项目"})
+    for sid, summary in (("A.scope", "范围已确认"), ("A.static", "静态审计完成"),
+                         ("A.poc", "PoC 已复现")):
+        assert sid in prompt
+        assert summary in prompt
+    assert "anvil step decide" in prompt

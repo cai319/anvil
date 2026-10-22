@@ -95,3 +95,159 @@ async def test_mention_on_workflow_creates_reply_run(client, seeded):
              and (x.get("prompt") or "").startswith("[anvil:reply]")]
     assert len(reply) == 1
     assert "接口缺少 moveId" in reply[0]["prompt"]
+
+
+DECISION_TREE = {
+    "steps": [
+        {"id": "S1", "title": "修复", "role": "developer"},
+        {"id": "S2", "title": "复验", "role": "pm", "depends_on": ["S1"]},
+        {"id": "D", "kind": "decision", "title": "决策", "role": "developer",
+         "depends_on": ["S2"], "on_reject": ["S1", "S2"]},
+    ],
+}
+
+
+async def test_decision_step_api_approve_and_reject(client, seeded, app):
+    await client.post("/api/v1/tasks", json=task_payload(
+        id="T-DEC", assignees=["pm", "developer"]), headers=auth_headers())
+    r = await client.post("/api/v1/board/drafts", headers=auth_headers("pm"), json={
+        "goal": "决策", "source_task": "T-DEC", "kind": "workflow", "tree": DECISION_TREE})
+    assert r.status_code == 201, r.text
+    did = r.json()["id"]
+    await client.post("/api/v1/board/drafts/approve", headers=human_headers(),
+                      json={"draft_ids": [did]})
+    wid = (await client.get("/api/v1/tasks/T-DEC/workflow",
+                            headers=auth_headers())).json()["id"]
+
+    conn = open_conn(app.state.db_path)
+    conn.execute("UPDATE workflow_steps SET status='approved' WHERE workflow_id=? "
+                 "AND step_id IN ('S1','S2')", (wid,))
+    conn.execute("UPDATE workflow_steps SET status='running' "
+                 "WHERE workflow_id=? AND step_id='D'", (wid,))
+    conn.commit()
+    conn.close()
+
+    r = await client.post(f"/api/v1/workflows/{wid}/steps/D/decide",
+                          headers=auth_headers("developer"),
+                          json={"approve": False, "feedback": "证据不足"})
+    assert r.status_code == 200, r.text
+    steps = {s["step_id"]: s for s in r.json()["steps"]}
+    assert steps["S1"]["status"] == "pending"
+    assert steps["S2"]["status"] == "pending"
+    assert steps["D"]["status"] == "pending"
+    assert steps["D"]["rework_count"] == 1
+
+    conn = open_conn(app.state.db_path)
+    conn.execute("UPDATE workflow_steps SET status='approved' WHERE workflow_id=? "
+                 "AND step_id IN ('S1','S2')", (wid,))
+    conn.execute("UPDATE workflow_steps SET status='running' "
+                 "WHERE workflow_id=? AND step_id='D'", (wid,))
+    conn.commit()
+    conn.close()
+
+    r = await client.post(f"/api/v1/workflows/{wid}/steps/D/decide",
+                          headers=auth_headers("developer"),
+                          json={"approve": True, "feedback": "通过"})
+    assert r.status_code == 200, r.text
+    steps = {s["step_id"]: s for s in r.json()["steps"]}
+    assert steps["D"]["status"] == "approved"
+
+
+DYNAMIC_TREE = {
+    "steps": [
+        {"id": "P1", "title": "项目盘点与切片", "role": "pm", "kind": "plan_slices",
+         "instructions": "盘点并切片"},
+        {"id": "F1", "title": "最终报告", "role": "pm", "depends_on": ["P1"],
+         "instructions": "汇总"},
+    ],
+    "loop": {
+        "from": "P1",
+        "execute": {"role": "developer"},
+        "verify": {"role": "pm"},
+        "fix": {"role": "developer"},
+        "verify2": {"role": "pm"},
+        "decide": {"role": "pm", "max_rework": 2},
+    },
+}
+
+
+async def test_plan_slices_api_expands_runtime_plan(client, seeded, app):
+    await client.post("/api/v1/tasks", json=task_payload(
+        id="T-DYN", assignees=["pm", "developer"]), headers=auth_headers())
+    r = await client.post("/api/v1/board/drafts", headers=auth_headers("pm"), json={
+        "goal": "运行时切片", "source_task": "T-DYN", "kind": "workflow",
+        "tree": DYNAMIC_TREE})
+    assert r.status_code == 201, r.text
+    did = r.json()["id"]
+    await client.post("/api/v1/board/drafts/approve", headers=human_headers(),
+                      json={"draft_ids": [did]})
+    wid = (await client.get("/api/v1/tasks/T-DYN/workflow",
+                            headers=auth_headers())).json()["id"]
+
+    conn = open_conn(app.state.db_path)
+    conn.execute("UPDATE workflow_steps SET status='running' "
+                 "WHERE workflow_id=? AND step_id='P1'", (wid,))
+    conn.commit()
+    conn.close()
+
+    plan = {"rationale": "按模块", "slices": [
+        {"id": "auth", "title": "认证模块",
+         "execute_steps": [{"id": "static", "title": "静态审计"}]},
+        {"id": "pay", "title": "支付模块"},
+    ]}
+    r = await client.post(f"/api/v1/workflows/{wid}/steps/P1/plan",
+                          headers=auth_headers("pm"), json=plan)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    steps = {s["step_id"]: s for s in body["steps"]}
+    assert steps["P1"]["status"] == "approved"
+    assert steps["F1"]["depends_on"] == ["P1.pay.decide"]
+    assert steps["P1.auth.decide"]["kind"] == "decision"
+    assert steps["P1.auth.decide"]["slice_key"] == "auth"
+
+    # 幂等：重复提交不会重复生成
+    r = await client.post(f"/api/v1/workflows/{wid}/steps/P1/plan",
+                          headers=auth_headers("pm"), json=plan)
+    assert r.status_code == 200, r.text
+    assert len(r.json()["steps"]) == len(body["steps"])
+
+
+SLICED_TREE = {
+    "feedback_rules": ["审计风险升级 @human"],
+    "slices": [{
+        "id": "A",
+        "title": "认证模块审计",
+        "execute_role": "pm",
+        "verify_role": "developer",
+        "fix_role": "pm",
+        "decision_role": "developer",
+        "execute_steps": [
+            {"id": "static", "title": "静态审计", "acceptance": ["覆盖认证入口"]},
+        ],
+    }],
+}
+
+
+async def test_slice_draft_expands_to_loop_and_serial_chain_is_rejected(client, seeded):
+    await client.post("/api/v1/tasks", json=task_payload(
+        id="T-SLICE", assignees=["pm", "developer"]), headers=auth_headers())
+    r = await client.post("/api/v1/board/drafts", headers=auth_headers("pm"), json={
+        "goal": "代码审计", "source_task": "T-SLICE", "kind": "workflow",
+        "tree": SLICED_TREE})
+    assert r.status_code == 201, r.text
+    steps = r.json()["tree"]["steps"]
+    assert [s["id"] for s in steps] == [
+        "A.scope", "A.static", "A.verify", "A.fix", "A.verify2", "A.decide",
+    ]
+    assert steps[-1]["kind"] == "decision"
+    assert steps[-1]["on_reject"] == ["A.fix", "A.verify2"]
+
+    serial = {"steps": [
+        {"id": f"S{i}", "title": f"step {i}", "role": ("pm", "developer")[i % 2],
+         "depends_on": [f"S{i - 1}"] if i > 1 else []}
+        for i in range(1, 9)
+    ]}
+    r = await client.post("/api/v1/board/drafts", headers=auth_headers("pm"), json={
+        "goal": "串行草案", "source_task": "T-SLICE", "kind": "workflow", "tree": serial})
+    assert r.status_code == 409, r.text
+    assert "flat serial chain" in r.text

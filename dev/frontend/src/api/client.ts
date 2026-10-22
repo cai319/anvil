@@ -430,6 +430,14 @@ export interface WorkflowStep {
   gate: boolean;
   reviewer: string | null;
   contract: string | null;
+  kind?: "task" | "decision" | "plan_slices";
+  on_reject?: string[];
+  max_rework?: number;
+  rework_count?: number;
+  feedback?: string | null;
+  source_step_id?: string | null;
+  slice_key?: string | null;
+  plan_json?: string | null;
   failure_reason: string | null;
   status: "pending" | "running" | "submitted" | "approved" | "rejected" | "failed" | "skipped";
   run_id: string | null;
@@ -477,12 +485,14 @@ export interface BoardDraft {
       id?: string;
       title?: string;
       role?: string;
+      kind?: string;
       depends_on?: string[];
       acceptance?: string[];
       gate?: boolean;
       reviewer?: string;
       contract?: string;
     }[];
+    loop?: Record<string, unknown>;
     children?: {
       id?: string;
       title?: string;

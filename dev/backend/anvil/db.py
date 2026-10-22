@@ -99,6 +99,14 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     failure_reason   TEXT,                          -- 失败归因（spec/contract/test/env/agent）
     last_nudge_at    TEXT,                          -- 停滞看门狗：上次唤醒时间
     nudge_count      INTEGER NOT NULL DEFAULT 0,    -- 停滞唤醒次数（超过上限判失败）
+    kind             TEXT NOT NULL DEFAULT 'task',   -- task | decision | plan_slices
+    on_reject_json   TEXT NOT NULL DEFAULT '[]',     -- decision 驳回时需重做的步骤
+    max_rework       INTEGER NOT NULL DEFAULT 2,
+    rework_count     INTEGER NOT NULL DEFAULT 0,
+    feedback         TEXT,                           -- 最近决策/评审反馈
+    source_step_id   TEXT,                           -- 动态切片：生成该步骤的 plan_slices 步骤
+    slice_key        TEXT,                           -- 动态切片：所属切片 id
+    plan_json        TEXT,                           -- plan_slices：切片计划原文
     status           TEXT NOT NULL DEFAULT 'pending',
     -- pending|running|submitted|approved|rejected|failed|skipped
     run_id           TEXT,
@@ -521,6 +529,20 @@ def init_schema(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
     for col in ("contract TEXT", "failure_reason TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE workflow_steps ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    for col in (
+        "kind TEXT NOT NULL DEFAULT 'task'",
+        "on_reject_json TEXT NOT NULL DEFAULT '[]'",
+        "max_rework INTEGER NOT NULL DEFAULT 2",
+        "rework_count INTEGER NOT NULL DEFAULT 0",
+        "feedback TEXT",
+        "source_step_id TEXT",
+        "slice_key TEXT",
+        "plan_json TEXT",
+    ):
         try:
             conn.execute(f"ALTER TABLE workflow_steps ADD COLUMN {col}")
         except sqlite3.OperationalError:

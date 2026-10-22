@@ -92,6 +92,12 @@ def create_draft(conn: sqlite3.Connection, goal: str, tree: dict,
         raise ConflictError(f"unsupported draft kind: {kind}")
     if kind in ("workflow", "role_suggestion") and not source_task:
         raise ConflictError(f"{kind} draft requires source_task")
+    if kind == "workflow":
+        # 把 Cindy 的 slices 确定性展开成每片闭环，并在草案阶段就拦下
+        # 「大型多角色但无决策点」的串行工作流，让 planner 当场修正。
+        from . import workflow as workflow_service
+        tree = workflow_service.normalize_definition(conn, tree)
+        workflow_service.validate_definition(conn, tree)
     did = new_id()
     conn.execute(
         "INSERT INTO board_drafts (id, workspace_id, goal, tree_json, status, created_by, created_at, source_task, kind) "

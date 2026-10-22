@@ -176,10 +176,12 @@ def _conversation_transcript(conn: sqlite3.Connection, task_id: str | None,
     return _clip_text("\n".join(lines), max_chars)
 
 
-def _prompt(task: dict | None, transcript: str = "", extra: str = "") -> str:
-    # extra（规划协议 / reminder 提示等）始终注入：即使有任务正文也不能被挤掉
+def _prompt(task: dict | None, transcript: str = "", extra: str = "",
+            protocol: str | None = render.PROTOCOL) -> str:
+    # extra（规划协议 / reminder 提示等）始终注入：即使有任务正文也不能被挤掉。
+    # planner 自带完整协议，不能再拼通用 PROTOCOL（否则「必须 claim」会覆盖「不要 claim」）。
     head = "\n".join(p for p in (task.get("title"), task.get("description")) if p) if task else ""
-    parts = [p for p in (head, extra, transcript, render.PROTOCOL) if p]
+    parts = [p for p in (head, extra, transcript, protocol) if p]
     return "\n\n".join(p for p in parts if p)
 
 
@@ -230,7 +232,8 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
     from ..services import planning as planning_service
     if prompt.startswith(planning_service.PLAN_MARKER):
         body = prompt[len(planning_service.PLAN_MARKER):].strip()
-        return _prompt(task, _conversation_transcript(conn, run.get("task_id")), body)
+        return _prompt(task, _conversation_transcript(conn, run.get("task_id")), body,
+                       protocol=None)
     # 工作流任务上的非步骤 run = 被 @ 的会话回复（包括历史遗留无标记的 run），
     # 一律用 REPLY_PROTOCOL，避免误 claim/submit 任务。
     is_reply = prompt.startswith("[anvil:reply]")
@@ -248,6 +251,24 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
                  ("## 最近会话\n" + recent) if recent else "", render.REPLY_PROTOCOL]
         return "\n\n".join(p for p in parts if p)
     return _prompt(task, _conversation_transcript(conn, run.get("task_id")), prompt)
+
+
+def _protocol_for_run(conn: sqlite3.Connection, run: dict) -> str:
+    """投影到 CLAUDE.md 的协议必须与 run 类型一致（步骤/规划/回复/普通任务）。"""
+    prompt = run.get("prompt") or ""
+    if run.get("step_id"):
+        return render.STEP_PROTOCOL
+    from ..services import planning as planning_service
+    if prompt.startswith(planning_service.PLAN_MARKER):
+        return render.PLANNING_PROTOCOL
+    is_reply = prompt.startswith("[anvil:reply]")
+    if not is_reply and run.get("task_id"):
+        from ..services import workflow as workflow_service
+        try:
+            is_reply = workflow_service.get_for_task(conn, run["task_id"]) is not None
+        except Exception:  # noqa: BLE001
+            is_reply = False
+    return render.REPLY_PROTOCOL if is_reply else render.PROTOCOL
 
 
 def _render_invocation(conn: sqlite3.Connection, run: dict, task: dict | None,
@@ -415,6 +436,7 @@ def project_node(state: dict, config) -> dict:
             responsibilities=proj.get("responsibilities") or [],
             memory=ctx["memory"], notes=ctx["notes"], lessons=ctx["lessons"],
             prompt=run.get("prompt") or "",
+            protocol=_protocol_for_run(conn, run),
         )
         _project_catalog(conn, effective, workspace_path, run["role_slug"])
         runs_service.set_status(conn, run_id, "projecting")

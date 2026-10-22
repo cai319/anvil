@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
-import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type Role, type Task, type TimelineEvent, type Workflow } from "../api/client";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type Role, type Task, type TimelineEvent, type Workflow, type WorkflowStep } from "../api/client";
 import { RoleSessions } from "./RoleSessions";
 import { WorkflowGraph } from "./WorkflowGraph";
 import { roleStatusFromWorkflow } from "../workflowStatus";
+import { STATUS_META, isDynamicStep, summarizeLoops, type LoopSummary } from "../workflowGroups";
 
 const STATUS_LABEL: Record<Task["status"], string> = {
   todo: "待办",
@@ -69,6 +70,24 @@ function describe(ev: TimelineEvent): { text: string; runStatus?: string; mentio
       return { text: "饥饿升级（无角色可认领）" };
     case "run":
       return { text: `运行状态 → ${RUN_LABEL[String(p.status)] ?? p.status}`, runStatus: String(p.status) };
+    case "step": {
+      const status = String(p.status ?? "");
+      const label: Record<string, string> = {
+        running: "开始执行",
+        submitted: "已提交（等待人工审核）",
+        planned: "切片计划已提交",
+        approved: "已通过",
+        rework: "决策打回，返工中",
+        rework_exhausted: "重做次数耗尽，需人工介入",
+        rejected: "人工驳回，返工中",
+        failed: "执行失败",
+      };
+      const summary = p.summary ? `：${String(p.summary)}` : "";
+      return {
+        text: `工作流步骤 ${String(p.step ?? "")}「${String(p.title ?? "")}」`
+          + `${label[status] ?? status}${summary}`,
+      };
+    }
     default:
       return { text: ev.kind };
   }
@@ -78,6 +97,7 @@ const TL_FILTERS = [
   { key: "all", label: "全部" },
   { key: "dialog", label: "对话" },
   { key: "mention", label: "@提及" },
+  { key: "step", label: "工作流" },
   { key: "run", label: "运行" },
   { key: "review", label: "评审" },
 ] as const;
@@ -88,20 +108,24 @@ export function TaskDetail({ id }: { id: string }) {
   const [roles, setRoles] = useState<Role[]>([]);
   const [assignee, setAssignee] = useState("");
   const [comment, setComment] = useState("");
-  const [asRole, setAsRole] = useState("human");
+  const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [gone, setGone] = useState(false);
   const [drafts, setDrafts] = useState<BoardDraft[]>([]);
   const [dispatchNote, setDispatchNote] = useState<string | null>(null);
   const [tab, setTab] = useState<"chat" | "workflow" | "subtasks" | "runtime">("chat");
-  const [tlKind, setTlKind] = useState<"all" | "dialog" | "mention" | "run" | "review">("all");
+  const [tlKind, setTlKind] = useState<"all" | "dialog" | "mention" | "step" | "run" | "review">("all");
   const [tlLimit, setTlLimit] = useState(40);
   const threadRef = useRef<HTMLElement>(null);
+  const pinnedRef = useRef(true);          // 用户是否停留在底部
+  const initialScrollRef = useRef(true);   // 刚打开任务/切回会话时强制滚到底
+  const autoScrollingRef = useRef(false);  // 程序化滚动期间忽略 onScroll 的“用户滚动”判定
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [children, setChildren] = useState<Task[]>([]);
   const [wfView, setWfView] = useState<"graph" | "list">("graph");
   const [busy, setBusy] = useState(false);
-  const endRef = useRef<HTMLDivElement>(null);
 
   const refreshWorkflow = () =>
     api.getTaskWorkflow(id).then(setWorkflow).catch(() => setWorkflow(null));
@@ -122,6 +146,30 @@ export function TaskDetail({ id }: { id: string }) {
         else setError(String(e));
       });
 
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
+    const el = threadRef.current;
+    if (!el) return;
+    pinnedRef.current = true;
+    autoScrollingRef.current = true;
+    // 等一帧确保新消息已经完成布局，再滚到容器底部（不滚动整个页面）
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        el.scrollTo({ top: el.scrollHeight, behavior });
+        window.setTimeout(() => { autoScrollingRef.current = false; },
+                          behavior === "smooth" ? 500 : 80);
+      });
+    });
+  }, []);
+
+  const scrollToTop = useCallback(() => {
+    const el = threadRef.current;
+    if (!el) return;
+    pinnedRef.current = false;  // 人为回到最早：暂停自动跟随，直到用户再次滚到底
+    autoScrollingRef.current = true;
+    el.scrollTo({ top: 0, behavior: "smooth" });
+    window.setTimeout(() => { autoScrollingRef.current = false; }, 500);
+  }, []);
+
   useEffect(() => {
     if (gone) return; // 任务已删除：不再刷新、不再订阅事件
     refresh();
@@ -140,11 +188,39 @@ export function TaskDetail({ id }: { id: string }) {
     });
   }, [id, gone]);
 
+  // 打开任务、切回「会话」或切换筛选时，默认显示最后一条消息。
   useEffect(() => {
+    pinnedRef.current = true;
+    initialScrollRef.current = true;
+    if (tab === "chat") {
+      scrollToBottom("auto");
+      // 线程已挂载时这次就是首次定位；清掉 initial，避免用户随后向上
+      // 翻看历史时被下一条新消息强行拉回底部。
+      if (threadRef.current) initialScrollRef.current = false;
+    } else {
+      setMention(null);  // 离开会话页签时关闭联想
+    }
+  }, [id, tab, tlKind, scrollToBottom]);
+
+  // 新消息到达：只有用户本来就在底部（或首次加载）时才跟随滚动；
+  // 用户主动向上翻看历史时不打断。
+  useEffect(() => {
+    if (tab !== "chat" || !task || task.id !== id) return;
+    if (timeline.length === 0) return;
+    if (initialScrollRef.current) {
+      initialScrollRef.current = false;
+      scrollToBottom("auto");
+    } else if (pinnedRef.current) {
+      scrollToBottom("smooth");
+    }
+  }, [timeline.length, tab, task?.id, id, scrollToBottom]);
+
+  const onThreadScroll = () => {
+    if (autoScrollingRef.current) return;  // 程序化滚动不改写“用户是否在底部”
     const el = threadRef.current;
-    const nearBottom = !el || el.scrollHeight - el.scrollTop - el.clientHeight < 140;
-    if (nearBottom) endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [timeline.length, tlKind, tlLimit]);
+    if (!el) return;
+    pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  };
 
   const filteredTimeline = timeline.filter((ev) => {
     if (tlKind === "all") return true;
@@ -178,9 +254,96 @@ export function TaskDetail({ id }: { id: string }) {
 
   const assignableRoles = roles.filter((r) => !isOnboardingRole(r));
 
+  // 优先只联想任务参与角色（@ 才会唤醒）；任务尚未绑定角色时退回全部可指派角色。
+  const assignedToTask = new Set(task.assignees ?? []);
+  const mentionRoles = assignedToTask.size
+    ? assignableRoles.filter((r) => assignedToTask.has(r.slug))
+    : assignableRoles;
+
+  const mentionQuery = (mention?.query || "").toLowerCase();
+  const seenMentionSlugs = new Set<string>();
+  const mentionCandidates = mentionRoles.filter((r) => {
+    if (seenMentionSlugs.has(r.slug)) return false;
+    seenMentionSlugs.add(r.slug);
+    const name = r.display_name || r.slug;
+    return !mentionQuery
+      || r.slug.toLowerCase().includes(mentionQuery)
+      || name.toLowerCase().includes(mentionQuery);
+  }).map((r) => ({ slug: r.slug, name: r.display_name || r.slug })).slice(0, 10);
+
+  // 从光标位置向前找 @token；只有 @ 位于开头/空白/标点后才触发联想。
+  const syncMention = (value: string, caret: number | null) => {
+    const pos = caret ?? value.length;
+    const before = value.slice(0, pos);
+    const at = before.lastIndexOf("@");
+    if (at < 0) {
+      setMention(null);
+      return;
+    }
+    const prev = at > 0 ? before[at - 1] : "";
+    if (prev && !/[\s([{,，。；;:：]/.test(prev)) {
+      setMention(null);
+      return;
+    }
+    const query = before.slice(at + 1);
+    if (/\s/.test(query)) {
+      setMention(null);
+      return;
+    }
+    setMention({ start: at, query });
+    setMentionIndex(0);
+  };
+
+  const chooseMention = (candidate: { slug: string; name: string }) => {
+    const input = inputRef.current;
+    if (!input || !mention) return;
+    const caret = input.selectionStart ?? comment.length;
+    let after = comment.slice(caret);
+    if (after.startsWith(" ")) after = after.slice(1);
+    const next = comment.slice(0, mention.start)
+      + "@" + candidate.slug + " " + after;
+    setComment(next);
+    setMention(null);
+    const pos = mention.start + candidate.slug.length + 2; // @ + slug + space
+    requestAnimationFrame(() => {
+      input.focus();
+      input.setSelectionRange(pos, pos);
+    });
+  };
+
+  const onComposerKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    // 中文输入法组合期间的 Enter 用于上屏，不触发联想选择/发送
+    if (e.nativeEvent.isComposing) return;
+    if (mention && mentionCandidates.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setMentionIndex((i) => (i + 1) % mentionCandidates.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setMentionIndex((i) =>
+          (i - 1 + mentionCandidates.length) % mentionCandidates.length);
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        chooseMention(mentionCandidates[mentionIndex] ?? mentionCandidates[0]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMention(null);
+        return;
+      }
+    }
+    if (e.key === "Enter") send();
+  };
+
   const send = async () => {
     const text = comment.trim();
     if (!text) return;
+    setMention(null);
     // 自动解析消息中的 @角色（slug 或显示名），命中参与角色即走 mention（唤醒 + 时间线标黄）
     const byToken = new Map<string, string>();
     assignableRoles.forEach((r) => {
@@ -191,17 +354,103 @@ export function TaskDetail({ id }: { id: string }) {
       [...text.matchAll(/@([\w\-\u4e00-\u9fa5]+)/g)]
         .map((m) => byToken.get(m[1].toLowerCase()))
         .filter((v): v is string => Boolean(v)))];
-    const senderRole = asRole === "human" ? undefined : asRole;
     await act(async () => {
       if (targets.length) {
         for (const target of targets) {
-          await api.mentionTask(id, target, text, senderRole);
+          await api.mentionTask(id, target, text);
         }
       } else {
-        await api.commentTask(id, text, senderRole);
+        await api.commentTask(id, text);
       }
       setComment("");
     });
+    // 发送后把自己刚发的消息带进视野
+    pinnedRef.current = true;
+    scrollToBottom("smooth");
+  };
+
+  const statusClass = (status: WorkflowStep["status"]) =>
+    status === "approved" ? "done"
+      : status === "running" ? "in_progress"
+      : status === "submitted" ? "in_review"
+      : status === "pending" ? "todo"
+      : status === "rejected" ? "in_review"
+      : "closed";
+
+  const renderStepRow = (st: WorkflowStep) => {
+    const cls = statusClass(st.status);
+    const label = STATUS_META[st.status].label;
+    return (
+      <div key={st.step_id} className="wf-step">
+        <span className="wf-id mono">{st.step_id}</span>
+        <div className="wf-main">
+          <div className="wf-title">
+            {st.title}
+            <span className="wf-role">{st.role_slug}</span>
+            {st.reviewer && <span className="wf-role">验证：{st.reviewer}</span>}
+            {st.gate && <span className="badge wf-gate">审核门</span>}
+            <span className={`status status-${cls}`}>{label}</span>
+          </div>
+          {st.depends_on?.length > 0 && <div className="muted wf-deps">依赖：{st.depends_on.join("、")}</div>}
+          {st.contract && <div className="muted wf-deps">契约：{st.contract}</div>}
+          {st.failure_reason && <div className="muted wf-deps">失败归因：{st.failure_reason}</div>}
+          {st.summary && <div className="muted wf-summary">{st.summary}</div>}
+        </div>
+        <div className="wf-actions">
+          {st.run_id && <a href={`/runs/${st.run_id}`}>会话</a>}
+          {st.gate && st.status === "submitted" && (
+            <>
+              <button className="small primary" onClick={() => act(async () => {
+                const w = await api.reviewWorkflowStep(workflow!.id, st.step_id, true);
+                setWorkflow(w);
+              })}>通过</button>
+              <button className="small danger" onClick={() => act(async () => {
+                const w = await api.reviewWorkflowStep(workflow!.id, st.step_id, false, "请按评审意见修改");
+                setWorkflow(w);
+              })}>驳回</button>
+            </>
+          )}
+          {(st.status === "failed" || st.status === "rejected") && (
+            <button className="small" onClick={() => act(async () => {
+              const w = await api.retryWorkflowStep(workflow!.id, st.step_id);
+              setWorkflow(w);
+            })}>重试</button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderLoopList = (loop: LoopSummary) => {
+    const meta = STATUS_META[loop.status];
+    return (
+      <details key={`loop-${loop.sourceStepId}`} className="wf-loop-list">
+        <summary className="wf-loop-summary">
+          <span className="wf-loop-mark">↻ 切片循环</span>
+          <span className={`status status-${statusClass(loop.status)}`}>{meta.label}</span>
+          <span className="muted">
+            {loop.totalSlices} 片 · {loop.totalSteps} 步 · 已完成 {loop.doneSlices}/{loop.totalSlices} 片
+          </span>
+          {loop.currentGroup && (
+            <span className="muted">
+              当前 {loop.currentGroup.title} · {loop.currentPhase}（{loop.currentProgress}）
+            </span>
+          )}
+        </summary>
+        <div className="wf-slice-list">
+          {loop.groups.map((g) => (
+            <details key={g.key} className="wf-slice-item">
+              <summary className="wf-slice-item-summary">
+                <i className="wf-slice-dot" style={{ background: STATUS_META[g.status].color }} />
+                <span className="wf-slice-name" title={g.title}>{g.title}</span>
+                <span className="muted">{g.done}/{g.total} · {g.phase}</span>
+              </summary>
+              <div className="wf-steps">{g.steps.map(renderStepRow)}</div>
+            </details>
+          ))}
+        </div>
+      </details>
+    );
   };
 
   return (
@@ -356,11 +605,18 @@ export function TaskDetail({ id }: { id: string }) {
                         ? <> · {d.tree.children.length} 个子任务</>
                         : null}
                   </div>
+                  {d.tree?.loop && (
+                    <div className="muted">
+                      动态切片：切片计划步骤由执行角色运行时盘点项目后产出；
+                      服务端按 loop 模板为每片生成 execute → verify → fix → verify2 → decide 小闭环。
+                    </div>
+                  )}
                   {d.tree?.steps?.length ? (
                     <ul className="muted" style={{ margin: "6px 0", paddingLeft: 18 }}>
                       {d.tree.steps.map((s, i) => (
                         <li key={s.id ?? i}>
                           {s.id ? `${s.id} ` : ""}{s.title} → {s.role ?? "未指派"}
+                          {s.kind === "plan_slices" ? "（切片计划）" : ""}
                           {s.depends_on?.length ? `（依赖 ${s.depends_on.join("、")}）` : ""}
                         </li>
                       ))}
@@ -393,14 +649,21 @@ export function TaskDetail({ id }: { id: string }) {
             </section>
           )}
 
-          <section className="session-thread" ref={threadRef}>
+          <section className="session-thread" ref={threadRef} onScroll={onThreadScroll}>
             <div className="thread-head">
               <h2 className="pane-title">会话 · {filteredTimeline.length} 条</h2>
-              <div className="thread-filters">
-                {TL_FILTERS.map((f) => (
-                  <button key={f.key} className={`small ${tlKind === f.key ? "primary" : ""}`}
-                    onClick={() => setTlKind(f.key)}>{f.label}</button>
-                ))}
+              <div className="thread-head-right">
+                <button className="small thread-jump" onClick={scrollToTop}
+                  title="跳到最早一条消息">↑ 最早</button>
+                <button className="small thread-jump"
+                  onClick={() => scrollToBottom("smooth")}
+                  title="跳到最新一条消息">↓ 最新</button>
+                <div className="thread-filters">
+                  {TL_FILTERS.map((f) => (
+                    <button key={f.key} className={`small ${tlKind === f.key ? "primary" : ""}`}
+                      onClick={() => setTlKind(f.key)}>{f.label}</button>
+                  ))}
+                </div>
               </div>
             </div>
             {filteredTimeline.length > tlLimit && (
@@ -441,27 +704,54 @@ export function TaskDetail({ id }: { id: string }) {
                 </div>
               );
             })}
-            <div ref={endRef} />
           </section>
 
           {/* 评论 / @提及 框 */}
           <div className="session-compose">
-            <select value={asRole} onChange={(e) => setAsRole(e.target.value)} title="发送身份（默认 human）">
-              <option value="human">human（你）</option>
-              {assignableRoles.map((r) => (
-                <option key={r.slug} value={r.slug}>{r.display_name}</option>
-              ))}
-            </select>
-            <input
-              value={comment}
-              onChange={(e) => setComment(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && send()}
-              placeholder="输入消息；@角色 会唤醒对方，例如：@pm 请启动程序，让我做网页版人工验证"
-            />
+            <div className="mention-input-wrap">
+              <input
+                ref={inputRef}
+                value={comment}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setComment(value);
+                  syncMention(value, e.target.selectionStart);
+                }}
+                onKeyDown={onComposerKeyDown}
+                onKeyUp={(e) => {
+                  if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) {
+                    syncMention(comment, e.currentTarget.selectionStart);
+                  }
+                }}
+                onClick={(e) => syncMention(comment, e.currentTarget.selectionStart)}
+                onBlur={() => window.setTimeout(() => setMention(null), 150)}
+                placeholder="输入消息；输入 @ 弹出角色选择，例如：@pm 请启动程序…"
+              />
+              {mention && mentionCandidates.length > 0 && (
+                <div className="mention-menu" role="listbox" aria-label="选择要 @ 的角色">
+                  {mentionCandidates.map((c, i) => (
+                    <button
+                      key={c.slug}
+                      type="button"
+                      role="option"
+                      aria-selected={i === mentionIndex}
+                      className={`mention-item ${i === mentionIndex ? "active" : ""}`}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onMouseEnter={() => setMentionIndex(i)}
+                      onClick={() => chooseMention(c)}
+                    >
+                      <span className="mention-item-name">{c.name}</span>
+                      <span className="mention-item-slug">@{c.slug}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <button className="primary" onClick={send} disabled={busy || !comment.trim()}>发送</button>
           </div>
           <p className="muted" style={{ fontSize: 11, margin: "4px 2px 0" }}>
-            提示：消息中出现 @角色（slug 或显示名）时自动按「@提及」发送——时间线标黄并唤醒该角色。
+            提示：输入 <strong>@</strong> 会弹出角色选择（↑/↓ 选择，Enter 确认）；选中后按 Enter 发送。
+            @角色 消息会按「@提及」发送——时间线标黄并唤醒该角色。
           </p>
         </div>
 
@@ -564,54 +854,25 @@ export function TaskDetail({ id }: { id: string }) {
                   })}
                 />
               ) : (
-              <div className="wf-steps">
-                {workflow.steps.map((st) => {
-                  const cls = st.status === "approved" ? "done" : st.status === "running" ? "in_progress"
-                    : st.status === "submitted" ? "in_review" : st.status === "pending" ? "todo" : "closed";
-                  const label = st.status === "approved" ? "完成" : st.status === "running" ? "进行中"
-                    : st.status === "submitted" ? "待审核" : st.status === "pending" ? "待办"
-                    : st.status === "rejected" ? "已驳回" : st.status === "failed" ? "失败" : "跳过";
-                  return (
-                    <div key={st.step_id} className="wf-step">
-                      <span className="wf-id mono">{st.step_id}</span>
-                      <div className="wf-main">
-                        <div className="wf-title">
-                          {st.title}
-                          <span className="wf-role">{st.role_slug}</span>
-                          {st.reviewer && <span className="wf-role">验证：{st.reviewer}</span>}
-                          {st.gate && <span className="badge wf-gate">审核门</span>}
-                          <span className={`status status-${cls}`}>{label}</span>
-                        </div>
-                        {st.depends_on?.length > 0 && <div className="muted wf-deps">依赖：{st.depends_on.join("、")}</div>}
-                        {st.contract && <div className="muted wf-deps">契约：{st.contract}</div>}
-                        {st.failure_reason && <div className="muted wf-deps">失败归因：{st.failure_reason}</div>}
-                        {st.summary && <div className="muted wf-summary">{st.summary}</div>}
-                      </div>
-                      <div className="wf-actions">
-                        {st.run_id && <a href={`/runs/${st.run_id}`}>会话</a>}
-                        {st.gate && st.status === "submitted" && (
-                          <>
-                            <button className="small primary" onClick={() => act(async () => {
-                              const w = await api.reviewWorkflowStep(workflow.id, st.step_id, true);
-                              setWorkflow(w);
-                            })}>通过</button>
-                            <button className="small danger" onClick={() => act(async () => {
-                              const w = await api.reviewWorkflowStep(workflow.id, st.step_id, false, "请按评审意见修改");
-                              setWorkflow(w);
-                            })}>驳回</button>
-                          </>
-                        )}
-                        {(st.status === "failed" || st.status === "rejected") && (
-                          <button className="small" onClick={() => act(async () => {
-                            const w = await api.retryWorkflowStep(workflow.id, st.step_id);
-                            setWorkflow(w);
-                          })}>重试</button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+                (() => {
+                  const loops = summarizeLoops(workflow.steps);
+                  const loopBySource = new Map(loops.map((l) => [l.sourceStepId, l]));
+                  const rendered = new Set<string>();
+                  const rows = workflow.steps.flatMap((st) => {
+                    if (isDynamicStep(st)) return [];
+                    const row = renderStepRow(st);
+                    const loop = loopBySource.get(st.step_id);
+                    if (loop && !rendered.has(loop.sourceStepId)) {
+                      rendered.add(loop.sourceStepId);
+                      return [row, renderLoopList(loop)];
+                    }
+                    return [row];
+                  });
+                  for (const loop of loops) {
+                    if (!rendered.has(loop.sourceStepId)) rows.push(renderLoopList(loop));
+                  }
+                  return <div className="wf-steps">{rows}</div>;
+                })()
               )}
             </>
           )}

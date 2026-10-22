@@ -192,6 +192,10 @@ def task_cmd(
     parent: str = typer.Option(None, "--parent", help="父任务 id"),
     title: str = typer.Option(None, "--title", help="任务标题（create 用）"),
     description: str = typer.Option(None, "--description", help="任务描述（create 用）"),
+    assignee: str = typer.Option(None, "--assignee",
+                                 help="子任务执行角色（create 用；单负责人）"),
+    assignees: str = typer.Option(None, "--assignees",
+                                  help="子任务团队角色（create 用；逗号分隔）"),
     summary: str = typer.Option(None, "--summary", help="submit 摘要"),
     paths: str = typer.Option(None, "--paths", help="认领范围路径（逗号分隔）"),
     force: bool = typer.Option(False, "--force", help="delete 强制；comment/mention 知情越过 held"),
@@ -221,6 +225,10 @@ def task_cmd(
             p["description"] = description
         if parent:
             p["parent_id"] = parent
+        if assignee:
+            p["assignee"] = assignee.strip()
+        if assignees:
+            p["assignees"] = [x.strip() for x in assignees.split(",") if x.strip()]
         if AGENT_SLUG:
             p["created_by"] = f"agent:{AGENT_SLUG}"
         method, path, payload = "POST", "/api/v1/tasks", p
@@ -515,6 +523,45 @@ def step_submit(
         typer.echo(f"步骤 {step_id} 已提交（{'等待人工审核' if any(s['step_id'] == step_id and s['status'] == 'submitted' and s['gate'] for s in out.get('steps', [])) else '已通过，工作流继续推进'}）")
 
 
+@step_app.command("decide")
+def step_decide(
+    workflow_id: str = typer.Argument(..., help="工作流 ID"),
+    step_id: str = typer.Argument(..., help="decision 步骤 ID"),
+    approve: bool = typer.Option(False, "--approve", help="通过"),
+    reject: bool = typer.Option(False, "--reject", help="打回重做"),
+    feedback: str = typer.Option("", "--feedback", help="决策结论 / 打回原因"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """决策角色通过或打回 decision 步骤（只能二选一）。"""
+    if approve == reject:
+        typer.echo("必须且只能给 --approve 或 --reject", err=True)
+        raise typer.Exit(2)
+    out = _call("POST", f"/api/v1/workflows/{workflow_id}/steps/{step_id}/decide",
+                {"approve": approve, "feedback": feedback})
+    if json_out:
+        _emit(out, True)
+    else:
+        typer.echo(f"决策步骤 {step_id} 已{'通过' if approve else '打回重做'}")
+
+
+@step_app.command("plan")
+def step_plan(
+    workflow_id: str = typer.Argument(..., help="工作流 ID"),
+    step_id: str = typer.Argument(..., help="plan_slices 步骤 ID"),
+    file: str = typer.Option(..., "--file", help="切片计划 JSON 文件"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """提交切片计划（plan_slices 步骤）：服务端按 loop 模板生成每片小闭环。"""
+    with open(file, encoding="utf-8") as f:
+        plan = json.load(f)
+    out = _call("POST", f"/api/v1/workflows/{workflow_id}/steps/{step_id}/plan", plan)
+    if json_out:
+        _emit(out, True)
+        return
+    generated = [s for s in out.get("steps", []) if s.get("source_step_id") == step_id]
+    typer.echo(f"切片计划已提交：生成 {len(generated)} 个切片步骤")
+
+
 @step_app.command("show")
 def step_show(
     workflow_id: str = typer.Argument(..., help="工作流 ID"),
@@ -527,7 +574,21 @@ def step_show(
         return
     for st in out.get("steps", []):
         gate = " [gate]" if st.get("gate") else ""
-        typer.echo(f"{st['step_id']:4s} {st['status']:10s} {st['role_slug']:12s} {st['title']}{gate}")
+        kind = ""
+        if st.get("kind") == "decision":
+            kind = " [decision]"
+        elif st.get("kind") == "plan_slices":
+            kind = " [plan_slices]"
+        slice_info = f" slice={st['slice_key']}" if st.get("slice_key") else ""
+        rework = ""
+        if st.get("kind") == "decision":
+            rework = f" rework={st.get('rework_count', 0)}/{st.get('max_rework', 0)}"
+        on_reject = ""
+        if st.get("on_reject"):
+            on_reject = " on_reject=" + ",".join(st["on_reject"])
+        typer.echo(
+            f"{st['step_id']:4s} {st['status']:10s} {st['role_slug']:12s} "
+            f"{st['title']}{gate}{kind}{slice_info}{rework}{on_reject}")
 
 
 # ---- board（P1-0 计划先行：工作流草案）------------------------------------
@@ -542,7 +603,9 @@ def board_draft(
     task: str = typer.Option(..., "--task", help="关联的主任务 id（通常为 $ANVIL_TASK_ID）"),
     goal: str = typer.Option(..., "--goal", help="目标一句话"),
     tree_file: str = typer.Option(..., "--tree-file", help="工作流/子任务树 JSON 文件路径"),
-    kind: str = typer.Option("tasks", "--kind", help="workflow（步骤状态机）或 tasks（旧子任务树）"),
+    kind: str = typer.Option(
+        "tasks", "--kind",
+        help="workflow（步骤状态机）/ role_suggestion（角色建议）/ tasks（旧子任务树）"),
     json_out: bool = typer.Option(False, "--json"),
 ):
     """planner 提交工作流草案（步骤/分工/依赖/审核门/反馈路径）。"""
@@ -575,7 +638,10 @@ def board_drafts(
         return
     for d in drafts:
         src = d.get("source_task") or "-"
-        typer.echo(f"{d['id']}  {d['status']:9s}  task={src}  {d['goal']}  by={d['created_by']}")
+        kind = d.get("kind") or "tasks"
+        typer.echo(
+            f"{d['id']}  {d['status']:9s}  {kind:15s}  task={src}  "
+            f"{d['goal']}  by={d['created_by']}")
 
 
 if __name__ == "__main__":

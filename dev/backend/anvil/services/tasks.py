@@ -283,7 +283,15 @@ def claim(conn: sqlite3.Connection, tid: str, role: str, paths: list[str] | None
                 (role, now, lease, now, tid, role),
             )
             if cur.rowcount == 0:
-                raise ConflictError(f"task {tid} not claimable (already claimed or not todo)")
+                if t["status"] not in ("todo", "in_progress"):
+                    raise ConflictError(f"task {tid} is {t['status']}, cannot claim")
+                owner = t.get("assignee") or ""
+                if owner and owner != role:
+                    raise ConflictError(
+                        f"task {tid} is {t['status']} and exclusively claimed by {owner}; "
+                        f"ask {owner} to `anvil task unclaim {tid}` or add you as a team "
+                        f"assignee before claiming")
+                raise ConflictError(f"task {tid} is not claimable (already claimed or not todo)")
         _audit(conn, role, tid, "claim", {"paths": paths, "team": bool(t["assignees"])})
     except BaseException:
         conn.rollback()

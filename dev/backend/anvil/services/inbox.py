@@ -74,6 +74,13 @@ def _mentions(conn: sqlite3.Connection) -> list[dict]:
             ).fetchone()
             if bound:
                 continue  # human 已绑定角色，提示不再滞留
+        if p.get("event") == "rework_exhausted":
+            st = conn.execute(
+                "SELECT status FROM workflow_steps WHERE workflow_id=? AND step_id=?",
+                (p.get("workflow_id"), p.get("step_id")),
+            ).fetchone()
+            if st and st["status"] != "failed":
+                continue  # 已 retry/重新决策，升级提醒不再滞留
         if r["role_slug"] == "workflow" and "工作流全部步骤完成" in msg:
             tst = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
             if tst and tst["status"] in ("in_review", "done"):

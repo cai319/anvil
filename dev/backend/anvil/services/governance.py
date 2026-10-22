@@ -75,42 +75,46 @@ def runtime_of_role(conn: sqlite3.Connection, role: str) -> str | None:
     return rt or None
 
 
-def _active_pairs(conn: sqlite3.Connection) -> set[tuple[str, str]]:
-    """活跃工作单元 (role, task)：单负责人任务的 assignee + 团队任务的 working 认领。"""
-    pairs: set[tuple[str, str]] = set()
-    for r in conn.execute(
-        "SELECT assignee AS role, id AS task_id FROM tasks "
-        "WHERE status='in_progress' AND assignee IS NOT NULL"
-    ).fetchall():
-        pairs.add((r["role"], r["task_id"]))
-    for r in conn.execute(
-        "SELECT role_slug AS role, task_id FROM task_role_claims WHERE status='working'"
-    ).fetchall():
-        pairs.add((r["role"], r["task_id"]))
+# 并发额度只统计真正占用进程的阶段；suspended/submitted/reviewing 都是空闲等待，
+# 不应把角色/系统额度占满（design §5.6 “同时最多几个运行”）。
+CONCURRENCY_RUN_STATUSES = ("created", "projecting", "running")
+
+
+def _active_run_rows(conn: sqlite3.Connection):
+    """当前活跃 run（正在创建/投影/运行）；空闲 claim 与挂起会话不占并发额度。"""
+    return conn.execute(
+        "SELECT role_slug, task_id FROM runs WHERE status IN (?,?,?)",
+        CONCURRENCY_RUN_STATUSES,
+    ).fetchall()
+
+
+def _active_pairs(conn: sqlite3.Connection) -> set[tuple[str, str | None]]:
+    """活跃工作单元 (role, task)：以 run 为准；空闲 claim 不占并发额度。"""
+    pairs: set[tuple[str, str | None]] = set()
+    for r in _active_run_rows(conn):
+        if r["role_slug"]:
+            pairs.add((r["role_slug"], r["task_id"]))
     return pairs
 
 
 def _active_count(conn: sqlite3.Connection, runtime_id: str | None = None) -> int:
-    pairs = _active_pairs(conn)
+    rows = _active_run_rows(conn)
     if runtime_id is None:
-        return len(pairs)
-    return sum(1 for role, _task in pairs if runtime_of_role(conn, role) == runtime_id)
+        return len(rows)
+    roles = {r["role_slug"] for r in rows if r["role_slug"]}
+    by_runtime = {role: runtime_of_role(conn, role) for role in roles}
+    return sum(
+        1 for r in rows
+        if r["role_slug"] and by_runtime.get(r["role_slug"]) == runtime_id
+    )
 
 
 def _role_active_count(conn: sqlite3.Connection, role: str) -> int:
-    owned = conn.execute(
-        "SELECT COUNT(*) AS n FROM tasks WHERE assignee=? AND status='in_progress'", (role,)
-    ).fetchone()["n"]
-    claims = conn.execute(
-        "SELECT COUNT(*) AS n FROM task_role_claims WHERE role_slug=? AND status='working'",
-        (role,),
-    ).fetchone()["n"]
-    overlap = conn.execute(
-        "SELECT COUNT(*) AS n FROM task_role_claims c JOIN tasks t ON t.id=c.task_id "
-        "WHERE c.role_slug=? AND c.status='working' AND t.assignee=? AND t.status='in_progress'",
-        (role, role),
-    ).fetchone()["n"]
-    return owned + claims - overlap
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM runs WHERE role_slug=? AND status IN (?,?,?)",
+        (role, *CONCURRENCY_RUN_STATUSES),
+    ).fetchone()
+    return int(row["n"])
 
 
 def daily_cost_usd(conn: sqlite3.Connection) -> float:
@@ -326,10 +330,17 @@ def _pick_eligible_agent(conn: sqlite3.Connection, task: dict) -> str | None:
 
 
 def _assigned_roles(conn: sqlite3.Connection, task_id: str) -> list[str]:
-    """任务显式绑定的参与角色（task_assignees）。"""
-    return [x["role_slug"] for x in conn.execute(
+    """任务显式绑定的参与角色：优先 task_assignees，否则单负责人 assignee。"""
+    roles = [x["role_slug"] for x in conn.execute(
         "SELECT role_slug FROM task_assignees WHERE task_id=?", (task_id,)
     )]
+    if roles:
+        return roles
+    row = conn.execute(
+        "SELECT assignee FROM tasks WHERE id=? AND assignee IS NOT NULL AND assignee<>''",
+        (task_id,),
+    ).fetchone()
+    return [row["assignee"]] if row else []
 
 
 def _wake(conn: sqlite3.Connection, role: str, task_id: str) -> bool:
@@ -392,7 +403,7 @@ def check_claim_allowed(conn: sqlite3.Connection, task: dict, role: str) -> None
     if budget is not None and daily_cost_usd(conn) >= budget:
         raise ConflictError(f"daily cost budget ${budget} exhausted")
 
-    # 并发闸门：角色级 max_parallel（单负责人任务 + 团队任务中的 working 认领）
+    # 并发闸门：角色级 max_parallel（按活跃 run 计数；空闲 claim 不占额度）
     max_parallel = _role_max_parallel(conn, role)
     if max_parallel is not None:
         active = _role_active_count(conn, role)

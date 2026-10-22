@@ -7,7 +7,7 @@ from anvil.db import connect
 from anvil.util import now_iso
 
 pytest.importorskip("anvil.graph")
-from anvil.graph import nodes  # noqa: E402
+from anvil.graph import nodes, render  # noqa: E402
 from anvil.services import runs as runs_service  # noqa: E402
 from anvil.services import tasks as tasks_service  # noqa: E402
 
@@ -58,3 +58,23 @@ def test_step_prompt_uses_agent_inbox_and_stays_small(conn):
     prompt = nodes._prompt_for_run(conn, run, {"title": "跳棋", "description": "实现"})
     assert "## 未读会话" in prompt and "anvil inbox check" in prompt
     assert len(prompt) < 6000  # 不把全量历史 push 进上下文
+
+
+def test_projected_protocol_matches_run_kind(conn):
+    planner = runs_service.create_run(conn, "cindy", "T1", prompt="[anvil:plan]\n请规划")
+    assert nodes._protocol_for_run(conn, planner) == render.PLANNING_PROTOCOL
+
+    step = runs_service.create_run(conn, "developer", "T1", prompt="步骤说明",
+                                   step_id="S1", workflow_id="wf-1")
+    assert nodes._protocol_for_run(conn, step) == render.STEP_PROTOCOL
+
+    normal = runs_service.create_run(conn, "developer", "T1", prompt="普通任务")
+    assert nodes._protocol_for_run(conn, normal) == render.PROTOCOL
+
+
+def test_project_instruction_uses_given_protocol(tmp_path):
+    target = tmp_path / "CLAUDE.md"
+    render.project_instruction(target, "", {"title": "t"}, protocol=render.STEP_PROTOCOL)
+    text = target.read_text(encoding="utf-8")
+    assert "anvil step submit" in text
+    assert "第一步必须执行 `anvil task claim" not in text
