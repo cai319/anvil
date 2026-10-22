@@ -100,6 +100,7 @@ class _Role:
     queue: list[tuple[str, str | None, str | None]] = field(default_factory=list)
     current_run_id: str | None = None
     current_task_id: str | None = None
+    last_task_id: str | None = None
     context_tokens: int = 0
     cic_pending: bool = False
     suppress_exit: bool = False
@@ -168,7 +169,49 @@ class DaemonManager:
             if (alive and r.busy and r.busy_since) else None,
             "pid": r.proc.pid if r.proc else None,
             "session_id": r.session_id,
+            "current_run_id": r.current_run_id,
+            "current_task_id": r.current_task_id,
+            "queue_len": len(r.queue),
         }
+
+    def cancel_task(self, role: str, task_id: str) -> bool:
+        """任务删除：停止该角色处理此任务的常驻进程。
+
+        - 正忙于此任务：杀进程并清会话；
+        - 正忙其它任务：不动；
+        - 空闲且队列无其它任务消息：杀进程并清会话；
+        - 丢弃队列中属于此任务的消息。
+        返回是否终止了进程。
+        """
+        r = self._roles.get(role)
+        if r is None:
+            return False
+        kill = False
+        with r.lock:
+            r.queue = [item for item in r.queue if item[2] != task_id]
+            if r.busy:
+                if r.current_task_id != task_id:
+                    return False
+            elif r.last_task_id != task_id or r.queue:
+                return False
+            kill = True
+            r.suppress_exit = True
+            self._kill_locked(r, graceful=True)
+            r.session_id = None
+            r.context_tokens = 0
+            r.cic_pending = False
+            r.busy = False
+            r.busy_since = None
+            r.current_run_id = None
+            r.current_task_id = None
+            r.current_log_path = None
+        if kill:
+            conn = open_conn(self.db_path)
+            try:
+                clear_session(conn, role, "task deleted")
+            finally:
+                conn.close()
+        return kill
 
     def kill(self, role: str) -> None:
         r = self._roles.get(role)
@@ -310,6 +353,7 @@ class DaemonManager:
             self._db_upsert(conn, r, status="idle")
             return
         text, run_id, task_id = r.queue.pop(0)
+        r.last_task_id = task_id
         r.busy = True
         r.busy_since = time.time()
         r.current_run_id = run_id

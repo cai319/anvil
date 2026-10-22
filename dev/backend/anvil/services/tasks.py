@@ -458,7 +458,11 @@ def review(conn: sqlite3.Connection, tid: str, approve: bool, role: str | None =
 
 
 def cancel(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
-    """取消任务（design §10 tasks/{id}/cancel）：终态 closed，保留审计。"""
+    """取消任务（design §10 tasks/{id}/cancel）：终态 closed，保留审计。
+
+    刻意不终止 run / 常驻角色进程：cancel 可通过 reopen 恢复，保留会话上下文
+    以便续跑；只有物理删除（delete）才回收进程。
+    """
     t = get(conn, tid)
     if t is None:
         raise LookupError(tid)
@@ -551,10 +555,10 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
     if t is None:
         return False
 
-    active = conn.execute(
-        "SELECT id, native_session_id FROM runs WHERE task_id=? "
-        "AND status NOT IN ('completed','failed','abandoned')", (tid,)
+    runs = conn.execute(
+        "SELECT id, role_slug, native_session_id, status FROM runs WHERE task_id=?", (tid,)
     ).fetchall()
+    active = [r for r in runs if r["status"] not in ("completed", "failed", "abandoned")]
     if active and not force:
         raise ConflictError(f"task {tid} has {len(active)} active run(s); use force to delete")
 
@@ -562,17 +566,35 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
     if children and not force:
         raise ConflictError(f"task {tid} has child tasks; delete them first or use force")
 
-    if active and force:
+    # 清理该任务的运行时进程：按角色去重，从所有 run 中收集（包括已完成的）。
+    # cancel_task 只会终止「正忙于此任务」或「空闲且最后处理的就是此任务」的常驻进程，
+    # 不会误杀正在处理其它任务的角色；平台 one-shot 只终止活跃 run 的 pg: 进程，
+    # 避免 PID 复用导致误杀。
+    task_roles = {r["role_slug"] for r in runs if r["role_slug"]}
+    if task_roles:
+        from . import daemon as daemon_service
+        mgr = daemon_service.get_manager()
+        if mgr is not None and mgr.enabled:
+            for role_slug in task_roles:
+                try:
+                    mgr.cancel_task(role_slug, tid)
+                except Exception:  # noqa: BLE001 —— 删除任务不因清理失败而回滚
+                    pass
+    if active:
         from ..platform import factory
         pm = None
-        try:
-            pm = factory.get_platform()[0]
-        except Exception:  # noqa: BLE001
-            pm = None
         for r in active:
-            if pm and r["native_session_id"]:
+            sid = r["native_session_id"] or ""
+            if not sid or sid.startswith("rs:"):
+                continue
+            if pm is None:
                 try:
-                    pm.terminate(r["native_session_id"])
+                    pm = factory.get_platform()[0]
+                except Exception:  # noqa: BLE001
+                    pm = None
+            if pm:
+                try:
+                    pm.terminate(sid)
                 except Exception:  # noqa: BLE001
                     pass
     if children and force:

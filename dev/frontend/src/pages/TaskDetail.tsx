@@ -480,8 +480,12 @@ export function TaskDetail({ id }: { id: string }) {
           <span className={`status status-${task.status}`}>{STATUS_LABEL[task.status]}</span>
         </div>
         <div className="session-meta">
-          <span>👤 {task.assignee || "未指派"}</span>
-          {task.assignees?.length > 0 && <span>👥 {task.assignees.join("、")}</span>}
+          {task.assignee && <span>👤 {task.assignee}</span>}
+          {task.assignees?.length > 0 ? (
+            <span>👥 {task.assignees.join("、")}</span>
+          ) : !task.assignee ? (
+            <span className="muted">未指派</span>
+          ) : null}
           {task.tags?.length > 0 && <span className="muted">#{task.tags.join(" #")}</span>}
           <span className="muted mono">{task.id}</span>
         </div>
@@ -777,7 +781,8 @@ export function TaskDetail({ id }: { id: string }) {
           <dl className="task-meta">
             <dt>状态</dt>
             <dd><span className={`status status-${task.status}`}>{STATUS_LABEL[task.status]}</span></dd>
-            <dt>指派</dt><dd>{task.assignee ?? "未指派"}</dd>
+            <dt>领队</dt>
+            <dd>{task.assignee ?? (task.assignees?.length ? "待认领" : "未指派")}</dd>
             <dt>类型</dt><dd>{task.type ?? "—"}</dd>
             <dt>标签</dt><dd>{task.tags?.length ? task.tags.join(", ") : "—"}</dd>
             <dt>ID</dt><dd className="mono">{task.id}</dd>

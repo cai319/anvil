@@ -76,7 +76,7 @@ def _run_status(db_path, rid):
         c.close()
 
 
-def _deliver(mgr, conn, fake, log, run_id, text="hello"):
+def _deliver(mgr, conn, fake, log, run_id, text="hello", task_id=None):
     runs_service.set_status(conn, run_id, "running")  # 等价于 resume→spawn 的状态流转
     args = {
         "executable": sys.executable,
@@ -87,7 +87,7 @@ def _deliver(mgr, conn, fake, log, run_id, text="hello"):
         "env": {"FAKE_ARGV_LOG": str(log)},
         "prompt": text,
         "run_id": run_id,
-        "task_id": None,
+        "task_id": task_id,
     }
     return mgr.ensure_and_deliver(conn, "qa-role", **args)
 
@@ -192,6 +192,74 @@ def test_restart_process_preserves_session(env):
     sids = [line.split()[1] for line in log.read_text().splitlines()]
     assert modes == ["new", "resume"]
     assert sids == [sid1, sid1]
+
+
+def test_delete_task_kills_persistent_role_process(env, monkeypatch):
+    """删除任务必须终止常驻角色进程（native_session_id=rs:<role>）。"""
+    conn, mgr, fake, log = env
+    from anvil.services import daemon as daemon_service
+    from anvil.services import tasks as tasks_service
+
+    monkeypatch.setattr(daemon_service, "get_manager", lambda: mgr)
+    task = tasks_service.create(conn, title="delete me")
+    run = runs_service.create_run(conn, "qa-role", task_id=task["id"])
+    runs_service.mark_spawned(conn, run["id"], "rs:qa-role")
+    _deliver(mgr, conn, fake, log, run["id"], "work", task_id=task["id"])
+    assert _wait(lambda: mgr.status("qa-role")["alive"])
+    # 一轮结束后进程空闲；删除任务也应立即释放它。
+    assert _wait(lambda: mgr.status("qa-role")["status"] == "idle")
+
+    tasks_service.delete(conn, task["id"], force=True)
+
+    assert tasks_service.get(conn, task["id"]) is None
+    assert _wait(lambda: not mgr.status("qa-role")["alive"])
+
+
+def test_delete_completed_task_kills_idle_persistent_role_process(env, monkeypatch):
+    """删除已完成任务也应释放该任务的空闲角色进程（无需 force）。"""
+    conn, mgr, fake, log = env
+    from anvil.services import daemon as daemon_service
+    from anvil.services import tasks as tasks_service
+
+    monkeypatch.setattr(daemon_service, "get_manager", lambda: mgr)
+    task = tasks_service.create(conn, title="completed task")
+    run = runs_service.create_run(conn, "qa-role", task_id=task["id"])
+    runs_service.mark_spawned(conn, run["id"], "rs:qa-role")
+    _deliver(mgr, conn, fake, log, run["id"], "work", task_id=task["id"])
+    assert _wait(lambda: mgr.status("qa-role")["status"] == "idle")
+    runs_service.set_status(conn, run["id"], "completed")
+
+    tasks_service.delete(conn, task["id"])
+
+    assert tasks_service.get(conn, task["id"]) is None
+    assert _wait(lambda: not mgr.status("qa-role")["alive"])
+
+
+def test_cancel_task_keeps_persistent_role_process(env):
+    """cancel 可 reopen，故不杀常驻进程；reopen 后仍复用同一会话。"""
+    conn, mgr, fake, log = env
+    from anvil.services import tasks as tasks_service
+
+    task = tasks_service.create(conn, title="cancel me")
+    run = runs_service.create_run(conn, "qa-role", task_id=task["id"])
+    runs_service.mark_spawned(conn, run["id"], "rs:qa-role")
+    _deliver(mgr, conn, fake, log, run["id"], "work", task_id=task["id"])
+    assert _wait(lambda: mgr.status("qa-role")["status"] == "idle")
+    pid = mgr.status("qa-role")["pid"]
+    sid = mgr.status("qa-role")["session_id"]
+
+    tasks_service.cancel(conn, task["id"])
+
+    assert tasks_service.get(conn, task["id"])["status"] == "closed"
+    st = mgr.status("qa-role")
+    assert st["alive"] and st["pid"] == pid
+
+    tasks_service.reopen(conn, task["id"])
+    assert tasks_service.get(conn, task["id"])["status"] == "todo"
+    _deliver(mgr, conn, fake, log, run["id"], "again", task_id=task["id"])
+    assert _wait(lambda: mgr.status("qa-role")["status"] == "idle")
+    st = mgr.status("qa-role")
+    assert st["alive"] and st["pid"] == pid and st["session_id"] == sid
 
 
 FAIL_RUNTIME = '''
