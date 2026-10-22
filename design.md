@@ -536,6 +536,13 @@ COMMIT;
 
 SQLite 的 `BEGIN IMMEDIATE` 加上单进程编排，足以保证排他性。不需要额外的锁服务。
 
+> **实现口径（owner 2026-10-22）**：单负责人任务与团队任务走不同 claim 路径——
+> 单负责人任务一旦 `assignee` 被占用就是排他的，其他角色不能 claim；团队任务按
+> `task_assignees` 逐角色独立 claim。创建给其他角色的子任务时应使用
+> `anvil task create ... --assignee <role>`（团队用 `--assignees a,b`）显式指派，
+> 创建者不要先 claim；若已 claim 需要转交，先 `anvil task unclaim <id>` 再 @ 对方。
+> claim 冲突返回 409，并直接给出 owner / unclaim / team assignee 的处理指引。
+
 ### 5.5 租约与心跳
 
 任务被领走后持有一个**租约**：租期 30 分钟，Agent 每 2 分钟通过 `anvil task heartbeat` 续租，连续缺失 3 个周期（6 分钟）判定失联，租约回收，任务退回 `todo` 并在事件流留痕。
@@ -554,6 +561,11 @@ SQLite 的 `BEGIN IMMEDIATE` 加上单进程编排，足以保证排他性。不
 4. **成本级** 当日累计花费超阈值时停止新建运行
 
 两级并发上限的思路来自 multica（角色级默认 6、守护进程级默认 20，取较小值），Anvil 因为是单机个人使用，默认值调得更保守。成本闸门是我加的，没有先例，但对个人用户来说防止一晚上烧掉几百块是有实际价值的。
+
+> **实现口径（owner 2026-10-22）**：角色/系统/运行时并发只统计
+> `created/projecting/running` 的 run；空闲 claim 与 `suspended/submitted/reviewing`
+> 会话不占 `max_parallel`。否则一个角色持有多个没有 run 的子任务 claim 就会把自己的
+> 并发额度占满，导致后续任务无法被唤醒。
 
 ---
 
@@ -578,6 +590,16 @@ async def tick():
 ```
 
 `wake()` 做的事：创建 run 记录、冻结 profile 快照、准备 worktree、执行投影、拉起子进程。**唤醒提示只含任务 id 与标题，不含任务正文**——正文由 Agent 自己通过 `anvil task show` 取。这样编排器不承担内容组装的责任，也让 Agent 的信息获取路径统一。
+
+> **Workflow 运行期切片（owner 2026-10-22）**：大型任务不再由 Cindy 预先切分。
+> Cindy 只定义工作流骨架——一个 `kind=plan_slices` 切片计划步骤 + 顶层 `loop` 模板；
+> 切片计划步骤由具备项目理解的角色运行，盘点目录/模块/依赖/风险面后通过
+> `anvil step plan <wf> <step> --file slices.json` 提交切片。服务端按 loop 模板为每片
+> 确定性展开 `scope? → execute[...] → verify → fix → verify2 → decide`：
+> 下一片依赖上一片 `decide`，decision 打回时 `fix/verify2` 重做；
+> 依赖切片计划步骤的静态下游步骤自动改挂到最后一片 `decide`。
+> 切片步骤带 `source_step_id`/`slice_key`，状态变化实时写入任务会话（`activities.kind=step`）。
+> 图谱只画一个 `↻ 切片循环` 节点，点击展开当前片的单一闭环流程。
 
 ### 6.2 运行生命周期
 
@@ -644,8 +666,16 @@ anvil task heartbeat                     # 续租当前任务
 anvil task submit --summary "..." [--branch <name>]
 anvil task comment <id> "..."
 anvil task mention <id> --to <role> "..."   # @提及角色（角色间协作，不经 human）
-anvil task create --title "..." --type T [--parent <id>]
+anvil task create --title "..." --type T [--parent <id>] \
+                  [--assignee <role> | --assignees a,b]  # 子任务显式指派执行者
 anvil task block <id> --on <other-id> --reason "..."
+
+# 工作流
+anvil step show <workflow-id>
+anvil step submit <workflow-id> <step-id> --summary "..."
+anvil step plan <workflow-id> <plan-step-id> --file slices.json  # 运行期切片计划
+anvil step decide <workflow-id> <decision-step-id> --approve|--reject --feedback "..."
+anvil board draft --task <id> --goal "..." --tree-file wf.json --kind workflow
 
 # 记忆
 anvil memory append "..."                # 追加到 MEMORY.md
@@ -683,6 +713,9 @@ anvil ws diff                            # 本次改动，含越界警告
 > 再执行 `anvil task show $ANVIL_TASK_ID` 读取完整要求。
 > 在当前工作目录（cwd）中完成你的产出（写代码/文档/测试）。
 > 需要与其它角色协作或澄清时，执行 `anvil task mention $ANVIL_TASK_ID --to <角色slug> "消息"` @提及对方（角色间直接交互，不经过人类）。
+> 开始/关键节点用 `anvil task comment` 同步进展；需要下游/验证角色介入时用 `anvil task mention` 交接。
+> 拆分给其他角色的子任务用 `anvil task create ... --assignee <角色>`（团队用 `--assignees a,b`）指定执行者；**不要 claim 你拆给别人的子任务**，已 claim 需先 `anvil task unclaim <id>` 再 @ 对方。
+> 工作流步骤完成后用 `anvil step submit`；decision 步骤用 `anvil step decide --approve|--reject`；plan_slices 步骤用 `anvil step plan --file slices.json`。
 > 长任务中每隔若干分钟执行 `anvil task heartbeat` 续租，否则任务会被回收。
 > 完成后必须执行 `anvil task submit $ANVIL_TASK_ID "完成摘要"` 声明完成，仅仅退出进程不算完成。
 > 发现自己不适合这个任务时执行 `anvil task unclaim` 并说明理由，这是正常操作。
@@ -880,7 +913,18 @@ GET    /api/v1/tasks/{id}/diff
 GET    /api/v1/tasks/{id}/config-snapshot      # 本任务实际使用的配置
 GET    /api/v1/board/templates                # 工作流模板库（SOP 预设，如 design-dev-test / dev-test / fix-test）
 POST   /api/v1/board/decompose                 # 提交目标 + 模板 → 产出带角色/依赖的 draft 任务树
-POST   /api/v1/board/drafts/approve            # 批量 draft → todo
+POST   /api/v1/board/drafts                    # planner 提交 workflow / role_suggestion 草案
+POST   /api/v1/board/drafts/approve            # 批量 draft → todo / workflow
+POST   /api/v1/board/drafts/reject             # 驳回草案（可触发重规划）
+
+# 工作流
+GET    /api/v1/tasks/{id}/workflow
+GET    /api/v1/workflows/{wid}
+POST   /api/v1/workflows/{wid}/steps/{sid}/submit
+POST   /api/v1/workflows/{wid}/steps/{sid}/plan      # 运行期切片计划
+POST   /api/v1/workflows/{wid}/steps/{sid}/decide    # decision approve/reject
+POST   /api/v1/workflows/{wid}/steps/{sid}/review    # 人工 gate 审核
+POST   /api/v1/workflows/{wid}/steps/{sid}/retry
 
 # 运行（run）
 GET    /api/v1/runs
@@ -940,7 +984,9 @@ Agent 侧 CLI 调用的是同一套 API 的子集，附加 `X-Anvil-Session` 头
 
 状态灯的图例必须写清楚**灰点不代表故障**——Raft 特别强调了这一点，安静的 Agent 通常只是空闲，进程被正常释放了。这个误解会让你反复去重启健康的角色。
 
-**任务详情（任务会话）**。一个任务即一个会话（raft 的频道/线程思路）：顶部任务卡全文与状态，主体是一条按时间排序的**多角色交互时间线**——认领/放弃、评论、提交、评审（通过/驳回）、交接（unclaim→他人 claim），以及运行生命周期事件（投影中/运行中/评审中/已完成/失败/已放弃），每条带头像色块、动作徽章与时间戳；底部可**以 human 身份评论/@提及**（输入 @ 弹出角色联想）参与交互，SSE 实时刷新。**三向 @提及**：①需自然人决策（评审）时系统自动 `@human` 通知；②自然人 `@角色` 注入注意事项/上下文；③角色间通过 `anvil task mention --to <role>` 直接 `@角色` 交互（角色职责内事务不经人类）。**@ 即拉入**（raft inbox 模型）：@ 的是角色、且该角色为任务参与角色且无活跃 run 时，自动唤醒该角色起来响应。产出 diff（并排视图）、评审意见、配置快照查看、出价记录（开启 `score` 策略时）收在折叠区；diff 视图中越界文件用红色标出并注明"越界，已阻止合并"。
+**任务详情（任务会话）**。一个任务即一个会话（raft 的频道/线程思路）：顶部任务卡全文与状态，主体是一条按时间排序的**多角色交互时间线**——认领/放弃、评论、提交、评审（通过/驳回）、交接（unclaim→他人 claim），以及运行生命周期事件（投影中/运行中/评审中/已完成/失败/已放弃），每条带头像色块、动作徽章与时间戳；底部可**以 human 身份评论/@提及**（输入 @ 弹出角色联想）参与交互，SSE 实时刷新。会话默认停在最新消息；用户上滚后暂停自动跟随，滚回底部恢复；吸顶栏提供「↑ 最早 / ↓ 最新」快捷跳转。**三向 @提及**：①需自然人决策（评审）时系统自动 `@human` 通知；②自然人 `@角色` 注入注意事项/上下文；③角色间通过 `anvil task mention --to <role>` 直接 `@角色` 交互（角色职责内事务不经人类）。**@ 即拉入**（raft inbox 模型）：@ 的是角色、且该角色为任务参与角色且无活跃 run 时，自动唤醒该角色起来响应。产出 diff（并排视图）、评审意见、配置快照查看、出价记录（开启 `score` 策略时）收在折叠区；diff 视图中越界文件用红色标出并注明"越界，已阻止合并"。
+
+**工作流视图（任务详情「工作流」页签）**。图谱只表达 workflow 的逻辑与架构：静态步骤按依赖分层；运行期切片折叠成一个 `↻ 切片循环` 节点，实时显示总片数/总步数、已完成片数、当前片·阶段·本片进度。点击循环节点展开当前片的**单一闭环流程**（scope → execute → verify → fix → verify2 → decide），当前阶段高亮，可切换切片查看任意一片；列表视图按「循环 → 切片 → 步骤」三级折叠，默认不展开 200+ 个动态步骤。
 
 **角色执行历史（`/agents/{slug}`）**。每个角色的自己执行情况可追溯：大厅角色卡点进该角色的执行历史页，列出其历次 run（session），每条含状态徽章、关联任务、起止时间、耗时。
 

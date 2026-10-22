@@ -358,14 +358,18 @@
 ## Raft 式子任务与团队扩展（2026-10-19）
 
 - **临时子任务**：Agent 用 `anvil task create --title ... --description ... --parent $ANVIL_TASK_ID`
-  创建子任务；自动继承父任务的 repo/workspace/base_branch；可被其他角色 `anvil task claim` 认领。
+  创建子任务；自动继承父任务的 repo/workspace/base_branch。创建给其他角色时用
+  `--assignee <role>`（团队用 `--assignees a,b`）显式指派，**创建者不要先 claim**；
+  单负责人任务一旦被 claim 就是排他的，需先 `anvil task unclaim` 才能转交。
   子任务**不进入大厅**，只在父任务详情新增的「子任务」页签展示（状态/认领角色/直达）。
 - **API**：`GET /tasks?parent_id=` 过滤子任务。
 - **Agent 自行扩展团队**：`POST /roles/expand` / `anvil role expand --brief "..."`：
   创建新 agent 并**继承创建者的 runtime/permission_mode**；新角色为普通 member，不能设置 tools/高权限字段；
   每日配额 `ANVIL_AGENT_ROLE_EXPAND_DAILY`（默认 3）、总角色上限 `ANVIL_MAX_ROLES`（默认 20）；
   创建动作写 audit `role_expand`，并在关联任务里 @human 通知。
-- **协议**：STEP_PROTOCOL 增加「拆分临时工作 → 子任务 + @目标角色」「扩展团队 → role expand」指引。
+- **协议**：`PROTOCOL` / `STEP_PROTOCOL` / `REPLY_PROTOCOL` 均要求拆分给其他角色的子任务用
+  `--assignee` / `--assignees` 显式指派，创建者不要 claim；已 claim 需先 unclaim 再交接。
+  同时保留「扩展团队 → role expand」指引。
 - 测试：`tests/api/test_subtasks.py`、`tests/api/test_role_expand.py`。
 
 ## Token 统计（2026-10-19，替代不准确的「今日成本」）

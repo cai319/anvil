@@ -168,10 +168,13 @@ data/
 1. 人类在大厅创建任务，选择参与角色并派发；
 2. **单角色任务**：直接唤醒该角色；
    **多角色任务**：先唤醒规划助理 Cindy，分析任务并提交工作流草案；
-3. 人类在收件箱批准草案，工作流步骤按依赖关系派发；
-4. 角色在私有 home（或 Git worktree）中执行，通过 `anvil` CLI 上报进展、@ 其他角色；
-5. 步骤完成后 `anvil step submit`；审核门（gate）进入收件箱等待人工通过；
-6. 全部步骤完成 → 任务进入 `in_review` → 人类最终评审 → `done`。
+3. 人类在收件箱批准草案，工作流按「静态步骤 + 运行期切片」执行：
+   Cindy 只定义 `plan_slices` 切片计划步骤与 `loop` 模板，具体切片由执行角色在运行时
+   盘点项目后产出；服务端为每片生成 `scope → execute → verify → fix → verify2 → decide` 小闭环；
+4. 切片内角色执行、验证、修复，进展和问题实时写入任务会话；决策角色 `approve` 后才进入下一片，
+   `reject` 会把 `fix/verify2` 打回重做；
+5. 非 decision 步骤完成后 `anvil step submit`；审核门（gate）进入收件箱等待人工通过；
+6. 全部切片与静态步骤完成 → 任务进入 `in_review` → 人类最终评审 → `done`。
 
 ---
 
@@ -545,10 +548,16 @@ projection:
 4. 角色建议的审批：
    - **批准**：按建议画像创建角色、绑定到任务，并自动重新规划 workflow；
    - **驳回**：Cindy 只用现有角色重新规划；如果任务仍为 0 角色，会提示你先创建/绑定至少一个角色；
-5. 工作流草案批准后，步骤按依赖关系自动派发。
+5. 工作流草案批准后，步骤按依赖关系自动派发；大型任务的切片计划步骤由执行角色在运行时
+   盘点项目并产出切片，服务端再按 `loop` 模板展开每片的小闭环。
 
 > Cindy **只使用任务已绑定的角色**，不会虚构未绑定角色。角色建议中的能力、职责、系统提示会在
 > 批准时直接落成角色；v1 不做收件箱内联编辑，需要调整可驳回后手动创建角色再重新派发。
+
+> **拆分子任务时**：用 `anvil task create ... --assignee <执行角色>`（团队用 `--assignees a,b`）
+> 显式指定执行者，创建者不要 claim 给别人的子任务。单负责人任务一旦被 claim 就是排他的；
+> 若已 claim 但需要转交，先 `anvil task unclaim <id>` 再 @ 对方认领。并发额度按活跃 run
+> （created/projecting/running）计算，空闲 claim 不会占用角色额度。
 
 ### 7.4 收件箱与人工确认
 
@@ -759,7 +768,9 @@ anvil init --with-roles                 # 首启：发现运行时、建频道�
 anvil task list                         # 任务列表
 anvil task show <task-id>               # 任务详情
 anvil task create --title "..." --description "..."
-anvil task comment <task-id> "说明"      # 以当前身份评论
+anvil task create --title "..." --parent <task-id> --assignee <role>   # 子任务显式指派
+anvil task create --title "..." --parent <task-id> --assignees a,b     # 子任务团队执行
+anvil task comment <task-id> "说明"      # 以 human 身份评论
 anvil task mention <task-id> --to human "请确认"   # @ 提及
 anvil whoami                            # 当前会话身份
 anvil ws status <workspace-id>          # 工作区文件与 git 状态
@@ -777,6 +788,9 @@ anvil task comment $ANVIL_TASK_ID "进展"
 anvil task mention $ANVIL_TASK_ID --to <role> "请确认接口"
 anvil task submit $ANVIL_TASK_ID "完成摘要"          # 整任务提交
 anvil step submit <workflow-id> <step-id> --summary "步骤完成"  # 工作流步骤提交
+anvil step plan <workflow-id> <plan-step-id> --file slices.json  # 运行期切片计划
+anvil step decide <workflow-id> <decision-step-id> --approve --feedback "结论"
+anvil step decide <workflow-id> <decision-step-id> --reject --feedback "返工要求"
 anvil board draft --task $ANVIL_TASK_ID --goal "..." --tree-file wf.json --kind workflow
 anvil role expand --brief "需要一个安全评审角色"       # Agent 扩展团队（有配额）
 anvil action prepare --kind task.cancel --task $ANVIL_TASK_ID --reason "..."  # 危险操作申请
