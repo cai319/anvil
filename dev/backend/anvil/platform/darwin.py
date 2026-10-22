@@ -87,7 +87,8 @@ def _pid_alive(pid: int) -> bool:
     # 进程存在，但可能是已终止的僵尸（SIGTERM 后未回收）；用 ps 判断状态。
     try:
         out = subprocess.run(
-            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=5
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=5
         ).stdout.strip()
     except Exception:  # noqa: BLE001
         return True
@@ -101,7 +102,7 @@ class DarwinCredentialStore(CredentialStore):
         try:
             out = subprocess.run(
                 ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
-                capture_output=True, text=True, check=True,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
             )
             return out.stdout.rstrip("\n") or None
         except (subprocess.CalledProcessError, FileNotFoundError):

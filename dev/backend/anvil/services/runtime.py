@@ -214,7 +214,8 @@ def _npm_global(package: str) -> str | None:
         if not exe:
             continue
         try:
-            out = subprocess.run([exe, *bin_args], capture_output=True, text=True, timeout=10)
+            out = subprocess.run([exe, *bin_args], capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace", timeout=10)
         except Exception:  # noqa: BLE001
             continue
         prefix = (out.stdout or "").strip()
@@ -264,7 +265,8 @@ def _run_version_probe(executable: str, definition: dict | None) -> tuple[str, s
     vp = (definition or {}).get("version_probe") or {}
     args = vp.get("args") or ["--version"]
     try:
-        out = subprocess.run([executable, *args], capture_output=True, text=True, timeout=15)
+        out = subprocess.run([executable, *args], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=15)
     except Exception as exc:  # noqa: BLE001
         return "unhealthy", None, _with_wrapper_warning(str(exc), executable)
     text = (out.stdout or out.stderr) or ""
@@ -431,7 +433,8 @@ def health_probe(conn: sqlite3.Connection, rid: str) -> dict | None:
     with tempfile.TemporaryDirectory(prefix="anvil-health-") as tmp:
         try:
             proc = subprocess.run(
-                [executable, *args], capture_output=True, text=True, timeout=timeout, cwd=tmp
+                [executable, *args], capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=timeout, cwd=tmp
             )
             text = (proc.stdout or "") + (proc.stderr or "")
             ok = proc.returncode == 0 and (expect in text if expect else True)

@@ -98,7 +98,8 @@ def workspace_diff(ws_id: str, conn=Depends(get_db)):
 def _git(root: Path, args: list[str]) -> tuple[int, str]:
     try:
         r = subprocess.run(
-            ["git", "-C", str(root), *args], capture_output=True, text=True, timeout=30
+            ["git", "-C", str(root), *args], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=30
         )
         return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
     except Exception as exc:  # noqa: BLE001

@@ -1,6 +1,7 @@
 """常驻角色运行时：同一进程复用、忙时排队、空闲退出后 --resume 恢复同一会话。"""
 from __future__ import annotations
 
+import io
 import sys
 import time
 
@@ -40,7 +41,8 @@ def test_frame_format():
 
 
 @pytest.fixture
-def env(tmp_path):
+def env(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "AGENTS_DIR", tmp_path / "agents")
     fake = tmp_path / "fake_runtime.py"
     fake.write_text(FAKE_RUNTIME, encoding="utf-8")
     log = tmp_path / "argv.log"
@@ -201,6 +203,82 @@ print(json.dumps({"type": "system", "subtype": "init", "session_id": sid}), flus
 for line in sys.stdin:
     sys.exit(2)
 '''
+
+
+def test_spawn_uses_utf8_pipes(env, monkeypatch):
+    """Windows 中文 prompt/输出必须走 UTF-8，且 stdin 不做 CRLF 转换。"""
+    conn, mgr, fake, log = env
+    captured: dict = {}
+
+    class FakeProc:
+        pid = 12345
+        stdin = None
+        stdout = io.StringIO("")
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+    def fake_popen(args, **kwargs):
+        captured.update(kwargs)
+        return FakeProc()
+
+    monkeypatch.setattr("anvil.services.daemon.subprocess.Popen", fake_popen)
+    r = mgr._role("qa-role")
+    mgr._spawn(conn, r, sys.executable, ["--version"], ["--version"], {},
+               str(fake.parent), {})
+
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"
+    assert captured["text"] is True
+
+
+def test_reader_crash_is_logged_and_process_terminated(env):
+    """reader 解码/管道异常不能静默死掉；要记录 traceback 并终止子进程。"""
+    conn, mgr, fake, log = env
+
+    class BrokenStdout:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            raise UnicodeDecodeError("gbk", b"\x80", 0, 1, "invalid start byte")
+
+    class BrokenProc:
+        pid = 1
+        stdin = None
+        stdout = BrokenStdout()
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+    r = mgr._role("qa-role")
+    r.proc = BrokenProc()
+    r.session_id = "sid"
+    r.token = "tok"
+    mgr._reader_loop(r)
+
+    log_path = config.AGENTS_DIR / "qa-role" / "logs" / "role-session.log"
+    text = log_path.read_text(encoding="utf-8")
+    assert "reader crashed" in text
+    assert "UnicodeDecodeError" in text
 
 
 def test_failure_clears_session_for_next_wake(env, monkeypatch):

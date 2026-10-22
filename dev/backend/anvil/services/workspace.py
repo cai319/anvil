@@ -23,7 +23,8 @@ def _repo(ws_id: str):
 def _git(root, args: list[str]) -> list[str]:
     try:
         r = subprocess.run(
-            ["git", "-C", str(root), *args], capture_output=True, text=True, timeout=15
+            ["git", "-C", str(root), *args], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=15
         )
         return (r.stdout or r.stderr).strip().splitlines()
     except Exception:  # noqa: BLE001

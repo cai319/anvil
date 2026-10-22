@@ -213,10 +213,15 @@ def probe_mcp_server(conn: sqlite3.Connection, mid: str, timeout: float = 8.0) -
         proc = subprocess.Popen(
             [server["command"], *[str(a) for a in server["args"]]],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1, env=merged_env,
+            text=True, encoding="utf-8", errors="replace", bufsize=1, env=merged_env,
         )
     except Exception as exc:  # noqa: BLE001
         return {"id": server["id"], "ok": False, "detail": str(exc), "tools": []}
+    try:
+        if proc.stdin:
+            proc.stdin.reconfigure(newline="\n")
+    except Exception:  # noqa: BLE001
+        pass
 
     q: queue.Queue = queue.Queue()
 

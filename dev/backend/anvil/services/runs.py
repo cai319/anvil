@@ -254,7 +254,7 @@ def _create_worktree(conn: sqlite3.Connection, run_id: str, role_slug: str, task
     try:
         subprocess.run(
             ["git", "-C", str(repo_path), "worktree", "add", "-b", branch, str(worktree)],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
         )
         return True
     except Exception:  # noqa: BLE001

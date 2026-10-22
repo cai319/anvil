@@ -18,6 +18,7 @@ import secrets
 import subprocess
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -248,13 +249,21 @@ class DaemonManager:
 
         kwargs: dict = dict(
             cwd=cwd, env=merged_env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, bufsize=1,
+            stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+            bufsize=1,
         )
         try:
             proc = subprocess.Popen([executable, *args], start_new_session=True, **kwargs)
         except TypeError:  # Windows 不支持 start_new_session
             proc = subprocess.Popen([executable, *args], **kwargs)
+        # Windows 的 text 模式默认把 \n 写成 \r\n；stream-json 是逐行 JSON，统一成 LF。
+        try:
+            if proc.stdin:
+                proc.stdin.reconfigure(newline="\n")
+        except Exception:  # noqa: BLE001
+            pass
         r.proc = proc
+        self._log(r.role, f"[anvil] spawn {executable} {' '.join(str(a) for a in args)}")
         r.session_id = sid
         r.token = token
         r.busy = False
@@ -313,49 +322,57 @@ class DaemonManager:
                 r.proc.stdin.write(frame_user_message(text))
                 r.proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
+            self._log(r.role, f"[anvil] stdin write failed: {exc}")
             r.last_active = time.time()
             self._db_upsert(conn, r, status="dead", error=str(exc))
 
     def _reader_loop(self, r: _Role) -> None:
         proc = r.proc
         assert proc is not None and proc.stdout is not None
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            if not line.startswith("{"):
-                self._log(r.role, line)  # claude 的警告行（如 unrecognized_model）
-                if "Prompt is too long" in line:
-                    self._reset_for_cic(r)
-                    break
-                continue
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                if not line.startswith("{"):
+                    self._log(r.role, line)  # claude 的警告行（如 unrecognized_model）
+                    if "Prompt is too long" in line:
+                        self._reset_for_cic(r)
+                        break
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    self._log(r.role, line)
+                    continue
+                self._append_run_log(r, self._format_event(ev))
+                etype = ev.get("type")
+                if etype == "system" and ev.get("session_id"):
+                    r.session_id = ev["session_id"]
+                elif etype == "result":
+                    if "Prompt is too long" in line:
+                        self._reset_for_cic(r)
+                        break
+                    self._on_turn_result(r, ev)
+                elif etype == "assistant":
+                    self._log(r.role, self._assistant_text(ev))
+                    usage = (ev.get("message") or {}).get("usage") or {}
+                    if usage:
+                        try:
+                            ctx = sum(int(usage.get(k) or 0) for k in (
+                                "input_tokens", "cache_read_input_tokens",
+                                "cache_creation_input_tokens"))
+                            if ctx:
+                                r.context_tokens = ctx
+                            self._record_usage(r, usage)
+                        except (TypeError, ValueError):
+                            pass
+        except Exception:  # noqa: BLE001 —— 解码/管道异常不能静默杀死 reader
+            self._log(r.role, "[anvil] reader crashed:\n" + traceback.format_exc())
             try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                self._log(r.role, line)
-                continue
-            self._append_run_log(r, self._format_event(ev))
-            etype = ev.get("type")
-            if etype == "system" and ev.get("session_id"):
-                r.session_id = ev["session_id"]
-            elif etype == "result":
-                if "Prompt is too long" in line:
-                    self._reset_for_cic(r)
-                    break
-                self._on_turn_result(r, ev)
-            elif etype == "assistant":
-                self._log(r.role, self._assistant_text(ev))
-                usage = (ev.get("message") or {}).get("usage") or {}
-                if usage:
-                    try:
-                        ctx = sum(int(usage.get(k) or 0) for k in (
-                            "input_tokens", "cache_read_input_tokens",
-                            "cache_creation_input_tokens"))
-                        if ctx:
-                            r.context_tokens = ctx
-                        self._record_usage(r, usage)
-                    except (TypeError, ValueError):
-                        pass
+                proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
         # 进程退出。stdout EOF 时 poll() 可能还是 None，wait 一下拿真实退出码，
         # 否则非零退出会被误判成正常退出，失败后仍会 --resume 旧上下文。
         code = proc.poll()
@@ -618,7 +635,8 @@ class DaemonManager:
                     # 只终止确实是 claude 的进程，避免 PID 复用误杀
                     out = subprocess.run(
                         ["ps", "-o", "command=", "-p", str(pid)],
-                        capture_output=True, text=True, timeout=3).stdout
+                        capture_output=True, text=True, encoding="utf-8",
+                        errors="replace", timeout=3).stdout
                     if "claude" in out:
                         os.kill(int(pid), 15)
                         self._log(r["role_slug"],
