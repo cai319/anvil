@@ -87,6 +87,6 @@ async def test_default_runtime_rejects_unknown_id(client):
 
 async def test_default_runtime_set_requires_human(client):
     await _post_runtime(client)
-    r = await client.put(f"{API}/runtimes/default", headers=auth_headers(),
+    r = await client.put(f"{API}/runtimes/default", headers=auth_headers("pm"),
                          json={"id": "claude-code"})
     assert r.status_code == 403

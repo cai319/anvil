@@ -6,6 +6,7 @@ Values come from environment variables with sensible defaults. Data directories
 """
 from __future__ import annotations
 
+import json
 import os
 import platform as _platform
 import sys
@@ -62,7 +63,32 @@ DEFAULT_PERMISSION_MODE = _env("ANVIL_DEFAULT_PERMISSION_MODE", "bypassPermissio
 
 # CIC（Constructed Initial Context）：空闲释放后若会话上下文超过阈值，不再 --resume，
 # 而是新建会话并注入 5 块构造上下文（MEMORY 头/最近消息/最近动作/唤醒）。
-CIC_THRESHOLD_TOKENS = int(_env("ANVIL_CIC_THRESHOLD_TOKENS", "128000"))
+# 0 = 自动：按模型上下文窗口 × CIC_RESET_RATIO；>0 = 绝对阈值覆盖。
+CIC_THRESHOLD_TOKENS = int(_env("ANVIL_CIC_THRESHOLD_TOKENS", "0"))
+CIC_RESET_RATIO = float(_env("ANVIL_CIC_RESET_RATIO", "0.8"))
+# 模型上下文窗口：优先 ANVIL_MODEL_CONTEXT_WINDOWS（JSON: {"model-id": 1000000}），
+# 否则按模型名中的 1m/200k/128k 推断，最后退回默认值。
+DEFAULT_CONTEXT_WINDOW = int(_env("ANVIL_DEFAULT_CONTEXT_WINDOW", "200000"))
+# 全局保守下限：若角色可能路由到更小窗口的模型，用它兜底（0=不设）。
+CONTEXT_WINDOW_FLOOR = int(_env("ANVIL_CONTEXT_WINDOW_FLOOR", "0"))
+try:
+    _model_windows_raw = json.loads(_env("ANVIL_MODEL_CONTEXT_WINDOWS", "{}") or "{}")
+except json.JSONDecodeError:
+    _model_windows_raw = {}
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {}
+for _k, _v in _model_windows_raw.items():
+    try:
+        _n = int(_v)
+    except (TypeError, ValueError):
+        continue
+    if _n > 0:
+        MODEL_CONTEXT_WINDOWS[str(_k)] = _n
+# 唤醒时向角色提示“上下文将满”的比例；达到该比例时角色可自行决定是否 reset-context。
+CONTEXT_HINT_RATIO = float(_env("ANVIL_CONTEXT_HINT_RATIO", "0.5"))
+
+# 数据库日常备份：启动/调度器每天做一次 SQLite 在线备份，保留最近 N 天。
+BACKUP_ENABLED = _env("ANVIL_BACKUP", "1") != "0"
+BACKUP_KEEP_DAYS = int(_env("ANVIL_BACKUP_KEEP_DAYS", "7"))
 
 # Cleaner：本地检查角色 MEMORY.md 体积（零 token），超限时给该角色排一次自修剪提醒（每天至多一次）。
 CLEANER_ENABLED = _env("ANVIL_CLEANER", "1") != "0"

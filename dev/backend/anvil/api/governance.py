@@ -13,7 +13,8 @@ router = APIRouter()
 
 
 @router.post("/control/tick")
-def control_tick(request: Request, conn=Depends(get_db)):
+def control_tick(request: Request, conn=Depends(get_db),
+                 auth: Auth = Depends(require_human)):
     """编排器 tick：回收 lease 过期的认领。测试旁路（test_auth）下 force 回收。"""
     force = bool(getattr(request.app.state, "test_auth", False))
     return services.governance.tick(conn, force=force)
@@ -25,7 +26,8 @@ def get_freeze(conn=Depends(get_db)):
 
 
 @router.post("/control/freeze")
-def set_freeze(body: dict, conn=Depends(get_db)):
+def set_freeze(body: dict, conn=Depends(get_db),
+               auth: Auth = Depends(require_human)):
     return services.governance.set_freeze(conn, bool(body.get("frozen", False)))
 
 
@@ -95,7 +97,8 @@ def list_audit(task_id: str | None = None, role: str | None = None,
 
 
 @router.post("/tasks/{tid}/cost", response_model=TaskOut)
-def report_task_cost(tid: str, body: dict, conn=Depends(get_db)):
+def report_task_cost(tid: str, body: dict, conn=Depends(get_db),
+                     auth: Auth = Depends(get_auth)):
     usd = float(body.get("usd", 0))
     services.governance.report_cost(conn, tid, body.get("role_slug"), usd, body.get("source", "reported"))
     return services.tasks.get(conn, tid)  # type: ignore[return-value]

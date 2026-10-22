@@ -34,6 +34,8 @@ CONTRACT = {
     "note write": (["note", "write", "p"], "POST", f"{API}/me/notes"),
     "lesson propose": (["lesson", "propose", "x"], "POST", f"{API}/lessons/pending"),
     "self show": (["self", "show"], "GET", f"{API}/me"),
+    "self reset-context": (["self", "reset-context", "--task", "T-0001"],
+                           "POST", f"{API}/me/session/reset"),
     "reminder list": (["reminder", "list"], "GET", f"{API}/reminders"),
     "reminder add": (["reminder", "add", "--cron", "0"], "POST", f"{API}/reminders"),
     "ws status": (["ws", "status"], "GET", f"{API}/workspaces/0/tree"),

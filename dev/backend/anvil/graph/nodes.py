@@ -103,7 +103,11 @@ def _render_persistent(conn: sqlite3.Connection, run: dict, task: dict | None,
     )
     executable = runtime_service.effective_executable(executable) or executable
     rt_cfg = (effective.get("projection") or {}).get("runtime") or {}
-    permission_mode = (rt_cfg.get("permission_mode") if isinstance(rt_cfg, dict) else None) or config.DEFAULT_PERMISSION_MODE
+    if not isinstance(rt_cfg, dict):
+        rt_cfg = {}
+    permission_mode = rt_cfg.get("permission_mode") or config.DEFAULT_PERMISSION_MODE
+    model_pool = rt_cfg.get("model_pool") or []
+    context_window_floor = rt_cfg.get("context_window_floor")
     sess = definition.get("session") or {}
     inv = definition.get("invocation") or {}
     timeout = float(inv.get("timeout_seconds") or 3600)
@@ -120,7 +124,7 @@ def _render_persistent(conn: sqlite3.Connection, run: dict, task: dict | None,
         executable,
         list(sess.get("args_new") or []),
         list(sess.get("args_resume") or []),
-        cwd, env, timeout, ctx,
+        cwd, env, timeout, ctx, model_pool, context_window_floor,
     )
 
 
@@ -460,13 +464,14 @@ def spawn_node(state: dict, config) -> dict:
         if persistent:
             from ..services import daemon as daemon_service
             try:
-                exe, args_new, args_resume, cwd, env, timeout, pctx = _render_persistent(
-                    conn, run, task, effective, role, workspace_path)
+                exe, args_new, args_resume, cwd, env, timeout, pctx, model_pool, window_floor = \
+                    _render_persistent(conn, run, task, effective, role, workspace_path)
                 prompt = _prompt_for_run(conn, run, task)
                 daemon_service.get_manager().ensure_and_deliver(
                     conn, run["role_slug"], executable=exe, args_new=args_new,
                     args_resume=args_resume, ctx=pctx, cwd=cwd, env=env, prompt=prompt,
-                    run_id=run_id, task_id=run.get("task_id"))
+                    run_id=run_id, task_id=run.get("task_id"),
+                    model_pool=model_pool, context_window_floor=window_floor)
             except Exception:  # noqa: BLE001 —— 无法拉起/投递即失败
                 runs_service.set_status(conn, run_id, "failed", ended_at=now_iso(),
                                         failure_class="spawn_error")

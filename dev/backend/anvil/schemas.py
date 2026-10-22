@@ -37,7 +37,7 @@ class RuntimeStatus(str, Enum):
 
 
 class RuntimeIn(BaseModel):
-    id: str
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9_.-]{1,63}$")
     display_name: str
     executable_path: str | None = None
     executable: str | None = None  # §2.6 手工注册用「executable」，扁平注册用「executable_path」

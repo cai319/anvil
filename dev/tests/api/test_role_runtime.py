@@ -34,6 +34,6 @@ async def test_update_role_runtime_rejects_unknown(client):
 async def test_update_role_runtime_requires_human(client):
     await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
     await client.post(f"{API}/roles", json=role_payload("dev"), headers=auth_headers())
-    r = await client.put(f"{API}/roles/dev/runtime", headers=auth_headers(),
+    r = await client.put(f"{API}/roles/dev/runtime", headers=auth_headers("pm"),
                          json={"id": "claude-code"})
     assert r.status_code == 403

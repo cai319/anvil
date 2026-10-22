@@ -4,7 +4,9 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip("anvil.main")
-from tests.conftest import auth_headers, role_payload, runtime_payload, task_payload  # noqa: E402
+from tests.conftest import (  # noqa: E402
+    API, auth_headers, human_headers, role_payload, runtime_payload, task_payload,
+)
 
 
 @pytest.fixture
@@ -22,7 +24,7 @@ async def _create_task(client, tid, assignees):
 
 async def test_multi_role_dispatch_plans_with_cindy(client, seeded):
     await _create_task(client, "T-MULTI", ["pm", "developer", "tester"])
-    r = await client.post("/api/v1/tasks/T-MULTI/dispatch", headers=auth_headers())
+    r = await client.post("/api/v1/tasks/T-MULTI/dispatch", headers=human_headers())
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["mode"] == "planning"
@@ -38,7 +40,7 @@ async def test_multi_role_dispatch_plans_with_cindy(client, seeded):
 
 async def test_zero_assignee_dispatch_plans_with_cindy(client, seeded):
     await _create_task(client, "T-NOROLE", [])
-    r = await client.post("/api/v1/tasks/T-NOROLE/dispatch", headers=auth_headers())
+    r = await client.post("/api/v1/tasks/T-NOROLE/dispatch", headers=human_headers())
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["mode"] == "planning"
@@ -47,7 +49,7 @@ async def test_zero_assignee_dispatch_plans_with_cindy(client, seeded):
 
 async def test_single_role_dispatch_is_direct(client, seeded):
     await _create_task(client, "T-SINGLE", ["developer"])
-    r = await client.post("/api/v1/tasks/T-SINGLE/dispatch", headers=auth_headers())
+    r = await client.post("/api/v1/tasks/T-SINGLE/dispatch", headers=human_headers())
     assert r.status_code == 201
     body = r.json()
     assert body["mode"] == "direct"
@@ -60,7 +62,7 @@ async def test_dispatch_returns_pending_review_when_draft_exists(client, seeded)
         "goal": "g", "source_task": "T-DRAFT",
         "tree": {"leader": "pm", "children": [{"id": "S1", "title": "s", "role": "pm"}]}})
     assert draft.status_code == 201
-    r = await client.post("/api/v1/tasks/T-DRAFT/dispatch", headers=auth_headers())
+    r = await client.post("/api/v1/tasks/T-DRAFT/dispatch", headers=human_headers())
     assert r.status_code == 201
     assert r.json()["mode"] == "pending_review"
     assert r.json()["draft_id"] == draft.json()["id"]

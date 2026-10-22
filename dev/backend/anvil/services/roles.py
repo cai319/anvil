@@ -303,6 +303,8 @@ def delete(conn: sqlite3.Connection, slug: str) -> bool:
     if role and jloads(role.get("definition_json") or "{}", {}).get("kind") == "onboarding":
         from ..util import ConflictError
         raise ConflictError("built-in onboarding assistant cannot be deleted")
+    conn.execute("DELETE FROM sessions WHERE role_slug=?", (slug,))
+    conn.execute("DELETE FROM role_sessions WHERE role_slug=?", (slug,))
     cur = conn.execute("DELETE FROM roles WHERE slug=?", (slug,))
     conn.commit()
     return cur.rowcount > 0

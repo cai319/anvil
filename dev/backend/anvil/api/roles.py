@@ -191,7 +191,8 @@ def expand_role(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth)
 
 
 @router.post("/roles", status_code=201, response_model=RoleOut)
-def create_role(body: RoleIn, conn=Depends(get_db)):
+def create_role(body: RoleIn, conn=Depends(get_db),
+                auth: Auth = Depends(require_human)):
     definition = body.model_dump(exclude_none=True)
     definition.pop("slug", None)
     definition.pop("display_name", None)
@@ -279,7 +280,8 @@ def delete_role(slug: str, conn=Depends(get_db), auth: Auth = Depends(require_hu
 
 
 @router.get("/roles/{slug}/home")
-def role_home(slug: str, conn=Depends(get_db)):
+def role_home(slug: str, conn=Depends(get_db),
+              auth: Auth = Depends(require_human)):
     tree = services.roles.home_tree(conn, slug)
     if tree is None:
         raise HTTPException(status_code=404, detail="role not found")
@@ -287,7 +289,8 @@ def role_home(slug: str, conn=Depends(get_db)):
 
 
 @router.get("/roles/{slug}/home/file")
-def role_home_file(slug: str, path: str, conn=Depends(get_db)):
+def role_home_file(slug: str, path: str, conn=Depends(get_db),
+                   auth: Auth = Depends(require_human)):
     """只读展示角色 home 内文件（design §10；默认只读，编辑请用「给角色发指令」）。"""
     file = services.roles.read_home_file(conn, slug, path)
     if file is None:
@@ -296,7 +299,8 @@ def role_home_file(slug: str, path: str, conn=Depends(get_db)):
 
 
 @router.get("/roles/{slug}/home/history")
-def role_home_history(slug: str, path: str | None = None, conn=Depends(get_db)):
+def role_home_history(slug: str, path: str | None = None, conn=Depends(get_db),
+                      auth: Auth = Depends(require_human)):
     if services.roles.get(conn, slug) is None:
         raise HTTPException(status_code=404, detail="role not found")
     return {"slug": slug, "path": path, "commits": services.roles.home_history(conn, slug, path)}
@@ -319,7 +323,8 @@ def rollback_role(slug: str, version: int, conn=Depends(get_db),
 
 
 @router.post("/roles/{slug}/message")
-def message_role(slug: str, body: dict, request: Request, conn=Depends(get_db)):
+def message_role(slug: str, body: dict, request: Request, conn=Depends(get_db),
+                 auth: Auth = Depends(require_human)):
     """向角色直接发指令（design §10 唤醒源之一）：创建无任务 run 并立即派发。"""
     if services.roles.get(conn, slug) is None:
         raise HTTPException(status_code=404, detail="role not found")
@@ -428,7 +433,8 @@ def update_role_profile(slug: str, body: dict, conn=Depends(get_db),
 
 
 @router.post("/roles/{slug}/generate")
-def generate_role(slug: str, body: dict, conn=Depends(get_db)):
+def generate_role(slug: str, body: dict, conn=Depends(get_db),
+                  auth: Auth = Depends(require_human)):
     """用角色自己的运行时（未配置时用默认运行时）生成工作模式/技能描述/职责/系统提示。"""
     role = services.roles.get(conn, slug)
     if role is None:

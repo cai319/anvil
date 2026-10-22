@@ -27,6 +27,20 @@ Anvil 要解决的就是这一层。它不重新实现 Agent，不代理模型�
 
 > **owner 2026-10-19 修正**：改为**常驻会话优先**——每个角色一个长期存活的 CLI 会话进程（claude-code 用 `--input-format stream-json` 双向流），唤醒 = 向 stdin 投递消息（同一上下文，不再重启进程）；空闲 = 阻塞等待；**空闲超过 `idle_release_minutes`（默认 15）优雅退出并保留 session_id**，下次唤醒用 `--resume <session_id>` 恢复同一上下文。`runs` 仍是一次执行记录。不支持流式协议的运行时回退 one-shot 模型。动机：实测 one-shot 模型下每次 @mention 唤醒都新建进程，上下文不连续且易叠出孤儿进程（同一角色 3-5 个）。
 
+> **上下文策略（owner 2026-10-22）**：角色常驻会话默认复用；daemon 从 CLI 的 system init
+> 事件捕获模型 id，按 `ANVIL_MODEL_CONTEXT_WINDOWS` / 模型名（1m、200k、128k）/
+> `ANVIL_DEFAULT_CONTEXT_WINDOW` 解析上下文窗口。冷唤醒阈值 = 窗口 × `ANVIL_CIC_RESET_RATIO`
+> （或用 `ANVIL_CIC_THRESHOLD_TOKENS` 绝对覆盖）；提示阈值 = 窗口 × `ANVIL_CONTEXT_HINT_RATIO`。
+> 若角色配置 `runtime.model_pool` / `runtime.context_window_floor`，或全局
+> `ANVIL_CONTEXT_WINDOW_FLOOR`，策略窗口取这些值中的最小值，以覆盖“角色可能从小模型
+> 降级/升级”的场景。init 别名与 assistant 的 served 名称同族时（如
+> `deepseek-flash[1m]` vs `deepseek-flash`）保留更具体/更保守的窗口；真正换族时写
+> `session.model_switch` 审计并更新阈值。
+> 任务切换或达到提示阈值时，唤醒消息注入占用/上次任务/当前任务提示；角色可自行调用
+> `anvil self reset-context --task <id> --reason "..."`，由 daemon 终止当前轮并在新会话中
+> 重投当前步骤（CIC = MEMORY 头 + 最近消息/动作）。非零退出自动 reset、排队消息禁止 reset
+> 等护栏仍由 daemon 控制；每次 reset 写 `session.reset_context` 审计。
+
 **其五，工具清单是带预算的一等配置。** skill 与 MCP 的**能力**完全继承自运行时，Anvil 不自造工具体系；但**加载哪些**由 Anvil 决定并强制约束。默认全量加载会让上下文里塞进几十个工具描述，几千 token 的固定开销，直接压缩有效工作空间。所以工具清单支持白名单裁剪、按任务条件加载、以及预设组合，并配一个 token 硬预算。
 
 **其六，单进程编排，并发来自子进程。** 后端是一个 asyncio 单进程，不引入 Celery、Redis、消息队列。真正吃 CPU 和上下文的是各个 Agent 子进程，编排器本身只是个状态机加进程管家。单机单用户场景下，任何分布式组件都是净负债。
@@ -271,6 +285,53 @@ DELETE /api/v1/runtimes/{id}                 删除自定义运行时（内置�
 
 **存储**：内置定义在 `runtimes/*.yaml`（随包分发），用户自定义/覆盖在 `%APPDATA%/Anvil/runtimes/*.yaml`；`runtimes` 表只存发现态（path/version/status/capabilities/definition_hash），真相在 YAML。
 
+### 2.7 上下文窗口与模型路由
+
+原则：**上下文窗口不是角色属性，而是“下一次请求实际使用的模型”的能力**；策略阈值是另一层，不能混为一谈。
+
+- **模型识别**：CLI 的 `system init` 事件给出模型别名（如 `deepseek-flash[1m]`），
+  assistant 事件给出 served 名称（可能只是 `deepseek-flash`）。两者分别持久化为
+  `model_id` 与 `served_model_id`。
+- **同族后缀**：去掉 `[1m]/[200k]/[128k]` 后比较；同族时保留更具体/更保守的窗口，
+  不把后缀丢失误判为换模型。真正换族才更新 `model_id` 并写 `session.model_switch` 审计。
+- **窗口解析优先级**：`ANVIL_MODEL_CONTEXT_WINDOWS` → 模型名推断（1m/200k/128k）→
+  `ANVIL_DEFAULT_CONTEXT_WINDOW`。
+- **策略窗口**：角色可能从 pro 切到 flash，因此取
+  `min(active_window, model_pool 中的窗口, runtime.context_window_floor, ANVIL_CONTEXT_WINDOW_FLOOR)`。
+- **阈值**：提示阈值 = 策略窗口 × `ANVIL_CONTEXT_HINT_RATIO`；
+  冷唤醒/CIC 阈值 = 策略窗口 × `ANVIL_CIC_RESET_RATIO`；
+  `ANVIL_CIC_THRESHOLD_TOKENS > 0` 时作为绝对覆盖。
+- **唤醒提示**：任务切换或占用达到提示阈值时，在 prompt 前注入上下文统计、上次任务/步骤、
+  当前任务和 `anvil self reset-context` 用法；否则不增加 token。
+- **角色自主重置**：`anvil self reset-context --task <id> --reason "..."` →
+  `POST /api/v1/me/session/reset`。护栏：Agent 身份、任务绑定一致、当前 run 匹配、进程存活、
+  无排队消息；行为：终止当前轮、清空 session、以 CIC 新会话重投当前步骤；写
+  `session.reset_context` 审计。
+- **切换后检查**：模型换族后比较上下文与新窗口；超窗记录 WARNING，超过策略 CIC 阈值时提示
+  下次冷唤醒走 CIC。Anvil 不控制运行时内部选模，因此不做“切换前拦截”；通过
+  `whoami` 的 `model_pool_windows/fits/context_fit/context_safe_fit` 把决策信息交给角色，
+  真正的预检应由运行时/网关（如 LiteLLM/OpenRouter）在分发前完成。
+
+业界对应：LiteLLM 的 `model_info.max_input_tokens` + `context_window_fallbacks`、
+OpenRouter 的 `context_length`、agent 框架的 per-agent/per-node 模型绑定，以及
+“先估算 token → 选择放得下的模型 → 放不下则 compact/reset”的预检模式。
+
+### 2.8 安全边界（本地单用户）
+
+- **统一 API 鉴权**：`/api/v1/*` 全部请求必须携带有效 `X-Anvil-Session`（SSE 可用
+  `?token=`）。有效身份只有两类：未过期的运行级 session，或人类共享 token
+  （`ANVIL_AUTH_TOKEN`；未设置时仅接受本地默认 `anvil` / `anvil-web`）。
+- **人类身份显式化**：共享 token 只映射为 `human`，不能通过 `X-Anvil-Role` 冒充 Agent；
+  `require_human` 只接受 `human`。非回环访问必须配置 `ANVIL_AUTH_TOKEN`。
+- **Agent token 绑定**：运行级 token 绑定角色/任务；常驻角色 token 只能操作自己参与的
+  团队任务（assignee/lead/planner），开放任务仍可由任意角色 claim。
+- **危险入口人类专属**：运行时/MCP 的注册、探测、health，角色创建/发消息/生成画像，
+  workspace 合并/成员变更，freeze/lesson 变更等只接受 human。
+- **路径与命令边界**：SPA fallback、workspace `_repo`、runtime id 都做 resolve +
+  relative_to 校验；运行期/MCP 的 executable/args 不允许未授权注册或执行。
+- **数据保护**：`data/` 不进入 Git；数据目录 700、DB 600；调度器每天做 SQLite 在线备份
+  （`data/backups/anvil-YYYYMMDD.db`，保留 7 天）；删除角色同步撤销其 sessions/role_sessions。
+
 ---
 
 ## 第三章 角色模型
@@ -298,6 +359,10 @@ runtime:
   model: claude-sonnet-4-6        # 可选，运行时支持时生效
   thinking_effort: medium         # low|medium|high
   cli_extra_args: []              # 直接拼进 argv
+  # 可选：运行时可能路由到的模型池；上下文策略阈值按池中最小窗口保守计算
+  model_pool: ["claude-sonnet-4-6", "claude-haiku"]
+  # 可选：该角色的保守窗口下限（tokens），优先级高于全局 ANVIL_CONTEXT_WINDOW_FLOOR
+  context_window_floor: 128000
 
 # ── 两类文本，用途严格区分 ──
 description: |
@@ -623,6 +688,10 @@ created → projecting → running → submitted → reviewing → completed
 
 子进程的 stdout/stderr 全量落盘到 `agents/<slug>/logs/run-<id>.log`（`ProcessManager.spawn` 扩展 `stdout`/`stderr` 重定向），通过 `GET /runs/{id}/log` 读取；日志不入库（避免 SQLite 膨胀），库里只存文件路径。逐行实时推送 SSE 留作后续。
 
+> **删除 vs 取消**：物理删除任务会终止并回收该任务的常驻角色进程/会话（`cancel_task`）；
+> 取消只把任务置为 `closed`，保留 run、进程与会话，`reopen` 后可继续。这是刻意区分：
+> delete 不可恢复，cancel 可恢复。
+
 ### 6.3 三档重置
 
 照搬 raft 的分级，因为这个分级本身就是对的：
@@ -634,6 +703,11 @@ created → projecting → running → submitted → reviewing → completed
 | `full reset` | 会话与记忆全清，仅保留 profile.yaml | 角色定义要重来 |
 
 `full reset` 前自动把 `agents/<slug>/` 打包备份到 `backups/`，因为这个操作不可逆而且人经常后悔。
+
+> **第四种路径：角色自主 `reset-context`**（与三档人工重置并列但由 Agent 发起）。
+> 角色根据任务相关性/上下文占用自行调用；daemon 校验当前 run、进程与队列后，终止当前轮，
+> 清空会话，用 CIC（MEMORY 头 + 最近消息/动作）新建会话并重投当前步骤。它等价于
+> “session reset + CIC + 自动重投”，写 `session.reset_context` 审计，不影响 MEMORY/notes。
 
 ### 6.4 Reminder 机制
 
@@ -693,7 +767,8 @@ anvil note write <path> --content-file f
 anvil lesson propose "..." --tags a,b    # 提议升格到 shared/lessons.md
 
 # 自我
-anvil self show                          # 当前 profile（快照）
+anvil self show [--json]                 # profile + session.context_tokens/model_id/窗口/阈值
+anvil self reset-context --task <id> --reason "..."  # 自主换新会话（CIC 重投当前步骤）
 anvil self edit-instruction --file f     # 可自主，写入 pending 或直接生效
 anvil self propose --field tools --file f  # 需审批项走提案
 
@@ -725,6 +800,7 @@ anvil ws diff                            # 本次改动，含越界警告
 > 开始/关键节点用 `anvil task comment` 同步进展；需要下游/验证角色介入时用 `anvil task mention` 交接。
 > 拆分给其他角色的子任务用 `anvil task create ... --assignee <角色>`（团队用 `--assignees a,b`）指定执行者；**不要 claim 你拆给别人的子任务**，已 claim 需先 `anvil task unclaim <id>` 再 @ 对方。
 > 工作流步骤完成后用 `anvil step submit`；decision 步骤用 `anvil step decide --approve|--reject`；plan_slices 步骤用 `anvil step plan --file slices.json`。
+> 唤醒提示可能给出上下文占用/模型窗口；若当前任务与上次上下文无关或占用过高，先执行 `anvil self reset-context --task $ANVIL_TASK_ID --reason "..."`。
 > 长任务中每隔若干分钟执行 `anvil task heartbeat` 续租，否则任务会被回收。
 > 完成后必须执行 `anvil task submit $ANVIL_TASK_ID "完成摘要"` 声明完成，仅仅退出进程不算完成。
 > 发现自己不适合这个任务时执行 `anvil task unclaim` 并说明理由，这是正常操作。

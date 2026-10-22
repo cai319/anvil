@@ -15,9 +15,17 @@ from ..util import new_id, now_iso
 
 
 def _repo(ws_id: str):
-    # 工作区 id 来自 URL，限制为单段安全字符，避免路径穿越。
+    # 工作区 id 来自 URL：限制为单段安全字符，并校验解析后仍在 REPOS_DIR 内。
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", ws_id or "")
-    return config.REPOS_DIR / safe
+    base = config.REPOS_DIR.resolve()
+    root = (base / safe).resolve()
+    try:
+        root.relative_to(base)
+    except ValueError:
+        return None
+    if root == base:
+        return None
+    return root
 
 
 def _git(root, args: list[str]) -> list[str]:
@@ -39,12 +47,16 @@ def _list_files(root) -> list[str]:
 
 def tree(ws_id: str) -> dict:
     root = _repo(ws_id)
+    if root is None:
+        return {"id": ws_id, "root": "", "files": [], "status": []}
     status = _git(root, ["status", "--porcelain"]) if (root / ".git").exists() else []
     return {"id": ws_id, "root": str(root), "files": _list_files(root), "status": status}
 
 
 def diff(ws_id: str) -> dict:
     root = _repo(ws_id)
+    if root is None:
+        return {"id": ws_id, "changes": []}
     changes = _git(root, ["diff", "--stat"]) if (root / ".git").exists() else []
     return {"id": ws_id, "changes": changes}
 

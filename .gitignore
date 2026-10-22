@@ -16,3 +16,7 @@ dev/dist/
 
 # 运行时临时
 *.pid
+
+# Local runtime data: DB, tokens, role homes, logs, repos, worktrees
+# Never commit this directory.
+data/

@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import config, services
-from ..deps import get_db
+from ..deps import Auth, get_auth, get_db, require_human
 
 router = APIRouter()
 
@@ -17,7 +17,8 @@ router = APIRouter()
 
 
 @router.post("/workspaces", status_code=201)
-def create_workspace(body: dict, conn=Depends(get_db)):
+def create_workspace(body: dict, conn=Depends(get_db),
+                     auth: Auth = Depends(require_human)):
     name = body.get("name")
     if not name:
         raise HTTPException(status_code=422, detail="name is required")
@@ -38,7 +39,8 @@ def get_workspace(ws_id: str, conn=Depends(get_db)):
 
 
 @router.delete("/workspaces/{ws_id}", status_code=204)
-def delete_workspace(ws_id: str, conn=Depends(get_db)):
+def delete_workspace(ws_id: str, conn=Depends(get_db),
+                     auth: Auth = Depends(require_human)):
     cur = conn.execute("DELETE FROM workspaces WHERE id=?", (ws_id,))
     conn.execute("DELETE FROM workspace_members WHERE workspace_id=?", (ws_id,))
     conn.commit()
@@ -58,7 +60,8 @@ def list_members(ws_id: str, conn=Depends(get_db)):
 
 
 @router.post("/workspaces/{ws_id}/members", status_code=201)
-def add_member(ws_id: str, body: dict, conn=Depends(get_db)):
+def add_member(ws_id: str, body: dict, conn=Depends(get_db),
+               auth: Auth = Depends(require_human)):
     if services.workspace.get_channel(conn, ws_id) is None:
         raise HTTPException(status_code=404, detail="workspace not found")
     role_slug = body.get("role_slug")
@@ -69,7 +72,8 @@ def add_member(ws_id: str, body: dict, conn=Depends(get_db)):
 
 
 @router.patch("/workspaces/{ws_id}/members/{role_slug}")
-def update_member(ws_id: str, role_slug: str, body: dict, conn=Depends(get_db)):
+def update_member(ws_id: str, role_slug: str, body: dict, conn=Depends(get_db),
+                  auth: Auth = Depends(require_human)):
     access = body.get("access")
     if access not in ("read", "write", "admin"):
         raise HTTPException(status_code=422, detail="access ∈ read|write|admin")
@@ -77,7 +81,8 @@ def update_member(ws_id: str, role_slug: str, body: dict, conn=Depends(get_db)):
 
 
 @router.delete("/workspaces/{ws_id}/members/{role_slug}", status_code=204)
-def remove_member(ws_id: str, role_slug: str, conn=Depends(get_db)):
+def remove_member(ws_id: str, role_slug: str, conn=Depends(get_db),
+                  auth: Auth = Depends(require_human)):
     services.workspace.remove_member(conn, ws_id, role_slug)
     return None
 
@@ -86,12 +91,14 @@ def remove_member(ws_id: str, role_slug: str, conn=Depends(get_db)):
 
 
 @router.get("/workspaces/{ws_id}/tree")
-def workspace_tree(ws_id: str, conn=Depends(get_db)):
+def workspace_tree(ws_id: str, conn=Depends(get_db),
+                   auth: Auth = Depends(get_auth)):
     return services.workspace.tree(ws_id)
 
 
 @router.get("/workspaces/{ws_id}/diff")
-def workspace_diff(ws_id: str, conn=Depends(get_db)):
+def workspace_diff(ws_id: str, conn=Depends(get_db),
+                   auth: Auth = Depends(get_auth)):
     return services.workspace.diff(ws_id)
 
 
@@ -107,7 +114,8 @@ def _git(root: Path, args: list[str]) -> tuple[int, str]:
 
 
 @router.post("/workspaces/{ws_id}/merge")
-def merge_workspace(ws_id: str, body: dict, conn=Depends(get_db)):
+def merge_workspace(ws_id: str, body: dict, conn=Depends(get_db),
+                    auth: Auth = Depends(require_human)):
     """手动合并分支（design §10）：先做越界校验，再 `git merge --no-ff`。
 
     body: {branch, base_branch?}；越界文件直接 409，不做部分合并。
@@ -125,6 +133,13 @@ def merge_workspace(ws_id: str, body: dict, conn=Depends(get_db)):
         raise HTTPException(status_code=422, detail=f"repo {repo_name} is not a git checkout")
 
     base = str(body.get("base_branch") or "main")
+    for ref in (base, branch):
+        if (not re.match(r"^[A-Za-z0-9._/-]+$", ref)
+                or ref.startswith(("-", "/")) or ".." in ref):
+            raise HTTPException(status_code=422, detail=f"invalid git ref: {ref!r}")
+        rc, _ = _git(root, ["rev-parse", "--verify", ref])
+        if rc != 0:
+            raise HTTPException(status_code=422, detail=f"unknown git ref: {ref!r}")
     rc, changed_text = _git(root, ["diff", "--name-only", f"{base}...{branch}"])
     if rc != 0:
         raise HTTPException(status_code=422, detail=f"branch diff failed: {changed_text}")

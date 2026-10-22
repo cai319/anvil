@@ -74,10 +74,24 @@ const ENV_TOKEN = (import.meta as unknown as { env?: Record<string, string> }).e
 const STORED_TOKEN = typeof localStorage !== "undefined" ? localStorage.getItem("anvil-session") : null;
 const SESSION = ENV_TOKEN || STORED_TOKEN || "anvil-web";
 
+const nativeFetch = typeof window !== "undefined" ? window.fetch.bind(window) : fetch;
+
+/** 所有 /api/v1 请求统一带人类会话头；显式传入的 role 优先。 */
+function authFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+  if (url.startsWith(BASE)) {
+    const headers = new Headers(init.headers || {});
+    if (!headers.has("X-Anvil-Session")) headers.set("X-Anvil-Session", SESSION);
+    if (!headers.has("X-Anvil-Role")) headers.set("X-Anvil-Role", "human");
+    init = { ...init, headers };
+  }
+  return nativeFetch(input, init);
+}
+
 function req(method: string, path: string, body?: unknown, role?: string): Promise<Response> {
   const headers: Record<string, string> = { "Content-Type": "application/json", "X-Anvil-Session": SESSION };
   if (role) headers["X-Anvil-Role"] = role;
-  return fetch(`${BASE}${path}`, {
+  return authFetch(`${BASE}${path}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -86,18 +100,18 @@ function req(method: string, path: string, body?: unknown, role?: string): Promi
 
 export const api = {
   // tasks
-  listTasks: (): Promise<Task[]> => fetch(`${BASE}/tasks`).then((r) => json<Task[]>(r)),
-  getTask: (id: string): Promise<Task> => fetch(`${BASE}/tasks/${id}`).then((r) => json<Task>(r)),
+  listTasks: (): Promise<Task[]> => authFetch(`${BASE}/tasks`).then((r) => json<Task[]>(r)),
+  getTask: (id: string): Promise<Task> => authFetch(`${BASE}/tasks/${id}`).then((r) => json<Task>(r)),
   createTask: (title: string, opts?: {
     description?: string; assignees?: string[]; plan_first?: boolean; planner?: string;
   }): Promise<Task> =>
     req("POST", "/tasks", { title, scope_paths: ["**"], ...opts }).then((r) => json<Task>(r)),
   listTaskChildren: (parentId: string): Promise<Task[]> =>
-    fetch(`${BASE}/tasks?parent_id=${encodeURIComponent(parentId)}`).then((r) => json<Task[]>(r)),
+    authFetch(`${BASE}/tasks?parent_id=${encodeURIComponent(parentId)}`).then((r) => json<Task[]>(r)),
   listTaskRuns: (taskId: string): Promise<Run[]> =>
-    fetch(`${BASE}/runs?task_id=${encodeURIComponent(taskId)}`).then((r) => json<Run[]>(r)),
+    authFetch(`${BASE}/runs?task_id=${encodeURIComponent(taskId)}`).then((r) => json<Run[]>(r)),
   getTaskWorkflow: (taskId: string): Promise<Workflow> =>
-    fetch(`${BASE}/tasks/${taskId}/workflow`).then((r) => json<Workflow>(r)),
+    authFetch(`${BASE}/tasks/${taskId}/workflow`).then((r) => json<Workflow>(r)),
   reviewWorkflowStep: (wid: string, sid: string, approve: boolean, feedback?: string): Promise<Workflow> =>
     req("POST", `/workflows/${wid}/steps/${sid}/review`, { approve, feedback }).then((r) => json<Workflow>(r)),
   retryWorkflowStep: (wid: string, sid: string): Promise<Workflow> =>
@@ -116,7 +130,7 @@ export const api = {
   rejectActionCard: (id: string): Promise<unknown> =>
     req("POST", `/action-cards/${id}/reject`, {}).then((r) => json(r)),
   getInbox: (): Promise<{ count: number; items: InboxItem[] }> =>
-    fetch(`${BASE}/inbox`).then((r) => json<{ count: number; items: InboxItem[] }>(r)),
+    authFetch(`${BASE}/inbox`).then((r) => json<{ count: number; items: InboxItem[] }>(r)),
   rejectDraftById: (id: string, feedback?: string): Promise<unknown> =>
     req("POST", "/board/drafts/reject", { draft_id: id, feedback }).then((r) => json(r)),
   approveDraft: (draftIds: string[]): Promise<{
@@ -136,41 +150,41 @@ export const api = {
   reviewTask: (id: string, approve: boolean): Promise<Task> =>
     req("POST", `/tasks/${id}/review`, { approve }).then((r) => json<Task>(r)),
   getTaskTimeline: (id: string): Promise<TimelineEvent[]> =>
-    fetch(`${BASE}/tasks/${id}/timeline`).then((r) => json<TimelineEvent[]>(r)),
+    authFetch(`${BASE}/tasks/${id}/timeline`).then((r) => json<TimelineEvent[]>(r)),
   commentTask: (id: string, body: string, role?: string): Promise<Task> =>
     req("POST", `/tasks/${id}/comment`, { body }, role).then((r) => json<Task>(r)),
   mentionTask: (id: string, target: string, message: string, role?: string): Promise<Task> =>
     req("POST", `/tasks/${id}/mention`, { target, message }, role).then((r) => json<Task>(r)),
 
   // runtimes
-  listRuntimes: (): Promise<Runtime[]> => fetch(`${BASE}/runtimes`).then((r) => json<Runtime[]>(r)),
+  listRuntimes: (): Promise<Runtime[]> => authFetch(`${BASE}/runtimes`).then((r) => json<Runtime[]>(r)),
   discoverRuntimes: (): Promise<Runtime[]> =>
     req("POST", "/runtimes/discover").then((r) => json<Runtime[]>(r)),
   getDefaultRuntime: (): Promise<{ id: string; runtime: Runtime | null }> =>
-    fetch(`${BASE}/runtimes/default`).then((r) => json(r)),
+    authFetch(`${BASE}/runtimes/default`).then((r) => json(r)),
   setDefaultRuntime: (id: string): Promise<{ id: string; runtime: Runtime | null }> =>
     req("PUT", "/runtimes/default", { id }).then((r) => json(r)),
   getRuntimeDefinition: (id: string): Promise<{ id: string; yaml: string; source: string; builtin: boolean }> =>
-    fetch(`${BASE}/runtimes/${encodeURIComponent(id)}/definition`).then((r) => json(r)),
+    authFetch(`${BASE}/runtimes/${encodeURIComponent(id)}/definition`).then((r) => json(r)),
   putRuntimeDefinition: (id: string, yaml: string): Promise<Runtime> =>
     req("PUT", `/runtimes/${encodeURIComponent(id)}/definition`, { yaml }).then((r) => json(r)),
   checkRuntimeHealth: (id: string): Promise<{ ok: boolean | null; status: string; detail?: string; log?: string }> =>
     req("POST", `/runtimes/${id}/health`, {}).then((r) => json(r)),
 
   // runs（运行生命周期）
-  listRuns: (): Promise<Run[]> => fetch(`${BASE}/runs`).then((r) => json<Run[]>(r)),
-  listActiveRuns: (): Promise<Run[]> => fetch(`${BASE}/runs?active=true`).then((r) => json<Run[]>(r)),
+  listRuns: (): Promise<Run[]> => authFetch(`${BASE}/runs`).then((r) => json<Run[]>(r)),
+  listActiveRuns: (): Promise<Run[]> => authFetch(`${BASE}/runs?active=true`).then((r) => json<Run[]>(r)),
   startRun: (roleSlug: string, taskId: string): Promise<Run> =>
     req("POST", `/runs`, { role_slug: roleSlug, task_id: taskId }).then((r) => json<Run>(r)),
   listRoleRuns: (roleSlug: string): Promise<Run[]> =>
-    fetch(`${BASE}/runs?role_slug=${encodeURIComponent(roleSlug)}`).then((r) => json<Run[]>(r)),
-  getRun: (id: string): Promise<Run> => fetch(`${BASE}/runs/${id}`).then((r) => json<Run>(r)),
+    authFetch(`${BASE}/runs?role_slug=${encodeURIComponent(roleSlug)}`).then((r) => json<Run[]>(r)),
+  getRun: (id: string): Promise<Run> => authFetch(`${BASE}/runs/${id}`).then((r) => json<Run>(r)),
   getRunTimeline: (id: string): Promise<TimelineEvent[]> =>
-    fetch(`${BASE}/runs/${id}/timeline`).then((r) => json<TimelineEvent[]>(r)),
+    authFetch(`${BASE}/runs/${id}/timeline`).then((r) => json<TimelineEvent[]>(r)),
   getRunLog: (id: string): Promise<{ run_id: string; exists: boolean; content: string }> =>
-    fetch(`${BASE}/runs/${id}/log`).then((r) => json(r)),
+    authFetch(`${BASE}/runs/${id}/log`).then((r) => json(r)),
   getRunSnapshot: (id: string): Promise<Record<string, unknown>> =>
-    fetch(`${BASE}/runs/${id}/snapshot`).then((r) => json(r)),
+    authFetch(`${BASE}/runs/${id}/snapshot`).then((r) => json(r)),
   restartRun: (id: string): Promise<Run> => req("POST", `/runs/${id}/restart`, {}).then((r) => json(r)),
   sessionResetRun: (id: string): Promise<Run> => req("POST", `/runs/${id}/session-reset`, {}).then((r) => json(r)),
   fullResetRun: (id: string): Promise<Run> => req("POST", `/runs/${id}/full-reset`, {}).then((r) => json(r)),
@@ -180,14 +194,14 @@ export const api = {
     }),
 
   // roles
-  listRoles: (): Promise<Role[]> => fetch(`${BASE}/roles`).then((r) => json<Role[]>(r)),
-  getRole: (slug: string): Promise<Role> => fetch(`${BASE}/roles/${slug}`).then((r) => json<Role>(r)),
+  listRoles: (): Promise<Role[]> => authFetch(`${BASE}/roles`).then((r) => json<Role[]>(r)),
+  getRole: (slug: string): Promise<Role> => authFetch(`${BASE}/roles/${slug}`).then((r) => json<Role>(r)),
   getEffectiveConfig: (slug: string): Promise<Record<string, unknown>> =>
-    fetch(`${BASE}/roles/${slug}/effective-config`).then((r) => json(r)),
+    authFetch(`${BASE}/roles/${slug}/effective-config`).then((r) => json(r)),
   getRuntimeCatalog: (id: string): Promise<{ runtime: string; skills: { name: string; description: string }[]; mcp_servers: { name: string }[] }> =>
-    fetch(`${BASE}/runtimes/${id}/catalog`).then((r) => json(r)),
+    authFetch(`${BASE}/runtimes/${id}/catalog`).then((r) => json(r)),
   getRoleCatalog: (slug: string): Promise<{ skills: string[]; mcp: string[] }> =>
-    fetch(`${BASE}/roles/${slug}/catalog`).then((r) => json(r)),
+    authFetch(`${BASE}/roles/${slug}/catalog`).then((r) => json(r)),
   updateRoleCatalog: (slug: string, skills: string[], mcp: string[]): Promise<{ skills: string[]; mcp: string[] }> =>
     req("PUT", `/roles/${slug}/catalog`, { skills, mcp }).then((r) => json(r)),
   generateRole: (slug: string, brief: string): Promise<{ working_mode?: string; skill_description?: string; responsibilities?: string[]; system_prompt?: string }> =>
@@ -195,7 +209,7 @@ export const api = {
   updateRoleTools: (slug: string, body: Record<string, unknown>): Promise<Record<string, unknown>> =>
     req("PUT", `/roles/${slug}/tools`, body).then((r) => json(r)),
   getRoleProfile: (slug: string): Promise<{ system_prompt: string; responsibilities: string[] }> =>
-    fetch(`${BASE}/roles/${slug}/profile`).then((r) => json(r)),
+    authFetch(`${BASE}/roles/${slug}/profile`).then((r) => json(r)),
   updateRoleProfile: (slug: string, system_prompt: string, responsibilities: string[]): Promise<{ system_prompt: string; responsibilities: string[] }> =>
     req("PUT", `/roles/${slug}/profile`, { system_prompt, responsibilities }).then((r) => json(r)),
   createRole: (slug: string, displayName: string, runtimeId?: string): Promise<Role> =>
@@ -218,31 +232,31 @@ export const api = {
   },
 
   // governance
-  getFreeze: (): Promise<{ frozen: boolean }> => fetch(`${BASE}/control/freeze`).then((r) => json(r)),
+  getFreeze: (): Promise<{ frozen: boolean }> => authFetch(`${BASE}/control/freeze`).then((r) => json(r)),
   freezeAll: (): Promise<{ frozen: boolean }> => req("POST", "/control/freeze-all").then((r) => json(r)),
   resumeAll: (): Promise<{ frozen: boolean }> => req("POST", "/control/resume-all").then((r) => json(r)),
   getTokens: (): Promise<{
     input_tokens: number; output_tokens: number; total_tokens: number;
     today_total_tokens: number; by_role: { role: string; total_tokens: number }[];
-  }> => fetch(`${BASE}/tokens`).then((r) => json(r)),
+  }> => authFetch(`${BASE}/tokens`).then((r) => json(r)),
   getBudget: (): Promise<{ role: string; cost_used_usd: number }> =>
-    fetch(`${BASE}/budget`).then((r) => json(r)),
+    authFetch(`${BASE}/budget`).then((r) => json(r)),
   listAudit: (opts?: { limit?: number; role?: string; action?: string }): Promise<unknown[]> => {
     const q = new URLSearchParams();
     if (opts?.limit) q.set("limit", String(opts.limit));
     if (opts?.role) q.set("role", opts.role);
     if (opts?.action) q.set("action", opts.action);
     const qs = q.toString();
-    return fetch(`${BASE}/audit${qs ? `?${qs}` : ""}`).then((r) => json(r));
+    return authFetch(`${BASE}/audit${qs ? `?${qs}` : ""}`).then((r) => json(r));
   },
   listTaskAudit: (taskId: string): Promise<unknown[]> =>
-    fetch(`${BASE}/audit?task_id=${taskId}`).then((r) => json(r)),
+    authFetch(`${BASE}/audit?task_id=${taskId}`).then((r) => json(r)),
 
   // board (目标拆解)
   decompose: (goal: string, template?: string): Promise<Record<string, unknown>> =>
     req("POST", "/board/decompose", { goal, template }).then((r) => json(r)),
   listBoardTemplates: (): Promise<{ name: string; steps: string[] }[]> =>
-    fetch(`${BASE}/board/templates`).then((r) => json(r)),
+    authFetch(`${BASE}/board/templates`).then((r) => json(r)),
   listDrafts: (sourceTask?: string): Promise<BoardDraft[]> =>
     req("GET", `/board/drafts${sourceTask ? `?source_task=${sourceTask}` : ""}`).then((r) => json<BoardDraft[]>(r)),
   approveDrafts: (ids: string[]): Promise<Record<string, unknown>> =>
@@ -251,11 +265,11 @@ export const api = {
     req("POST", "/board/drafts/reject", { draft_id: id }).then((r) => json(r)),
 
   // channels (workspaces)
-  listChannels: (): Promise<Channel[]> => fetch(`${BASE}/workspaces`).then((r) => json<Channel[]>(r)),
+  listChannels: (): Promise<Channel[]> => authFetch(`${BASE}/workspaces`).then((r) => json<Channel[]>(r)),
   createChannel: (name: string): Promise<Channel> =>
     req("POST", "/workspaces", { name }).then((r) => json<Channel>(r)),
   listMembers: (wsId: string): Promise<Member[]> =>
-    fetch(`${BASE}/workspaces/${wsId}/members`).then((r) => json<Member[]>(r)),
+    authFetch(`${BASE}/workspaces/${wsId}/members`).then((r) => json<Member[]>(r)),
   addMember: (wsId: string, roleSlug: string, access: string): Promise<Member[]> =>
     req("POST", `/workspaces/${wsId}/members`, { role_slug: roleSlug, access }).then((r) => json<Member[]>(r)),
   updateMember: (wsId: string, roleSlug: string, access: string): Promise<Member[]> =>
@@ -275,7 +289,7 @@ export const api = {
 
   // reminders
   listReminders: (roleSlug?: string): Promise<Reminder[]> =>
-    fetch(`${BASE}/reminders${roleSlug ? `?role_slug=${encodeURIComponent(roleSlug)}` : ""}`).then((r) => json(r)),
+    authFetch(`${BASE}/reminders${roleSlug ? `?role_slug=${encodeURIComponent(roleSlug)}` : ""}`).then((r) => json(r)),
   addReminder: (body: Record<string, unknown>): Promise<Reminder> =>
     req("POST", "/reminders", body).then((r) => json(r)),
   deleteReminder: (id: string): Promise<void> =>
@@ -287,7 +301,7 @@ export const api = {
 
   // lessons
   listLessons: (status?: string): Promise<Lesson[]> =>
-    fetch(`${BASE}/lessons${status ? `?status=${encodeURIComponent(status)}` : ""}`).then((r) => json(r)),
+    authFetch(`${BASE}/lessons${status ? `?status=${encodeURIComponent(status)}` : ""}`).then((r) => json(r)),
   proposeLesson: (content: string, tags: string[], repo: string): Promise<Lesson> =>
     req("POST", "/lessons/pending", { content, tags, repo }).then((r) => json(r)),
   approveLesson: (id: string): Promise<Lesson> => req("POST", `/lessons/${id}/approve`, {}).then((r) => json(r)),
@@ -299,21 +313,21 @@ export const api = {
 
   // proposals
   listProposals: (status?: string): Promise<Proposal[]> =>
-    fetch(`${BASE}/proposals${status ? `?status=${encodeURIComponent(status)}` : ""}`).then((r) => json(r)),
+    authFetch(`${BASE}/proposals${status ? `?status=${encodeURIComponent(status)}` : ""}`).then((r) => json(r)),
   approveProposal: (id: string): Promise<Proposal> =>
     req("POST", `/proposals/${id}/approve`, {}).then((r) => json(r)),
   rejectProposal: (id: string): Promise<Proposal> =>
     req("POST", `/proposals/${id}/reject`, {}).then((r) => json(r)),
 
   // skills / MCP / presets
-  listSkills: (): Promise<Skill[]> => fetch(`${BASE}/skills`).then((r) => json(r)),
+  listSkills: (): Promise<Skill[]> => authFetch(`${BASE}/skills`).then((r) => json(r)),
   createSkill: (body: Record<string, unknown>): Promise<Skill> =>
     req("POST", "/skills", body).then((r) => json(r)),
   deleteSkill: (id: string): Promise<void> =>
     req("DELETE", `/skills/${id}`).then((r) => {
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
     }),
-  listMcpServers: (): Promise<McpServer[]> => fetch(`${BASE}/mcp/servers`).then((r) => json(r)),
+  listMcpServers: (): Promise<McpServer[]> => authFetch(`${BASE}/mcp/servers`).then((r) => json(r)),
   createMcpServer: (body: Record<string, unknown>): Promise<McpServer> =>
     req("POST", "/mcp/servers", body).then((r) => json(r)),
   deleteMcpServer: (id: string): Promise<void> =>
@@ -323,19 +337,19 @@ export const api = {
   testMcpServer: (id: string): Promise<{ ok: boolean | null; tools: { name: string; description?: string }[]; detail?: string }> =>
     req("POST", `/mcp/servers/${id}/test`, {}).then((r) => json(r)),
   listToolPresets: (): Promise<Record<string, { max_tool_tokens: number; allowlist: unknown[] }>> =>
-    fetch(`${BASE}/tools/presets`).then((r) => json(r)),
+    authFetch(`${BASE}/tools/presets`).then((r) => json(r)),
 
   // role extras
   getRoleHome: (slug: string): Promise<{ slug: string; home_path: string; files: string[] }> =>
-    fetch(`${BASE}/roles/${slug}/home`).then((r) => json(r)),
+    authFetch(`${BASE}/roles/${slug}/home`).then((r) => json(r)),
   getRoleVersions: (slug: string): Promise<{ version: number; display_name: string; source: string; created_at: string }[]> =>
-    fetch(`${BASE}/roles/${slug}/versions`).then((r) => json(r)),
+    authFetch(`${BASE}/roles/${slug}/versions`).then((r) => json(r)),
   rollbackRole: (slug: string, version: number): Promise<Role> =>
     req("POST", `/roles/${slug}/rollback/${version}`, {}).then((r) => json(r)),
   getRoleHomeFile: (slug: string, path: string): Promise<{ path: string; content: string }> =>
-    fetch(`${BASE}/roles/${slug}/home/file?path=${encodeURIComponent(path)}`).then((r) => json(r)),
+    authFetch(`${BASE}/roles/${slug}/home/file?path=${encodeURIComponent(path)}`).then((r) => json(r)),
   getRoleMetrics: (slug: string): Promise<{ runs: number; tasks_total: number; tasks_done: number; cost_used_usd: number }> =>
-    fetch(`${BASE}/roles/${slug}/metrics`).then((r) => json(r)),
+    authFetch(`${BASE}/roles/${slug}/metrics`).then((r) => json(r)),
   sendRoleMessage: (slug: string, message: string): Promise<Run> =>
     req("POST", `/roles/${slug}/message`, { message }).then((r) => json(r)),
 
@@ -343,7 +357,7 @@ export const api = {
   updateBudget: (body: Record<string, unknown>): Promise<Record<string, unknown>> =>
     req("PUT", "/budget", body).then((r) => json(r)),
   getCosts: (): Promise<{ total_usd: number; by_role: { role: string; usd: number }[]; by_day: { day: string; usd: number }[] }> =>
-    fetch(`${BASE}/costs`).then((r) => json(r)),
+    authFetch(`${BASE}/costs`).then((r) => json(r)),
 };
 
 export interface Channel {
@@ -583,7 +597,7 @@ const listeners = new Set<EventListener>();
 
 function ensureEventSource(): EventSource {
   if (sharedES) return sharedES;
-  const es = new EventSource(`${BASE}/events`);
+  const es = new EventSource(`${BASE}/events?token=${encodeURIComponent(SESSION)}`);
   es.onmessage = (e) => {
     try {
       const ev = JSON.parse(e.data) as AnvilEvent;

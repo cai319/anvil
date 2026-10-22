@@ -4,7 +4,9 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip("anvil.main")
-from tests.conftest import auth_headers, role_payload, runtime_payload, task_payload, human_headers  # noqa: E402
+from tests.conftest import (  # noqa: E402
+    auth_headers, human_headers, role_payload, runtime_payload, task_payload,
+)
 
 
 @pytest.fixture
@@ -30,7 +32,7 @@ async def test_plan_endpoint_creates_planner_run(client, seeded):
     await client.post("/api/v1/tasks", json=task_payload(
         id="T-PF2", assignees=["pm", "developer"], plan_first=True, planner="pm"),
         headers=auth_headers())
-    r = await client.post("/api/v1/tasks/T-PF2/plan", headers=auth_headers())
+    r = await client.post("/api/v1/tasks/T-PF2/plan", headers=human_headers())
     assert r.status_code == 201, r.text
     run = r.json()
     assert run["role_slug"] == "pm"
@@ -44,14 +46,14 @@ async def test_plan_endpoint_rejects_non_assignee_planner(client, seeded):
     await client.post("/api/v1/tasks", json=task_payload(
         id="T-PF3", assignees=["pm"], plan_first=True, planner="developer"),
         headers=auth_headers())
-    r = await client.post("/api/v1/tasks/T-PF3/plan", headers=auth_headers())
+    r = await client.post("/api/v1/tasks/T-PF3/plan", headers=human_headers())
     assert r.status_code == 409
 
 
 async def test_plan_endpoint_requires_planner(client, seeded):
     await client.post("/api/v1/tasks", json=task_payload(
         id="T-PF5", assignees=["pm"]), headers=auth_headers())
-    r = await client.post("/api/v1/tasks/T-PF5/plan", headers=auth_headers())
+    r = await client.post("/api/v1/tasks/T-PF5/plan", headers=human_headers())
     assert r.status_code == 409
 
 

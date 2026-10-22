@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import services
-from ..deps import get_db
+from ..deps import Auth, get_auth, get_db, require_human
 from ..util import ConflictError
 
 router = APIRouter()
@@ -19,7 +19,8 @@ def list_skills(runtime: str | None = None, conn=Depends(get_db)):
 
 
 @router.post("/skills", status_code=201)
-def create_skill(body: dict, conn=Depends(get_db)):
+def create_skill(body: dict, conn=Depends(get_db),
+                 auth: Auth = Depends(require_human)):
     name = str(body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=422, detail="name is required")
@@ -41,7 +42,8 @@ def get_skill(sid: str, conn=Depends(get_db)):
 
 
 @router.put("/skills/{sid}")
-def update_skill(sid: str, body: dict, conn=Depends(get_db)):
+def update_skill(sid: str, body: dict, conn=Depends(get_db),
+                 auth: Auth = Depends(require_human)):
     try:
         skill = services.tooling.update_skill(conn, sid, **body)
     except ConflictError as exc:
@@ -52,7 +54,8 @@ def update_skill(sid: str, body: dict, conn=Depends(get_db)):
 
 
 @router.delete("/skills/{sid}", status_code=204)
-def delete_skill(sid: str, conn=Depends(get_db)):
+def delete_skill(sid: str, conn=Depends(get_db),
+                 auth: Auth = Depends(require_human)):
     if not services.tooling.delete_skill(conn, sid):
         raise HTTPException(status_code=404, detail="skill not found")
     return None
@@ -82,7 +85,8 @@ def list_mcp_servers(conn=Depends(get_db)):
 
 
 @router.post("/mcp/servers", status_code=201)
-def create_mcp_server(body: dict, conn=Depends(get_db)):
+def create_mcp_server(body: dict, conn=Depends(get_db),
+                      auth: Auth = Depends(require_human)):
     name = str(body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=422, detail="name is required")
@@ -107,7 +111,8 @@ def get_mcp_server(mid: str, conn=Depends(get_db)):
 
 
 @router.put("/mcp/servers/{mid}")
-def update_mcp_server(mid: str, body: dict, conn=Depends(get_db)):
+def update_mcp_server(mid: str, body: dict, conn=Depends(get_db),
+                      auth: Auth = Depends(require_human)):
     server = services.tooling.update_mcp_server(conn, mid, **body)
     if server is None:
         raise HTTPException(status_code=404, detail="mcp server not found")
@@ -115,14 +120,16 @@ def update_mcp_server(mid: str, body: dict, conn=Depends(get_db)):
 
 
 @router.delete("/mcp/servers/{mid}", status_code=204)
-def delete_mcp_server(mid: str, conn=Depends(get_db)):
+def delete_mcp_server(mid: str, conn=Depends(get_db),
+                      auth: Auth = Depends(require_human)):
     if not services.tooling.delete_mcp_server(conn, mid):
         raise HTTPException(status_code=404, detail="mcp server not found")
     return None
 
 
 @router.post("/mcp/servers/{mid}/test")
-def test_mcp_server(mid: str, conn=Depends(get_db)):
+def test_mcp_server(mid: str, conn=Depends(get_db),
+                    auth: Auth = Depends(require_human)):
     """MCP 握手探测（stdio：initialize + tools/list），刷新工具缓存。"""
     result = services.tooling.probe_mcp_server(conn, mid)
     if result is None:

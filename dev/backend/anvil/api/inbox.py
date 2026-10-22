@@ -4,13 +4,14 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from .. import services
-from ..deps import get_db
+from ..deps import Auth, require_human, get_db
 
 router = APIRouter()
 
 
 @router.get("/inbox")
-def get_inbox(conn=Depends(get_db)):
+def get_inbox(conn=Depends(get_db),
+              auth: Auth = Depends(require_human)):
     """聚合四类人机决策点：评审请求 / @human 提及 / 待审草案 / 待审提案（lessons+proposals）。
 
     只读；操作复用现有端点（POST /tasks/{id}/review、/board/drafts/approve、

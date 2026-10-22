@@ -4,19 +4,21 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .. import services
-from ..deps import get_db
+from ..deps import Auth, get_auth, get_db
 from ..util import ConflictError
 
 router = APIRouter()
 
 
 @router.get("/reminders")
-def list_reminders(role_slug: str | None = None, conn=Depends(get_db)):
+def list_reminders(role_slug: str | None = None, conn=Depends(get_db),
+                    auth: Auth = Depends(get_auth)):
     return services.reminders.list_reminders(conn, role_slug)
 
 
 @router.post("/reminders", status_code=201)
-def add_reminder(body: dict, conn=Depends(get_db)):
+def add_reminder(body: dict, conn=Depends(get_db),
+                 auth: Auth = Depends(get_auth)):
     try:
         return services.reminders.create_reminder(
             conn,
@@ -32,7 +34,8 @@ def add_reminder(body: dict, conn=Depends(get_db)):
 
 
 @router.put("/reminders/{rid}")
-def update_reminder(rid: str, body: dict, conn=Depends(get_db)):
+def update_reminder(rid: str, body: dict, conn=Depends(get_db),
+                    auth: Auth = Depends(get_auth)):
     try:
         reminder = services.reminders.update_reminder(conn, rid, **body)
     except ValueError as exc:
@@ -43,14 +46,16 @@ def update_reminder(rid: str, body: dict, conn=Depends(get_db)):
 
 
 @router.delete("/reminders/{rid}", status_code=204)
-def delete_reminder(rid: str, conn=Depends(get_db)):
+def delete_reminder(rid: str, conn=Depends(get_db),
+                    auth: Auth = Depends(get_auth)):
     if not services.reminders.delete_reminder(conn, rid):
         raise HTTPException(status_code=404, detail="reminder not found")
     return None
 
 
 @router.post("/reminders/{rid}/fire-now")
-def fire_now(rid: str, request: Request, conn=Depends(get_db)):
+def fire_now(rid: str, request: Request, conn=Depends(get_db),
+             auth: Auth = Depends(get_auth)):
     """手动触发（调试用）：创建对应 run 并标记 reminder 已触发。"""
     reminder = services.reminders.get_reminder(conn, rid)
     if reminder is None:

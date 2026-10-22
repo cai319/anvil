@@ -18,7 +18,7 @@ from pathlib import Path
 import yaml  # type: ignore
 
 from .. import config
-from ..util import jdumps, jloads, now_iso
+from ..util import ConflictError, jdumps, jloads, now_iso
 
 
 # ---- 定义加载（存储分层） -------------------------------------------------
@@ -337,9 +337,16 @@ def register_definition(conn: sqlite3.Connection, definition: dict,
 
     raw_yaml 用于保留用户在 UI/文件中写的原始格式与注释；未提供时按 dict 序列化。
     """
-    rid = definition["id"]
+    rid = str(definition["id"])
+    if not re.match(r"^[a-z0-9][a-z0-9_.-]{1,63}$", rid) or ".." in rid:
+        raise ConflictError(f"invalid runtime id: {rid!r}")
     config.USER_RUNTIMES_DIR.mkdir(parents=True, exist_ok=True)
-    yaml_path = config.USER_RUNTIMES_DIR / f"{rid}.yaml"
+    base = config.USER_RUNTIMES_DIR.resolve()
+    yaml_path = (base / f"{rid}.yaml").resolve()
+    try:
+        yaml_path.relative_to(base)
+    except ValueError:
+        raise ConflictError(f"invalid runtime id: {rid!r}")
     text = raw_yaml if raw_yaml is not None else yaml.safe_dump(
         definition, allow_unicode=True, sort_keys=False)
     yaml_path.write_text(text, encoding="utf-8")

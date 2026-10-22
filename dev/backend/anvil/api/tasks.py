@@ -15,10 +15,27 @@ from . import events
 router = APIRouter()
 
 
-def _assert_session_task(auth: Auth, tid: str) -> None:
-    """运行级会话只能操作自己被绑定的任务（design §10 末段）。"""
+def _assert_session_task(conn, auth: Auth, tid: str) -> None:
+    """运行级会话只能操作自己绑定/参与的任务。
+
+    - task 绑定 token：必须与 URL 任务一致；
+    - 角色级常驻 token：任务已有绑定角色时，只允许 assignee/lead/planner/onboarding；
+      无绑定角色的开放任务仍允许任意角色 claim。
+    """
     if auth.task_id and auth.task_id != tid:
         raise HTTPException(status_code=403, detail="session is bound to another task")
+    if auth.role and auth.role != "human" and auth.task_id is None:
+        t = services.tasks.get(conn, tid)
+        if t is not None:
+            # 仅团队任务按 Roster 限制；单负责人/开放任务交给 claim 的排他逻辑返回 409。
+            bound = set(t.get("assignees") or [])
+            if bound:
+                if t.get("assignee"):
+                    bound.add(t["assignee"])
+                if t.get("planner"):
+                    bound.add(t["planner"])
+                if auth.role not in bound and not services.roles.is_onboarding(conn, auth.role):
+                    raise HTTPException(status_code=403, detail="role is not a participant of this task")
 
 
 def _pump_after_submit(request: Request, conn, tid: str) -> None:
@@ -48,7 +65,10 @@ def _resume_after_review(request: Request, conn, tid: str, approve: bool) -> Non
 
 
 @router.post("", status_code=201, response_model=TaskOut)
-def create_task(body: TaskIn, conn=Depends(get_db)):
+def create_task(body: TaskIn, conn=Depends(get_db),
+                auth: Auth = Depends(get_auth)):
+    if auth.role:
+        body.created_by = ("human" if auth.role == "human" else f"agent:{auth.role}")
     try:
         return services.tasks.create(
         conn, id=body.id, title=body.title, type=body.type, priority=body.priority,
@@ -182,7 +202,7 @@ def patch_task(tid: str, body: TaskPatch, conn=Depends(get_db),
 
 @router.post("/{tid}/claim", response_model=TaskOut)
 def claim_task(tid: str, body: ClaimIn, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
-    _assert_session_task(auth, tid)
+    _assert_session_task(conn, auth, tid)
     try:
         result = services.tasks.claim(conn, tid, auth.role or "qa-role", body.paths)
     except LookupError:
@@ -195,7 +215,7 @@ def claim_task(tid: str, body: ClaimIn, conn=Depends(get_db), auth: Auth = Depen
 
 @router.post("/{tid}/unclaim", response_model=TaskOut)
 def unclaim_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
-    _assert_session_task(auth, tid)
+    _assert_session_task(conn, auth, tid)
     try:
         result = services.tasks.unclaim(conn, tid, auth.role)
     except LookupError:
@@ -206,7 +226,7 @@ def unclaim_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth))
 
 @router.post("/{tid}/heartbeat", response_model=TaskOut)
 def heartbeat_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
-    _assert_session_task(auth, tid)
+    _assert_session_task(conn, auth, tid)
     try:
         return services.tasks.heartbeat(conn, tid, auth.role)
     except LookupError:
@@ -215,7 +235,7 @@ def heartbeat_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth
 
 @router.post("/{tid}/submit", response_model=TaskOut)
 def submit_task(tid: str, body: SubmitIn, request: Request, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
-    _assert_session_task(auth, tid)
+    _assert_session_task(conn, auth, tid)
     team = services.tasks.is_team_task(conn, tid)
     try:
         result = services.tasks.submit(conn, tid, summary=body.summary, branch=body.branch,
@@ -247,7 +267,7 @@ def review_task(tid: str, body: ReviewIn, request: Request, conn=Depends(get_db)
 
 @router.post("/{tid}/comment", response_model=TaskOut)
 def comment_task(tid: str, body: CommentIn, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
-    _assert_session_task(auth, tid)
+    _assert_session_task(conn, auth, tid)
     held = _held_response(conn, tid, auth, body.model_dump())
     if held is not None:
         return held
@@ -262,7 +282,7 @@ def comment_task(tid: str, body: CommentIn, conn=Depends(get_db), auth: Auth = D
 @router.post("/{tid}/mention", response_model=TaskOut)
 def mention_task(tid: str, body: dict, request: Request, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """@提及某角色，注入注意事项/上下文；@的是角色时唤醒该角色（raft inbox：@ 即拉入）。"""
-    _assert_session_task(auth, tid)
+    _assert_session_task(conn, auth, tid)
     task = services.tasks.get(conn, tid)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
@@ -409,7 +429,7 @@ def _start_planner_run(conn, request: Request, tid: str, planner: str,
 @router.post("/{tid}/plan", status_code=201)
 def plan_task(tid: str, request: Request, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """P1-0 计划先行：唤醒 planner 角色生成工作流草案（只拉起 planner，其余角色等批准后按依赖自动派发）。"""
-    _assert_session_task(auth, tid)
+    _assert_session_task(conn, auth, tid)
     t = services.tasks.get(conn, tid)
     if t is None:
         raise HTTPException(status_code=404, detail="task not found")
@@ -436,7 +456,7 @@ def dispatch_task(tid: str, request: Request, conn=Depends(get_db), auth: Auth =
     """
     import os
 
-    _assert_session_task(auth, tid)
+    _assert_session_task(conn, auth, tid)
     t = services.tasks.get(conn, tid)
     if t is None:
         raise HTTPException(status_code=404, detail="task not found")
@@ -487,7 +507,8 @@ def dispatch_task(tid: str, request: Request, conn=Depends(get_db), auth: Auth =
 
 
 @router.post("/{tid}/deps", response_model=TaskOut)
-def add_deps(tid: str, body: DepIn, conn=Depends(get_db)):
+def add_deps(tid: str, body: DepIn, conn=Depends(get_db),
+             auth: Auth = Depends(get_auth)):
     t = services.tasks.add_dep(conn, tid, body.depends_on)
     if t is None:
         raise HTTPException(status_code=404, detail="task not found")

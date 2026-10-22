@@ -32,6 +32,9 @@ def _headers() -> dict[str, str]:
         h["X-Anvil-Session"] = TOKEN
     if AGENT_SLUG:
         h["X-Anvil-Role"] = AGENT_SLUG
+    else:
+        # 人类 CLI：共享 token 只代表 human，不能冒充 agent。
+        h["X-Anvil-Role"] = "human"
     return h
 
 
@@ -138,9 +141,11 @@ def self_cmd(
     field: str = typer.Option(None, "--field", help="propose 的字段（tools/responsibilities/...）"),
     rationale: str = typer.Option(None, "--rationale", help="提案依据"),
     risk: str = typer.Option(None, "--risk", help="提案风险"),
+    task: str = typer.Option(None, "--task", help="reset-context 的任务 id（默认 $ANVIL_TASK_ID）"),
+    reason: str = typer.Option(None, "--reason", help="reset-context 原因"),
     json_out: bool = typer.Option(False, "--json", help="输出 JSON"),
 ):
-    """anvil self <show|edit-instruction|propose>"""
+    """anvil self <show|edit-instruction|propose|reset-context>"""
     if action == "show":
         _emit(_call("GET", "/api/v1/me"), json_out)
     elif action == "edit-instruction":
@@ -165,6 +170,14 @@ def self_cmd(
         _emit(_call("POST", "/api/v1/proposals", {
             "field": field, "proposed": proposed,
             "rationale": rationale, "risk": risk,
+        }), json_out)
+    elif action == "reset-context":
+        tid = task or DEFAULT_TASK
+        if not tid:
+            typer.echo("self reset-context 需要 --task 或 $ANVIL_TASK_ID", err=True)
+            raise typer.Exit(2)
+        _emit(_call("POST", "/api/v1/me/session/reset", {
+            "task_id": tid, "reason": reason or "",
         }), json_out)
     else:
         typer.echo(f"unknown self action: {action}", err=True)

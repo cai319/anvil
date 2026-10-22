@@ -21,12 +21,20 @@ mode = "resume" if "--resume" in sys.argv else "new"
 sid = sys.argv[sys.argv.index("--resume" if mode == "resume" else "--session-id") + 1]
 with open(os.environ["FAKE_ARGV_LOG"], "a") as f:
     f.write(mode + " " + sid + "\\n")
-print(json.dumps({"type": "system", "subtype": "init", "session_id": sid}), flush=True)
+init_model = os.environ.get("FAKE_MODEL", "fake-1m")
+switch_model = os.environ.get("FAKE_SWITCH_MODEL", "")
+print(json.dumps({"type": "system", "subtype": "init", "session_id": sid,
+                  "model": init_model}), flush=True)
+turn = 0
 for line in sys.stdin:
+    turn += 1
     time.sleep(0.2)
-    print(json.dumps({"type": "assistant", "message": {"content": [
-        {"type": "text", "text": "working"},
-        {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}],
+    model = switch_model if (switch_model and turn >= 2) else init_model
+    print(json.dumps({"type": "assistant", "message": {
+        "model": model,
+        "content": [
+            {"type": "text", "text": "working"},
+            {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}],
         "usage": {"input_tokens": 10, "output_tokens": 2}}}), flush=True)
     print(json.dumps({"type": "user", "message": {"content": [
         {"type": "tool_result", "content": "file.txt"}]}}), flush=True)
@@ -76,15 +84,16 @@ def _run_status(db_path, rid):
         c.close()
 
 
-def _deliver(mgr, conn, fake, log, run_id, text="hello", task_id=None):
+def _deliver(mgr, conn, fake, log, run_id, text="hello", task_id=None, extra_env=None):
     runs_service.set_status(conn, run_id, "running")  # 等价于 resume→spawn 的状态流转
+    env = {"FAKE_ARGV_LOG": str(log), **(extra_env or {})}
     args = {
         "executable": sys.executable,
         "args_new": [str(fake), "--session-id", "{{session_id}}"],
         "args_resume": [str(fake), "--resume", "{{session_id}}"],
         "ctx": {},
         "cwd": str(fake.parent),
-        "env": {"FAKE_ARGV_LOG": str(log)},
+        "env": env,
         "prompt": text,
         "run_id": run_id,
         "task_id": task_id,
@@ -103,6 +112,8 @@ def test_same_process_reused_and_resume_after_exit(env):
     assert _wait(lambda: _run_status(db_path, run["id"]) == "suspended"), "一轮结束应转 suspended"
     st1 = mgr.status("qa-role")
     assert st1["alive"] and st1["status"] == "idle"
+    assert st1["model_id"] == "fake-1m"
+    assert st1["context_window"] == 1_000_000
     pid1 = st1["pid"]
 
     # 第二次唤醒：复用同一进程（核心要求：不新起进程）
@@ -174,6 +185,144 @@ def test_reset_session_starts_new_context(env):
     assert modes == ["new", "new"]
     assert len(set(sids)) == 2
     assert sid1 not in sids[1:]
+
+
+def test_context_hint_only_on_task_switch_or_high_usage(env):
+    conn, mgr, fake, log = env
+    r = mgr._role("qa-role")
+    r.model_id = "test-200k"
+    r.context_tokens = 100
+    r.last_task_id = "T1"
+    r.last_step_id = "S1"
+    assert mgr._context_hint(r, "T1") == ""
+
+    # 200k 窗口 × 50% = 100k；120k 触发高占用提示
+    r.context_tokens = 120000
+    hint = mgr._context_hint(r, "T2")
+    assert "上一次处理：T1 / 步骤 S1" in hint
+    assert "当前任务：T2" in hint
+    assert "模型窗口约 200k" in hint
+    assert "Anvil 冷唤醒阈值 160k" in hint
+    assert "reset-context --task T2" in hint
+    assert "任务已切换" in hint and "上下文占用较高" in hint
+
+    same = mgr._context_hint(r, "T1")
+    assert "上下文占用较高" in same
+    assert "任务已切换" not in same
+
+    # 模型池更小时，提示按保守窗口计算
+    r.model_pool = ["flash-128k"]
+    r.context_tokens = 70000
+    pooled = mgr._context_hint(r, "T2")
+    assert "按模型池/下限保守预算 128k" in pooled
+    assert "Anvil 冷唤醒阈值 102k" in pooled
+
+
+def test_model_switch_updates_window_and_audits(env):
+    conn, mgr, fake, log = env
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "first",
+             extra_env={"FAKE_SWITCH_MODEL": "fake-200k"})
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    st = mgr.status("qa-role")
+    assert st["model_id"] == "fake-1m"
+    assert st["context_window"] == 1_000_000
+
+    _deliver(mgr, conn, fake, log, run["id"], "second",
+             extra_env={"FAKE_SWITCH_MODEL": "fake-200k"})
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    st = mgr.status("qa-role")
+    assert st["model_id"] == "fake-200k"
+    assert st["served_model_id"] == "fake-200k"
+    assert st["context_window"] == 200_000
+
+    c = open_conn(mgr.db_path)
+    try:
+        row = c.execute(
+            "SELECT payload_json FROM audit WHERE role_slug='qa-role' "
+            "AND action='session.model_switch' ORDER BY id DESC LIMIT 1").fetchone()
+    finally:
+        c.close()
+    assert row is not None
+    assert '"to": "fake-200k"' in row["payload_json"]
+
+
+def test_model_variant_suffix_is_not_treated_as_switch(env):
+    """init 的 deepseek-flash[1m] 与 served 的 deepseek-flash 同族，保留 1M 窗口。"""
+    conn, mgr, fake, log = env
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    envs = {"FAKE_MODEL": "deepseek-flash[1m]",
+            "FAKE_SWITCH_MODEL": "deepseek-flash"}
+    _deliver(mgr, conn, fake, log, run["id"], "first", extra_env=envs)
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    _deliver(mgr, conn, fake, log, run["id"], "second", extra_env=envs)
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+
+    st = mgr.status("qa-role")
+    assert st["model_id"] == "deepseek-flash[1m]"
+    assert st["served_model_id"] == "deepseek-flash"
+    assert st["context_window"] == 1_000_000
+
+    c = open_conn(mgr.db_path)
+    try:
+        row = c.execute(
+            "SELECT 1 FROM audit WHERE role_slug='qa-role' "
+            "AND action='session.model_switch' LIMIT 1").fetchone()
+    finally:
+        c.close()
+    assert row is None
+
+
+def test_model_context_window_and_thresholds(env, monkeypatch):
+    conn, mgr, fake, log = env
+    r = mgr._role("qa-role")
+
+    r.model_id = "deepseek-flash[1m]"
+    assert mgr._context_window(r) == 1_000_000
+    assert mgr._cic_threshold(r) == 800_000
+    assert mgr._hint_threshold(r) == 500_000
+
+    # 模型池里最小的模型决定保守策略窗口
+    r.model_pool = ["flash-128k"]
+    assert mgr._context_window(r) == 128_000
+    assert mgr._cic_threshold(r) == 102_400
+    assert mgr._hint_threshold(r) == 64_000
+    r.model_pool = []
+
+    # 角色级窗口下限
+    r.context_window_floor = 64_000
+    assert mgr._context_window(r) == 64_000
+    r.context_window_floor = None
+
+    r.model_id = "unknown-model"
+    assert mgr._context_window(r) == config.DEFAULT_CONTEXT_WINDOW
+
+    monkeypatch.setattr(config, "MODEL_CONTEXT_WINDOWS", {"custom-model": 100_000})
+    r.model_id = "custom-model"
+    assert mgr._context_window(r) == 100_000
+
+    monkeypatch.setattr(config, "CIC_THRESHOLD_TOKENS", 128_000)
+    assert mgr._cic_threshold(r) == 128_000
+
+
+def test_reset_session_with_cic_starts_new_context(env):
+    conn, mgr, fake, log = env
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "first")
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    sid1 = mgr.status("qa-role")["session_id"]
+
+    mgr.reset_session("qa-role", cic=True)
+    assert _wait(lambda: not mgr.status("qa-role")["alive"])
+    assert mgr._role("qa-role").cic_pending is True
+
+    _deliver(mgr, conn, fake, log, run["id"], "second")
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    modes = [line.split()[0] for line in log.read_text().splitlines()]
+    sids = [line.split()[1] for line in log.read_text().splitlines()]
+    assert modes == ["new", "new"]
+    assert sids[0] != sids[1]
+    assert sid1 == sids[0]
 
 
 def test_restart_process_preserves_session(env):

@@ -33,6 +33,15 @@ def _assert_workflow_task(conn, wid: str, auth: Auth) -> dict:
         raise HTTPException(status_code=404, detail="workflow not found")
     if auth.task_id and auth.task_id != wf["task_id"]:
         raise HTTPException(status_code=403, detail="session is bound to another task")
+    if auth.role and auth.role != "human" and auth.task_id is None:
+        t = services.tasks.get(conn, wf["task_id"]) or {}
+        bound = set(t.get("assignees") or [])
+        if t.get("assignee"):
+            bound.add(t["assignee"])
+        if t.get("planner"):
+            bound.add(t["planner"])
+        if bound and auth.role not in bound and not services.roles.is_onboarding(conn, auth.role):
+            raise HTTPException(status_code=403, detail="role is not a participant of this task")
     return wf
 
 

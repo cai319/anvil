@@ -73,6 +73,10 @@ STEP_PROTOCOL = (
     "子任务不进大厅，只在父任务的「子任务」页签展示。\n"
     "· 需要扩展团队：`anvil role expand --brief \"<一句话定位>\"` 创建新 agent"
     "（继承你的 runtime；每日配额有限，human 会在任务会话收到通知）。\n"
+    "## 会话上下文（按需重置）\n"
+    "· 唤醒消息可能在任务切换或上下文占用较高时给出会话统计。若当前任务与上一次上下文无关，"
+    "或占用过高，先执行 `anvil self reset-context --task $ANVIL_TASK_ID --reason \"...\"`；"
+    "它会在新会话中重新投递当前步骤。不要在有排队消息时调用。\n"
     "## 工作流边界（必须遵守）\n"
     "· workflow/loop 的阶段与角色分配只能由 planner（默认 Cindy）定义；执行角色不得提交或修改 "
     "workflow 草案，也不得在切片计划里写角色字段。\n"
@@ -94,7 +98,9 @@ STEP_PROTOCOL = (
 # P1-0 计划先行：规划者（leader）的专用协议。规划 → 草案 → @human → 挂起；不亲自实现。
 PLANNING_PROTOCOL = (
     "你是本任务的工作流规划者（人类助理 / leader）。先评估角色、再规划、后协调，不亲自实现具体产出。\n"
-    "第一步：执行 `anvil task show $ANVIL_TASK_ID` 读取任务全文。**不要 claim 任务**——你不是任务参与角色。\n"
+    "第一步：执行 `anvil task show $ANVIL_TASK_ID` 读取任务全文。**不要 claim 任务**——你不是任务参与角色。"
+    "如果唤醒提示给出会话统计，且当前任务与上次上下文无关或占用过高，先执行 "
+    "`anvil self reset-context --task $ANVIL_TASK_ID --reason \"...\"`，让运行时用新会话重投本任务。\n"
     "第二步：评估 Roster（已绑定角色）是否足够。逐项对照任务要求与每个角色的能力/职责/运行时/写权限，"
     "列出缺口。**只能使用 Roster 中的角色执行步骤，绝不虚构未绑定角色。**\n"
     "  A. 角色足够：设计**工作流**。先判断任务规模再选格式：\n"

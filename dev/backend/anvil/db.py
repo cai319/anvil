@@ -261,6 +261,7 @@ CREATE TABLE IF NOT EXISTS role_sessions (
     role_slug      TEXT PRIMARY KEY,
     session_id     TEXT NOT NULL,
     token          TEXT,            -- 角色级会话令牌（task_id=NULL）
+    model_id       TEXT,            -- 最近一次 init 事件报告的模型 id
     pid            INTEGER,
     status         TEXT NOT NULL DEFAULT 'idle',  -- starting|idle|busy|dead
     busy_since     TEXT,
@@ -416,6 +417,12 @@ def connect(path: str) -> sqlite3.Connection:
     """建库（含建表）。仅在 create_app 时调用一次，建表后即关。"""
     conn = _raw_connect(path)
     init_schema(conn)
+    if path != ":memory:":
+        try:
+            from pathlib import Path
+            Path(path).chmod(0o600)
+        except OSError:
+            pass
     return conn
 
 
@@ -521,6 +528,10 @@ def init_schema(conn: sqlite3.Connection) -> None:
         pass
     try:
         conn.execute("ALTER TABLE role_sessions ADD COLUMN last_context_tokens INTEGER")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE role_sessions ADD COLUMN model_id TEXT")
     except sqlite3.OperationalError:
         pass
     for col in ("last_nudge_at TEXT", "nudge_count INTEGER NOT NULL DEFAULT 0"):

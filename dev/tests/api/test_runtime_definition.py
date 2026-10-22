@@ -81,7 +81,7 @@ async def test_definition_id_must_match_path(client, tmp_path, monkeypatch):
 async def test_definition_put_requires_human(client, tmp_path, monkeypatch):
     _isolate_user_runtimes(tmp_path, monkeypatch)
     r = await client.put(f"{API}/runtimes/codeagent/definition",
-                         headers=auth_headers(), json={"yaml": _yaml_for()})
+                         headers=auth_headers("pm"), json={"yaml": _yaml_for()})
     assert r.status_code == 403
 
 

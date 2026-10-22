@@ -12,7 +12,8 @@ router = APIRouter()
 
 
 @router.post("", status_code=201, response_model=RuntimeOut)
-def register_runtime(body: RuntimeIn, conn=Depends(get_db)):
+def register_runtime(body: RuntimeIn, conn=Depends(get_db),
+                    auth: Auth = Depends(require_human)):
     executable = body.executable_path or body.executable
     is_manual = bool(
         body.invocation or body.discovery or body.projection
@@ -46,7 +47,8 @@ def list_runtimes(conn=Depends(get_db)):
 
 
 @router.post("/discover", response_model=list[RuntimeOut])
-def discover_runtimes(conn=Depends(get_db)):
+def discover_runtimes(conn=Depends(get_db),
+                      auth: Auth = Depends(require_human)):
     return services.runtime.discover(conn)
 
 
@@ -117,7 +119,8 @@ def put_runtime_definition(rid: str, body: dict, conn=Depends(get_db),
 
 
 @router.post("/{rid}/probe", response_model=RuntimeOut)
-def probe_runtime(rid: str, conn=Depends(get_db)):
+def probe_runtime(rid: str, conn=Depends(get_db),
+                  auth: Auth = Depends(require_human)):
     rt = services.runtime.probe(conn, rid)
     if rt is None:
         raise HTTPException(status_code=404, detail="runtime not found")
@@ -125,7 +128,8 @@ def probe_runtime(rid: str, conn=Depends(get_db)):
 
 
 @router.post("/{rid}/health")
-def health_runtime(rid: str, conn=Depends(get_db)):
+def health_runtime(rid: str, conn=Depends(get_db),
+                   auth: Auth = Depends(require_human)):
     """健康检查：在临时目录跑一次最小任务（design §2.4），会消耗少量额度。"""
     result = services.runtime.health_probe(conn, rid)
     if result is None:

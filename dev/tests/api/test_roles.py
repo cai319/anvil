@@ -80,6 +80,15 @@ async def test_me_endpoint(client):
     assert body["role_slug"] == "qa-role"
     assert "concurrency_quota" in body
     assert "cost_used_usd" in body
+    # 角色自主上下文管理所需信息
+    assert "session" in body
+    assert "context_tokens" in body["session"]
+    assert "active_context_window" in body["session"]
+    assert "context_window" in body["session"]
+    assert "context_safe_fit" in body["session"]
+    assert "model_pool" in body["session"]
+    assert "cic_threshold_tokens" in body["session"]
+    assert "hint_tokens" in body["session"]
 
 
 async def test_config_snapshot_frozen(client):

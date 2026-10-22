@@ -26,6 +26,7 @@ from .api import (
     actions, agent_inbox, board, events, governance, inbox, memory, reminders, roles, runs, runtimes, tasks, tooling, workflow, workspaces,
 )
 from .db import connect, open_conn
+from .deps import token_is_valid
 from .services import daemon as daemon_service
 from .services import roles as roles_service
 from .services import runs as runs_service
@@ -86,18 +87,35 @@ def _cleanup_orphans(conn) -> None:
 
 
 class _LocalTokenMiddleware(BaseHTTPMiddleware):
-    """本地 token 轻校验（design §1.4 / §10）：所有写操作必须带 X-Anvil-Session。
+    """统一 API 鉴权：/api/v1 下所有请求都必须携带有效 token。
 
-    只做「存在性」校验；具体 token 是否有效由 `deps.get_auth`（共享 token 或运行级
-    会话令牌）判断。测试旁路 `ANVIL_TEST_AUTH=1` 下跳过。
+    token 来源：
+    - `X-Anvil-Session`（默认）
+    - `?token=` 仅用于 SSE `/api/v1/events`（EventSource 无法自定义 header）
+
+    有效 token = 未过期的运行级 session，或人类共享 token（`ANVIL_AUTH_TOKEN`；
+    未设置时只接受 `anvil` / `anvil-web`）。测试旁路 `ANVIL_TEST_AUTH=1` 下跳过。
     """
 
     async def dispatch(self, request, call_next):
-        if (request.method in ("POST", "PUT", "PATCH", "DELETE")
-                and request.url.path.startswith("/api/v1")):
+        path = request.url.path
+        if path.startswith("/api/v1"):
             test_auth = bool(getattr(request.app.state, "test_auth", False)) or os.environ.get("ANVIL_TEST_AUTH") == "1"
-            if not test_auth and not request.headers.get("X-Anvil-Session"):
-                return JSONResponse({"detail": "missing X-Anvil-Session"}, status_code=401)
+            if not test_auth:
+                host = request.client.host if request.client else ""
+                loopback = host in ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1")
+                if not config.AUTH_TOKEN and not loopback:
+                    return JSONResponse(
+                        {"detail": "remote access requires ANVIL_AUTH_TOKEN"},
+                        status_code=403,
+                    )
+                token = request.headers.get("X-Anvil-Session")
+                if not token and path == "/api/v1/events":
+                    token = request.query_params.get("token")
+                if not token:
+                    return JSONResponse({"detail": "missing X-Anvil-Session"}, status_code=401)
+                if not token_is_valid(request, token):
+                    return JSONResponse({"detail": "invalid X-Anvil-Session"}, status_code=401)
         return await call_next(request)
 
 
@@ -105,7 +123,12 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     cfg = cfg or {}
     path = _db_path(cfg.get("db_url"))
     if path != ":memory:":
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        data_dir = Path(path).parent
+        data_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            data_dir.chmod(0o700)
+        except OSError:
+            pass
     _init = connect(path)
     # 历史删除遗留的孤儿 workflow/run：启动时清理，避免调度器继续推进已删除任务。
     _cleanup_orphans(_init)
@@ -120,6 +143,10 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     orchestrator = Orchestrator(graph, checkpointer)
 
     scheduler_enabled = bool(cfg.get("scheduler_enabled"))
+    test_auth = bool(cfg.get("test_auth")) or os.environ.get("ANVIL_TEST_AUTH") == "1"
+    if test_auth and scheduler_enabled:
+        raise RuntimeError(
+            "ANVIL_TEST_AUTH is test-only and must not be enabled in the production server")
     scheduler = Scheduler(path, orchestrator) if scheduler_enabled else None
 
     # 常驻角色运行时（owner 2026-10-19）：生产入口（scheduler_enabled）默认启用；
@@ -169,7 +196,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     app = FastAPI(title="Anvil", version="0.1.0", lifespan=lifespan)
     app.state.db_path = path
-    app.state.test_auth = bool(cfg.get("test_auth")) or os.environ.get("ANVIL_TEST_AUTH") == "1"
+    app.state.test_auth = test_auth
     app.state.graph_db_path = graph_db_path
     app.state.checkpointer = checkpointer
     app.state.graph = graph
@@ -205,10 +232,16 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         def spa_fallback(full_path: str):
             if full_path.startswith("api/"):
                 raise HTTPException(status_code=404)
-            candidate = config.FRONTEND_DIST / full_path
+            root = config.FRONTEND_DIST.resolve()
+            candidate = (root / full_path).resolve()
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                # 路径穿越：绝不把 dist 之外的文件当静态资源返回
+                raise HTTPException(status_code=404)
             if candidate.is_file():
                 return FileResponse(candidate)
-            index = config.FRONTEND_DIST / "index.html"
+            index = root / "index.html"
             if index.exists():
                 return FileResponse(index, headers={"Cache-Control": "no-cache"})
             raise HTTPException(status_code=404)

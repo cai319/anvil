@@ -58,7 +58,8 @@ def run_timeline(rid: str, conn=Depends(get_db)):
 
 
 @router.get("/runs/{rid}/log")
-def run_log(rid: str, conn=Depends(get_db)):
+def run_log(rid: str, conn=Depends(get_db),
+            auth: Auth = Depends(require_human)):
     """该 run 的 stdout/stderr 日志。"""
     if services.runs.get_run(conn, rid) is None:
         raise HTTPException(status_code=404, detail="run not found")
@@ -66,7 +67,8 @@ def run_log(rid: str, conn=Depends(get_db)):
 
 
 @router.get("/runs/{rid}/snapshot")
-def run_snapshot(rid: str, conn=Depends(get_db)):
+def run_snapshot(rid: str, conn=Depends(get_db),
+                 auth: Auth = Depends(require_human)):
     """该 run 冻结的 profile 快照（config snapshot）。"""
     if services.runs.get_run(conn, rid) is None:
         raise HTTPException(status_code=404, detail="run not found")

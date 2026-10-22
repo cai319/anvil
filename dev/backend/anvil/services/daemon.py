@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import subprocess
 import threading
@@ -31,6 +32,9 @@ from ..util import decode_child_output, jdumps, jloads, now_iso
 # 不泄漏给子进程的编排器会话变量（与 platform/darwin.py 保持一致）
 _SESSION_ENV_PREFIXES = ("CLAUDE_CODE_",)
 _SESSION_ENV_KEYS = {"CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ATTENDED"}
+
+# 模型别名的上下文变体后缀，例如 deepseek-flash[1m] / foo[200k]。
+_MODEL_VARIANT_SUFFIX = re.compile(r"\[(?:1m|200k|128k)\]$", re.IGNORECASE)
 
 
 def _clean_env(extra: dict[str, str]) -> dict[str, str]:
@@ -94,6 +98,10 @@ class _Role:
     proc: subprocess.Popen | None = None
     session_id: str | None = None
     token: str | None = None
+    model_id: str | None = None
+    served_model_id: str | None = None
+    model_pool: list[str] = field(default_factory=list)
+    context_window_floor: int | None = None
     busy: bool = False
     busy_since: float | None = None
     last_active: float = 0.0
@@ -101,6 +109,7 @@ class _Role:
     current_run_id: str | None = None
     current_task_id: str | None = None
     last_task_id: str | None = None
+    last_step_id: str | None = None
     context_tokens: int = 0
     cic_pending: bool = False
     suppress_exit: bool = False
@@ -138,10 +147,20 @@ class DaemonManager:
     def ensure_and_deliver(self, conn, role: str, *, executable: str, args_new: list[str],
                            args_resume: list[str], ctx: dict, cwd: str, env: dict,
                            prompt: str, run_id: str | None = None,
-                           task_id: str | None = None) -> dict:
+                           task_id: str | None = None,
+                           model_pool: list[str] | None = None,
+                           context_window_floor: int | None = None) -> dict:
         """确保角色进程存活（必要时 --resume/新建）并投递一条消息。"""
         r = self._role(role)
         with r.lock:
+            if model_pool is not None:
+                r.model_pool = [str(m).strip() for m in model_pool if str(m).strip()]
+            if context_window_floor is not None:
+                try:
+                    floor = int(context_window_floor)
+                except (TypeError, ValueError):
+                    floor = 0
+                r.context_window_floor = floor if floor > 0 else None
             if r.proc is None or r.proc.poll() is not None:
                 self._spawn(conn, r, executable, args_new, args_resume, ctx, cwd, env)
             self._deliver_locked(conn, r, prompt, run_id, task_id)
@@ -160,8 +179,21 @@ class DaemonManager:
     def status(self, role: str) -> dict:
         r = self._roles.get(role)
         if r is None:
-            return {"alive": False, "status": "dead", "busy_since": None, "pid": None}
+            window = int(config.DEFAULT_CONTEXT_WINDOW)
+            return {
+                "alive": False, "status": "dead", "busy_since": None, "pid": None,
+                "context_tokens": 0, "model_id": None, "served_model_id": None,
+                "model_pool": [], "context_window_floor": None,
+                "active_context_window": window, "context_window": window,
+                "context_fit": True, "context_safe_fit": True,
+                "cic_threshold_tokens": (
+                    int(config.CIC_THRESHOLD_TOKENS) if config.CIC_THRESHOLD_TOKENS > 0
+                    else int(window * config.CIC_RESET_RATIO)),
+                "hint_tokens": int(window * config.CONTEXT_HINT_RATIO),
+            }
         alive = r.proc is not None and r.proc.poll() is None
+        tokens = int(r.context_tokens or 0)
+        active_window = self._active_context_window(r)
         return {
             "alive": alive,
             "status": "busy" if (alive and r.busy) else ("idle" if alive else "dead"),
@@ -172,6 +204,22 @@ class DaemonManager:
             "current_run_id": r.current_run_id,
             "current_task_id": r.current_task_id,
             "queue_len": len(r.queue),
+            "context_tokens": tokens,
+            "model_id": r.model_id,
+            "served_model_id": r.served_model_id,
+            "model_pool": list(r.model_pool),
+            "context_window_floor": r.context_window_floor,
+            "active_context_window": active_window,
+            "context_window": self._context_window(r),
+            "context_fit": tokens <= active_window,
+            "context_safe_fit": tokens <= self._context_window(r),
+            "model_pool_windows": [
+                {"model": m, "context_window": self._model_window(m),
+                 "fits": tokens <= self._model_window(m)}
+                for m in r.model_pool
+            ],
+            "cic_threshold_tokens": self._cic_threshold(r),
+            "hint_tokens": self._hint_threshold(r),
         }
 
     def cancel_task(self, role: str, task_id: str) -> bool:
@@ -237,8 +285,12 @@ class DaemonManager:
             r.current_task_id = None
             r.current_log_path = None
 
-    def reset_session(self, role: str) -> None:
-        """终止常驻进程并清空 session_id；下一次唤醒新建上下文。"""
+    def reset_session(self, role: str, cic: bool = False) -> None:
+        """终止常驻进程并清空 session_id；下一次唤醒新建上下文。
+
+        cic=True 时，下一次唤醒先注入 CIC（MEMORY 头 + 最近消息/动作），适合
+        角色自主决定“换新上下文，但保留必要交接”的场景。
+        """
         r = self._roles.get(role)
         if r is not None:
             with r.lock:
@@ -247,7 +299,7 @@ class DaemonManager:
                 self._kill_locked(r, graceful=True)
                 r.session_id = None
                 r.context_tokens = 0
-                r.cic_pending = False
+                r.cic_pending = cic
                 r.busy = False
                 r.busy_since = None
                 r.current_run_id = None
@@ -278,11 +330,14 @@ class DaemonManager:
         from ..graph.render import render_template
 
         row = conn.execute(
-            "SELECT session_id, token, last_context_tokens FROM role_sessions WHERE role_slug=?",
+            "SELECT session_id, token, last_context_tokens, model_id "
+            "FROM role_sessions WHERE role_slug=?",
             (r.role,)).fetchone()
+        if row and row["model_id"]:
+            r.model_id = row["model_id"]
         resume = bool(row and row["session_id"])
         if resume and row["last_context_tokens"] and \
-                int(row["last_context_tokens"]) >= config.CIC_THRESHOLD_TOKENS:
+                int(row["last_context_tokens"]) >= self._cic_threshold(r):
             # 会话过大：不 resume，按 CIC 构造新会话首输入（见 _build_cic）
             resume = False
             r.cic_pending = True
@@ -332,12 +387,110 @@ class DaemonManager:
         conn.commit()
         return token
 
+    @staticmethod
+    def _model_family(model_id: str | None) -> str:
+        """去掉 [1m]/[200k]/[128k] 变体后缀，用于判断 init 别名与 served 名称是否同族。"""
+        return _MODEL_VARIANT_SUFFIX.sub("", (model_id or "").strip().lower())
+
+    def _model_window_info(self, model_id: str | None) -> tuple[int, bool]:
+        """返回 (窗口, 是否来自显式配置/名称推断)；默认值不算 known。"""
+        model = (model_id or "").strip()
+        mapped = config.MODEL_CONTEXT_WINDOWS.get(model)
+        if mapped:
+            return int(mapped), True
+        low = model.lower()
+        if "1m" in low:
+            return 1_000_000, True
+        if "200k" in low:
+            return 200_000, True
+        if "128k" in low:
+            return 128_000, True
+        return int(config.DEFAULT_CONTEXT_WINDOW), False
+
+    def _model_window(self, model_id: str | None) -> int:
+        """解析单个模型 id 的上下文窗口（配置映射/名称推断/默认）。"""
+        return self._model_window_info(model_id)[0]
+
+    def _active_context_window(self, r: _Role) -> int:
+        return self._model_window(r.model_id)
+
+    def _context_window(self, r: _Role) -> int:
+        """策略窗口：取「当前模型、角色下限、全局下限、模型池」中的最小值。
+
+        角色可能从 pro 切到 flash；若只按当前模型窗口算阈值，大上下文会超出
+        小模型的窗口。这里用保守最小值，保证任何候选模型都放得下。
+        """
+        windows = [self._active_context_window(r)]
+        if r.context_window_floor and int(r.context_window_floor) > 0:
+            windows.append(int(r.context_window_floor))
+        if config.CONTEXT_WINDOW_FLOOR > 0:
+            windows.append(int(config.CONTEXT_WINDOW_FLOOR))
+        for model in r.model_pool:
+            windows.append(self._model_window(model))
+        return max(1, min(windows))
+
+    def _cic_threshold(self, r: _Role) -> int:
+        """冷唤醒/CIC 重置阈值：显式配置优先，否则按策略窗口比例。"""
+        if config.CIC_THRESHOLD_TOKENS > 0:
+            return int(config.CIC_THRESHOLD_TOKENS)
+        return max(1, int(self._context_window(r) * config.CIC_RESET_RATIO))
+
+    def _hint_threshold(self, r: _Role) -> int:
+        return max(1, int(self._context_window(r) * config.CONTEXT_HINT_RATIO))
+
+    def _context_hint(self, r: _Role, task_id: str | None) -> str:
+        """给角色的会话决策提示：只在切换任务或上下文占用较高时出现。"""
+        tokens = int(r.context_tokens or 0)
+        active_window = self._active_context_window(r)
+        window = self._context_window(r)
+        threshold = self._cic_threshold(r)
+        changed = bool(r.last_task_id and task_id and r.last_task_id != task_id)
+        high = tokens >= self._hint_threshold(r)
+        if not (changed or high):
+            return ""
+
+        def fmt(n: int) -> str:
+            if n >= 1_000_000:
+                return f"{n / 1_000_000:.1f}m".replace(".0m", "m")
+            return f"{n / 1000:.0f}k" if n >= 1000 else str(n)
+
+        lines = ["## 会话上下文（由你决定是否重置）"]
+        model = f"（{r.model_id}）" if r.model_id else ""
+        if window < active_window:
+            lines.append(
+                f"- 当前会话已用上下文约 {fmt(tokens)} tokens；"
+                f"当前模型窗口约 {fmt(active_window)}{model}；"
+                f"按模型池/下限保守预算 {fmt(window)}，Anvil 冷唤醒阈值 {fmt(threshold)} tokens。")
+        else:
+            lines.append(
+                f"- 当前会话已用上下文约 {fmt(tokens)} tokens；"
+                f"模型窗口约 {fmt(window)}{model}，Anvil 冷唤醒阈值 {fmt(threshold)} tokens。")
+        if r.last_task_id:
+            last = r.last_task_id
+            if r.last_step_id:
+                last += f" / 步骤 {r.last_step_id}"
+            lines.append(f"- 上一次处理：{last}")
+        if task_id:
+            lines.append(f"- 当前任务：{task_id}")
+        if changed:
+            lines.append("- 任务已切换；若与本任务不相关，建议先重置会话。")
+        if high:
+            lines.append("- 上下文占用较高；若新任务与旧上下文关系不大，建议先重置会话。")
+        cmd = (f"anvil self reset-context --task {task_id} --reason \"...\""
+               if task_id else "anvil self reset-context --reason \"...\"")
+        lines.append(
+            f"- 重置方法：`{cmd}`。它会在新会话中重新投递当前任务/步骤；"
+            "不要在有排队消息时调用。")
+        return "\n".join(lines) + "\n\n"
+
     def _deliver_locked(self, conn, r: _Role, prompt: str,
                         run_id: str | None, task_id: str | None) -> None:
         prefix = f"当前任务 ID：{task_id}\n（环境变量 ANVIL_TASK_ID 可能已过期，请以此为准）\n\n" if task_id else ""
         if r.cic_pending:
             prefix = self._build_cic(conn, r.role, task_id) + "\n\n" + prefix
             r.cic_pending = False
+        else:
+            prefix = self._context_hint(r, task_id) + prefix
         text = prefix + prompt
         r.queue.append((text, run_id, task_id))
         if not r.busy:
@@ -358,8 +511,9 @@ class DaemonManager:
         r.busy_since = time.time()
         r.current_run_id = run_id
         r.current_task_id = task_id
-        row = conn.execute("SELECT log_path FROM runs WHERE id=?", (run_id,)).fetchone() if run_id else None
+        row = conn.execute("SELECT log_path, step_id FROM runs WHERE id=?", (run_id,)).fetchone() if run_id else None
         r.current_log_path = row["log_path"] if row else None
+        r.last_step_id = row["step_id"] if row else None
         self._append_run_log(r, f"\n===== USER（上下文/提示词） @ {now_iso()} =====\n{text}\n")
         self._db_upsert(conn, r, status="busy")
         try:
@@ -394,14 +548,34 @@ class DaemonManager:
                 etype = ev.get("type")
                 if etype == "system" and ev.get("session_id"):
                     r.session_id = ev["session_id"]
+                    model = ev.get("model") or ev.get("model_id")
+                    if model:
+                        r.model_id = str(model)
                 elif etype == "result":
                     if "Prompt is too long" in line:
                         self._reset_for_cic(r)
                         break
                     self._on_turn_result(r, ev)
                 elif etype == "assistant":
+                    msg = ev.get("message") or {}
+                    model = msg.get("model") or ev.get("model")
+                    old_model = r.model_id
+                    if model:
+                        served = str(model)
+                        r.served_model_id = served
+                        if not old_model:
+                            r.model_id = served
+                        elif self._model_family(old_model) == self._model_family(served):
+                            # init 别名可能更具体（deepseek-flash[1m] vs served deepseek-flash）；
+                            # 同族时优先保留有明确窗口的变体，二者都明确则取较小窗口。
+                            old_w, old_known = self._model_window_info(old_model)
+                            new_w, new_known = self._model_window_info(served)
+                            if new_known and (not old_known or new_w < old_w):
+                                r.model_id = served
+                        else:
+                            r.model_id = served
                     self._log(r.role, self._assistant_text(ev))
-                    usage = (ev.get("message") or {}).get("usage") or {}
+                    usage = msg.get("usage") or {}
                     if usage:
                         try:
                             ctx = sum(int(usage.get(k) or 0) for k in (
@@ -412,6 +586,8 @@ class DaemonManager:
                             self._record_usage(r, usage)
                         except (TypeError, ValueError):
                             pass
+                    if old_model and r.model_id and r.model_id != old_model:
+                        self._on_model_switch(r, old_model, r.model_id)
         except Exception:  # noqa: BLE001 —— 解码/管道异常不能静默杀死 reader
             self._log(r.role, "[anvil] reader crashed:\n" + traceback.format_exc())
             try:
@@ -505,6 +681,47 @@ class DaemonManager:
             return "\n".join(out)
         return None
 
+    def _on_model_switch(self, r: _Role, old: str, new: str) -> None:
+        """模型切换后的上下文适配检查（运行时自己切模型，Anvil 只能观测和提示）。"""
+        tokens = int(r.context_tokens or 0)
+        active = self._active_context_window(r)
+        safe = self._context_window(r)
+        cic = self._cic_threshold(r)
+        fit = tokens <= active
+        safe_fit = tokens <= safe
+        self._log(
+            r.role,
+            f"[anvil] model switched: {old} -> {new}; context={tokens}, "
+            f"active_window={active}, safe_window={safe}, fit={fit}, safe_fit={safe_fit}")
+        if not fit:
+            self._log(
+                r.role,
+                "[anvil] WARNING: context exceeds the new model window; "
+                "reset/compact before the next turn")
+        elif tokens >= cic:
+            self._log(
+                r.role,
+                f"[anvil] context {tokens} >= CIC threshold {cic} for model pool; "
+                "next cold wake will use a fresh CIC session")
+        try:
+            conn = open_conn(self.db_path)
+            try:
+                conn.execute(
+                    "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
+                    "VALUES (?,?,?,?,?)",
+                    (r.role, r.current_task_id, "session.model_switch",
+                     jdumps({"from": old, "to": new,
+                             "served_model_id": r.served_model_id,
+                             "context_tokens": tokens,
+                             "active_window": active, "safe_window": safe,
+                             "fit": fit, "safe_fit": safe_fit}), now_iso()),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 —— 审计失败不影响会话
+            pass
+
     def _record_usage(self, r: _Role, usage: dict) -> None:
         try:
             from . import tokens as tokens_service
@@ -522,7 +739,7 @@ class DaemonManager:
         r.suppress_exit = True
         try:
             r.context_tokens = max(int(r.context_tokens or 0),
-                                   int(config.CIC_THRESHOLD_TOKENS) + 1)
+                                   self._cic_threshold(r) + 1)
         except Exception:  # noqa: BLE001
             pass
         proc = r.proc
@@ -651,15 +868,16 @@ class DaemonManager:
         if pid == -1:
             pid = r.proc.pid if r.proc else None
         conn.execute(
-            "INSERT INTO role_sessions (role_slug, session_id, token, pid, status, busy_since, "
+            "INSERT INTO role_sessions (role_slug, session_id, token, model_id, pid, status, busy_since, "
             "last_active_at, last_context_tokens, last_error, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(role_slug) DO UPDATE SET session_id=excluded.session_id, token=excluded.token, "
+            "model_id=COALESCE(excluded.model_id, role_sessions.model_id), "
             "pid=excluded.pid, status=excluded.status, busy_since=excluded.busy_since, "
             "last_active_at=excluded.last_active_at, "
             "last_context_tokens=COALESCE(excluded.last_context_tokens, role_sessions.last_context_tokens), "
             "last_error=excluded.last_error, updated_at=excluded.updated_at",
-            (r.role, r.session_id or "", r.token, pid, status,
+            (r.role, r.session_id or "", r.token, r.model_id, pid, status,
              datetime.fromtimestamp(r.busy_since, tz=timezone.utc).isoformat() if r.busy_since else None,
              datetime.fromtimestamp(r.last_active, tz=timezone.utc).isoformat() if r.last_active else None,
              r.context_tokens or None, error, now_iso()),

@@ -143,7 +143,7 @@ async def test_S9_exclusive_claim(client):
     await _post_task(client)
     r1 = await _claim(client, "T-0001", role="qa-role")
     r2 = await _claim(client, "T-0001", role="other-role")
-    assert (r1.status_code, r2.status_code) in [(200, 409), (409, 200)]
+    assert (r1.status_code, r2.status_code) in [(200, 409), (409, 200), (200, 403), (403, 200)]
     body = (await client.get(f"{API}/tasks/T-0001")).json()
     assert body["assignee"] in ("qa-role", "other-role")
 

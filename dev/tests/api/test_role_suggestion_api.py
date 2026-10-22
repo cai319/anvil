@@ -173,7 +173,7 @@ async def test_inbox_workflow_draft_counts_steps(client, seeded):
 
 async def test_dispatch_returns_role_suggestion_draft_kind(client, seeded):
     await _draft(client)
-    r = await client.post(f"{API}/tasks/T-ROLE/dispatch", headers=auth_headers())
+    r = await client.post(f"{API}/tasks/T-ROLE/dispatch", headers=human_headers())
     assert r.status_code == 201, r.text
     assert r.json()["mode"] == "pending_review"
     assert r.json()["draft_kind"] == "role_suggestion"

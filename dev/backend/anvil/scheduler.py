@@ -10,8 +10,10 @@
 """
 from __future__ import annotations
 
+import sqlite3
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 from . import config
 from .api.events import publish
@@ -61,6 +63,7 @@ class Scheduler:
             self._stop.wait(self.interval)
 
     def tick_once(self) -> None:
+        self._backup_daily()
         conn = open_conn(self.db_path)
         try:
             governance.tick(conn, dispatch=True, plans_only=True)
@@ -71,6 +74,43 @@ class Scheduler:
         finally:
             conn.close()
         publish("tick", {})  # 通知前端刷新运行/任务状态
+
+    def _backup_daily(self) -> None:
+        """每天一次 SQLite 在线备份，并清理超过保留期的备份。"""
+        if not config.BACKUP_ENABLED or self.db_path == ":memory:":
+            return
+        backups = Path(config.DATA_DIR) / "backups"
+        try:
+            backups.mkdir(parents=True, exist_ok=True)
+            try:
+                backups.chmod(0o700)
+            except OSError:
+                pass
+            stamp = datetime.now().strftime("%Y%m%d")
+            target = backups / f"anvil-{stamp}.db"
+            if not target.exists():
+                src = sqlite3.connect(self.db_path)
+                try:
+                    dst = sqlite3.connect(str(target))
+                    try:
+                        src.backup(dst)
+                    finally:
+                        dst.close()
+                finally:
+                    src.close()
+                try:
+                    target.chmod(0o600)
+                except OSError:
+                    pass
+            cutoff = datetime.now().timestamp() - config.BACKUP_KEEP_DAYS * 86400
+            for old in backups.glob("anvil-*.db"):
+                try:
+                    if old.stat().st_mtime < cutoff:
+                        old.unlink()
+                except OSError:
+                    pass
+        except Exception:  # noqa: BLE001 —— 备份失败不应阻断调度
+            pass
 
     def _advance_workflows(self, conn) -> None:
         """推进所有 running workflow：依赖满足且角色空闲的步骤创建 run。"""
