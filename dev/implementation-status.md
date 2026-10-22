@@ -210,6 +210,13 @@
 - 测试：`tests/test_task_concurrency.py`（空闲 claim 不占额度 / 活跃 run 占额度 /
   独占 claim 提示 / assignee 自动派发）。
 
+### 角色 slug 校验（2026-10-22）
+- slug 统一为 `^[a-z0-9][a-z0-9_-]{1,63}$`；`roles.create` 与角色建议审批共用
+  `validate_slug`，避免中文/大写/空格/slug 进入 `agents/<slug>/` 路径与分支名。
+- `POST /roles`、`/roles/auto`、`/roles/expand` 非法 slug 返回 422（带中文提示）；
+  角色工坊实时显示规则并在非法时禁用「新建角色」。
+- 测试：`tests/api/test_role_slug_api.py`。
+
 ### 任务详情显示优化（2026-10-22）
 - 侧栏长描述默认折叠为 6 行；用 ResizeObserver 按实际溢出显示「展开全文 / 收起描述」，
   展开后最高 42vh 并在描述区内滚动，避免把任务信息面板撑得过长。

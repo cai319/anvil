@@ -12,6 +12,7 @@ from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import RoleIn, RoleOut, ToolsIn
 from ..services import utility
+from ..util import ConflictError
 
 router = APIRouter()
 logger = logging.getLogger("anvil.roles")
@@ -84,7 +85,11 @@ def auto_create_role(body: dict, conn=Depends(get_db),
         "responsibilities": data.get("responsibilities") or [],
     }
     display_name = str(data.get("display_name") or body.get("display_name") or slug)
-    return services.roles.create(conn, slug=slug, display_name=display_name, definition=definition)
+    try:
+        return services.roles.create(conn, slug=slug, display_name=display_name,
+                                     definition=definition)
+    except ConflictError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
 
 @router.post("/roles/expand", status_code=201, response_model=RoleOut)
@@ -164,8 +169,11 @@ def expand_role(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth)
             "主动用 anvil task comment 同步进展、用 anvil task mention 协作，"
             "需要人类决策时 @human。"),
     }
-    role = services.roles.create(conn, slug=slug, display_name=display_name,
-                                 definition=definition)
+    try:
+        role = services.roles.create(conn, slug=slug, display_name=display_name,
+                                     definition=definition)
+    except ConflictError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     conn.execute(
         "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
         "VALUES (?,?,?,?,?)",
@@ -190,8 +198,11 @@ def create_role(body: RoleIn, conn=Depends(get_db)):
     if definition.get("kind") == "onboarding":
         raise HTTPException(status_code=422, detail="cannot create onboarding role via API")
     definition.setdefault("kind", "member")
-    return services.roles.create(conn, slug=body.slug, display_name=body.display_name,
-                                 definition=definition)
+    try:
+        return services.roles.create(conn, slug=body.slug, display_name=body.display_name,
+                                     definition=definition)
+    except ConflictError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
 
 @router.get("/roles", response_model=list[RoleOut])

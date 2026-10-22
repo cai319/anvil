@@ -289,7 +289,7 @@ DELETE /api/v1/runtimes/{id}                 删除自定义运行时（内置�
 
 ```yaml
 # agents/backend-dev/profile.yaml
-slug: backend-dev                 # 主键，不可改
+slug: backend-dev                 # 主键，不可改；小写 ASCII/数字/-/_，2-64 位
 display_name: 后端工程师
 avatar_color: "#2563eb"
 
@@ -345,6 +345,11 @@ lifecycle:
   session_reset_after_tasks: 10   # 每 N 个任务后清一次上下文
   idle_release_minutes: 15
 ```
+
+> **slug 约束（owner 2026-10-22）**：只允许小写英文字母、数字、`-`、`_`（2–64 位，
+> 且以字母或数字开头）；禁止中文、大写、空格等字符。slug 会进入 `agents/<slug>/`
+> 路径、分支名与 CLI 参数，限定 ASCII 可避免 Windows 代码页/路径/编码问题。
+> API 非法 slug 返回 422；角色工坊实时提示并禁用提交；角色建议审批复用同一校验。
 
 **`description` 与 `instruction` 的区分是从 multica 借来的，很值得照搬。** 描述用来在界面上让你一眼认出这个角色是干嘛的，写得再长也不花 token；指令才是真正注入的内容，要精简。混在一起会导致人为了看清而写长描述，白白吃掉每一轮的上下文。
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import sqlite3
 from pathlib import Path
@@ -16,9 +17,24 @@ logger = logging.getLogger("anvil.roles")
 # Naive token estimate until the real estimator (M3) lands: fixed cost per tool.
 TOKENS_PER_TOOL = 500
 
+# slug 会进入文件路径（agents/<slug>/）、分支名与 CLI 参数；限定 ASCII 可避免
+# Windows 代码页 / 路径 / 编码问题。
+ROLE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
+ROLE_SLUG_HINT = (
+    "角色 slug 只能使用小写英文字母、数字、-、_（2-64 个字符，且以字母或数字开头）；"
+    "不支持中文、大写、空格或其它特殊字符")
+
+
+def validate_slug(slug: str) -> str:
+    text = str(slug or "").strip()
+    if not ROLE_SLUG_RE.match(text):
+        raise ConflictError(ROLE_SLUG_HINT)
+    return text
+
 
 def create(conn: sqlite3.Connection, *, slug: str, display_name: str,
            definition: dict) -> dict:
+    slug = validate_slug(slug)
     now = now_iso()
     home = _ensure_home(slug, display_name, definition)
     conn.execute(

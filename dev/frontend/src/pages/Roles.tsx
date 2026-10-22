@@ -13,6 +13,11 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "runtime", label: "运行时" },
 ];
 
+// slug 会进入 agents/<slug>/ 路径、分支名与 CLI 参数；只允许 ASCII。
+const SLUG_RE = /^[a-z0-9][a-z0-9_-]{1,63}$/;
+const SLUG_HINT = "slug 只能使用小写英文字母、数字、-、_（2-64 位，且以字母或数字开头）；"
+  + "不支持中文、大写、空格或其它特殊字符。";
+
 export function Roles() {
   const [roles, setRoles] = useState<Role[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -140,6 +145,10 @@ export function Roles() {
 
   const create = async () => {
     if (!slug || !displayName) return;
+    if (!SLUG_RE.test(slug)) {
+      setError(SLUG_HINT);
+      return;
+    }
     if (!runtimeId) {
       setError("请先选择一个可用运行时（可先在「运行时」页扫描）");
       return;
@@ -266,6 +275,7 @@ export function Roles() {
 
   const projection = (config?.projection ?? {}) as Record<string, any>;
   const current = roles.find((r) => r.slug === selected);
+  const slugInvalid = slug.length > 0 && !SLUG_RE.test(slug);
 
   return (
     <div className="roles">
@@ -273,7 +283,18 @@ export function Roles() {
       {error && <p className="error">{error}</p>}
 
       <div className="toolbar">
-        <input value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="slug" />
+        <input
+          value={slug}
+          onChange={(e) => setSlug(e.target.value)}
+          placeholder="slug（小写字母/数字/-/_）"
+          pattern="[a-z0-9][a-z0-9_-]{1,63}"
+          maxLength={64}
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          title={SLUG_HINT}
+          aria-invalid={slugInvalid}
+        />
         <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="显示名" />
         <select value={runtimeId} onChange={(e) => setRuntimeId(e.target.value)} title="角色绑定的运行时">
           {runtimes.length === 0 && <option value="">（无可用运行时）</option>}
@@ -284,8 +305,13 @@ export function Roles() {
             <option key={r.id} value={r.id}>{r.display_name} · {r.status}</option>
           ))}
         </select>
-        <button onClick={create} disabled={!slug || !displayName || !runtimeId}>新建角色</button>
+        <button onClick={create} disabled={!slug || !displayName || !runtimeId || slugInvalid}>
+          新建角色
+        </button>
       </div>
+      <p className={slugInvalid ? "error role-slug-hint" : "muted role-slug-hint"}>
+        {slugInvalid ? SLUG_HINT : "slug：小写字母、数字、-、_，2–64 位；不支持中文/大写/空格。"}
+      </p>
       <div className="toolbar">
         <input
           value={autoBrief}
@@ -310,6 +336,11 @@ export function Roles() {
               <a href="#" onClick={(e) => { e.preventDefault(); setSelected(r.slug); setTab("basic"); }}>
                 {r.display_name} <small>({r.slug})</small>
                 {isOnboardingRole(r) && <span className="badge badge-in_progress" title="默认助理，不可删除">默认助理</span>}
+                {!isOnboardingRole(r) && !SLUG_RE.test(r.slug) && (
+                  <span className="badge wf-gate" title="slug 含中文/非法字符，建议删除并重建">
+                    slug 不合规
+                  </span>
+                )}
               </a>
               {!isOnboardingRole(r) && (
                 <button onClick={() => remove(r)} className="danger">删</button>

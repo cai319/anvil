@@ -5,13 +5,11 @@
 """
 from __future__ import annotations
 
-import re
 import sqlite3
 
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
 
 DRAFT_KINDS = {"tasks", "workflow", "role_suggestion"}
-ROLE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
 
 # 工作流模板库（SOP 预设，MetaGPT 思路）：每条是一串「步骤」；步骤线性依赖上一步。
 # 步骤字段：title（前缀）、type、role（角色 slug）。
@@ -168,10 +166,8 @@ def _approve_role_suggestion(conn: sqlite3.Connection, draft: dict, by: str) -> 
     for item in suggested:
         if not isinstance(item, dict):
             raise ConflictError("suggested role must be an object")
-        slug = str(item.get("slug") or "").strip()
+        slug = roles_service.validate_slug(str(item.get("slug") or ""))
         display = str(item.get("display_name") or "").strip()
-        if not ROLE_SLUG_RE.match(slug):
-            raise ConflictError(f"invalid role slug: {slug!r}")
         if not display:
             raise ConflictError(f"role {slug}: display_name required")
         if slug == roles_service.ONBOARDING_SLUG or item.get("kind") == "onboarding":

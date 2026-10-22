@@ -246,6 +246,7 @@ input::placeholder { color: var(--faint); }
 .board tbody tr:last-child td { border-bottom: none; }
 
 /* ── 角色工坊 / 频道 ─────────────────────────────── */
+.role-slug-hint { font-size: 11px; margin: 4px 2px 6px; }
 .roles-layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 1rem; align-items: start; }
 .roles-list { list-style: none; padding: 0; margin: 0; }
 .roles-list li {
