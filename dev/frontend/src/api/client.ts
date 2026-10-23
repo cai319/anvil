@@ -42,6 +42,8 @@ export interface Runtime {
 export interface Role {
   slug: string;
   display_name: string;
+  avatar?: string | null;
+  avatar_color?: string | null;
   home_path: string;
   enabled: boolean;
   created_at: string;
@@ -154,8 +156,12 @@ export const api = {
     planner?: string; run?: Run; runs?: Run[]; draft_id?: string;
     draft_kind?: "tasks" | "workflow" | "role_suggestion";
   }> => req("POST", `/tasks/${id}/dispatch`).then((r) => json(r)),
-  autoCreateRole: (brief: string, runtimeId?: string): Promise<Role> =>
-    req("POST", "/roles/auto", { brief, runtime_id: runtimeId || undefined }).then((r) => json<Role>(r)),
+  autoCreateRole: (brief: string, runtimeId?: string, avatar?: string | null): Promise<Role> =>
+    req("POST", "/roles/auto", {
+      brief,
+      runtime_id: runtimeId || undefined,
+      avatar: avatar ?? undefined,
+    }).then((r) => json<Role>(r)),
   approveActionCard: (id: string): Promise<unknown> =>
     req("POST", `/action-cards/${id}/approve`, {}).then((r) => json(r)),
   rejectActionCard: (id: string): Promise<unknown> =>
@@ -243,15 +249,18 @@ export const api = {
     authFetch(`${BASE}/roles/${slug}/profile`).then((r) => json(r)),
   updateRoleProfile: (slug: string, system_prompt: string, responsibilities: string[]): Promise<{ system_prompt: string; responsibilities: string[] }> =>
     req("PUT", `/roles/${slug}/profile`, { system_prompt, responsibilities }).then((r) => json(r)),
-  createRole: (slug: string, displayName: string, runtimeId?: string): Promise<Role> =>
+  createRole: (slug: string, displayName: string, runtimeId?: string, avatar?: string | null): Promise<Role> =>
     req("POST", "/roles", {
       slug,
       display_name: displayName,
+      avatar: avatar ?? undefined,
       runtime: runtimeId ? { id: runtimeId } : {},
       workspace: { home: `agents/${slug}/`, repos: [] },
       tools: {},
       concurrency: {},
     }).then((r) => json<Role>(r)),
+  updateRoleAvatar: (slug: string, avatar: string | null): Promise<Role> =>
+    req("PUT", `/roles/${slug}/avatar`, { avatar }).then((r) => json<Role>(r)),
   updateRoleRuntime: (slug: string, runtimeId: string): Promise<Role> =>
     req("PUT", `/roles/${slug}/runtime`, { id: runtimeId }).then((r) => json<Role>(r)),
   getRoleRuntime: (slug: string): Promise<RoleRuntimeStatus> =>
