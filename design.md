@@ -1,9 +1,42 @@
 # Anvil — 本地多 Agent 协作编排系统
 
-**设计文档 v3.0**
+**设计文档 v3.0**（含 2026-10-23 实现增量）
 平台：Windows 10/11 · 单机单用户 · 后端 Python · 前端 Web
 
+> **最近更新（2026-10-23）**：上下文/请求体三层保护、技术性失败自动恢复、知识快照与
+> CIC 知识包、@ 唤醒口径。变更摘要见 [附录 A.2](#appendix)，实现口径索引见
+> [附录 A.3](#appendix)。
+
+> **文档约定**
+>
+> - 未标注的正文是**原始设计动机与方案**；标注
+>   `> **实现口径（owner YYYY-MM-DD）**` 的块是实际落地时对原设计的修正/补充。
+>   二者冲突时，以日期较新的实现口径为准。
+> - 章节引用统一写作 `§X.Y`；代码路径相对仓库根目录。
+> - 历史变更与实现口径索引见 [附录 A](#appendix)。
+
+## 阅读指南（目录）
+
+| 章 | 内容 | 想回答的问题 |
+|---|---|---|
+| [1](#ch1) | 概述与设计目标 | 为什么做、边界在哪 |
+| [2](#ch2) | Agent 运行时抽象与绑定 | CLI Agent 如何被发现、绑定、投影 |
+| [3](#ch3) | 角色模型 | 角色是什么、home 里有什么 |
+| [4](#ch4) | 工作区模型 | 私有 home 与共享仓库如何协作 |
+| [5](#ch5) | 任务板与认领机制 | 任务状态、认领、租约、并发 |
+| [6](#ch6) | 编排与执行引擎 | 调度、run 生命周期、重置、reminder、成本 |
+| [7](#ch7) | Agent CLI 契约 | Agent 如何主动上报状态 |
+| [8](#ch8) | 记忆与知识库 | MEMORY/notes/FTS/CIC/知识快照 |
+| [9](#ch9) | 角色演化 | 自主编辑 + 人工审批 |
+| [10](#ch10) | HTTP API | 端点清单 |
+| [11](#ch11) | Web 前端 | 视图与实时事件 |
+| [12](#ch12) | 实施路线 | 里程碑与范围 |
+| [13](#ch13) | 风险与判断 | 已知取舍与失败模式 |
+| [附录 A](#appendix) | 变更清单与实现口径索引 | 相对前版改了什么、实现注在哪 |
+
 ---
+
+<a id="ch1"></a>
 
 ## 第一章 概述与设计目标
 
@@ -27,19 +60,9 @@ Anvil 要解决的就是这一层。它不重新实现 Agent，不代理模型�
 
 > **owner 2026-10-19 修正**：改为**常驻会话优先**——每个角色一个长期存活的 CLI 会话进程（claude-code 用 `--input-format stream-json` 双向流），唤醒 = 向 stdin 投递消息（同一上下文，不再重启进程）；空闲 = 阻塞等待；**空闲超过 `idle_release_minutes`（默认 15）优雅退出并保留 session_id**，下次唤醒用 `--resume <session_id>` 恢复同一上下文。`runs` 仍是一次执行记录。不支持流式协议的运行时回退 one-shot 模型。动机：实测 one-shot 模型下每次 @mention 唤醒都新建进程，上下文不连续且易叠出孤儿进程（同一角色 3-5 个）。
 
-> **上下文策略（owner 2026-10-22）**：角色常驻会话默认复用；daemon 从 CLI 的 system init
-> 事件捕获模型 id，按 `ANVIL_MODEL_CONTEXT_WINDOWS` / 模型名（1m、200k、128k）/
-> `ANVIL_DEFAULT_CONTEXT_WINDOW` 解析上下文窗口。冷唤醒阈值 = 窗口 × `ANVIL_CIC_RESET_RATIO`
-> （或用 `ANVIL_CIC_THRESHOLD_TOKENS` 绝对覆盖）；提示阈值 = 窗口 × `ANVIL_CONTEXT_HINT_RATIO`。
-> 若角色配置 `runtime.model_pool` / `runtime.context_window_floor`，或全局
-> `ANVIL_CONTEXT_WINDOW_FLOOR`，策略窗口取这些值中的最小值，以覆盖“角色可能从小模型
-> 降级/升级”的场景。init 别名与 assistant 的 served 名称同族时（如
-> `deepseek-flash[1m]` vs `deepseek-flash`）保留更具体/更保守的窗口；真正换族时写
-> `session.model_switch` 审计并更新阈值。
-> 任务切换或达到提示阈值时，唤醒消息注入占用/上次任务/当前任务提示；角色可自行调用
-> `anvil self reset-context --task <id> --reason "..."`，由 daemon 终止当前轮并在新会话中
-> 重投当前步骤（CIC = MEMORY 头 + 最近消息/动作）。非零退出自动 reset、排队消息禁止 reset
-> 等护栏仍由 daemon 控制；每次 reset 写 `session.reset_context` 审计。
+> **上下文策略（owner 2026-10-22，细节与 2026-10-23 修正见 [§2.7](#ch2) / [§6.3](#ch6)）**：常驻会话默认复用；窗口解析、策略窗口、
+> CIC/提示阈值、角色自主重置，以及硬保护/请求体保护，统一在 §2.7 与 §6.3
+> 维护，本文不再重复参数。
 
 **其五，工具清单是带预算的一等配置。** skill 与 MCP 的**能力**完全继承自运行时，Anvil 不自造工具体系；但**加载哪些**由 Anvil 决定并强制约束。默认全量加载会让上下文里塞进几十个工具描述，几千 token 的固定开销，直接压缩有效工作空间。所以工具清单支持白名单裁剪、按任务条件加载、以及预设组合，并配一个 token 硬预算。
 
@@ -108,6 +131,8 @@ Anvil 要解决的就是这一层。它不重新实现 Agent，不代理模型�
 数据库存的是**状态与索引**，文件系统存的是**内容与真相**。当两者冲突时以文件为准，数据库可重建。这条规则让系统在崩溃后总能靠重扫恢复。
 
 ---
+
+<a id="ch2"></a>
 
 ## 第二章 Agent 运行时抽象与绑定
 
@@ -312,9 +337,36 @@ DELETE /api/v1/runtimes/{id}                 删除自定义运行时（内置�
   `whoami` 的 `model_pool_windows/fits/context_fit/context_safe_fit` 把决策信息交给角色，
   真正的预检应由运行时/网关（如 LiteLLM/OpenRouter）在分发前完成。
 
+> **实现口径（owner 2026-10-23）：上下文/请求体的三层保护**
+>
+> 1. **计量只认 assistant 单次 usage**：`result.usage` 是会话累计消耗（含历史所有
+>    cache read），不是当前上下文大小。daemon 只把 assistant 事件里的
+>    `input + cache_read + cache_creation` 当作上下文；`result.usage` 仅用于 token
+>    记账。旧口径曾把角色上下文放大到 1.5M–3M，导致阈值失真。
+> 2. **单轮硬保护**：一次唤醒可能连续跑几百次工具调用（实测 1 小时 714 次 API
+>    请求），CLI 自动压缩只在轮次边界生效。assistant 实测上下文达到
+>    `min(策略窗口 × ANVIL_CONTEXT_HARD_RESET_RATIO, 窗口 − ANVIL_CONTEXT_OUTPUT_RESERVE)`
+>    时，daemon 主动终止会话、写知识快照，并用 CIC 新会话重投当前 run。主动水位
+>    轮换**不计入失败预算**；API 溢出才计入 `ANVIL_CONTEXT_RESET_MAX_RETRIES`。
+> 3. **API 溢出自适应**：真正收到上下文超限错误时，按“最后一次成功请求的 95%”
+>    收紧该角色的自适应窗口（只调小不调大），后续会话在更低水位轮换，避免反复
+>    撞同一堵墙。API 上限按 `input + max_tokens` 计，所以硬阈值预留 output 额度。
+> 4. **请求体（图片/附件）保护**：图片/附件不计 token，但计入 32MB 请求体上限。
+>    daemon 累计每个会话的图片/附件 base64 字符数；达到
+>    `ANVIL_PAYLOAD_HINT_CHARS`（默认 8MB）时在唤醒提示里提醒角色自律；达到
+>    `ANVIL_PAYLOAD_HARD_RESET_CHARS`（默认 24MB）时主动换新会话。收到
+>    `request too large (max 32mb)` 时识别为 `payload` 溢出，**强制新会话**
+>    （不 `--resume`，避免旧附件被原样带回）并重投当前 run。
+> 5. **角色自律优先**：协议要求不把大文件/整页截图/长日志直接塞进对话，优先
+>    `grep/head/tail` 或 `Read offset+limit` 读片段、大产物落盘用路径引用、
+>    图片裁剪/压缩且不重复读取；硬保护只是兜底。
+> 6. **可观测**：`anvil whoami --json` 暴露 `context_tokens`、`hard_limit_tokens`、
+>    `active_context_window`、`context_fit`、`payload_chars`、`payload_limit_chars`。
+
 业界对应：LiteLLM 的 `model_info.max_input_tokens` + `context_window_fallbacks`、
 OpenRouter 的 `context_length`、agent 框架的 per-agent/per-node 模型绑定，以及
-“先估算 token → 选择放得下的模型 → 放不下则 compact/reset”的预检模式。
+“先估算 token → 选择放得下的模型 → 放不下则 compact/reset”的预检模式。Anvil 额外
+补了“请求体字节预算”这一层，因为图片/附件不计 token、但会先撞 32MB 网关上限。
 
 ### 2.8 安全边界（本地单用户）
 
@@ -333,6 +385,8 @@ OpenRouter 的 `context_length`、agent 框架的 per-agent/per-node 模型绑�
   （`data/backups/anvil-YYYYMMDD.db`，保留 7 天）；删除角色同步撤销其 sessions/role_sessions。
 
 ---
+
+<a id="ch3"></a>
 
 ## 第三章 角色模型
 
@@ -460,6 +514,8 @@ agents/backend-dev/
 
 ---
 
+<a id="ch4"></a>
+
 ## 第四章 工作区模型
 
 ### 4.1 两类工作区
@@ -520,6 +576,8 @@ Agent 提交时，Anvil 比对本次运行的实际改动文件列表与任务�
 超预算时按优先级从后往前截断，记忆段优先保留 FTS 得分最高的片段。截断事件记入日志——如果某个角色频繁截断，说明它的记忆需要整理了，这本身是个有用信号。
 
 ---
+
+<a id="ch5"></a>
 
 ## 第五章 任务板与认领机制
 
@@ -621,6 +679,21 @@ SQLite 的 `BEGIN IMMEDIATE` 加上单进程编排，足以保证排他性。不
 
 被回收的运行会被标记 `abandoned`，其 worktree 保留供检查——很多时候失联意味着 Agent 卡在某个循环里，那个 worktree 是唯一的证据。
 
+> **实现口径（owner 2026-10-23）：租约续租优先于回收**
+>
+> 等待模型响应、等待其它角色响应、等待 human 都是“活着”，不能因为 30 分钟没
+> heartbeat 就判失联：
+>
+> - 任务/角色 claim 到期时，先检查是否还有“活着”的非终态 run：
+>   `created/projecting/submitted/reviewing/suspended` 直接续租；
+>   `running` 只有会话进程仍存活（常驻 `rs:<role>` 由 daemon 报告，one-shot
+>   `pg:<pid>` 由平台 probe）才续租；
+> - 没有存活会话、也不是控制面/等待态的 run 才回收；
+> - 回收是**技术性失败**：步骤进入自动恢复队列（指数退避重排队），不 @human；
+>   只有评审、gate、审批、决策僵局等 HITL 确认点仍需自然人。
+>
+> 这样区分的原因是：租约的本意是发现“失联”，不是惩罚“长时间思考/等待”。
+
 ### 5.6 并发闸门
 
 四层闸门，取最严者：
@@ -639,25 +712,53 @@ SQLite 的 `BEGIN IMMEDIATE` 加上单进程编排，足以保证排他性。不
 
 ---
 
+<a id="ch6"></a>
+
 ## 第六章 编排与执行引擎
 
-> **实现口径（owner 2026-10-17 决策）**：编排器用 **LangGraph 作为编排控制面**落地，而非自建工具循环。运行生命周期是一个 `StateGraph`（节点 `project`/`spawn`/`submit`/`await_review`/`review`/`process_exit`），用 `SqliteSaver` 检查点持久化（独立 `anvil-graph.db`）、`interrupt()`/`Command(resume)` 做人机评审；**事件驱动**——外部 `claim`/`submit`/`heartbeat`/进程退出作为同一 thread_id 的图重入点，子进程 fire-and-forget 拉起后图即返回，节点绝不为子进程生命周期阻塞。CLI Agent 仍作为子进程执行，「Agent 是驾驶员」立场不变。调度循环由 `anvil/scheduler.py` 后台线程每 5 秒驱动：回收租约 → 派发 wake（spawn）→ monitor（探测退出 + 超时回收）→ reconcile（对账自愈崩溃窗口）。任务 5 态仍留在 `services.tasks`，图节点只 `UPDATE runs` 运行 8 态。**超时回收**：monitor 对超过 `RUN_TIMEOUT_SECONDS`（默认 600s）仍 `running` 的 run 自动 terminate 并标 `failed`，防 agent 卡死永久占用。SSE 事件总线用非阻塞轮询（`get_nowait` + keep-alive），不按连接开线程，避免导航频繁时线程池耗尽。
-> **多轮挂起/resume（owner 2026-10-18 决策）**：agent 可被**反复唤醒续跑**。① `@ 即拉入`：@ 的是角色且为任务参与角色时，若该角色有挂起中的 run → 触发 `resume` 事件（清空 `native_session_id` → 重新投影 → 重新 spawn）；否则新起 run。② **会话上下文注入**：spawn 的 prompt 注入任务会话完整时间线（评论/@提及/认领/提交），使每轮续跑都读到最新内容。③ **挂起不误判**：agent @了角色等待响应时，`process_exit` 保持 `running`（挂起），不标 failed/abandoned。协议约定「@了别人等响应就挂起（不 submit），被 @回来再继续，最终完成才 submit」。
+> **实现口径（owner 2026-10-17 决策）**：编排器用 **LangGraph 作为编排控制面**落地，而非自建工具循环。运行生命周期是一个 `StateGraph`（节点 `project`/`spawn`/`submit`/`await_review`/`review`/`process_exit`），用 `SqliteSaver` 检查点持久化（独立 `anvil-graph.db`）、`interrupt()`/`Command(resume)` 做人机评审；**事件驱动**——外部 `claim`/`submit`/`heartbeat`/进程退出作为同一 thread_id 的图重入点，子进程 fire-and-forget 拉起后图即返回，节点绝不为子进程生命周期阻塞。CLI Agent 仍作为子进程执行，「Agent 是驾驶员」立场不变。调度循环由 `anvil/scheduler.py` 后台线程每 5 秒驱动：回收租约 → 派发 wake（spawn）→ monitor（探测退出 + 超时回收）→ reconcile（对账自愈崩溃窗口）。任务 5 态仍留在 `services.tasks`，图节点只 `UPDATE runs` 运行 8 态。**超时回收**：monitor 对超过 `RUN_TIMEOUT_SECONDS`（默认 600s）仍 `running` 的 run 自动 terminate 并标 `failed`，防 agent 卡死永久占用。SSE 事件总线用非阻塞轮询（`get_nowait` + keep-alive），不按连接开线程，避免导航频繁时线程池耗尽。（调度/超时口径以 §6.1 的 2026-10-23 实现口径为准。）
+> **多轮挂起/resume（owner 2026-10-18 决策）**：agent 可被**反复唤醒续跑**。① `@ 即拉入`：@ 的是角色且为任务参与角色时，若该角色有挂起中的 run → 触发 `resume` 事件（清空 `native_session_id` → 重新投影 → 重新 spawn）；否则新起 run。② **会话上下文注入**：spawn 的 prompt 注入任务会话完整时间线（评论/@提及/认领/提交），使每轮续跑都读到最新内容。③ **挂起不误判**：agent @了角色等待响应时，`process_exit` 保持 `running`（挂起），不标 failed/abandoned。协议约定「@了别人等响应就挂起（不 submit），被 @回来再继续，最终完成才 submit」。（等待/process_exit 口径以 §6.1/§6.2 的 2026-10-23 实现口径为准。）
 
 ### 6.1 调度循环
 
-编排器是一个 asyncio 任务，每 5 秒扫描一轮：
+编排器是一个后台线程，每 5 秒扫描一轮。实际顺序（`scheduler.tick_once`）：
 
 ```python
-async def tick():
-    reclaim_expired_leases()          # 回收失联租约
-    fire_due_reminders()              # 触发到期的 reminder
-    for agent in eligible_agents():   # 通过全部四层闸门的角色
-        tasks = matchable_tasks(agent)
-        if not tasks:
-            continue
-        await wake(agent, hint=summarize(tasks))
+def tick_once():
+    governance.tick(...)      # 回收到期租约；活跃/挂起 run 先续租
+    advance_workflows(...)    # 依赖满足且退避到期的步骤创建 run
+    pump_created(...)         # created run 重投 wake
+    monitor(...)              # 进程 liveness + busy 超时
+    reap_dead_runs(...)       # 死进程的僵尸 run → suspended + 新 CIC
+    reap_stalled_phases(...)  # projecting 卡住 → 重投/修正
+    nudge_stalled(...)        # suspended 步骤续跑；HITL/忙碌 peer 跳过
+    reconcile(...)            # 任务态与 run 态对账
 ```
+
+> **实现口径（owner 2026-10-23）：5 秒 tick 是健康巡检，不是催命符**
+>
+> 每一轮只处理明确异常，不会每 5 秒动一次等待中的角色：
+>
+> - **等其它角色**：run=`suspended`；对方仍有活跃 run 或进程 busy 时跳过；对方空闲/
+>   失联超过 `ANVIL_STEP_NUDGE_SECONDS` 才 `resume` 等待方检查 inbox/重新询问；
+> - **等 human**：最后一条 @ 是 human 且未回复 → 不自动重试，mention 回复时唤醒；
+> - **等模型/工具**：run=`running`、进程 busy；只做 liveness 检查，超过 run 级
+>   timeout（默认 3600s）才重置会话（带 CIC）并进入自动恢复；
+> - **死进程/僵尸 run**：60s 宽限期后转 `suspended`，标记下次用全新 CIC 会话；
+> - **技术性失败自动恢复**：步骤回到 `pending`，指数退避（默认 2 分钟起、上限 30
+>   分钟、最多 10 次），重跑提示带上次失败原因；耗尽后标 `failed` 并只写一条非阻塞
+>   comment，**不产生待回复的 @human**；
+> - **HITL 不受影响**：评审、gate、审批、决策僵局仍必须自然人处理。
+>
+> 对应业界实践：Kubernetes liveness probe + CrashLoopBackOff、Temporal activity
+> retry（initial interval / backoff coefficient / max interval / max attempts）、
+> CI rerun；失败后“有限重试 + 退避 + 非阻塞告警”，而不是把恢复挂在人在场。
+>
+> **@ 唤醒口径（owner 2026-10-23）**：唤醒范围是 `task_assignees` + 单负责人
+> `assignee` + `task.planner` + workflow 步骤角色 + **被明确 @ 的现有角色**。
+> 普通任务/子任务起普通 run（可直接 claim）；工作流任务起 `[anvil:reply]` run
+> （只讨论，不覆盖 workflow 角色分配）。**评论正文里的 @ 只是文本，不会唤醒**；
+> 需要唤醒必须用 `anvil task mention`（CLI 会 warning，前端会把命中角色的 @ 标黄）。
 
 `wake()` 做的事：创建 run 记录、冻结 profile 快照、准备 worktree、执行投影、拉起子进程。**唤醒提示只含任务 id 与标题，不含任务正文**——正文由 Agent 自己通过 `anvil task show` 取。这样编排器不承担内容组装的责任，也让 Agent 的信息获取路径统一。
 
@@ -686,6 +787,20 @@ created → projecting → running → submitted → reviewing → completed
 
 该 8 态由 LangGraph `StateGraph` 承载：`project`→`spawn`（拉起子进程）→ 图结束；`submit` 事件重入 → `submit`→`await_review`（`interrupt()` 挂起等人审）→`review`；`process_exit` 事件重入 → `failed`/`abandoned`（依据 run 自身状态，非 task 状态）。每次状态迁移落为 `activities`（kind=`run`）事件供时间线消费。
 
+> **实现口径（owner 2026-10-23）：不允许“永久 running”**
+>
+> - `process_exit` 只把“最后一条 @ 仍在等待、且之后没有对方 @ 回来”的 run 保持
+>   `running`；历史上有过 @ 不再等于一直等待。该判断只看当前这次等待，避免任何角色
+>   曾经 @ 过别人后，进程退出时 run 永远卡在 `running`。
+> - `process_exit` 遇到 `role_sessions.last_error` 以 `context overflow` 开头时让路，
+>   由上下文/请求体溢出回调接管；否则会与自动重投竞态。
+> - 常驻进程已死但 run 仍 `running`：宽限期后转 `suspended`，并标记下次用全新 CIC
+>   会话；步骤看门狗随后续跑。
+> - 上下文/请求体溢出：run 回 `created` → 新 CIC run 重投；超过单 run 重试预算才
+>   转 `failed`，再由步骤自动恢复队列以指数退避重排。整个过程不 @human。
+> - `projecting` 卡住（编排器在 project→spawn 之间崩溃）：周期看门狗重新投递或修正
+>   为 `running`，避免控制面崩溃留下的悬挂态。
+
 子进程的 stdout/stderr 全量落盘到 `agents/<slug>/logs/run-<id>.log`（`ProcessManager.spawn` 扩展 `stdout`/`stderr` 重定向），通过 `GET /runs/{id}/log` 读取；日志不入库（避免 SQLite 膨胀），库里只存文件路径。逐行实时推送 SSE 留作后续。
 
 > **删除 vs 取消**：物理删除任务会终止并回收该任务的常驻角色进程/会话（`cancel_task`）；
@@ -706,8 +821,30 @@ created → projecting → running → submitted → reviewing → completed
 
 > **第四种路径：角色自主 `reset-context`**（与三档人工重置并列但由 Agent 发起）。
 > 角色根据任务相关性/上下文占用自行调用；daemon 校验当前 run、进程与队列后，终止当前轮，
-> 清空会话，用 CIC（MEMORY 头 + 最近消息/动作）新建会话并重投当前步骤。它等价于
-> “session reset + CIC + 自动重投”，写 `session.reset_context` 审计，不影响 MEMORY/notes。
+> 清空会话，用 CIC 新建会话并重投当前步骤。它等价于“session reset + CIC + 自动重投”，
+> 写 `session.reset_context` 审计，不影响 MEMORY/notes。
+>
+> **实现口径（owner 2026-10-23）：自动换会话与 CIC 内容**
+>
+> - **触发**：
+>   - 角色主动 `anvil self reset-context`；
+>   - 轮次结束时上下文 ≥ CIC 阈值，或请求体附件 ≥ payload 阈值：释放进程，下次唤醒
+>     新建会话；
+>   - 单轮内上下文达到硬阈值、或 API 报上下文/请求体超限：终止当前轮，写知识快照，
+>     新 CIC 会话重投当前 run；
+>   - API 上下文溢出按最后成功请求的 95% 自适应收紧窗口后重试。
+> - **CIC 不再是“MEMORY 头 + 最近消息/动作”三块**，而是持久知识包：
+>   1. 本角色 `MEMORY.md` **尾部**（`max 4000 chars`，最近整理的内容优先）；
+>   2. 按任务标题/标签做 FTS 检索得到的相关记忆（最多 5 条）；
+>   3. 当前 workflow 最近 30 步的状态/摘要/反馈（决策依据）；
+>   4. 当前任务最近一次知识快照（`notes/knowledge/<task-id>/`）；
+>   5. 最近 25 条任务消息 + 最近 12 条动作。
+>   CIC 总长上限约 32k 字符，且不宣布“重置”、不列未决问题清单。
+> - **主动水位轮换不计入失败预算**；只有真正的 API 溢出/请求体超限计入
+>   `ANVIL_CONTEXT_RESET_MAX_RETRIES`，耗尽后交给步骤自动恢复（指数退避，不 @human）。
+> - **知识快照先于上下文丢失**：换会话前由 DB 时间线确定性生成
+>   `agents/<slug>/notes/knowledge/<task-id>/<时间>-<触发>.md`，写 FTS 索引与 audit；
+>   不依赖旧对话，也不调用模型。
 
 ### 6.4 Reminder 机制
 
@@ -728,6 +865,8 @@ Reminder 可由人设置，**也可由 Agent 自己设置**（`anvil reminder ad
 这套观测的准确性受限于运行时是否报告用量，做不到精确。它的用途是发现异常趋势（"这个角色的平均 token 消耗翻倍了"），而不是财务核算。
 
 ---
+
+<a id="ch7"></a>
 
 ## 第七章 Agent CLI 契约
 
@@ -790,24 +929,28 @@ anvil ws diff                            # 本次改动，含越界警告
 
 ### 7.4 注入给 Agent 的协议说明
 
-投影时写入指令的一段固定文本（约 400 token），大意如下：
+投影时写入指令的一段固定文本（约 600 token），大意如下：
 
 > 你在 Anvil 环境中运行。当前环境变量 `ANVIL_TASK_ID` 指示你被分配的任务。
 > 第一步必须执行 `anvil task claim $ANVIL_TASK_ID` 认领任务（否则无法提交）。
 > 再执行 `anvil task show $ANVIL_TASK_ID` 读取完整要求。
 > 在当前工作目录（cwd）中完成你的产出（写代码/文档/测试）。
-> 需要与其它角色协作或澄清时，执行 `anvil task mention $ANVIL_TASK_ID --to <角色slug> "消息"` @提及对方（角色间直接交互，不经过人类）。
+> 需要与其它角色协作或澄清时，执行 `anvil task mention $ANVIL_TASK_ID --to <角色slug> "消息"` @提及对方（角色间直接交互，不经过人类）。**只有 mention 会唤醒角色**；`anvil task comment` 里的 @ 只是文本，不会唤醒（CLI 会提示，前端只会标黄）。
+> @ 的唤醒范围包括任务参与角色、单负责人、workflow 步骤角色，以及被明确 @ 的现有角色：普通任务/子任务会起普通 run 让对方可以直接 claim；工作流任务会起 `[anvil:reply]` run（只讨论，不改 workflow 结构）。回复 run 如果消息明确要求你 claim/submit **另一个任务/子任务**，按指示执行；当前任务的 claim/submit 仍禁止。
 > 开始/关键节点用 `anvil task comment` 同步进展；需要下游/验证角色介入时用 `anvil task mention` 交接。
 > 拆分给其他角色的子任务用 `anvil task create ... --assignee <角色>`（团队用 `--assignees a,b`）指定执行者；**不要 claim 你拆给别人的子任务**，已 claim 需先 `anvil task unclaim <id>` 再 @ 对方。
 > 工作流步骤完成后用 `anvil step submit`；decision 步骤用 `anvil step decide --approve|--reject`；plan_slices 步骤用 `anvil step plan --file slices.json`。
-> 唤醒提示可能给出上下文占用/模型窗口；若当前任务与上次上下文无关或占用过高，先执行 `anvil self reset-context --task $ANVIL_TASK_ID --reason "..."`。
+> 唤醒提示可能给出上下文占用/模型窗口/附件预算；若当前任务与上次上下文无关或占用过高，先执行 `anvil self reset-context --task $ANVIL_TASK_ID --reason "..."`。
+> **请求体/附件预算**：不要把大文件、整页截图或长日志直接塞进对话；优先 `grep/head/tail` 或 `Read offset+limit` 读片段，大产物落盘用路径引用；图片裁剪/压缩，同一图片不要反复读取。附件接近预算时，先把关键结论写入 `memory/notes` 再 reset-context。
 > 长任务中每隔若干分钟执行 `anvil task heartbeat` 续租，否则任务会被回收。
 > 完成后必须执行 `anvil task submit $ANVIL_TASK_ID "完成摘要"` 声明完成，仅仅退出进程不算完成。
 > 发现自己不适合这个任务时执行 `anvil task unclaim` 并说明理由，这是正常操作。
-> 学到值得长期记住的东西时用 `anvil memory append` 记下；判断对其他角色也有用时用 `anvil lesson propose`。
+> 学到值得长期记住的东西时用 `anvil memory append` 记下；Anvil 在每次换会话前也会自动保存任务知识快照，新会话通过 CIC 重新注入；判断对其他角色也有用时用 `anvil lesson propose`。
 > 只修改 scope 范围内的文件，越界的提交会被拒绝。
 
 ---
+
+<a id="ch8"></a>
 
 ## 第八章 记忆与知识库
 
@@ -821,15 +964,28 @@ anvil ws diff                            # 本次改动，含越界警告
 
 所以 v1 的记忆系统是：**文件是真相，SQLite FTS5 是索引，向量检索推迟到 v2 且需要证据支持。**
 
+> **实现口径（owner 2026-10-23）**：检索层已经接入 CIC（Constructed Initial
+> Context）。换会话时不靠旧对话，而是重新注入“持久知识包”：MEMORY 尾部 + 任务相关
+> FTS 命中 + workflow 决策 + 最近知识快照 + 最近消息/动作。这就是轻量 RAG
+> （retrieval-augmented context）：**检索是增强，Markdown 仍是真相**；未来加向量
+> retriever 不需要改变文件层。私有记忆严格按 `role_slug` 过滤，不混入其它角色；
+> 跨角色共享只走人工批准的 lessons。
+
 ### 8.2 三个层次
 
 | 层 | 位置 | 谁维护 | 上限 |
 |---|---|---|---|
 | 私有记忆 | `agents/<slug>/MEMORY.md` | 该 Agent 自主 | 建议 300 行，超出时提示整理 |
 | 私有笔记 | `agents/<slug>/notes/*.md` | 该 Agent 自主 | 无硬限，FTS 索引 |
+| 上下文快照 | `agents/<slug>/notes/knowledge/<task-id>/*.md` | 换会话前 Anvil 自动生成 | 无硬限，FTS 索引；建议周整理时清理旧快照 |
 | 共享经验 | `repos/<r>/.anvil/shared/lessons.md` | 提案 + 审批 | **80 条硬上限** |
 
 私有层完全自治，Anvil 不干预内容，只做索引和"该整理了"的提醒。共享层是唯一需要把关的地方，因为它会注入给所有角色，一条错误的共享经验会污染整个系统。
+
+> **隔离口径（owner 2026-10-23）**：`MEMORY.md`、`notes/`、知识快照都在各自角色
+> home 下；`memories`/`notes`/`memory_fts` 查询严格按 `role_slug` 过滤（不再混入
+> `'shared'`）。任务会话与 workflow 数据是任务级共享输入，但知识快照只写入该角色
+> 自己的 home。这是应用/数据层隔离，不是 OS 沙箱。
 
 ### 8.3 升格流程
 
@@ -845,17 +1001,25 @@ Agent 执行 `anvil lesson propose "..."` 后：
 
 ### 8.4 检索
 
-FTS5 虚拟表索引所有 `notes/*.md` 与 `lessons.md` 的分段（按二级标题切段）。查询时：
+FTS5 虚拟表 `memory_fts(role_slug, content)` 索引通过 `anvil memory append` /
+`anvil note write` 写入的私有记忆与笔记；查询严格按角色过滤：
 
 ```sql
-SELECT path, snippet(mem_fts, 2, '[', ']', '…', 32) AS s, bm25(mem_fts) AS score
-  FROM mem_fts
- WHERE mem_fts MATCH :q
-   AND (owner = :slug OR owner = 'shared')
+SELECT role_slug, snippet(memory_fts, 1, '[', ']', '…', 32) AS s,
+       bm25(memory_fts) AS score
+  FROM memory_fts
+ WHERE memory_fts MATCH :q
+   AND role_slug = :slug
  ORDER BY score LIMIT 8;
 ```
 
-中文分词用 FTS5 的 `unicode61` 加 bigram 兜底，或接 `simple` 分词器扩展。做不到语义检索，只能做关键词——这是明确接受的取舍。注入上下文时的记忆段就靠这个检索填充，查询词由任务标题、标签与 scope 路径拼成。
+查询词由任务标题、标签与 scope 路径拼成；检索结果只作为 CIC 的“相关记忆”块。
+做不到语义检索，只能做关键词——这是明确接受的取舍。FTS5 不可用时回退 `LIKE`
+（`memories.owner = :slug` / `notes.role_slug = :slug`）。
+
+> **索引边界（owner 2026-10-23）**：只有通过 `anvil memory append` / `anvil note write`
+> 写入的内容会进入 FTS。直接编辑 `MEMORY.md` 仍会被 CIC 直接读取（不走检索），
+> 但直接编辑 `notes/` 不会自动重建索引；需要可检索的笔记请用 API/CLI 写入。
 
 ### 8.5 自动整理
 
@@ -865,7 +1029,24 @@ SELECT path, snippet(mem_fts, 2, '[', ']', '…', 32) AS s, bm25(mem_fts) AS sco
 
 整理由 Agent 自己在自己的上下文里做，它最清楚哪些内容是重复的。人只需要偶尔翻一眼 `agents/` 那个 Git 仓库的提交历史，看记忆的演化方向是否正常。
 
+> **实现口径（owner 2026-10-23）：换会话前的事件驱动整理**
+>
+> 周 reminder 不够频繁，上下文可能在一小时内就满。Anvil 在每次换会话前自动生成
+> 一份**任务知识快照**：
+>
+> - 触发：主动 CIC 轮换、硬阈值、API 上下文溢出、请求体超限、角色 `reset-context`；
+> - 内容：任务标题/状态、当前 workflow 最近 60 步的状态/摘要/反馈、最近 30 条
+>   评论/@提及（截断），总长上限约 12k 字符；
+> - 写入 `agents/<slug>/notes/knowledge/<task-id>/<时间>-<触发>.md`，同步写 FTS
+>   索引与 `session.context_digest` 审计；
+> - 纯 DB 时间线生成，不调用模型，不依赖旧对话；新会话 CIC 会注入最近一份快照。
+>
+> 这样“清理上下文”只丢掉图片/附件和原始对话，不丢掉判断依据。周 reminder 继续
+> 负责把散落 notes 合并进 `MEMORY.md`；快照是事件驱动的补充，不替代周整理。
+
 ---
+
+<a id="ch9"></a>
 
 ## 第九章 角色演化
 
@@ -922,9 +1103,13 @@ run-01H8 至 run-01HR 的日志中无这两个工具的调用记录。
 **这比任何自动回滚机制都可靠**，因为判断权在你手上，而判断"是否退化"这件事目前没有任何自动化方法能做得比人好。
 
 
-# 第十章 · HTTP API
+<a id="ch10"></a>
+
+## 第十章 HTTP API
 
 `http://127.0.0.1:7317`，仅监听回环地址，本地 token 轻校验（用于防止本机其他程序误调，不是账号体系）。FastAPI 自动生成 OpenAPI 规格，前端用 `openapi-typescript` 生成类型化客户端——这条一开始就配好，能省掉后续大量前后端对接摩擦。
+
+### 10.1 端点清单
 
 ```
 # 运行时
@@ -1061,9 +1246,11 @@ Agent 侧 CLI 调用的是同一套 API 的子集，附加 `X-Anvil-Session` 头
 
 ---
 
-# 第十一章 · Web 前端
+<a id="ch11"></a>
 
-## 11.1 视图清单
+## 第十一章 Web 前端
+
+### 11.1 视图清单
 
 **大厅（默认页）**。左栏角色卡片列：头像、名称、状态灯（运行中/空闲/已释放/异常）、当前任务、运行时标签、今日成本。中栏任务板看板，按状态分列，dnd-kit 拖拽改状态。右栏全局实时活动流。顶栏常驻「全场冻结」按钮与今日成本进度条。
 
@@ -1103,7 +1290,7 @@ Agent 侧 CLI 调用的是同一套 API 的子集，附加 `X-Anvil-Session` 头
 
 **审计与成本**。日志多维筛选与全文检索、成本按角色/日期/运行时分解图表、token 消耗趋势。
 
-## 11.2 实时事件消费
+### 11.2 实时事件消费
 
 ```typescript
 // hooks/useEventStream.ts
@@ -1128,7 +1315,7 @@ export function useEventStream() {
 
 活动流用追加而非失效重取——高频事件下重取会打满后端。其余低频事件走 TanStack Query 失效即可。
 
-## 11.3 启动体验
+### 11.3 启动体验
 
 `anvil.exe` 双击后：启动 Uvicorn、注册系统托盘、默认浏览器打开 `http://127.0.0.1:7317`。托盘常驻显示活跃角色数与今日成本，右键菜单含「打开界面」「全场冻结」「退出」。
 
@@ -1136,39 +1323,41 @@ export function useEventStream() {
 
 ---
 
-# 第十二章 · 实施路线
+<a id="ch12"></a>
+
+## 第十二章 实施路线
 
 工作量估算基于单人开发、每周 15–20 小时投入。
 
 **范围注记（owner 2026-09-16 拍板）**：首版 = M1 + M2 + M5（打包，Windows 分发）；**M3 工具治理移 v2**；M4 长程能力按设计建议视实际使用再定。Windows 为第一验收要素。
 
-## M1 · 骨架（2 周）
+### 12.1 M1 骨架（2 周）
 
 运行时自动发现与定义加载（先只支持你最常用的一个）、启动器与 Job Object、角色定义与私有工作区、共享仓库与 Git 操作、任务 CRUD 与手动指派、`anvil` CLI 的 `whoami` / `task show` / `task submit`、SSE 事件流、大厅与任务详情两个页面。
 
 **目标：端到端跑通一个手动指派的任务。** 这一步跑通，整个架构的可行性就验证了。
 
-## M2 · 协作与治理（3 周）
+### 12.2 M2 协作与治理（3 周）
 
 认领机制（`first_come`）、租约与心跳、配置快照、八态状态机、依赖解算、评审流程、分支隔离与 diff 越界校验、四层成本闸门、两级并发上限、全场冻结、审计日志、角色工坊页。
 
 **此时系统已实用。** 我建议在这里停下来用两三周，只用不开发，把实际遇到的问题记下来再决定 M3 做什么。这个暂停很重要——下面两个里程碑的优先级应该由你的真实使用体验决定，而不是由这份文档决定。
 
-## M3 · 工具治理（2 周）
+### 12.3 M3 工具治理（2 周）
 
 MCP 服务器登记与握商探测、skill 与 MCP 投影、工具白名单裁剪、token 估算与预算校验、条件加载与工具组合预设、勾选矩阵 UI、运行时能力三档门控。
 
 这一段的收益完全取决于你实际挂了多少工具。如果你只用两三个 MCP 服务器，直接沿用运行时的全局配置就够了，这一整段可以推迟。
 
-## M4 · 长程能力（2 周）
+### 12.4 M4 长程能力（2 周）
 
 三档重置、按需唤醒与空闲释放、reminders 调度器与 CLI、`MEMORY.md` 自整理引导模板、`shared/lessons.md` 与 FTS5 检索、升格评审流程、提案审批机制、角色主页与提案页。
 
-## M5 · 打磨（持续）
+### 12.5 M5 打磨（持续）
 
 更多运行时定义、角色模板库扩充、指标看板、目标拆解优化、性能调优、PyInstaller 打包与首启引导。
 
-## 推迟到 v2 的事项
+### 12.6 推迟到 v2 的事项
 
 向量检索（`sqlite-vec`）—— 触发条件是共享经验超 80 条且你能指出具体的检索不准实例。
 
@@ -1180,9 +1369,11 @@ WSL2 或容器强隔离 —— 触发条件是你需要让 Agent 跑不受信任
 
 ---
 
-# 第十三章 · 风险与我的判断
+<a id="ch13"></a>
 
-## 13.1 多 Agent 常常不如单 Agent
+## 第十三章 风险与判断
+
+### 13.1 多 Agent 常常不如单 Agent
 
 Cognition 有篇被广泛引用的文章论证过：并行子 Agent 因上下文割裂容易产出互相冲突的结果，合并成本可能超过收益。我认为这个批评是对的，但它针对的是"把一个任务切碎给多个无记忆 Agent 并行"。
 
@@ -1190,25 +1381,25 @@ Cognition 有篇被广泛引用的文章论证过：并行子 Agent 因上下文
 
 但仍然建议：**任务粒度宁大勿小**，一个角色能连续做完的不要拆；**全局并发初期设 2**，尝到好处再调高。
 
-## 13.2 没有实时沙箱，这是明确的架构取舍
+### 13.2 没有实时沙箱，这是明确的架构取舍
 
 因为放弃自实现工具循环、完全继承运行时能力，Anvil **无法在运行时内部拦截操作**。防线是三道：提示词告知、运行时配置约束、diff 越界校验。前两道可被突破，第三道保证不该改的文件不进主干。
 
 这对单人本地开发是合适的强度。但你应当清楚：Agent 在执行过程中读到了什么，Anvil 管不住。如果你的项目里有不能被模型看到的东西（真实生产密钥、他人隐私数据），把它们放到工作区之外，并依赖 `permissions.deny` 之外的手段——最可靠的是根本不放在这台机器上。
 
-## 13.3 成本会超出直觉
+### 13.3 成本会超出直觉
 
 多个长会话 Agent 并发跑商业 API，烧钱速度比单 Agent 快得多，而且是超线性的——因为返工、互相驳回、重复读同一份代码都在烧钱。Raft 与 Multica 都不管这件事（成本归你的订阅），所以你没有现成参照。
 
 四层预算闸门务必在 M2 就做。另外建议第一个月每天看一次成本分解页，你会发现钱主要花在哪些意想不到的地方。
 
-## 13.4 我改口的两处，值得你知道原因
+### 13.4 我改口的两处，值得你知道原因
 
 **知识库从四层结构改为文件优先。** 我最初设计了向量库 + 四层分类 + 置信度衰减 + 冲突消解 + 专职档案员角色。看到 Raft 的实际做法（就是普通 Markdown 文件，Agent 自己维护）之后，我认为我此前是在为一个还不存在的规模问题做设计。你的知识主体在角色自己家里、每次会话必读，绝大部分根本不需要检索。工程量差三十倍，功能差距在前几个月是零。
 
 **角色自迭代从自动改写改为自主编辑 + 人工审批。** 我最初设计了教练角色、结构化提案、灰度期、指标对比、自动回滚、负面样本库。Raft 的做法是一句话：Agent 可以编辑自己的描述，配一个每周 reminder。我现在认为后者对你更合适——让系统自动改自己的提示词，长期会缓慢漂移到你不认可的方向，而且**退化极难察觉，因为每次只差一点点**。手动审批既是安全阀，也是你摸清系统脾气的过程。
 
-## 13.5 范围控制
+### 13.5 范围控制
 
 这份文档的完整实现约 9 周密集投入。如果只想尽快用上，我的建议是：**M1 + M2 做扎实，然后停下来用一段时间。**
 
@@ -1216,7 +1407,11 @@ M3 的工具治理看你实际挂多少工具决定，M4 的长程能力看你�
 
 ---
 
-# 附录 · 相对前版的变更清单
+<a id="appendix"></a>
+
+## 附录 A 相对前版变更清单
+
+### A.1 v2.0 → v3.0
 
 | 项目 | v2.0 | v3.0 | 依据 |
 |---|---|---|---|
@@ -1240,3 +1435,57 @@ M3 的工具治理看你实际挂多少工具决定，M4 的长程能力看你�
 删除数据表：`knowledge`、`knowledge_vec`、`knowledge_conflicts`、演化灰度相关表。
 删除代码模块：`evolution/`、`runtimes/` 的事件映射与通用适配器兜底。
 新增代码模块：`agentcli/`、`reminders/`、`tools/`、`memory/`、`roles/home.py`、`sessions/reset.py`。
+
+### A.2 2026-10-23 增量 · 可靠性、请求体保护与知识延续
+
+这一版来自实际长跑事故（角色在单轮内连续 714 次 API 请求，上下文涨到
+975k 后触发 `prompt is too long`），把“上下文管理”从被动提示改为分层防御。
+
+| 主题 | 实现口径 |
+|---|---|
+| 上下文计量 | 只认 assistant 单次请求的 `input + cache_read + cache_creation`；`result.usage` 是会话累计消耗，只用于记账 |
+| 单轮硬保护 | 上下文达到 `min(策略窗口 × 0.9, 窗口 − 32k)` 时终止会话、写知识快照、CIC 新会话重投当前 run |
+| 主动轮换 | 主动水位轮换不计入失败预算；轮次结束 ≥ CIC 阈值或 payload 阈值时释放进程，下次唤醒新建会话 |
+| API 溢出自适应 | 按最后成功请求的 95% 收紧该角色的窗口（只调小不调大），再重试；超过单 run 预算交给步骤自动恢复 |
+| 请求体保护 | 累计图片/附件 base64 字符数；8MB 在唤醒提示里要求角色自律，24MB 主动换会话；识别 `request too large (max 32mb)` 并强制新会话（不 `--resume`） |
+| 角色自律 | 协议要求片段读取、路径引用、图片裁剪/压缩、不重复读图；先固化结论再 reset-context |
+| 技术性自愈 | 崩溃/超时/上下文溢出/停滞 → 步骤指数退避重排队（2min→30min，默认 10 次），重跑提示带失败原因；耗尽后只写非阻塞 comment，不 @human |
+| 等待不误伤 | 等 human、等忙碌的其它角色不自动重试；租约到期时活跃/挂起 run 先续租；死进程 60s 后转 suspended 并标记新 CIC |
+| 僵尸防护 | `_waiting_for_reply` 只看最后一次 @ 及之后回复；`process_exit` 遇到上下文溢出让路；`projecting` 卡住周期重投 |
+| @ 唤醒 | 范围 = task_assignees + 单负责人 + planner + workflow 步骤角色 + 被明确 @ 的现有角色；普通任务/子任务起普通 run，工作流任务起 reply run；评论里的 @ 不唤醒（CLI warning + UI 标黄） |
+| 回复 run | 允许按消息明确指示 claim/submit 另一个任务/子任务；当前任务仍禁止 |
+| 知识快照 | 换会话前写入 `notes/knowledge/<task-id>/<时间>-<触发>.md`（workflow 决策 + 最近结论），FTS 索引 + audit；CIC 注入 MEMORY 尾部、任务相关 FTS 命中、workflow 决策、最近快照、最近消息/动作 |
+| 角色隔离 | `MEMORY.md`/`notes/`/知识快照/FTS 查询按 role_slug 严格隔离；共享只走人工批准的 lessons |
+| 新增字段 | `runs.context_reset_count`、`workflow_steps.recovery_count`、`workflow_steps.next_retry_at` |
+| 新增配置 | `ANVIL_CONTEXT_HARD_RESET_RATIO`、`ANVIL_CONTEXT_OUTPUT_RESERVE`、`ANVIL_CONTEXT_RESET_MAX_RETRIES`、`ANVIL_PAYLOAD_HARD_RESET_CHARS`、`ANVIL_PAYLOAD_HINT_CHARS`、`ANVIL_RUN_DEAD_GRACE_SECONDS`、`ANVIL_RUN_PHASE_STALL_SECONDS`、`ANVIL_AUTO_RECOVER*` |
+
+> 设计立场不变：**Agent 是驾驶员**。Anvil 不替角色判断该不该读某张图，但会把预算、
+> 占用和后果明确告诉它；只有在角色判断失误时，才用硬阈值和知识快照兜底。
+
+### A.3 实现口径索引
+
+下表汇总散落在各章的 dated 实现口径，便于按日期/主题查找。冲突时以日期较新的注为准。
+
+| 日期 | 主题 | 位置 |
+|---|---|---|
+| 2026-09-16 | 运行时配置双路径（本地搜索 + 手工定制） | §2.6 |
+| 2026-10-17 | LangGraph 编排控制面、事件驱动、超时回收 | §6 章首 |
+| 2026-10-18 | 角色 system_prompt / 职责 / skill/MCP / 画像 | §3 章首 |
+| 2026-10-18 | 团队任务 `task_assignees` | §5.2 |
+| 2026-10-18 | 多轮挂起 / resume | §6 章首 |
+| 2026-10-19 | 常驻会话优先（取代 one-shot） | §1.2 |
+| 2026-10-19 | Workflow 模型（Task 是高层工作空间） | §5.2 |
+| 2026-10-19 | Onboarding 助理 Cindy | §5.2 / §6.1 |
+| 2026-10-21 | 画像生成改走 CLI 运行时 | §3 章首 |
+| 2026-10-22 | 上下文策略（已收敛到 §2.7/§6.3） | §1.2 |
+| 2026-10-22 | 角色 slug 约束 | §3.2 |
+| 2026-10-22 | 单负责人 / 团队 claim 路径 | §5.4 |
+| 2026-10-22 | 并发只统计活跃 run | §5.6 |
+| 2026-10-22 | Workflow 运行期切片 | §6.1 |
+| 2026-10-23 | 上下文/请求体三层保护 | §2.7 |
+| 2026-10-23 | 租约续租优先于回收 | §5.5 |
+| 2026-10-23 | 5 秒 tick 健康巡检、自动恢复、@ 唤醒 | §6.1 |
+| 2026-10-23 | 不允许“永久 running” | §6.2 |
+| 2026-10-23 | 自动换会话与 CIC 内容 | §6.3 |
+| 2026-10-23 | CIC 检索、角色隔离、索引边界、事件驱动整理 | §8 |
+| 2026-10-23 | 可靠性/请求体/知识延续增量 | 附录 A.2 |
