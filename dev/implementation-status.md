@@ -42,9 +42,9 @@
 ### 任务与治理
 - submit 时用真实 git 信息计算改动：worktree `git status -uall` + `base...agent/<slug>/<task>` diff；
   支持 `.anvilignore`（仓库根 / 数据目录）与 Anvil 投影产物豁免。
-- 四层闸门口径：角色级（已有）、运行时级、系统级、日成本；`GET/PUT /budget`。
+- 四层闸门口径：角色级（已有）、运行时级、系统级、每日 Token 预算；`GET/PUT /budget`。
 - `POST /tasks/{id}/cancel|reopen`，`GET /tasks/{id}/diff|config-snapshot|bids|activities`。
-- 任务列表按 type/tag 过滤；审计按 role/action/时间过滤；成本聚合 `GET /costs`。
+- 任务列表按 type/tag 过滤；审计按 role/action/时间过滤；Token 聚合 `GET /tokens`。
 
 ### 记忆、知识与演化
 - `memory_fts` 真正参与检索（不可用时回退 LIKE）；MEMORY.md + FTS 笔记 + 命中标签的共享经验注入 `CLAUDE.md`。
