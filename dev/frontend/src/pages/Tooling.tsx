@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type McpServer, type Skill } from "../api/client";
+import { PageHeader } from "../components/ui";
 
 export function Tooling() {
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -87,7 +88,7 @@ export function Tooling() {
 
   return (
     <div>
-      <h1>工具治理</h1>
+      <PageHeader kicker="TOOLING" title="工具治理" />
       {error && <p className="error">{error}</p>}
 
       <section>

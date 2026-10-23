@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { formatDateTime } from "../time";
+import { PageHeader } from "../components/ui";
 
 interface AuditRow {
   created_at: string;
@@ -95,7 +96,7 @@ export function Governance() {
 
   return (
     <div>
-      <h1>治理</h1>
+      <PageHeader kicker="GOVERNANCE" title="治理" />
       {error && <p className="error">{error}</p>}
       <div className="toolbar">
         <button onClick={toggle} className={frozen ? "danger" : ""}>

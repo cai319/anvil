@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type Runtime } from "../api/client";
+import { PageHeader } from "../components/ui";
 
 const STATUS_LABEL: Record<string, string> = {
   ready: "就绪",
@@ -167,11 +168,16 @@ export function Runtimes() {
 
   return (
     <div>
-      <h1>运行时</h1>
-      <p className="muted">
-        AI 生成画像/角色会复用默认运行时的登录态，无需单独配置 API Key。当前默认：
-        <strong>{defaultRuntime?.display_name ?? defaultId ?? "未设置"}</strong>
-      </p>
+      <PageHeader
+        kicker="RUNTIMES"
+        title="运行时"
+        subtitle={
+          <>
+            AI 生成画像/角色会复用默认运行时的登录态，无需单独配置 API Key。当前默认：
+            <strong>{defaultRuntime?.display_name ?? defaultId ?? "未设置"}</strong>
+          </>
+        }
+      />
       <div className="toolbar">
         <label className="field" style={{ marginBottom: 0, minWidth: 320 }}>
           <span>默认运行时（无角色参与的 AI 调用使用）</span>

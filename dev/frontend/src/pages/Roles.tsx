@@ -3,6 +3,7 @@ import { api, isOnboardingRole, type Role, type Runtime } from "../api/client";
 import { AvatarPicker } from "../components/AvatarPicker";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { formatDateTime } from "../time";
+import { PageHeader } from "../components/ui";
 
 type Tab = "basic" | "instruction" | "tools" | "catalog" | "home" | "permissions" | "runtime";
 
@@ -287,7 +288,11 @@ export function Roles() {
 
   return (
     <div className="roles">
-      <h1>角色工坊</h1>
+      <PageHeader
+        kicker="CREW WORKSHOP"
+        title="角色工坊"
+        subtitle={`${roles.length} 个角色`}
+      />
       {error && <p className="error">{error}</p>}
 
       <section className="create-role-panel">

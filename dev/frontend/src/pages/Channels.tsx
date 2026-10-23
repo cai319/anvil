@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type Channel, type Member } from "../api/client";
+import { PageHeader } from "../components/ui";
 
 export function Channels() {
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -65,7 +66,7 @@ export function Channels() {
 
   return (
     <div className="roles">
-      <h1>频道</h1>
+      <PageHeader kicker="CHANNELS" title="频道" />
       {error && <p className="error">{error}</p>}
 
       <div className="toolbar">

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type Lesson, type Proposal } from "../api/client";
+import { PageHeader } from "../components/ui";
 
 export function Knowledge() {
   const [pending, setPending] = useState<Lesson[]>([]);
@@ -54,7 +55,7 @@ export function Knowledge() {
 
   return (
     <div>
-      <h1>知识库与提案</h1>
+      <PageHeader kicker="KNOWLEDGE" title="知识库与提案" />
       {error && <p className="error">{error}</p>}
 
       <section>

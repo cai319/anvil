@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { formatDateTime } from "../time";
+import { PageHeader } from "../components/ui";
 
 /** 活动历史：完整审计记录（实时看板只显示最近 30 分钟，历史集中在这里）。 */
 
@@ -48,8 +49,8 @@ export function ActivityHistory() {
 
   return (
     <div className="session">
+      <PageHeader kicker="ACTIVITY" title="活动历史" />
       <div className="toolbar" style={{ flexWrap: "wrap", gap: 8 }}>
-        <h1 style={{ margin: 0 }}>活动历史</h1>
         <input placeholder="角色 slug（可选）" value={role} onChange={(e) => setRole(e.target.value)}
           style={{ width: 160 }} />
         <select value={action} onChange={(e) => setAction(e.target.value)}>

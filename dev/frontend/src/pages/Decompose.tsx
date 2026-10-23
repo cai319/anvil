@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
+import { PageHeader } from "../components/ui";
 
 interface Draft {
   id: string;
@@ -60,7 +61,7 @@ export function Decompose() {
 
   return (
     <div>
-      <h1>目标拆解</h1>
+      <PageHeader kicker="DECOMPOSE" title="目标拆解" />
       {error && <p className="error">{error}</p>}
 
       <div className="toolbar">

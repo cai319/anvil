@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type Reminder, type Role } from "../api/client";
 import { formatDateTime } from "../time";
+import { PageHeader } from "../components/ui";
 
 const KIND_LABEL: Record<string, string> = { cron: "定时", at: "延时", when: "条件" };
 const STATUS_LABEL: Record<string, string> = {
@@ -69,7 +70,7 @@ export function Reminders() {
 
   return (
     <div>
-      <h1>提醒（Reminders）</h1>
+      <PageHeader kicker="REMINDERS" title="提醒" />
       {error && <p className="error">{error}</p>}
 
       <div className="toolbar">
