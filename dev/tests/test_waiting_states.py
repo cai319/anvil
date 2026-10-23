@@ -143,18 +143,19 @@ def _seed_busy_role(env, task_id="T-MODEL", busy_old=False, timeout=3600):
 class _Mgr:
     enabled = True
 
-    def __init__(self, busy_since):
+    def __init__(self, busy_since, task_id=None):
         self.busy_since = busy_since
+        self.task_id = task_id
         self.reset_calls = []
 
     def status(self, role):
         return {"alive": True, "status": "busy", "busy_since": self.busy_since,
-                "current_run_id": "R-M", "queue_len": 0}
+                "current_run_id": "R-M", "current_task_id": self.task_id, "queue_len": 0}
 
-    def reset_session(self, role, cic=False):
+    def reset_session(self, role, cic=False, task_id=None):
         self.reset_calls.append((role, cic))
 
-    def mark_needs_fresh_context(self, role, note=""):
+    def mark_needs_fresh_context(self, role, note="", task_id=None):
         raise AssertionError("活跃进程不应被标记为 fresh context")
 
 
@@ -162,7 +163,7 @@ def test_tick_leaves_busy_model_call_alone_and_renews_lease(tmp_path, monkeypatc
     env = make_env(tmp_path, monkeypatch)
     _no_reminders(monkeypatch)
     busy_since = _seed_busy_role(env, "T-MODEL-BUSY")
-    mgr = _Mgr(busy_since)
+    mgr = _Mgr(busy_since, task_id="T-MODEL-BUSY")
     monkeypatch.setattr(daemon_service, "get_manager", lambda: mgr)
 
     orch = _Orch()
@@ -184,7 +185,7 @@ def test_tick_resets_hung_model_call_after_timeout(tmp_path, monkeypatch):
     env = make_env(tmp_path, monkeypatch)
     _no_reminders(monkeypatch)
     busy_since = _seed_busy_role(env, "T-MODEL-HUNG", busy_old=True, timeout=60)
-    mgr = _Mgr(busy_since)
+    mgr = _Mgr(busy_since, task_id="T-MODEL-HUNG")
     monkeypatch.setattr(daemon_service, "get_manager", lambda: mgr)
 
     orch = _Orch()

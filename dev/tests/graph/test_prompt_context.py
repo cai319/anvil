@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import pytest
 
+from anvil import config
 from anvil.db import connect
+from anvil.services import memory
 from anvil.util import now_iso
 
 pytest.importorskip("anvil.graph")
@@ -79,6 +81,63 @@ def test_projected_protocol_matches_run_kind(conn):
 
     normal = runs_service.create_run(conn, "developer", "T1", prompt="普通任务")
     assert nodes._protocol_for_run(conn, normal) == render.PROTOCOL
+
+
+def test_step_prompt_includes_knowledge_hint(conn, tmp_path, monkeypatch):
+    """warm session 的步骤 prompt 也要有知识库入口与相关标题。"""
+    monkeypatch.setattr(config, "AGENTS_DIR", tmp_path / "agents")
+    conn.execute("UPDATE tasks SET tags_json='[\"jwt\"]' WHERE id='T1'")
+    conn.commit()
+    memory.write_note(
+        conn, "developer", "vulns/jwt.md",
+        "JWT algorithm confusion pattern", kind="vulnerability_pattern",
+        scope="role", tags=["jwt"], repo="openssl")
+
+    run = runs_service.create_run(conn, "developer", "T1",
+                                  prompt="## 工作流步骤 S3：实现 JWT 校验",
+                                  step_id="S3", workflow_id="wf-1")
+    prompt = nodes._prompt_for_run(conn, run, {"title": "跳棋", "description": "实现跳棋"})
+    assert "## 可用知识（按需检索）" in prompt
+    assert "漏洞模式 1" in prompt
+    assert "JWT algorithm confusion" in prompt
+    assert "anvil knowledge search" in prompt
+    assert len(prompt) < 8000
+
+
+def test_non_step_prompt_uses_compact_knowledge_hint(conn, tmp_path, monkeypatch):
+    """普通/回复/规划 run 只给一行知识入口，避免与 CIC 的完整检索块重复。"""
+    monkeypatch.setattr(config, "AGENTS_DIR", tmp_path / "agents")
+    memory.write_note(
+        conn, "developer", "vulns/jwt.md", "JWT compact hint pattern",
+        kind="vulnerability_pattern", scope="role", tags=["jwt"])
+
+    run = runs_service.create_run(conn, "developer", "T1", prompt="普通任务")
+    prompt = nodes._prompt_for_run(conn, run, {"title": "跳棋", "description": "实现跳棋"})
+    assert "知识库：" in prompt
+    assert "## 可用知识" not in prompt
+    hint_line = next(line for line in prompt.splitlines() if line.startswith("知识库："))
+    assert len(hint_line) <= 320
+    assert "anvil knowledge search" in hint_line
+
+
+def test_context_for_task_excludes_snapshot_and_other_tasks(conn, tmp_path, monkeypatch):
+    """投影只带可复用知识：任务快照/其它任务内容不进入 CLAUDE.md。"""
+    monkeypatch.setattr(config, "AGENTS_DIR", tmp_path / "agents")
+    memory.write_note(
+        conn, "developer", "knowledge/T1/snap.md", "SNAPSHOTONLYUNIQUE jwt",
+        kind="task_snapshot", scope="task", task_id="T1")
+    memory.write_note(
+        conn, "developer", "vulns/jwt.md", "ROLEONLYUNIQUE jwt pattern",
+        kind="vulnerability_pattern", scope="role", tags=["jwt"])
+
+    ctx = memory.context_for_task(
+        conn, "developer", {"id": "T1", "title": "跳棋", "tags": ["jwt"], "repo": None})
+    assert ctx["snapshot"] == ""
+    assert ctx["notes"]
+    joined = "\n".join(ctx["notes"])
+    assert "ROLEONLYUNIQUE" in joined
+    assert "SNAPSHOTONLYUNIQUE" not in joined
+    assert len(joined) <= 4000
 
 
 def test_project_instruction_uses_given_protocol(tmp_path):

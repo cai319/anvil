@@ -27,6 +27,7 @@ PROTOCOL = (
     "在当前工作目录（cwd）中完成你的产出（写代码/文档/测试）。\n"
     "开始工作后、完成关键阶段后，执行 `anvil task comment $ANVIL_TASK_ID \"进展说明\"` 在任务会话里同步你的思考与进展。\n"
     "需要与其它角色协作或澄清时，执行 `anvil task mention $ANVIL_TASK_ID --to <角色slug> \"消息\"` @提及对方（角色间直接交互，不经过人类）。\n"
+    "遇到漏洞模式、故障场景、模块知识不确定时，先用 `anvil knowledge search \"<关键词>\" --task $ANVIL_TASK_ID` 检索自己的知识库；检索结果需用代码/测试验证，不盲信。\n"
     "如果你 @提及了其它角色等待响应，就**不要 submit**，直接结束进程挂起等待；系统会在对方 @你之后再次唤醒你，你带着最新会话内容继续；只有任务真正完成时才执行 submit。\n"
     "完成后必须执行 `anvil task submit $ANVIL_TASK_ID \"完成摘要\"` 声明完成，仅仅退出进程不算完成。\n"
     "长任务中每隔若干分钟执行 `anvil task heartbeat` 续租，否则任务会被回收。\n"
@@ -50,6 +51,8 @@ REPLY_PROTOCOL = (
     "若已 claim 但要让别人执行，先 `anvil task unclaim <id>` 再 @对方认领。\n"
     "但若人类明确要求你执行操作（如启动程序、运行验证命令、准备演示环境），可以在当前工作目录"
     "执行并把结果回复给人类。\n"
+    "需要漏洞模式、故障场景或模块知识时，用 `anvil knowledge search \"<关键词>\" "
+    "--task $ANVIL_TASK_ID` 检索自己的知识库；结论需结合代码/测试验证。\n"
     "如果对方需要根据你的结论继续工作，**必须**用 "
     "`anvil task mention $ANVIL_TASK_ID --to <对方角色slug> \"结论\"` 回复（这会自动唤醒对方）；"
     "只有在纯旁注、不需要对方行动时才用 `anvil task comment`。\n"
@@ -77,7 +80,12 @@ STEP_PROTOCOL = (
     "不要默认接受：直接 @ 相关角色指出具体问题、依据与建议；必要时 @human 升级。\n"
     "· 收到别人 @ 你的消息时，把反馈当作当前步骤的输入：评估、采纳或给出反驳理由，"
     "并在 step submit 的摘要或 decision 的 feedback 里说明你如何处理了这些反馈。\n"
-    "· 需要人类决策时 @human，然后结束进程挂起等待。\n"
+    "· 遇到漏洞模式、故障场景、模块知识不确定时，先用 "
+    "`anvil knowledge search \"<关键词>\" --task $ANVIL_TASK_ID --limit 5` 检索自己的"
+    "知识库；检索结果要结合代码/测试验证，不盲信过期笔记。\n"
+    "· 需要人类决策时先做路由：若问题属于某个现有角色的职责/能力范围，@该角色处理；"
+    "只有新建角色、workflow 审批、gate、最终评审、取消/删除等不可逆事项才 @human。"
+    "升级给人类后结束进程挂起等待。\n"
     "· 拆分临时工作：`anvil task create --title \"<标题>\" --description \"<说明>\" "
     "--parent $ANVIL_TASK_ID --assignee <执行角色>`（团队用 `--assignees a,b`）创建子任务，"
     "然后 @ 目标角色认领。**不要 claim 你拆给别人的子任务**——单负责人任务一旦被 claim 就是排他的；"
@@ -193,17 +201,29 @@ PLANNING_PROTOCOL = (
     "contract（实现类步骤必须写不变量/接口承诺/失败模式）。\n"
     "  · 服务端会拒绝「≥6 步、≥2 角色、既没有 decision 步骤也没有 plan_slices 步骤」的串行工作流。"
     "如果 `anvil board draft` 返回校验错误，按错误信息修正 JSON 后重试，不要绕过校验。\n"
-    "  B. 角色不足或当前没有绑定角色：**不要生成 workflow 步骤**。把评估写入 JSON 文件并执行 "
+    "  B. 角色评估（区分重大/非重大决策）：\n"
+    "    - **当前未绑定角色，但角色库中已有合适角色**（如 pm/designer/developer/tester）："
+    "直接执行 `anvil task assign $ANVIL_TASK_ID --assignees pm,designer,developer,tester` "
+    "绑定现有角色，**不需要 human 审批**，然后按 A 提交 workflow 草案。"
+    "这属于非重大编排决策，由你自行判断；只能绑定已存在且启用的角色，不能创建角色。\n"
+    "    - **确实需要新建角色**（现有角色库无法满足能力）：不要生成 workflow 步骤，"
+    "提交 role_suggestion 等待 human 审批。把评估写入 JSON 文件并执行 "
     "`anvil board draft --task $ANVIL_TASK_ID --goal \"<角色建议一句话>\" --kind role_suggestion --tree-file <roles.json>`。\n"
-    "  JSON 格式：{\"assessment\":\"为什么现有角色不够\",\"missing_capabilities\":[\"...\"],"
+    "      JSON 格式：{\"assessment\":\"为什么现有角色不够\",\"missing_capabilities\":[\"...\"],"
     "\"suggested_roles\":[{\"slug\":\"...\",\"display_name\":\"...\",\"description\":\"...\","
     "\"runtime\":{\"id\":\"claude-code\"},\"capabilities\":{},\"responsibilities\":[...],"
     "\"system_prompt\":\"...\"}]}。角色建议要克制：只补真正缺失的能力。\n"
+    "    - **已有绑定角色但你认为不足**：不要自行改绑 human 已定的 Roster；按现有角色规划并标注风险，"
+    "或提交 role_suggestion 说明缺失能力，等待 human 决定。\n"
     "第三步：执行 `anvil task mention $ANVIL_TASK_ID --to human \"...\"` 说明是工作流草案还是角色建议，"
     "然后直接结束进程挂起等待。\n"
+    "  · **升级路由**：问题如果落在某个现有角色的职责/能力范围内，直接 "
+    "`anvil task mention $ANVIL_TASK_ID --to <角色> \"...\"` 让对方处理，不要 @human。"
+    "只有需要自然人裁定的事项（新建角色、workflow 草案审批、gate、最终评审、"
+    "取消/删除/不可逆操作、角色演化/预算）才 @human。\n"
     "第四步：若规划约束说明 human 拒绝了新增角色：只能用现有 Roster 规划；如果没有任何可用角色，"
     "停止并在消息中说明需要 human 先创建/绑定至少一个角色，不得虚构角色或步骤。\n"
-    "禁止：不要实现具体步骤；不要 submit 主任务；草案被驳回时按人工意见修订后重新提交。"
+    "禁止：不要实现具体步骤；不要 submit 主任务；不要自行创建角色；草案被驳回时按人工意见修订后重新提交。"
 )
 
 _BEGIN = "<!-- ANVIL:BEGIN -->"
@@ -237,7 +257,8 @@ def render_template(template: str, ctx: dict[str, str]) -> str:
 def project_instruction(target: Path, instruction_md: str, task: dict,
                         system_prompt: str = "", responsibilities: list[str] | None = None,
                         workflow: str = "direct_execute", memory: str = "",
-                        notes: list[str] | None = None, lessons: list[str] | None = None,
+                        snapshot: str = "", notes: list[str] | None = None,
+                        lessons: list[str] | None = None,
                         prompt: str = "", protocol: str | None = None) -> None:
     """把 system prompt + 职责 + 工作流指令 + instruction + 记忆 + 任务 + 协议写入 target。
 
@@ -264,6 +285,7 @@ def project_instruction(target: Path, instruction_md: str, task: dict,
             "## 共享经验\n" + "\n".join(f"- {l.strip()}" for l in lessons) if lessons else "",
             f"## 任务：{task_title}",
             task_body or "",
+            f"## 当前任务知识快照\n{snapshot.strip()}" if snapshot.strip() else "",
             "## 协议",
             protocol_text,
         ) if p

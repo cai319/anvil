@@ -369,6 +369,82 @@ def role_metrics(slug: str, conn=Depends(get_db)):
     }
 
 
+@router.get("/roles/{slug}/runtime")
+def role_runtime(slug: str, conn=Depends(get_db)):
+    """角色当前运行时：进程忙闲、正在处理的任务、队列、所有任务上下文槽。
+
+    任务详情用它回答「这个角色现在是不是在忙别的任务、本任务排了几条」。
+    """
+    if services.roles.get(conn, slug) is None and slug != services.roles.ONBOARDING_SLUG:
+        raise HTTPException(status_code=404, detail="role not found")
+    from ..services import daemon as daemon_service
+
+    mgr = daemon_service.get_manager()
+    if mgr is not None and getattr(mgr, "enabled", False):
+        st = mgr.status(slug)
+    else:
+        row = conn.execute(
+            "SELECT * FROM role_sessions WHERE role_slug=?", (slug,)
+        ).fetchone()
+        st = {
+            "alive": False, "status": "dead", "pid": None,
+            "current_task_id": row["current_task_id"] if row else None,
+            "current_run_id": row["current_run_id"] if row else None,
+            "current_step_id": row["current_step_id"] if row else None,
+            "context_task_id": None, "queue_len": 0, "queue": [], "queue_tasks": [],
+            "context_tokens": int(row["last_context_tokens"] or 0) if row else 0,
+            "session_id": (row["session_id"] or "") if row else "",
+            "model_id": row["model_id"] if row else None,
+            "busy_since": row["busy_since"] if row else None,
+        }
+
+    def task_info(task_id):
+        if not task_id:
+            return None
+        row = conn.execute(
+            "SELECT id, title, status FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        return dict(row) if row else {"id": task_id, "title": task_id, "status": None}
+
+    queue = st.get("queue") or []
+    counts: dict[str, int] = {}
+    for item in queue:
+        tid = item.get("task_id")
+        if tid:
+            counts[tid] = counts.get(tid, 0) + 1
+    queue_tasks = []
+    for tid, n in counts.items():
+        info = task_info(tid) or {"id": tid, "title": tid, "status": None}
+        queue_tasks.append({**info, "count": n})
+
+    contexts = []
+    for row in conn.execute(
+        "SELECT * FROM role_task_sessions WHERE role_slug=? "
+        "ORDER BY COALESCE(last_active_at, updated_at) DESC", (slug,)
+    ).fetchall():
+        key = row["task_key"]
+        info = None if key == daemon_service.GLOBAL_TASK_KEY else task_info(key)
+        contexts.append({
+            "task_id": None if key == daemon_service.GLOBAL_TASK_KEY else key,
+            "task_title": (info or {}).get("title", key),
+            "task_status": (info or {}).get("status"),
+            "has_session": bool(row["session_id"]),
+            "session_id": row["session_id"],
+            "context_tokens": int(row["context_tokens"] or 0),
+            "last_active_at": row["last_active_at"],
+            "status": row["status"],
+            "cwd": row["cwd"],
+            "workspace_path": row["workspace_path"],
+        })
+    return {
+        "role_slug": slug,
+        "current_task": task_info(st.get("current_task_id")),
+        "queue_tasks": queue_tasks,
+        "contexts": contexts,
+        **{k: v for k, v in st.items() if k != "queue"},
+    }
+
+
 @router.get("/roles/{slug}/tools")
 def role_tools(slug: str, conn=Depends(get_db)):
     if services.roles.get(conn, slug) is None:

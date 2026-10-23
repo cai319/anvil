@@ -24,6 +24,7 @@ from .. import config
 from ..db import open_conn
 from ..platform import factory
 from ..services import (
+    knowledge as knowledge_service,
     memory as memory_service,
     roles as roles_service,
     runs as runs_service,
@@ -125,6 +126,7 @@ def _render_persistent(conn: sqlite3.Connection, run: dict, task: dict | None,
         list(sess.get("args_new") or []),
         list(sess.get("args_resume") or []),
         cwd, env, timeout, ctx, model_pool, context_window_floor,
+        runtime_id, workspace_path,
     )
 
 
@@ -133,6 +135,28 @@ def _workspace_path(run: dict, role: dict) -> str:
     if wt and Path(wt).exists():
         return wt
     return role.get("home_path") or str(config.AGENTS_DIR / run["role_slug"])
+
+
+def _run_workspace_path(conn: sqlite3.Connection, run: dict, role: dict,
+                        effective: dict) -> str:
+    """常驻运行：同一 (role, task) 复用第一次确定的 workspace/cwd。
+
+    Claude Code 的会话按 cwd 分目录；如果每个 run 都建新 worktree，--resume 会
+    找不到旧会话。这里优先读取任务上下文槽里记录的 workspace_path。
+    """
+    if _persistent_session(conn, effective) and run.get("task_id"):
+        row = conn.execute(
+            "SELECT workspace_path FROM role_task_sessions "
+            "WHERE role_slug=? AND task_key=?",
+            (run["role_slug"], run["task_id"]),
+        ).fetchone()
+        # sqlite3.Row 没有 .get()；缺失列/值为 NULL 时按无槽处理。
+        slot_ws = row["workspace_path"] if row is not None else None
+        if slot_ws:
+            p = Path(slot_ws)
+            if p.exists():
+                return str(p)
+    return _workspace_path(run, role)
 
 
 def _instruction_md(role: dict) -> str:
@@ -210,6 +234,20 @@ def _recent_transcript(conn: sqlite3.Connection, task_id: str | None, limit: int
     return _clip_text("\n".join(lines), max_chars)
 
 
+def _knowledge_hint(conn: sqlite3.Connection, run: dict,
+                    task: dict | None) -> str:
+    """紧凑知识提示：warm session 不走 CIC，也能看到知识库入口。"""
+    try:
+        task_id = run.get("task_id") or (task or {}).get("id")
+        is_step = bool(run.get("step_id"))
+        return knowledge_service.step_knowledge_hint(
+            conn, run["role_slug"], task_id, task,
+            max_chars=1200 if is_step else 320,
+            compact=not is_step)
+    except Exception:  # noqa: BLE001 —— 知识提示失败不阻断唤醒
+        return ""
+
+
 def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> str:
     """按 run 类型选择协议：
     - 工作流步骤：步骤说明 + 最近会话（含 @ 反馈）+ STEP_PROTOCOL
@@ -230,14 +268,19 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
                     f"## 未读会话（{unread} 条，最近 3 条）\n{lines}\n\n"
                     f"处理完反馈后执行 `anvil inbox commit {task_id} --up-to <最大消息 id>`；"
                     f"完整未读用 `anvil inbox check {task_id}` 按需拉取（拉模式）。")
+        hint = _knowledge_hint(conn, run, task)
+        if hint:
+            parts.append(hint)
         parts.append(render.STEP_PROTOCOL)
         return "\n\n".join(p for p in parts if p)
     # 规划 run（Cindy / planner）：不能因为任务已有 workflow 就被误判为回复。
     from ..services import planning as planning_service
     if prompt.startswith(planning_service.PLAN_MARKER):
         body = prompt[len(planning_service.PLAN_MARKER):].strip()
-        return _prompt(task, _conversation_transcript(conn, run.get("task_id")), body,
+        base = _prompt(task, _conversation_transcript(conn, run.get("task_id")), body,
                        protocol=None)
+        hint = _knowledge_hint(conn, run, task)
+        return "\n\n".join(p for p in (base, hint) if p)
     # 工作流任务上的非步骤 run = 被 @ 的会话回复（包括历史遗留无标记的 run），
     # 一律用 REPLY_PROTOCOL，避免误 claim/submit 任务。
     is_reply = prompt.startswith("[anvil:reply]")
@@ -252,9 +295,12 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
         recent = _recent_transcript(conn, run.get("task_id"))
         head = "\n".join(p for p in ((task or {}).get("title"), (task or {}).get("description")) if p)
         parts = [head, body or "你在任务会话中被 @，请阅读最近会话并回复。",
-                 ("## 最近会话\n" + recent) if recent else "", render.REPLY_PROTOCOL]
+                 ("## 最近会话\n" + recent) if recent else "",
+                 _knowledge_hint(conn, run, task), render.REPLY_PROTOCOL]
         return "\n\n".join(p for p in parts if p)
-    return _prompt(task, _conversation_transcript(conn, run.get("task_id")), prompt)
+    hint = _knowledge_hint(conn, run, task)
+    body = prompt + ("\n\n" + hint if hint else "")
+    return _prompt(task, _conversation_transcript(conn, run.get("task_id")), body)
 
 
 def _protocol_for_run(conn: sqlite3.Connection, run: dict) -> str:
@@ -427,7 +473,7 @@ def project_node(state: dict, config) -> dict:
         role = roles_service.get(conn, run["role_slug"]) or {}
         task = _task(conn, run.get("task_id"))
         effective = _effective(conn, run)
-        workspace_path = _workspace_path(run, role)
+        workspace_path = _run_workspace_path(conn, run, role, effective)
         proj = effective.get("projection") or {}
         ctx = memory_service.context_for_task(conn, run["role_slug"], task)
         # projection.instruction.target 由运行时 YAML 决定（Claude→CLAUDE.md，Codex→AGENTS.md…）
@@ -438,7 +484,8 @@ def project_node(state: dict, config) -> dict:
             target, _instruction_md(role), task or {},
             system_prompt=proj.get("system_prompt") or "",
             responsibilities=proj.get("responsibilities") or [],
-            memory=ctx["memory"], notes=ctx["notes"], lessons=ctx["lessons"],
+            memory=ctx["memory"], snapshot=ctx.get("snapshot", ""),
+            notes=ctx["notes"], lessons=ctx["lessons"],
             prompt=run.get("prompt") or "",
             protocol=_protocol_for_run(conn, run),
         )
@@ -458,20 +505,22 @@ def spawn_node(state: dict, config) -> dict:
         role = roles_service.get(conn, run["role_slug"]) or {}
         task = _task(conn, run.get("task_id"))
         effective = _effective(conn, run)
-        workspace_path = _workspace_path(run, role)
+        workspace_path = _run_workspace_path(conn, run, role, effective)
         # 常驻会话模式：唤醒 = 向角色进程 stdin 投递消息（进程存活则复用，不新建）
         persistent = _persistent_session(conn, effective)
         if persistent:
             from ..services import daemon as daemon_service
             try:
-                exe, args_new, args_resume, cwd, env, timeout, pctx, model_pool, window_floor = \
-                    _render_persistent(conn, run, task, effective, role, workspace_path)
+                (exe, args_new, args_resume, cwd, env, timeout, pctx, model_pool,
+                 window_floor, runtime_id, ws_path) = _render_persistent(
+                    conn, run, task, effective, role, workspace_path)
                 prompt = _prompt_for_run(conn, run, task)
                 daemon_service.get_manager().ensure_and_deliver(
                     conn, run["role_slug"], executable=exe, args_new=args_new,
                     args_resume=args_resume, ctx=pctx, cwd=cwd, env=env, prompt=prompt,
                     run_id=run_id, task_id=run.get("task_id"),
-                    model_pool=model_pool, context_window_floor=window_floor)
+                    model_pool=model_pool, context_window_floor=window_floor,
+                    runtime_id=runtime_id, workspace_path=ws_path)
             except Exception:  # noqa: BLE001 —— 无法拉起/投递即失败
                 runs_service.set_status(conn, run_id, "failed", ended_at=now_iso(),
                                         failure_class="spawn_error")

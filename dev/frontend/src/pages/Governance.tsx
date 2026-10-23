@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
+import { formatDateTime } from "../time";
 
 interface AuditRow {
   created_at: string;
@@ -138,7 +139,7 @@ export function Governance() {
           )}
           {audit.map((a, i) => (
             <tr key={i}>
-              <td className="mono">{a.created_at}</td>
+              <td className="mono">{formatDateTime(a.created_at)}</td>
               <td>{a.role_slug ?? "—"}</td>
               <td>{a.task_id ?? "—"}</td>
               <td>{a.action}</td>

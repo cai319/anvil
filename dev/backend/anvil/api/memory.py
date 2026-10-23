@@ -1,7 +1,7 @@
 """Agent self-service endpoints: memory / notes / proposals / lessons (§3.2/§3.4)."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
@@ -100,7 +100,13 @@ def reset_my_session(body: dict, request: Request, conn=Depends(get_db),
 
     tokens = st.get("context_tokens")
     reason = str(body.get("reason") or "")[:500]
-    mgr.reset_session(role, cic=True)
+    # 主动换会话前也固化任务知识，避免只有 daemon 触发的轮换才有快照。
+    try:
+        services.memory.consolidate_context(
+            conn, role, task_id, "self-reset", run["id"])
+    except Exception:  # noqa: BLE001 —— 快照失败不阻断 reset
+        pass
+    mgr.reset_session(role, cic=True, task_id=task_id)
     services.runs.set_native_session(conn, run["id"], None)
     services.runs.set_status(conn, run["id"], "created")
     conn.execute(
@@ -138,7 +144,145 @@ def search_memory(q: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
 
 @router.post("/me/notes")
 def write_note(body: NoteWriteIn, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
-    return services.memory.write_note(conn, auth.role or "qa-role", body.path, body.content)
+    role = auth.role
+    if not role or role == "human":
+        raise HTTPException(status_code=422, detail="agent session required")
+    task_id = body.task_id or auth.task_id
+    if auth.task_id and body.task_id and auth.task_id != body.task_id:
+        raise HTTPException(status_code=403, detail="session is bound to another task")
+    scope = body.scope or ("task" if task_id else "role")
+    if scope == "task" and not task_id:
+        raise HTTPException(status_code=422, detail="scope=task requires task_id")
+    if body.kind and body.kind not in services.knowledge.NOTE_KINDS:
+        raise HTTPException(status_code=422, detail=f"invalid note kind: {body.kind}")
+    if scope not in services.knowledge.NOTE_SCOPES:
+        raise HTTPException(status_code=422, detail=f"invalid note scope: {scope}")
+    try:
+        return services.memory.write_note(
+            conn, role, body.path, body.content,
+            kind=body.kind, scope=scope, task_id=task_id,
+            source_task=body.source_task, tags=body.tags, repo=body.repo,
+            module=body.module, confidence=body.confidence, mode=body.mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+def _knowledge_role(conn, auth: Auth, requested: str | None) -> str:
+    role = auth.role
+    if role == "human":
+        if not requested:
+            raise HTTPException(
+                status_code=422, detail="human browsing requires ?role=<slug>")
+        role = requested
+    elif requested and requested != role:
+        raise HTTPException(status_code=403, detail="cannot search another role's knowledge")
+    if not role:
+        raise HTTPException(status_code=422, detail="role is required")
+    return role
+
+
+def _knowledge_task(conn, auth: Auth, role: str, task_id: str | None,
+                    include_snapshots: bool) -> str | None:
+    task_id = task_id or auth.task_id
+    if auth.task_id and task_id and auth.task_id != task_id:
+        raise HTTPException(status_code=403, detail="session is bound to another task")
+    if include_snapshots and not task_id:
+        raise HTTPException(status_code=422, detail="include_snapshots requires task_id")
+    if task_id and auth.task_id is None and auth.role != "human":
+        # 角色级常驻 token 可跨任务，但只能读取自己参与的任务。
+        if services.roles.is_onboarding(conn, role):
+            return task_id
+        row = conn.execute(
+            "SELECT 1 FROM tasks t WHERE t.id=? AND (t.assignee=? OR t.planner=? "
+            "OR EXISTS (SELECT 1 FROM task_assignees a WHERE a.task_id=t.id AND a.role_slug=?))",
+            (task_id, role, role, role)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=403, detail="role is not bound to this task")
+    return task_id
+
+
+@router.get("/me/knowledge/search")
+def search_knowledge(
+    q: str = "", task_id: str | None = None, scope: str = "auto",
+    kind: str | None = None, tags: str | None = None,
+    repo: str | None = None, module: str | None = None,
+    include_snapshots: bool = False, include_unclassified: bool = False,
+    limit: int = 8, role: str | None = None,
+    conn=Depends(get_db), auth: Auth = Depends(get_auth),
+):
+    role_slug = _knowledge_role(conn, auth, role)
+    task_id = _knowledge_task(conn, auth, role_slug, task_id, include_snapshots)
+    if scope not in ("auto", "role", "task"):
+        raise HTTPException(status_code=422, detail=f"invalid scope: {scope}")
+    if scope == "task" and not task_id:
+        raise HTTPException(status_code=422, detail="scope=task requires task_id")
+    kinds = tuple(x.strip() for x in (kind or "").split(",") if x.strip()) or None
+    tag_list = tuple(x.strip() for x in (tags or "").split(",") if x.strip()) or None
+    try:
+        hits = services.knowledge.search_knowledge(
+            conn, role_slug, q, task_id=task_id, scope=scope,
+            kinds=kinds, tags=tag_list, repo=repo, module=module,
+            include_snapshots=include_snapshots,
+            include_unclassified=include_unclassified, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {"role_slug": role_slug, "task_id": task_id, "query": q,
+            "count": len(hits), "results": hits}
+
+
+@router.get("/me/knowledge/index")
+def knowledge_index(task_id: str | None = None, role: str | None = None,
+                    conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    role_slug = _knowledge_role(conn, auth, role)
+    task_id = _knowledge_task(conn, auth, role_slug, task_id, False)
+    return {"role_slug": role_slug, "task_id": task_id,
+            **services.knowledge.knowledge_index(conn, role_slug, task_id)}
+
+
+@router.post("/me/knowledge/reindex")
+def reindex_knowledge(body: dict | None = None, role: str | None = None,
+                      conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    role_slug = _knowledge_role(conn, auth, role)
+    body = body or {}
+    try:
+        return services.knowledge.reindex_notes(
+            conn, role_slug, dry_run=bool(body.get("dry_run")),
+            prune=bool(body.get("prune")))
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/me/knowledge/{note_id}")
+def get_knowledge(note_id: str, task_id: str | None = None,
+                  role: str | None = None, conn=Depends(get_db),
+                  auth: Auth = Depends(get_auth)):
+    role_slug = _knowledge_role(conn, auth, role)
+    task_id = _knowledge_task(conn, auth, role_slug, task_id, False)
+    item = services.knowledge.get_knowledge(
+        conn, role_slug, note_id, task_id=task_id,
+        include_task_scope=auth.role == "human")
+    if item is None:
+        raise HTTPException(status_code=404, detail="knowledge not found")
+    return item
+
+
+@router.post("/knowledge/reindex")
+def reindex_all(body: dict | None = None, conn=Depends(get_db),
+                auth: Auth = Depends(require_human)):
+    """Human-only reindex for one role or all roles."""
+    body = body or {}
+    role = str(body.get("role") or "").strip() or None
+    roles = [role] if role else [
+        r["slug"] for r in conn.execute("SELECT slug FROM roles WHERE enabled=1")]
+    out = []
+    for slug in roles:
+        try:
+            out.append(services.knowledge.reindex_notes(
+                conn, slug, dry_run=bool(body.get("dry_run")),
+                prune=bool(body.get("prune"))))
+        except Exception as exc:  # noqa: BLE001
+            out.append({"role": slug, "error": str(exc)})
+    return {"roles": out}
 
 
 @router.post("/me/instruction")

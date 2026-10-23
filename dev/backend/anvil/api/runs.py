@@ -121,6 +121,14 @@ def _reset(run_id: str, mode: str, request: Request, conn) -> dict:
 
     mgr = daemon_service.get_manager()
     _terminate(run)
+    if mode == "session":
+        # 丢弃任务上下文前先固化知识快照（full reset 会连 notes 一起清，不需要）。
+        try:
+            services.memory.consolidate_context(
+                conn, run["role_slug"], run.get("task_id"),
+                "run-session-reset", run_id)
+        except Exception:  # noqa: BLE001 —— 快照失败不阻断 reset
+            pass
 
     # 常驻模式必须同时处理角色进程和 role_sessions：
     # - restart：杀进程但保留 session_id，下一次 --resume 同一上下文；
@@ -128,11 +136,18 @@ def _reset(run_id: str, mode: str, request: Request, conn) -> dict:
     if mgr and mgr.enabled:
         if mode == "restart":
             mgr.restart_process(run["role_slug"])
+        elif mode == "session":
+            # 只清该 run 所属任务的上下文；角色在其它任务上的会话保留。
+            mgr.reset_session(run["role_slug"], task_id=run.get("task_id"))
         else:
             mgr.reset_session(run["role_slug"])
-    elif mode in ("session", "full"):
-        # one-shot / daemon 未启用：清掉可能存在的旧角色会话记录。
-        daemon_service.clear_session(conn, run["role_slug"], "session reset")
+    elif mode == "session":
+        # one-shot / daemon 未启用：只清该 run 所属任务槽。
+        daemon_service.clear_session(
+            conn, run["role_slug"], "session reset",
+            task_key_value=daemon_service.task_key(run.get("task_id")))
+    elif mode == "full":
+        daemon_service.clear_session(conn, run["role_slug"], "full reset")
 
     services.runs.set_native_session(conn, run_id, None)
 

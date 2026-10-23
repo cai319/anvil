@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..services.tasks import ConflictError
-from . import events
+from ..util import jdumps, now_iso
 
 router = APIRouter()
 
@@ -57,37 +57,49 @@ def create_draft(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth
         raise HTTPException(status_code=409, detail=str(exc))
 
 
-def _start_replans(request: Request, conn, result: dict) -> dict:
-    """执行 board 决策返回的重规划描述；失败只记 warning，不回滚已批准的角色。"""
-    runs = []
-    for replan in result.get("replans", []):
-        try:
-            run = services.planning.start_planner_run(
-                conn, request.app.state.db_path,
-                getattr(request.app.state, "orchestrator", None),
-                replan["task_id"], replan["planner"],
-                assignees=replan.get("assignees"),
-                extra_constraint=replan.get("extra_constraint", ""),
-                replace_active=bool(replan.get("replace_active")),
-            )
-            runs.append(run)
-            events.publish("task", {"id": replan["task_id"], "kind": "plan",
-                                    "planner": replan["planner"]})
-        except Exception as exc:  # noqa: BLE001
-            result.setdefault("warnings", []).append(f"replan failed: {exc}")
-    if runs:
-        result["runs"] = runs
-    return result
+def _audit_human_decision(conn, task_id: str | None, action: str,
+                          request: Request, payload: dict) -> None:
+    """HITL 决策留痕：记录发起请求的客户端特征，区分 Web UI 与本地脚本。"""
+    if not task_id:
+        return
+    try:
+        conn.execute(
+            "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
+            "VALUES (?,?,?,?,?)",
+            ("human", task_id, action, jdumps({
+                **payload,
+                "client": request.client.host if request.client else None,
+                "user_agent": request.headers.get("user-agent"),
+                "referer": request.headers.get("referer"),
+                "origin": request.headers.get("origin"),
+            }), now_iso()),
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001 —— 审计失败不阻断已完成的决策
+        pass
 
 
 @router.post("/board/drafts/approve")
 def approve_drafts(body: dict, request: Request, conn=Depends(get_db),
                    auth: Auth = Depends(require_human)):
+    draft_ids = body.get("draft_ids", [])
     try:
-        result = services.board.approve(conn, body.get("draft_ids", []))
+        result = services.board.approve(conn, draft_ids)
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-    return _start_replans(request, conn, result)
+    seen_tasks: set[str] = set()
+    for did in draft_ids:
+        row = conn.execute(
+            "SELECT source_task FROM board_drafts WHERE id=?", (did,)).fetchone()
+        task_id = row["source_task"] if row else None
+        if task_id and task_id not in seen_tasks:
+            seen_tasks.add(task_id)
+            _audit_human_decision(conn, task_id, "board.approve", request, {
+                "draft_ids": draft_ids,
+                "landed": result.get("landed", []),
+                "human_decision": True,
+            })
+    return result
 
 
 @router.post("/board/drafts/reject")
@@ -97,21 +109,16 @@ def reject_draft(body: dict, request: Request, conn=Depends(get_db),
     if not did:
         raise HTTPException(status_code=422, detail="draft_id is required")
     try:
-        result = services.board.reject(
-            conn, did, feedback=body.get("feedback"))
+        result = services.board.reject(conn, did, feedback=body.get("feedback"))
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-    replan = result.get("replan")
-    if replan:
-        result["replans"] = [replan]
-        _start_replans(request, conn, result)
-    # 兼容旧客户端：驳回响应仍以 draft 字段为主体（status/tree/...）。
     draft = result.get("draft") or {}
-    payload = {**draft, "replan": replan, "blocked": result.get("blocked")}
-    if result.get("runs"):
-        payload["runs"] = result["runs"]
-    if result.get("warnings"):
-        payload["warnings"] = result["warnings"]
-    return payload
+    _audit_human_decision(conn, draft.get("source_task"), "board.reject", request, {
+        "draft_id": did,
+        "feedback": body.get("feedback"),
+        "human_decision": True,
+    })
+    # 驳回本身不替自然人 @ 任何角色；自然人在任务会话中自行 @ 对应角色处理。
+    return {**draft, "replan": None, "blocked": result.get("blocked")}

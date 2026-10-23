@@ -105,6 +105,12 @@ def _cleanup_orphans(conn) -> None:
     conn.execute(
         "DELETE FROM role_inbox_cursors WHERE task_id IS NOT NULL "
         "AND task_id NOT IN (SELECT id FROM tasks)")
+    conn.execute(
+        "DELETE FROM role_task_sessions WHERE task_key<>'__global__' "
+        "AND task_key NOT IN (SELECT id FROM tasks)")
+    conn.execute(
+        "DELETE FROM reminders WHERE role_slug IS NOT NULL "
+        "AND role_slug NOT IN (SELECT slug FROM roles)")
     conn.commit()
 
 
@@ -156,6 +162,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     _cleanup_orphans(_init)
     # 跨平台/迁移修复：数据库里的角色 home_path 可能来自旧系统（如 macOS → Windows）。
     roles_service.repair_home_paths(_init)
+    # 旧角色可能早于每日复盘功能创建；启动时为所有启用角色补齐/迁移 reminder。
+    roles_service.ensure_daily_review_reminders(_init)
     _init.close()  # 建表后即关，之后每请求独立连接
 
     # 编排控制面：同步 LangGraph + SqliteSaver（长驻 app 生命周期）。
@@ -216,7 +224,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         yield
         if scheduler:
             scheduler.stop()
-        # 常驻角色进程先关闭（session_id 保留在 role_sessions，下次 --resume 恢复上下文）
+        # 常驻角色进程先关闭（各任务上下文槽保留 session，下次按任务 --resume）
         role_daemon.shutdown()
         # 优雅停机（P0-3）：终止活跃子进程（防孤儿烧钱），run 转 suspended（非 failed，可续跑）
         _conn = open_conn(path)

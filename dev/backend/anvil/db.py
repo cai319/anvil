@@ -6,6 +6,9 @@ events, and the search index. Each app instance owns one connection (see
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 
@@ -248,6 +251,8 @@ CREATE TABLE IF NOT EXISTS activities (
     created_at   TEXT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_activities_task_id ON activities(task_id, id);
+
 CREATE TABLE IF NOT EXISTS audit (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     role_slug    TEXT,
@@ -257,8 +262,9 @@ CREATE TABLE IF NOT EXISTS audit (
     created_at   TEXT NOT NULL
 );
 
--- 角色常驻运行时会话（persistent daemon）：每角色一个长期 CLI 进程，
--- 空闲释放后保留 session_id，下次唤醒用 --resume 恢复同一上下文。
+-- 角色常驻运行时（persistent daemon）：每角色最多一个活跃 CLI 进程。
+-- session_id 是「当前加载的任务上下文槽」的镜像；真正的会话按
+-- (role_slug, task_key) 保存在 role_task_sessions，切换任务时恢复对应槽。
 CREATE TABLE IF NOT EXISTS role_sessions (
     role_slug      TEXT PRIMARY KEY,
     session_id     TEXT NOT NULL,
@@ -270,6 +276,27 @@ CREATE TABLE IF NOT EXISTS role_sessions (
     last_active_at TEXT,
     last_error     TEXT,
     updated_at     TEXT NOT NULL
+);
+
+-- 角色 × 任务上下文槽：一个角色可以在多个任务上工作，但同一时刻只执行一个。
+-- 每个槽保存该任务独立的 CLI 会话、cwd、工作区和上下文水位；切回任务时
+-- 用 --resume 恢复，首次进入则新建会话并注入 CIC。
+CREATE TABLE IF NOT EXISTS role_task_sessions (
+    role_slug      TEXT NOT NULL,
+    task_key       TEXT NOT NULL,               -- task id 或 __global__
+    session_id     TEXT NOT NULL DEFAULT '',
+    runtime_id     TEXT,
+    cwd            TEXT,                        -- CLI 会话所属目录（--resume 必须一致）
+    workspace_path TEXT,                        -- 投影/工作区路径（同任务复用）
+    model_id       TEXT,
+    status         TEXT NOT NULL DEFAULT 'idle', -- idle|busy|dead
+    context_tokens INTEGER,
+    last_seen_activity_id INTEGER NOT NULL DEFAULT 0,
+    last_active_at TEXT,
+    last_error     TEXT,
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL,
+    PRIMARY KEY (role_slug, task_key)
 );
 
 -- Action Cards：Agent 只能 prepare，自然人批准后以人的身份执行（HITL 一等原语）
@@ -391,7 +418,20 @@ CREATE TABLE IF NOT EXISTS notes (
     role_slug  TEXT NOT NULL,
     path       TEXT NOT NULL,
     content    TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    -- 知识元数据：scope=task 仅同任务可见；scope=role 可跨任务复用；
+    -- legacy/未知笔记保持 unclassified，默认不自动注入。
+    kind          TEXT NOT NULL DEFAULT 'note',
+    scope         TEXT NOT NULL DEFAULT 'unclassified',
+    task_id       TEXT,
+    source_task   TEXT,
+    tags_json     TEXT NOT NULL DEFAULT '[]',
+    repo          TEXT,
+    module        TEXT,
+    confidence    REAL NOT NULL DEFAULT 0.5,
+    updated_at    TEXT,
+    source        TEXT NOT NULL DEFAULT 'agent',
+    content_hash  TEXT
 );
 """
 
@@ -536,6 +576,33 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE role_sessions ADD COLUMN model_id TEXT")
     except sqlite3.OperationalError:
         pass
+    # 迁移：多任务角色调度——把当前任务/run/步骤持久化，供 UI 与调度器观测。
+    for col in ("current_task_id TEXT", "current_run_id TEXT", "current_step_id TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE role_sessions ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    # 旧版只有一个角色级 session：保守地放入 __global__ 槽，不冒充任何任务上下文。
+    try:
+        legacy = conn.execute(
+            "SELECT role_slug, session_id, model_id, last_context_tokens FROM role_sessions "
+            "WHERE COALESCE(session_id,'')<>''"
+        ).fetchall()
+        for row in legacy:
+            has_slot = conn.execute(
+                "SELECT 1 FROM role_task_sessions WHERE role_slug=? LIMIT 1",
+                (row["role_slug"],)).fetchone()
+            if has_slot:
+                continue  # 已经是多槽版本的数据，不再猜测旧 session 属于哪个任务
+            conn.execute(
+                "INSERT INTO role_task_sessions "
+                "(role_slug, task_key, session_id, model_id, context_tokens, status, "
+                " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (row["role_slug"], "__global__", row["session_id"], row["model_id"],
+                 row["last_context_tokens"], "idle", now, now),
+            )
+    except sqlite3.OperationalError:
+        pass
     for col in ("last_nudge_at TEXT", "nudge_count INTEGER NOT NULL DEFAULT 0",
                 "recovery_count INTEGER NOT NULL DEFAULT 0", "next_retry_at TEXT"):
         try:
@@ -576,5 +643,274 @@ def init_schema(conn: sqlite3.Connection) -> None:
     try:
         conn.execute("ALTER TABLE board_drafts ADD COLUMN source_task TEXT")
     except sqlite3.OperationalError:
+        pass
+    # 迁移：知识库元数据（scope/task/kind/tags/repo/confidence/updated_at/source/hash）
+    for col in (
+        "kind TEXT NOT NULL DEFAULT 'note'",
+        "scope TEXT NOT NULL DEFAULT 'unclassified'",
+        "task_id TEXT",
+        "source_task TEXT",
+        "tags_json TEXT NOT NULL DEFAULT '[]'",
+        "repo TEXT",
+        "module TEXT",
+        "confidence REAL NOT NULL DEFAULT 0.5",
+        "updated_at TEXT",
+        "source TEXT NOT NULL DEFAULT 'agent'",
+        "content_hash TEXT",
+    ):
+        try:
+            conn.execute(f"ALTER TABLE notes ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    for stmt in (
+        "CREATE INDEX IF NOT EXISTS idx_notes_role_task_kind "
+        "ON notes(role_slug, task_id, kind, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_notes_role_scope_updated "
+        "ON notes(role_slug, scope, updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_notes_role_repo ON notes(role_slug, repo)",
+    ):
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()
+    _ensure_notes_fts(conn)
+    _migrate_notes_metadata(conn)
+    _migrate_legacy_note_scopes(conn)
+    _ensure_notes_path_unique(conn)
+    _rebuild_memory_fts_once(conn)
+    conn.commit()
+
+
+def _setting(conn: sqlite3.Connection, key: str) -> str | None:
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
+    except sqlite3.OperationalError:
+        return None
+
+
+def _set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO settings (key, value, updated_at) VALUES (?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        (key, value, datetime.now(timezone.utc).isoformat()),
+    )
+
+
+def _safe_task_segment(task_id: str) -> str:
+    """与 services.knowledge.task_path_segment 保持一致的目录段算法。"""
+    raw = str(task_id or "")
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", raw)[:64] or "task"
+    if safe != raw:
+        safe += "-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
+    return safe
+
+
+def _ensure_notes_fts(conn: sqlite3.Connection) -> bool:
+    """创建独立 notes_fts（trigram 优先）+ 同步触发器；失败则回退 LIKE。"""
+    table = (
+        "CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5("
+        "note_id UNINDEXED, role_slug UNINDEXED, kind UNINDEXED, tags, content, "
+        "tokenize='trigram')"
+    )
+    try:
+        conn.execute(table)
+    except sqlite3.OperationalError:
+        try:
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5("
+                "note_id UNINDEXED, role_slug UNINDEXED, kind UNINDEXED, tags, content, "
+                "tokenize='unicode61')")
+        except sqlite3.OperationalError:
+            for trigger in ("notes_fts_ai", "notes_fts_ad", "notes_fts_au"):
+                try:
+                    conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+                except sqlite3.OperationalError:
+                    pass
+            return False
+    for stmt in (
+        "CREATE TRIGGER IF NOT EXISTS notes_fts_ai AFTER INSERT ON notes BEGIN "
+        "INSERT INTO notes_fts(rowid, note_id, role_slug, kind, tags, content) "
+        "VALUES (new.rowid, new.id, new.role_slug, new.kind, new.tags_json, new.content); END",
+        "CREATE TRIGGER IF NOT EXISTS notes_fts_ad AFTER DELETE ON notes BEGIN "
+        "DELETE FROM notes_fts WHERE rowid = old.rowid; END",
+        "CREATE TRIGGER IF NOT EXISTS notes_fts_au AFTER UPDATE ON notes BEGIN "
+        "DELETE FROM notes_fts WHERE rowid = old.rowid; "
+        "INSERT INTO notes_fts(rowid, note_id, role_slug, kind, tags, content) "
+        "VALUES (new.rowid, new.id, new.role_slug, new.kind, new.tags_json, new.content); END",
+    ):
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+    return True
+
+
+def _migrate_notes_metadata(conn: sqlite3.Connection) -> None:
+    """一次性回填旧 notes 的 scope/task/kind/updated_at/hash，并重建 notes_fts。"""
+    marker = _setting(conn, "schema.notes_metadata_v1")
+    if marker:
+        return
+    tasks = conn.execute("SELECT id, tags_json, repo FROM tasks").fetchall()
+    seg_to_task: dict[str, str | None] = {}
+    task_meta: dict[str, dict] = {}
+    for task in tasks:
+        tid = str(task["id"])
+        seg = _safe_task_segment(tid)
+        if seg in seg_to_task and seg_to_task[seg] != tid:
+            seg_to_task[seg] = None  # 目录名冲突：无法唯一恢复
+        else:
+            seg_to_task[seg] = tid
+        task_meta[tid] = {"tags": task["tags_json"] or "[]", "repo": task["repo"]}
+    rows = conn.execute(
+        "SELECT rowid, path, content, created_at FROM notes").fetchall()
+    for row in rows:
+        path = str(row["path"] or "")
+        content = str(row["content"] or "")
+        values = {
+            "updated_at": row["created_at"],
+            "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        }
+        update = (
+            "UPDATE notes SET updated_at=COALESCE(updated_at, ?), "
+            "content_hash=COALESCE(content_hash, ?)"
+        )
+        params: list = [values["updated_at"], values["content_hash"]]
+        if path.startswith("knowledge/"):
+            parts = path.split("/")
+            seg = parts[1] if len(parts) > 1 else ""
+            tid = seg_to_task.get(seg)
+            update += ", kind='task_snapshot', scope=?"
+            params.append("task" if tid else "unclassified")
+            # 目录名就是旧快照唯一可用的任务标识：匹配不到现存任务时把目录名
+            # 保留在 source_task（scope 仍为 unclassified，不会自动注入）。
+            update += ", task_id=?"
+            params.append(tid)
+            if tid:
+                update += ", source_task=?, tags_json=?, repo=?"
+                params.extend([tid,
+                               task_meta.get(tid, {}).get("tags", "[]"),
+                               task_meta.get(tid, {}).get("repo")])
+            elif seg:
+                update += ", source_task=?"
+                params.append(seg)
+        update += " WHERE rowid=?"
+        params.append(row["rowid"])
+        conn.execute(update, params)
+    # 重建 notes_fts（触发器可能已同步过，最终以 notes 为准）
+    try:
+        conn.execute("DELETE FROM notes_fts")
+        conn.execute(
+            "INSERT INTO notes_fts(rowid, note_id, role_slug, kind, tags, content) "
+            "SELECT rowid, id, role_slug, kind, tags_json, content FROM notes")
+    except sqlite3.OperationalError:
+        pass
+    _set_setting(conn, "schema.notes_metadata_v1", "1")
+    conn.commit()
+
+
+def _migrate_legacy_note_scopes(conn: sqlite3.Connection) -> None:
+    """旧 notes/ 笔记回填为 role scope（可跨任务复用），knowledge/ 快照保持原判。
+
+    v1 迁移把未知 scope 的旧行留在 unclassified；那会让角色已有的普通笔记
+    从检索/CIC 里消失。普通 notes 位于角色 home 内，默认就是角色可复用知识。
+    """
+    marker = _setting(conn, "schema.notes_metadata_v2")
+    if marker:
+        return
+    conn.execute(
+        "UPDATE notes SET scope='role' "
+        "WHERE scope='unclassified' AND path NOT LIKE 'knowledge/%'")
+    _set_setting(conn, "schema.notes_metadata_v2", "1")
+    conn.commit()
+
+
+def _ensure_notes_path_unique(conn: sqlite3.Connection) -> None:
+    """确保 `(role_slug, path)` 唯一：一个笔记文件对应一行索引。
+
+    - 旧库可能因 append 多次写入留下同 path 多行：按文件是真相合并内容，
+      保留最新一行的元数据/id，再删除其余行；
+    - 唯一索引是 write_note upsert 的冲突目标；
+    - 旧的普通索引被唯一索引取代。
+    """
+    marker = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' "
+        "AND name='idx_notes_role_path_unique'").fetchone()
+    unique_ok = marker is not None
+    if not unique_ok:
+        groups = conn.execute(
+            "SELECT role_slug, path FROM notes GROUP BY role_slug, path "
+            "HAVING COUNT(*) > 1").fetchall()
+        for group in groups:
+            rows = conn.execute(
+                "SELECT rowid, content, created_at, updated_at FROM notes "
+                "WHERE role_slug=? AND path=? "
+                "ORDER BY COALESCE(created_at, ''), rowid",
+                (group["role_slug"], group["path"])).fetchall()
+            if not rows:
+                continue
+            keep = max(
+                rows,
+                key=lambda r: (str(r["updated_at"] or r["created_at"] or ""), r["rowid"]))
+            parts: list[str] = []
+            seen: set[str] = set()
+            for r in rows:
+                text = str(r["content"] or "")
+                if not text:
+                    continue
+                digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                if digest in seen:
+                    continue
+                seen.add(digest)
+                parts.append(text)
+            merged = "\n".join(parts)
+            conn.execute(
+                "UPDATE notes SET content=?, content_hash=?, "
+                "updated_at=COALESCE(updated_at, ?) WHERE rowid=?",
+                (merged, hashlib.sha256(merged.encode("utf-8")).hexdigest(),
+                 keep["updated_at"] or keep["created_at"], keep["rowid"]))
+            conn.execute(
+                "DELETE FROM notes WHERE role_slug=? AND path=? AND rowid<>?",
+                (group["role_slug"], group["path"], keep["rowid"]))
+        try:
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_role_path_unique "
+                "ON notes(role_slug, path)")
+            unique_ok = True
+        except sqlite3.OperationalError:
+            # 极端异常数据下保留非唯一索引；write_note 会退化为 DELETE+INSERT。
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notes_role_path "
+                "ON notes(role_slug, path)")
+    if unique_ok:
+        try:
+            conn.execute("DROP INDEX IF EXISTS idx_notes_role_path")
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()
+
+
+def _notes_path_is_unique(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' "
+        "AND name='idx_notes_role_path_unique'").fetchone() is not None
+
+
+def _rebuild_memory_fts_once(conn: sqlite3.Connection) -> None:
+    """旧版 memory_fts 同时索引 notes；重建为仅 memories，避免跨任务泄漏。"""
+    if _setting(conn, "schema.memory_fts_memories_only_v1"):
+        return
+    try:
+        conn.execute("DROP TABLE IF EXISTS memory_fts")
+        conn.execute(
+            "CREATE VIRTUAL TABLE memory_fts USING fts5("
+            "role_slug, content, tokenize='porter')")
+        conn.execute(
+            "INSERT INTO memory_fts(role_slug, content) "
+            "SELECT role_slug, content FROM memories")
+        _set_setting(conn, "schema.memory_fts_memories_only_v1", "1")
+    except sqlite3.OperationalError:
+        # FTS5 不可用：保持 LIKE 回退，不阻断启动。
         pass
     conn.commit()

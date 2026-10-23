@@ -69,7 +69,7 @@ def create(conn: sqlite3.Connection, *, slug: str, display_name: str,
     )
     conn.commit()
     _snapshot_version(conn, slug, display_name, definition, source="create")
-    _ensure_weekly_reminder(conn, slug)
+    _ensure_daily_review_reminder(conn, slug)
     return get(conn, slug)  # type: ignore[return-value]
 
 
@@ -214,30 +214,77 @@ def notification_sender(conn: sqlite3.Connection, task_id: str,
     return ONBOARDING_SLUG
 
 
-WEEKLY_REVIEW_PROMPT = (
-    "回顾本周完成的任务与 notes，把散落的要点合并进 MEMORY.md，删掉已经过时的内容，"
-    "把值得共享的用 `anvil lesson propose` 提出来。检查 MEMORY.md 是否超过 300 行，"
-    "超了就精简。同时检查自己的 description（角色定位）是否仍准确；若已漂移，"
-    "用 lesson propose 记录建议并 @human 说明，不要自行改写。"
+DAILY_REVIEW_PROMPT = (
+    "回顾最近 24 小时完成的任务与 notes：\n"
+    "1) 任务结论/决策留在任务快照，不要混入通用知识；\n"
+    "2) 把可复用的漏洞模式/故障场景/模块知识写入角色知识库："
+    "`anvil note write notes/<path>.md --content-file <file> --kind "
+    "vulnerability_pattern|failure_scenario|module_knowledge --scope role "
+    "--tags <tags> --repo <repo> --module <module> --confidence 0.8 --replace`；\n"
+    "3) 写入前先 `anvil knowledge search \"<关键词>\" --limit 5`，已有同类知识优先更新，避免重复；\n"
+    "4) 把散落要点合并进 MEMORY.md，删掉过时内容；值得共享的用 `anvil lesson propose` 提出；\n"
+    "5) MEMORY.md 超过 300 行就精简；检查 description 是否漂移；整理后执行 "
+    "`anvil knowledge reindex` 让文件与索引一致。"
 )
 
+DAILY_REVIEW_CRON = "0 9 * * *"
 
-def _ensure_weekly_reminder(conn: sqlite3.Connection, slug: str) -> None:
-    """design §8.5：每个角色默认附带一条周复盘 reminder（幂等）。"""
-    existing = conn.execute(
-        "SELECT 1 FROM reminders WHERE role_slug=? AND kind='cron' AND prompt=?",
-        (slug, WEEKLY_REVIEW_PROMPT),
-    ).fetchone()
-    if existing:
-        return
+
+def ensure_daily_review_reminders(conn: sqlite3.Connection) -> int:
+    """为所有启用角色补齐每日复盘 reminder（幂等；用于启动时回填旧角色）。"""
+    created = 0
+    for row in conn.execute("SELECT slug FROM roles WHERE enabled=1").fetchall():
+        if _ensure_daily_review_reminder(conn, row["slug"]):
+            created += 1
+    return created
+
+
+def _ensure_daily_review_reminder(conn: sqlite3.Connection, slug: str) -> bool:
+    """design §8.5：每个角色默认附带一条每日复盘 reminder（幂等）。
+
+    兼容旧版「周复盘」条目：识别旧文案/旧默认 cron，迁移为每天 09:00；
+    用户自定义过的 cron 保留，只升级 prompt。历史重复条目会清理。
+    """
+    rows = conn.execute(
+        "SELECT id, status, next_fire_at, cron_expr FROM reminders "
+        "WHERE role_slug=? AND kind='cron' "
+        "AND (prompt LIKE '回顾本周%' OR prompt LIKE '回顾最近%') "
+        "ORDER BY created_at",
+        (slug,),
+    ).fetchall()
+    if rows:
+        keep = rows[0]
+        keep_id = keep["id"]
+        # 旧默认（周一 09:00）迁移为每日 09:00；自定义 cron 保留。
+        cron = keep["cron_expr"] or ""
+        migrate_cron = cron in ("", "0 9 * * 1")
+        set_cron = DAILY_REVIEW_CRON if migrate_cron else cron
+        from . import reminders as reminders_service  # 惰性导入避免循环
+        if keep["status"] == "pending" and keep["next_fire_at"] and not migrate_cron:
+            conn.execute("UPDATE reminders SET prompt=?, cron_expr=? WHERE id=?",
+                         (DAILY_REVIEW_PROMPT, set_cron, keep_id))
+        else:
+            try:
+                nxt = reminders_service.next_cron_fire(set_cron)
+            except ValueError:
+                nxt = keep["next_fire_at"]
+            conn.execute(
+                "UPDATE reminders SET prompt=?, cron_expr=?, status='pending', "
+                "next_fire_at=? WHERE id=?",
+                (DAILY_REVIEW_PROMPT, set_cron, nxt, keep_id))
+        for extra in rows[1:]:
+            conn.execute("DELETE FROM reminders WHERE id=?", (extra["id"],))
+        conn.commit()
+        return False
     from . import reminders as reminders_service  # 惰性导入避免循环
     try:
         reminders_service.create_reminder(
-            conn, role_slug=slug, kind="cron", cron_expr="0 9 * * 1",
-            prompt=WEEKLY_REVIEW_PROMPT,
+            conn, role_slug=slug, kind="cron", cron_expr=DAILY_REVIEW_CRON,
+            prompt=DAILY_REVIEW_PROMPT,
         )
+        return True
     except (ValueError, ConflictError):
-        pass
+        return False
 
 
 def _snapshot_version(conn: sqlite3.Connection, slug: str, display_name: str,
@@ -349,6 +396,8 @@ def delete(conn: sqlite3.Connection, slug: str) -> bool:
         raise ConflictError("built-in onboarding assistant cannot be deleted")
     conn.execute("DELETE FROM sessions WHERE role_slug=?", (slug,))
     conn.execute("DELETE FROM role_sessions WHERE role_slug=?", (slug,))
+    conn.execute("DELETE FROM role_task_sessions WHERE role_slug=?", (slug,))
+    conn.execute("DELETE FROM reminders WHERE role_slug=?", (slug,))
     cur = conn.execute("DELETE FROM roles WHERE slug=?", (slug,))
     conn.commit()
     return cur.rowcount > 0

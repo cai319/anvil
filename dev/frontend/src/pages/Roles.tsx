@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, isOnboardingRole, type Role, type Runtime } from "../api/client";
+import { formatDateTime } from "../time";
 
 type Tab = "basic" | "instruction" | "tools" | "catalog" | "home" | "permissions" | "runtime";
 
@@ -385,7 +386,7 @@ export function Roles() {
                     {versions.length === 0 && <li className="muted">暂无版本记录。</li>}
                     {versions.map((v) => (
                       <li key={v.version}>
-                        v{v.version} · {v.source} · <span className="muted mono">{v.created_at.slice(0, 19)}</span>{" "}
+                        v{v.version} · {v.source} · <span className="muted mono">{formatDateTime(v.created_at)}</span>{" "}
                         <button
                           className="small"
                           onClick={async () => {

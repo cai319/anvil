@@ -3,9 +3,9 @@
 **设计文档 v3.0**（含 2026-10-23 实现增量）
 平台：Windows 10/11 · 单机单用户 · 后端 Python · 前端 Web
 
-> **最近更新（2026-10-23）**：上下文/请求体三层保护、技术性失败自动恢复、知识快照与
-> CIC 知识包、@ 唤醒口径。变更摘要见 [附录 A.2](#appendix)，实现口径索引见
-> [附录 A.3](#appendix)。
+> **最近更新（2026-10-23）**：上下文/请求体三层保护、技术性失败自动恢复、知识作用域与
+> 检索隔离、同 path upsert、CIC 优先级预算、@ 唤醒口径。变更摘要见
+> [附录 A.2](#appendix)，实现口径索引见 [附录 A.3](#appendix)。
 
 > **文档约定**
 >
@@ -375,6 +375,9 @@ OpenRouter 的 `context_length`、agent 框架的 per-agent/per-node 模型绑�
   （`ANVIL_AUTH_TOKEN`；未设置时仅接受本地默认 `anvil` / `anvil-web`）。
 - **人类身份显式化**：共享 token 只映射为 `human`，不能通过 `X-Anvil-Role` 冒充 Agent；
   `require_human` 只接受 `human`。非回环访问必须配置 `ANVIL_AUTH_TOKEN`。
+  Agent 运行级 token 调用 HITL 端点一律 403。HITL 决策写入 `audit`（含 client/
+  user-agent/referer），Web UI 与本地脚本可追溯；**不在 HITL 流程中弹任何系统/浏览器
+  确认窗**，审批仍由 UI 按钮直接触发，权限边界落在 token + `require_human` + 审计。
 - **Agent token 绑定**：运行级 token 绑定角色/任务；常驻角色 token 只能操作自己参与的
   团队任务（assignee/lead/planner），开放任务仍可由任意角色 claim。
 - **危险入口人类专属**：运行时/MCP 的注册、探测、health，角色创建/发消息/生成画像，
@@ -383,6 +386,28 @@ OpenRouter 的 `context_length`、agent 框架的 per-agent/per-node 模型绑�
   relative_to 校验；运行期/MCP 的 executable/args 不允许未授权注册或执行。
 - **数据保护**：`data/` 不进入 Git；数据目录 700、DB 600；调度器每天做 SQLite 在线备份
   （`data/backups/anvil-YYYYMMDD.db`，保留 7 天）；删除角色同步撤销其 sessions/role_sessions。
+
+> **HITL 边界（owner 2026-10-23）**：收件箱是唯一的人工决策入口，不在流程里弹系统/浏览器窗。
+>
+> - **角色自主（不进收件箱）**：任务尚无 Roster 时绑定**现有角色**（`anvil task assign`）、
+>   角色间 @/交接、步骤内实现与自检、上下文 reset、技术性失败自动恢复。
+> - **必须自然人裁定（进收件箱）**：新建角色（role_suggestion）、workflow 草案审批、
+>   gate 步骤、任务最终评审、取消/删除等 action card、角色演化/工具权限、预算/冻结、
+>   运行时注册。
+> - Agent 运行级 token 调用 HITL 端点一律 403；`human` 是自然人身份，不是 AI 角色，
+>   前端显示为「你（自然人）」；决策写 `audit`（含 client/user-agent/referer）。
+> - **决策后的后续动作由自然人的下一次具体应答决定**：批准/驳回本身不等于重规划；
+>   需要角色继续时，自然人在任务会话里自己 @ 对应角色（@planner 会启动规划 run）。
+>   系统不替自然人选择角色，也不替角色决定是否继续。
+> - **问题有对应角色时先 @ 该角色**：只要现有角色的职责/能力覆盖该问题，就由该角色处理；
+>   只有新建角色、workflow 审批、gate、最终评审、不可逆操作等 HITL 事项才 @human。
+> - 非重大事项不得升级为 HITL；重大/不可逆/跨边界事项必须由管理员自然人在收件箱裁定。
+>
+> **标识与显示分离（owner 2026-10-23）**：消息/审计/激活等后台数据一律使用 **slug**；
+> 界面展示使用 `display_name`（昵称）。@ 联想显示「昵称（slug）」，选择后输入框显示
+> `@昵称`，发送时 `target` 仍解析回 slug，正文保留昵称；时间线 @ 标签显示昵称。
+> `human` 的 slug 固定为 `human`，界面统一显示「你（自然人）」。将来接入登录认证后，
+> slug 可作为「用户账号别名」，中文昵称只用于显示，不参与绑定/激活。
 
 ---
 
@@ -457,8 +482,8 @@ claim:
   reject_task_tags: [frontend-only, design]
 
 reminders:
-  - cron: "0 9 * * 1"
-    prompt: 回顾上周完成的任务，整理经验到 MEMORY.md，并检查自己的 profile 描述是否还准确。
+  - cron: "0 9 * * *"
+    prompt: 回顾最近 24 小时完成的任务，整理经验到 MEMORY.md，并检查自己的 profile 描述是否还准确。
 
 lifecycle:
   session_reset_after_tasks: 10   # 每 N 个任务后清一次上下文
@@ -570,12 +595,15 @@ Agent 提交时，Anvil 比对本次运行的实际改动文件列表与任务�
 |---|---|---|
 | 身份 | instruction.md | 800 tok |
 | 任务 | 标题、描述、验收标准、scope | 600 tok |
-| 记忆 | MEMORY.md 摘要 + FTS 检索到的相关 notes 片段 | 1200 tok |
-| 共享 | lessons.md 中与任务标签匹配的条目 | 500 tok |
+| 记忆 | MEMORY.md 尾部 + 可复用知识（role/当前任务，不含快照） | 4000 + 4000 chars |
+| 共享 | lessons.md 中按 tags/repo 匹配的条目 | ≤2000 chars |
 | 协议 | anvil CLI 用法说明 | 400 tok |
 | 工具 | 工具描述（由运行时自身注入） | ≤ max_tool_tokens |
 
-超预算时按优先级从后往前截断，记忆段优先保留 FTS 得分最高的片段。截断事件记入日志——如果某个角色频繁截断，说明它的记忆需要整理了，这本身是个有用信号。
+投影**不注入任务快照**：快照只进入同一 `task_id` 的 CIC，避免把历史快照当成当前事实。
+超预算时按块截断而不是硬切整个文件：MEMORY 保留尾部，知识/lessons 保留最高分条目，
+消息类保留最新内容；截断事件记入日志——如果某个角色频繁截断，说明它的记忆需要整理了，
+这本身是个有用信号。
 
 ---
 
@@ -774,6 +802,32 @@ def tick_once():
 > 不是任务执行成员）。`workflow` 仅保留
 > 给步骤进度等不需要人类回复的事件；旧版 `fail_step` 的 `workflow` mention 历史数据
 > 仍会显示，但新版本已改为非阻塞 comment。
+>
+> **多任务角色调度与任务上下文槽（owner 2026-10-23）**：角色（包括 Cindy）可同时绑定
+> 多个任务，但**任意时刻只执行一个 turn**；忙时状态绑定到具体任务/步骤，其它任务看到的
+> 是「忙碌于任务 A」，B 的 @ 与步骤派发排队等待，不抢占、不失败。运行时把会话从
+> 「每角色一个」升级为 **`(role_slug, task_key)` 的任务上下文槽**（`role_task_sessions`）：
+> 同一任务内复用进程/会话；切换到另一任务时先固化当前槽，再 `kill → spawn`，有该任务
+> 会话且 cwd 一致则 `--resume`，否则新建会话并注入该任务的 CIC（记忆/工作流决策/
+> 知识快照/最近消息）。切回旧任务时恢复其会话，并补一段「离开期间的新进展」增量；
+> 任务级 reset/溢出/崩溃只清当前任务槽，其它任务上下文保留。`__global__` 槽承载
+> reminder/直聊等无任务工作。同一 `(role, task)` 的后续 run 复用第一次确定的
+> workspace/cwd（Claude Code 的会话按 cwd 分目录，cwd 变了无法 resume）。任务详情
+> 「角色运行时」页签展示忙碌任务、本任务排队数与已保留上下文；任务右侧「任务信息 →
+> 参与角色」实时点灯（顺序：点灯 → 状态徽标 → slug）：绿=本任务工作中、红=其他任务
+> 工作中、琥珀=切换上下文中、浅蓝=空闲且本任务上下文已保留、灰=空闲/冷启动。徽标沿用
+> 任务状态色彩：蓝「进行中」、红「繁忙」、灰「待办」、绿「完成」、琥珀「排队中/切换上下文」。
+> 顶部 session-meta 仍只显示 `👤 领队 / 👥 成员` 摘要。`GET /roles/{slug}/runtime`
+> 提供同样数据。完整设计见 `docs/superpowers/specs/2026-10-23-role-task-contexts-design.md`。
+>
+> **角色建议审批后的处理（owner 2026-10-23）**：**自然人批准/驳回 role_suggestion 本身只
+> 记录决策并落角色，不自动 @任何角色、不自动启动重规划 run**。后续动作完全由自然人的
+> 下一次具体应答决定：自然人自己在任务会话里 @ 具体角色，mention 端点负责唤醒该角色；
+> 如果 @ 的是 planner/Cindy，则启动规划 run，由 planner 按职责判断是否提交/修订 workflow。
+> 系统不替自然人决定该找谁，也不替角色决定是否继续。**非重大 Roster 决策**（仅在任务尚无
+> Roster 时绑定现有角色）由 planner 通过 `anvil task assign` 自行完成，不需要 HITL；
+> 只有**新建角色**才提交 role_suggestion 等 human 审批。角色建议的 HITL 记录仍以 `human`
+> 为自然人身份，前端显示为「你（自然人）」，不再显示成 AI 角色。
 
 `wake()` 做的事：创建 run 记录、冻结 profile 快照、准备 worktree、执行投影、拉起子进程。**唤醒提示只含任务 id 与标题，不含任务正文**——正文由 Agent 自己通过 `anvil task show` 取。这样编排器不承担内容组装的责任，也让 Agent 的信息获取路径统一。
 
@@ -829,8 +883,11 @@ created → projecting → running → submitted → reviewing → completed
 | 档位 | 动作 | 用途 |
 |---|---|---|
 | `restart` | 结束进程，保留会话 id，下次续跑 | 进程卡死但上下文还有用 |
-| `session reset` | 丢弃会话，保留 MEMORY.md 与 notes | 上下文污染了，但经验要留 |
-| `full reset` | 会话与记忆全清，仅保留 profile.yaml | 角色定义要重来 |
+| `session reset` | 丢弃**当前任务**的会话槽，保留其它任务上下文、MEMORY.md 与 notes | 上下文污染了，但经验要留 |
+| `full reset` | 所有任务会话槽与记忆全清，仅保留 profile.yaml | 角色定义要重来 |
+
+> 角色级 `POST /roles/{slug}/session-reset` 会清空该角色**所有**任务槽；run 级
+> `session-reset` 与角色自主 `reset-context` 只清当前 run 所属任务槽。
 
 `full reset` 前自动把 `agents/<slug>/` 打包备份到 `backups/`，因为这个操作不可逆而且人经常后悔。
 
@@ -848,24 +905,30 @@ created → projecting → running → submitted → reviewing → completed
 >   - 单轮内上下文达到硬阈值、或 API 报上下文/请求体超限：终止当前轮，写知识快照，
 >     新 CIC 会话重投当前 run；
 >   - API 上下文溢出按最后成功请求的 95% 自适应收紧窗口后重试。
-> - **CIC 不再是“MEMORY 头 + 最近消息/动作”三块**，而是持久知识包：
->   1. 本角色 `MEMORY.md` **尾部**（`max 4000 chars`，最近整理的内容优先）；
->   2. 按任务标题/标签做 FTS 检索得到的相关记忆（最多 5 条）；
->   3. 当前 workflow 最近 30 步的状态/摘要/反馈（决策依据）；
->   4. 当前任务最近一次知识快照（`notes/knowledge/<task-id>/`）；
->   5. 最近 25 条任务消息 + 最近 12 条动作。
->   CIC 总长上限约 32k 字符，且不宣布“重置”、不列未决问题清单。
+> - **CIC 不再是“MEMORY 头 + 最近消息/动作”三块**，而是按优先级打包的持久知识包
+>   （展示顺序与保留优先级分离）：
+>   1. 本角色 `MEMORY.md` **尾部**（≤4000 chars，最近整理的内容优先）；
+>   2. 知识库索引（role/当前任务的各 kind 计数 + 最近 8 条标题，≤1200）；
+>   3. 当前任务最近一次知识快照（按 `notes.task_id` 精确查询，≤4000）；
+>   4. 可复用知识 top5（role-scoped + 当前任务，排除快照，≤4000）；
+>   5. 当前 workflow 最近 30 步的状态/摘要/反馈（≤4000）；
+>   6. 已批准 lessons（按 tags/repo 匹配，≤1500）；
+>   7. 最近 25 条任务消息（≤4000，tail 截断保留最新）；
+>   8. 最近 12 条动作（≤1000）。
+>   CIC 总长上限 32k 字符；预算不足时按“动作 → 索引 → lessons → workflow/检索项”
+>   丢弃，MEMORY/当前任务快照/最近消息优先保留。任务 B 的 CIC 绝不包含任务 A 的
+>   task-scoped 内容；且不宣布“重置”、不列未决问题清单。
 > - **主动水位轮换不计入失败预算**；只有真正的 API 溢出/请求体超限计入
 >   `ANVIL_CONTEXT_RESET_MAX_RETRIES`，耗尽后交给步骤自动恢复（指数退避，不 @human）。
 > - **知识快照先于上下文丢失**：换会话前由 DB 时间线确定性生成
->   `agents/<slug>/notes/knowledge/<task-id>/<时间>-<触发>.md`，写 FTS 索引与 audit；
->   不依赖旧对话，也不调用模型。
+>   `agents/<slug>/notes/knowledge/<task-id>/<时间>-<触发>.md`，写 `notes_fts` 索引与
+>   audit；不依赖旧对话，也不调用模型。快照是 task scope，只进入同一 `task_id` 的 CIC。
 
 ### 6.4 Reminder 机制
 
 Reminder 是一等公民，不是附属功能。三种形态：
 
-- **定时**（cron 表达式）：每周一早九点回顾整理
+- **定时**（cron 表达式）：每天早九点回顾整理
 - **延时**（一次性）：两小时后检查 CI 是否通过
 - **条件**：当任务 T-1039 转为 done 时唤醒我
 
@@ -914,10 +977,15 @@ anvil step plan <workflow-id> <plan-step-id> --file slices.json  # 运行期切�
 anvil step decide <workflow-id> <decision-step-id> --approve|--reject --feedback "..."
 anvil board draft --task <id> --goal "..." --tree-file wf.json --kind workflow
 
-# 记忆
+# 记忆与知识库
 anvil memory append "..."                # 追加到 MEMORY.md
-anvil memory search "查询词"             # FTS5 检索自己的 notes + shared
-anvil note write <path> --content-file f
+anvil memory search "查询词"             # MEMORY + role-scoped notes（按角色隔离）
+anvil note write <path> --content-file f [--kind ...] [--scope role|task] [--task ID] \
+    [--tags a,b] [--repo ...] [--module ...] [--confidence 0.8] [--replace]
+anvil knowledge search "查询词" [--task ID] [--kind ...] [--tags ...] [--limit N]
+anvil knowledge show <id>
+anvil knowledge index [--task ID]
+anvil knowledge reindex [--dry-run] [--prune]
 anvil lesson propose "..." --tags a,b    # 提议升格到 shared/lessons.md
 
 # 自我
@@ -927,7 +995,7 @@ anvil self edit-instruction --file f     # 可自主，写入 pending 或直接�
 anvil self propose --field tools --file f  # 需审批项走提案
 
 # 提醒
-anvil reminder add --cron "0 9 * * 1" --prompt "..."
+anvil reminder add --cron "0 9 * * *" --prompt "..."
 anvil reminder add --in 2h --prompt "..."
 anvil reminder list / remove <id>
 
@@ -980,33 +1048,44 @@ anvil ws diff                            # 本次改动，含越界警告
 所以 v1 的记忆系统是：**文件是真相，SQLite FTS5 是索引，向量检索推迟到 v2 且需要证据支持。**
 
 > **实现口径（owner 2026-10-23）**：检索层已经接入 CIC（Constructed Initial
-> Context）。换会话时不靠旧对话，而是重新注入“持久知识包”：MEMORY 尾部 + 任务相关
-> FTS 命中 + workflow 决策 + 最近知识快照 + 最近消息/动作。这就是轻量 RAG
-> （retrieval-augmented context）：**检索是增强，Markdown 仍是真相**；未来加向量
-> retriever 不需要改变文件层。私有记忆严格按 `role_slug` 过滤，不混入其它角色；
-> 跨角色共享只走人工批准的 lessons。
+> Context）。换会话时不靠旧对话，而是重新注入“持久知识包”：MEMORY 尾部 + 知识库索引
+> + 当前任务快照 + 可复用知识 top5 + workflow 决策 + 已批准 lessons + 最近消息/动作。
+> 这就是轻量 RAG（retrieval-augmented context）：**检索是增强，Markdown 仍是真相**；
+> 未来加向量 retriever 不需要改变文件层。私有记忆严格按 `role_slug` 过滤，不混入其它
+> 角色；notes 再按 `scope/task_id` 隔离——task-scoped 只进同一任务，role-scoped 可跨
+> 任务复用；跨角色共享只走人工批准的 lessons。
 
 ### 8.2 三个层次
 
-| 层 | 位置 | 谁维护 | 上限 |
+| 层 | 位置 | 谁维护 | 作用域 / 上限 |
 |---|---|---|---|
-| 私有记忆 | `agents/<slug>/MEMORY.md` | 该 Agent 自主 | 建议 300 行，超出时提示整理 |
-| 私有笔记 | `agents/<slug>/notes/*.md` | 该 Agent 自主 | 无硬限，FTS 索引 |
-| 上下文快照 | `agents/<slug>/notes/knowledge/<task-id>/*.md` | 换会话前 Anvil 自动生成 | 无硬限，FTS 索引；建议周整理时清理旧快照 |
-| 共享经验 | `repos/<r>/.anvil/shared/lessons.md` | 提案 + 审批 | **80 条硬上限** |
+| 私有记忆 | `agents/<slug>/MEMORY.md` | 该 Agent 自主 | role；建议 300 行，超出时提示整理 |
+| 私有笔记 | `agents/<slug>/notes/*.md` | 该 Agent 自主 | role（可跨任务复用）；无硬限，`notes_fts` 索引 |
+| 上下文快照 | `agents/<slug>/notes/knowledge/<task-id>/*.md` | 换会话前 Anvil 自动生成 | task（仅同 `task_id` 可见）；无硬限，`notes_fts` 索引 |
+| 共享经验 | `repos/<r>/.anvil/shared/lessons.md` | 提案 + 审批 | 跨角色；**80 条硬上限** |
 
 私有层完全自治，Anvil 不干预内容，只做索引和"该整理了"的提醒。共享层是唯一需要把关的地方，因为它会注入给所有角色，一条错误的共享经验会污染整个系统。
 
+> **知识作用域（owner 2026-10-23）**：`notes` 增加 `scope`（task|role）、`kind`
+> （task_snapshot / vulnerability_pattern / failure_scenario / module_knowledge /
+> decision / note）、`task_id`、`tags`、`repo`、`module`、`confidence`、`updated_at`。
+> `knowledge/<task>/...` 默认 task snapshot + task scope；其余 notes 默认 role scope。
+> 旧库迁移时，普通 notes 回填为 role scope；`knowledge/` 目录无法解析到现存任务的行
+> 保持 unclassified（目录名保留在 `source_task`），不参与自动注入。同 path 多行会合并
+> 正文并保留最新元数据。任务删除后快照仍留在角色 home，但不再匹配任何当前任务，因此
+> 不会串进其它任务。
+
 > **隔离口径（owner 2026-10-23）**：`MEMORY.md`、`notes/`、知识快照都在各自角色
-> home 下；`memories`/`notes`/`memory_fts` 查询严格按 `role_slug` 过滤（不再混入
-> `'shared'`）。任务会话与 workflow 数据是任务级共享输入，但知识快照只写入该角色
-> 自己的 home。这是应用/数据层隔离，不是 OS 沙箱。
+> home 下；`memories`/`notes`/`memory_fts`/`notes_fts` 查询严格按 `role_slug` 过滤
+> （不再混入 `'shared'`），notes 再按 `scope/task_id` 做任务隔离。任务会话与 workflow
+> 数据是任务级共享输入，但知识快照只写入该角色自己的 home。这是应用/数据层隔离，
+> 不是 OS 沙箱。
 
 ### 8.3 升格流程
 
 Agent 执行 `anvil lesson propose "..."` 后：
 
-1. 提案进入待审队列，前端"知识库"页显示。
+1. 提案进入待审队列，在现有治理页显示（本阶段不新增独立知识库页）。
 2. 系统自动做一次 FTS 相似检索，若与现有条目高度重合则并列显示，方便你判断是重复还是补充。
 3. 你批准、编辑后批准、或拒绝。
 4. 批准后追加到 `lessons.md`，带标签与来源任务 id。
@@ -1014,50 +1093,88 @@ Agent 执行 `anvil lesson propose "..."` 后：
 
 **80 条这个数字是我定的，没有先例。** 逻辑是：注入时按标签筛选后通常命中 5-10 条，全量 80 条大约 3000-4000 token，正好是一个能整体浏览又不至于失控的量级。你实际用起来发现太少就改，改这个上限没有任何技术成本。
 
+> **实现口径（owner 2026-10-23）**：本阶段不新增前端知识库页面；角色知识通过 CIC、
+> 步骤 prompt、`anvil knowledge` CLI 与 API 使用，已有 lessons 审批仍在治理页。
+> 检索基线是 FTS5 BM25 + 元数据重排，不引入向量库；接口保留 dense/RRF 扩展点。
+
 ### 8.4 检索
 
-FTS5 虚拟表 `memory_fts(role_slug, content)` 索引通过 `anvil memory append` /
-`anvil note write` 写入的私有记忆与笔记；查询严格按角色过滤：
+两套 FTS 索引，职责分开：
 
-```sql
-SELECT role_slug, snippet(memory_fts, 1, '[', ']', '…', 32) AS s,
-       bm25(memory_fts) AS score
-  FROM memory_fts
- WHERE memory_fts MATCH :q
-   AND role_slug = :slug
- ORDER BY score LIMIT 8;
+- `memory_fts(role_slug, content)` 只索引 `anvil memory append` 写入的长期记忆；
+- `notes_fts(note_id, role_slug, kind, tags, content)` 索引 `notes`，由触发器与
+  `notes` 表保持同步。旧库启动迁移会把 notes 从 `memory_fts` 里剥离并重建两套索引。
+
+`search_knowledge` 先按 role/scope/task 过滤，再用 FTS5 BM25 取 top-30 级候选，
+最后做元数据重排：repo/module/tag/kind + 近 90 天时效，`source_task` 命中当前任务
+额外 +0.2，再乘 confidence 系数（`0.5 + 0.5 × confidence`）。结果按内容 hash 去重、
+同 path 合并、Jaccard 近重复过滤，并用 MMR 保证多样性（同一 kind 在有其它类型时最多
+2 条）。返回 `id/path/kind/scope/task_id/tags/repo/confidence/updated_at/snippet/
+provenance/bm25/why`。默认排除 `kind=task_snapshot`，快照由 CIC 的任务块单独取；
+`task_id=None` 的会话（reminder/直聊）永远看不到 task scope。做不到语义检索，只能做
+关键词——这是明确接受的取舍；接口保留 dense/RRF 扩展点。FTS5 不可用时回退带同样
+scope 过滤的 `LIKE`。
+
+**一个 path 一行索引**：`notes` 有唯一索引 `(role_slug, path)`。`anvil note write`
+的 append 会把新内容累积进文件正文后 upsert 同一行（保留原 id/created_at），replace
+则覆盖文件与行；文件头只保留一份 `<!-- anvil: {...} -->` 元数据。旧库同 path 多行在
+启动迁移时合并正文、保留最新元数据并去重。`path` 始终相对 `notes/`，写成
+`notes/foo.md` 也会规范化为 `foo.md`，不会出现 `notes/notes/`。
+
+角色可随时按需检索：
+
+```bash
+anvil knowledge search "JWT 算法混淆" --task $ANVIL_TASK_ID \
+  --kind vulnerability_pattern --tags jwt,auth --limit 5
+anvil knowledge show <note-id>
+anvil knowledge index                    # 各 kind 计数 + 最近标题
+anvil knowledge reindex [--dry-run] [--prune]   # 扫描 home/notes 同步 DB/FTS
+anvil note write <path> --content-file f --kind vulnerability_pattern \
+  --scope role --tags jwt,auth --repo openssl --module x509 --confidence 0.8
 ```
 
-查询词由任务标题、标签与 scope 路径拼成；检索结果只作为 CIC 的“相关记忆”块。
-做不到语义检索，只能做关键词——这是明确接受的取舍。FTS5 不可用时回退 `LIKE`
-（`memories.owner = :slug` / `notes.role_slug = :slug`）。
+检索结果是参考输入，不是事实：协议要求角色对关键结论用代码/测试验证，过期笔记不得
+盲信。`anvil memory search` 保留为兼容入口，合并返回 MEMORY 命中与 role-scoped notes；
+需要某个任务的内容时显式传 `task_id`。
+
+**上下文注入**：CIC（新会话）按 32k 字符预算打包，块有独立的 cap/min、保留优先级
+和展示顺序（两者分离）。保留优先级从高到低：MEMORY 尾部（≤4000）、当前任务快照
+（≤4000，按 `notes.task_id` 查询，不再用 path `LIKE`）、最近消息（≤4000，按 tail
+截断保留最新）、可复用知识 top5（≤4000）、workflow（≤4000）、lessons（≤1500）、
+知识索引（≤1200，最近 8 条标题）、最近动作（≤1000）。预算不足时从低优先级开始丢：
+动作 → 索引 → lessons → workflow/检索项，MEMORY/快照/最近消息优先保留。步骤 prompt
+（warm session）注入完整的 `## 可用知识` 块（≤1200）；普通/回复/规划 run 只给一行
+知识库入口，避免与 CIC 的检索块重复。投影到 `CLAUDE.md`/`AGENTS.md` 的上下文只带
+可复用知识与 lessons，**不注入任务快照**，每条/总长都有截断。
 
 > **索引边界（owner 2026-10-23）**：只有通过 `anvil memory append` / `anvil note write`
 > 写入的内容会进入 FTS。直接编辑 `MEMORY.md` 仍会被 CIC 直接读取（不走检索），
-> 但直接编辑 `notes/` 不会自动重建索引；需要可检索的笔记请用 API/CLI 写入。
+> 但直接编辑 `notes/` 不会自动重建索引；需要可检索的笔记请用 API/CLI 写入，或执行
+> `anvil knowledge reindex`。
 
 ### 8.5 自动整理
 
-不设专职档案员角色（那是过度设计），改为**每个角色通过 reminder 自己整理**。默认创建角色时附带一条周 reminder：
+不设专职档案员角色（那是过度设计），改为**每个角色通过 reminder 自己整理**。默认创建角色时附带一条每日 reminder：
 
-> 回顾本周完成的任务与 notes，把散落的要点合并进 MEMORY.md，删掉已经过时的内容，把值得共享的用 `anvil lesson propose` 提出来。检查 MEMORY.md 是否超过 300 行，超了就精简。
+> 回顾最近 24 小时完成的任务与 notes，把散落的要点合并进 MEMORY.md，删掉已经过时的内容，把值得共享的用 `anvil lesson propose` 提出来。把任务中可复用的漏洞模式/故障场景/模块知识提升为 role-scoped note（带 kind/tags/repo/confidence），任务决策留在 task scope；整理后执行 `anvil knowledge reindex` 让文件与索引一致。检查 MEMORY.md 是否超过 300 行，超了就精简。
 
 整理由 Agent 自己在自己的上下文里做，它最清楚哪些内容是重复的。人只需要偶尔翻一眼 `agents/` 那个 Git 仓库的提交历史，看记忆的演化方向是否正常。
 
 > **实现口径（owner 2026-10-23）：换会话前的事件驱动整理**
 >
-> 周 reminder 不够频繁，上下文可能在一小时内就满。Anvil 在每次换会话前自动生成
+> 每日 reminder 不够频繁，上下文可能在一小时内就满。Anvil 在每次换会话前自动生成
 > 一份**任务知识快照**：
 >
 > - 触发：主动 CIC 轮换、硬阈值、API 上下文溢出、请求体超限、角色 `reset-context`；
 > - 内容：任务标题/状态、当前 workflow 最近 60 步的状态/摘要/反馈、最近 30 条
 >   评论/@提及（截断），总长上限约 12k 字符；
-> - 写入 `agents/<slug>/notes/knowledge/<task-id>/<时间>-<触发>.md`，同步写 FTS
->   索引与 `session.context_digest` 审计；
+> - 写入 `agents/<slug>/notes/knowledge/<task-id>/<时间>-<触发>.md`，同步写
+>   `notes_fts` 索引与 `session.context_digest` 审计；
 > - 纯 DB 时间线生成，不调用模型，不依赖旧对话；新会话 CIC 会注入最近一份快照。
 >
-> 这样“清理上下文”只丢掉图片/附件和原始对话，不丢掉判断依据。周 reminder 继续
-> 负责把散落 notes 合并进 `MEMORY.md`；快照是事件驱动的补充，不替代周整理。
+> 这样“清理上下文”只丢掉图片/附件和原始对话，不丢掉判断依据。每日 reminder 继续
+> 负责把散落 notes 合并进 `MEMORY.md`、把可复用知识提升为 role-scoped note；快照是
+> 事件驱动的补充，不替代日常整理。
 
 ---
 
@@ -1090,7 +1207,7 @@ raft 的实际做法极简：Agent 可以编辑自己的 description，加一条
 ```markdown
 # 提案：调整工具清单
 - 提出时间：2026-09-14T10:22
-- 触发：周复盘 reminder
+- 触发：每日复盘 reminder
 - 字段：tools.allowlist
 
 ## 现状
@@ -1138,6 +1255,8 @@ GET    /api/v1/runtimes/{id}/capabilities      # 前端据此决定显示哪些�
 GET    /api/v1/roles                    POST   /api/v1/roles
 GET    /api/v1/roles/{id}               PUT    /api/v1/roles/{id}
 DELETE /api/v1/roles/{id}
+GET    /api/v1/roles/{id}/runtime       # 忙闲/当前任务/队列/各任务上下文槽
+POST   /api/v1/roles/{id}/session-reset # 清空该角色所有任务上下文槽
 GET    /api/v1/roles/{id}/versions
 POST   /api/v1/roles/{id}/rollback/{version}
 GET    /api/v1/roles/{id}/metrics
@@ -1238,11 +1357,16 @@ POST   /api/v1/proposals                     # anvil self propose（创建待审
 POST   /api/v1/proposals/{id}/approve
 POST   /api/v1/proposals/{id}/reject
 
-# 记忆与自我（Agent 写路径，走后端以同步 FTS）
+# 记忆、知识库与自我（Agent 写路径，走后端以同步 FTS）
 GET    /api/v1/me                            # anvil self show（profile 快照 + 身份 + 并发 + 成本）
 POST   /api/v1/me/memory                     # anvil memory append（追加自身 MEMORY.md）
-GET    /api/v1/me/memory/search?q=           # anvil memory search（FTS5）
-POST   /api/v1/me/notes                      # anvil note write
+GET    /api/v1/me/memory/search?q=           # anvil memory search（MEMORY + role notes）
+POST   /api/v1/me/notes                      # anvil note write（kind/scope/task_id/tags/repo/...）
+GET    /api/v1/me/knowledge/search?q=&task_id=&scope=&kind=&tags=&repo=&module=&limit=
+GET    /api/v1/me/knowledge/index?task_id=   # 各 kind 计数 + 最近标题
+GET    /api/v1/me/knowledge/{id}?task_id=    # knowledge show（角色/任务隔离）
+POST   /api/v1/me/knowledge/reindex          # 扫描本角色 notes/ 同步 DB/FTS
+POST   /api/v1/knowledge/reindex             # human-only：按角色或全量 reindex
 POST   /api/v1/me/instruction                # anvil self edit-instruction
 
 # 治理
@@ -1469,8 +1593,11 @@ M3 的工具治理看你实际挂多少工具决定，M4 的长程能力看你�
 | 僵尸防护 | `_waiting_for_reply` 只看最后一次 @ 及之后回复；`process_exit` 遇到上下文溢出让路；`projecting` 卡住周期重投 |
 | @ 唤醒 | 范围 = task_assignees + 单负责人 + planner + workflow 步骤角色 + 被明确 @ 的现有角色；普通任务/子任务起普通 run，工作流任务起 reply run；评论里的 @ 不唤醒（CLI warning + UI 标黄） |
 | 回复 run | 允许按消息明确指示 claim/submit 另一个任务/子任务；当前任务仍禁止 |
-| 知识快照 | 换会话前写入 `notes/knowledge/<task-id>/<时间>-<触发>.md`（workflow 决策 + 最近结论），FTS 索引 + audit；CIC 注入 MEMORY 尾部、任务相关 FTS 命中、workflow 决策、最近快照、最近消息/动作 |
+| 知识快照 | 换会话前写入 `notes/knowledge/<task-id>/<时间>-<触发>.md`（workflow 决策 + 最近结论），`notes_fts` + audit；只进入同一 `task_id` 的 CIC |
 | 角色隔离 | `MEMORY.md`/`notes/`/知识快照/FTS 查询按 role_slug 严格隔离；共享只走人工批准的 lessons |
+| 知识作用域 | `notes` 增加 scope/kind/task_id/tags/repo/confidence；独立 `notes_fts`；同 path 唯一 + append-upsert；CIC/检索/投影按 task 隔离，role 知识跨任务复用 |
+| 检索排序 | FTS top-30 候选 + 元数据重排；同任务 `source_task` +0.2、confidence 乘数 `0.5+0.5×conf`、同 kind 最多 2 条；content hash/近重复去重、同 path 合并 |
+| CIC 预算 | 32k 字符上限；块级 cap/min，保留优先级与展示顺序分离；按“动作→索引→lessons→workflow/检索项”丢弃，MEMORY/快照/最近消息优先；最近消息 tail 截断 |
 | 新增字段 | `runs.context_reset_count`、`workflow_steps.recovery_count`、`workflow_steps.next_retry_at` |
 | 新增配置 | `ANVIL_CONTEXT_HARD_RESET_RATIO`、`ANVIL_CONTEXT_OUTPUT_RESERVE`、`ANVIL_CONTEXT_RESET_MAX_RETRIES`、`ANVIL_PAYLOAD_HARD_RESET_CHARS`、`ANVIL_PAYLOAD_HINT_CHARS`、`ANVIL_RUN_DEAD_GRACE_SECONDS`、`ANVIL_RUN_PHASE_STALL_SECONDS`、`ANVIL_AUTO_RECOVER*` |
 
@@ -1503,4 +1630,7 @@ M3 的工具治理看你实际挂多少工具决定，M4 的长程能力看你�
 | 2026-10-23 | 不允许“永久 running” | §6.2 |
 | 2026-10-23 | 自动换会话与 CIC 内容 | §6.3 |
 | 2026-10-23 | CIC 检索、角色隔离、索引边界、事件驱动整理 | §8 |
+| 2026-10-23 | 知识作用域（task/role）、notes_fts、按需检索与投影隔离 | §8.2 / §8.4 |
+| 2026-10-23 | 知识库同 path upsert、元数据排序、CIC 优先级预算 | §6.3 / §8.2 / §8.4 |
 | 2026-10-23 | 可靠性/请求体/知识延续增量 | 附录 A.2 |
+| 2026-10-23 | 多任务角色调度、任务上下文槽、实时点灯 | §6.1 / §6.3 / `docs/superpowers/specs/2026-10-23-role-task-contexts-design.md` |

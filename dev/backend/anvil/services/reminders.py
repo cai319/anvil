@@ -4,7 +4,7 @@
 `anvil reminder add` 与人工创建的 reminder 走同一条路径。
 
 cron 解析不引第三方依赖：支持 `*`、`*/n`、`a,b`、`a-b`、`a-b/n` 五段表达式。
-时间按本机时区计算（与用户对「每周一早九点」的直觉一致），存储为带偏移的 ISO。
+时间按本机时区计算（与用户对「每天早九点」的直觉一致），存储为带偏移的 ISO。
 """
 from __future__ import annotations
 
@@ -183,7 +183,8 @@ def fire_due_reminders(conn: sqlite3.Connection, now: datetime | None = None) ->
             continue
 
         role = r["role_slug"]
-        if not role or conn.execute("SELECT 1 FROM roles WHERE slug=?", (role,)).fetchone() is None:
+        if not role or conn.execute(
+                "SELECT 1 FROM roles WHERE slug=? AND enabled=1", (role,)).fetchone() is None:
             conn.execute("UPDATE reminders SET status='error' WHERE id=?", (r["id"],))
             continue
         runs_service.create_run(conn, role, None, prompt=r["prompt"] or "定时提醒")

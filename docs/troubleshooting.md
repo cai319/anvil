@@ -47,7 +47,7 @@ pip install pywin32
 
 ### Q6. 角色状态显示灰色
 
-灰色 = 空闲，不是故障。常驻会话在空闲超过 `ANVIL_IDLE_RELEASE_MINUTES`（默认 15 分钟）后会退出，`session_id` 保留，下次唤醒用 `--resume` 恢复上下文。
+灰色 = 空闲，不是故障。常驻会话在空闲超过 `ANVIL_IDLE_RELEASE_MINUTES`（默认 15 分钟）后会退出；每个 `(角色, 任务)` 的 `session_id` 保存在 `role_task_sessions`，下次唤醒按任务用 `--resume` 恢复对应上下文。角色在别的任务上忙碌时，本任务的 @/步骤会排队（任务详情「角色运行时」页签可见）。
 
 ### Q7. 端口 7317 被占用
 
@@ -284,8 +284,9 @@ reader 遇到解码/管道异常时会记录完整 traceback 到 `role-session.l
 
 **手动处理**
 
-- Run 详情 → **重置会话（新上下文）**，或 `POST /api/v1/runs/<run-id>/session-reset`；
-- 角色详情 →「运行时」→ **重置 Agent 会话**；
+- Run 详情 → **重置会话（新上下文）**，或 `POST /api/v1/runs/<run-id>/session-reset`
+  （只清该 run 所属任务的上下文槽）；
+- 角色详情 →「运行时」→ **重置 Agent 会话**（清空该角色所有任务槽）；
 - 检查是否还有僵尸 run（`status='running'` 但角色进程已不在）：重启后端会做启动自愈，
   调度器也会按宽限期回收。
 
@@ -307,15 +308,21 @@ reader 遇到解码/管道异常时会记录完整 traceback 到 `role-session.l
 **长期知识不受影响**
 
 - 换会话前 Anvil 会自动把任务的工作流步骤摘要、最近结论与交接写入
-  `data/agents/<slug>/notes/knowledge/`，并建立 FTS 索引；
-- 新会话的 CIC 注入本角色 `MEMORY.md` 尾部、按任务检索的相关记忆、工作流决策与最近快照；
-- 私有记忆按角色隔离：`data/agents/<slug>/MEMORY.md`、`notes/`、`notes/knowledge/` 与 FTS 检索
-  都只属于该角色；跨角色共享只通过人工批准的 lessons 通道；
-- 角色在运行中用 `anvil memory append "关键结论..."` 主动沉淀；每周复盘 reminder 会
-  把散落 notes 合并进 `MEMORY.md`。
+  `data/agents/<slug>/notes/knowledge/`，并建立 `notes_fts` 索引；
+- 新会话的 CIC 注入本角色 `MEMORY.md` 尾部、知识库索引、按任务检索的可复用知识、
+  当前任务快照、工作流决策与最近消息；
+- 私有记忆按角色隔离：`data/agents/<slug>/MEMORY.md`、`notes/`、`notes/knowledge/` 与
+  FTS 检索都只属于该角色；跨角色共享只通过人工批准的 lessons 通道；
+- 知识按 scope 隔离：`notes/knowledge/<task>/` 是 task scope，只进入**同一任务**的
+  CIC/检索；普通 `notes/` 是 role scope，可跨任务复用。其它任务的快照不会串进来，
+  投影到 `CLAUDE.md` 时也不注入任务快照；
+- 角色在运行中用 `anvil memory append "关键结论..."` 主动沉淀；每日复盘 reminder 会
+  把散落 notes 合并进 `MEMORY.md`，并把可复用知识提升为 role-scoped note。
 
 > 只有通过 `anvil memory append` / `anvil note write` 写入的内容会进入 FTS 索引；
 > 直接编辑 `MEMORY.md` 仍会被 CIC 直接读取，但直接编辑 `notes/` 不会自动重建索引。
+> 需要检索时用 `anvil knowledge search "<关键词>" --task $ANVIL_TASK_ID`；直接改文件后
+> 用 `anvil knowledge reindex` 同步（`--dry-run` 预览，`--prune` 删除已不存在的文件行）。
 
 ### Q18. 角色被 @ 了但没被唤醒 / @ 没标黄
 

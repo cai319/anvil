@@ -206,6 +206,15 @@ class MemoryAppendIn(BaseModel):
 class NoteWriteIn(BaseModel):
     path: str
     content: str
+    kind: str | None = None
+    scope: str | None = None
+    task_id: str | None = None
+    source_task: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    repo: str | None = None
+    module: str | None = None
+    confidence: float = Field(0.5, ge=0.0, le=1.0)
+    mode: str = "append"  # append | replace
 
 
 class ProposalIn(BaseModel):

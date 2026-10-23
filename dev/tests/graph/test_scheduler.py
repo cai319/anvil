@@ -125,7 +125,7 @@ def test_reap_dead_persistent_run(tmp_path, monkeypatch):
         @staticmethod
         def status(role):
             return {"alive": False}
-        def mark_needs_fresh_context(self, role, note=""):
+        def mark_needs_fresh_context(self, role, note="", task_id=None):
             self.fresh.append(role)
 
     mgr = _Mgr()
@@ -162,7 +162,7 @@ def test_reap_keeps_live_persistent_run(tmp_path, monkeypatch):
         def status(role):
             return {"alive": True, "status": "busy", "current_run_id": "R-LIVE",
                     "queue_len": 0}
-        def mark_needs_fresh_context(self, role, note=""):
+        def mark_needs_fresh_context(self, role, note="", task_id=None):
             self.fresh.append(role)
 
     mgr = _Mgr()
@@ -199,7 +199,7 @@ def test_reap_suspends_run_not_currently_processed(tmp_path, monkeypatch):
         def status(role):
             return {"alive": True, "status": "idle", "current_run_id": None,
                     "queue_len": 0}
-        def mark_needs_fresh_context(self, role, note=""):
+        def mark_needs_fresh_context(self, role, note="", task_id=None):
             self.fresh.append(role)
 
     mgr = _Mgr()

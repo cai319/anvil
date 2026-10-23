@@ -56,13 +56,13 @@ async def test_reminder_at_fires_and_creates_run(client):
     assert reminders[0]["status"] == "fired"
 
 
-async def test_role_create_attaches_weekly_review_reminder(client):
+async def test_role_create_attaches_daily_review_reminder(client):
     await _seed(client)
     reminders = (await client.get(f"{API}/reminders", headers=auth_headers())).json()
-    weekly = [r for r in reminders if r["role_slug"] == "qa-role" and "回顾本周" in (r["prompt"] or "")]
-    assert len(weekly) == 1
-    assert weekly[0]["kind"] == "cron"
-    assert weekly[0]["cron_expr"] == "0 9 * * 1"
+    daily = [r for r in reminders if r["role_slug"] == "qa-role" and "回顾最近" in (r["prompt"] or "")]
+    assert len(daily) == 1
+    assert daily[0]["kind"] == "cron"
+    assert daily[0]["cron_expr"] == "0 9 * * *"
 
 
 async def test_reminder_cron_crud(client):

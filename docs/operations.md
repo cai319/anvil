@@ -100,15 +100,30 @@ cd C:\path\to\aliceAgent\dev\dist\anvil-dist
 > 角色 `home_path` 会在后端启动时自动重算为当前数据目录下的 `agents/<slug>`，不需要手动改数据库；
 > 请连同 `agents/` 目录一起复制。若只复制 `anvil.db`，会创建空 home（历史指令/记忆会丢失）。
 
+### 知识库索引与检索
+
+- 文件是真相，`notes` 表与 `notes_fts` 只是索引；`anvil note write` 会同步写文件与索引。
+- 同一 path 只保留一行索引：append 累积文件正文后 upsert，`--replace` 覆盖；路径相对
+  `notes/`（写成 `notes/foo.md` 也会规范化为 `foo.md`）。
+- `anvil knowledge search "<关键词>" [--task ID] [--kind ...] [--tags ...]` 按角色/任务
+  scope 检索；不传 `--task` 时只返回 role-scoped 知识。
+- `anvil knowledge index [--task ID]` 查看各 kind 计数与最近笔记。
+- `anvil knowledge reindex [--dry-run] [--prune]` 扫描角色 `notes/**/*.md` 重建索引；
+  直接编辑文件后使用。`--prune` 会删除磁盘上已不存在的文件的索引行。
+- 任务快照（`notes/knowledge/<task>/`）只对同一任务可见；普通 `notes/` 是 role scope，
+  可跨任务复用。其它任务的快照不会进入本任务的 CIC/检索/投影。
+
 ### 重置
 
 - **不要直接删除 `anvil.db` 而保留 `agents/`**：状态与文件会不一致；
 - 想要“干净重来”时，停止后端后整体移走/删除数据目录，再重新 `anvil init`；
-- 会话上下文重置：
-  - Run 详情 → **重启进程（保留上下文）**：保留 `session_id`，下次 `--resume`；
-  - Run 详情 → **重置会话（新上下文）**：终止常驻进程并清空 `session_id`，下次新建会话；
-  - Run 详情 → **全量重置（清记忆）**：会话与 `MEMORY.md` / `notes` 都清空（先备份 home）；
-  - 角色详情 →「运行时」→ **重置 Agent 会话**：无需存在 run，直接换新上下文（适合 Cindy）。
+- 会话上下文重置（每个角色在每个任务上有一个独立上下文槽）：
+  - Run 详情 → **重启进程（保留上下文）**：保留所有任务槽的 `session_id`，下次按任务 `--resume`；
+  - Run 详情 → **重置会话（新上下文）**：只清该 run 所属任务的槽，其它任务上下文保留；
+  - Run 详情 → **全量重置（清记忆）**：所有任务槽与 `MEMORY.md` / `notes` 都清空（先备份 home）；
+  - 角色详情 →「运行时」→ **重置 Agent 会话**：无需存在 run，清空该角色所有任务槽（适合 Cindy）。
+- 角色忙在任务 A 时，任务 B 的 @/步骤会排队；任务详情「角色运行时」页签可看到
+  当前忙碌任务与本任务排队数。
 
 ---
 

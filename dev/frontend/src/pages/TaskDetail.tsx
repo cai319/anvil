@@ -3,6 +3,9 @@ import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type Role, typ
 import { RoleSessions } from "./RoleSessions";
 import { WorkflowGraph } from "./WorkflowGraph";
 import { roleStatusFromWorkflow } from "../workflowStatus";
+import { formatClock } from "../time";
+import { roleLiveDot, roleLiveState, stateClassForDot } from "../roleLive";
+import { useRoleRuntimes } from "../useRoleRuntimes";
 import { STATUS_META, isDynamicStep, summarizeLoops, type LoopSummary } from "../workflowGroups";
 
 const STATUS_LABEL: Record<Task["status"], string> = {
@@ -25,14 +28,6 @@ const RUN_LABEL: Record<string, string> = {
   suspended: "已挂起",
 };
 
-const ROLE_CLAIM_LABEL: Record<string, string> = {
-  pending: "未认领",
-  working: "工作中",
-  submitted: "已提交",
-  released: "已放弃",
-  approved: "已通过",
-};
-
 const AVATAR_COLORS = ["#6d7cff", "#34d399", "#fbbf24", "#60a5fa", "#f472b6", "#2dd4bf", "#fb923c", "#a78bfa"];
 // 系统伪发送者：workflow 引擎/系统通知不是真实 Agent 角色。
 const SYSTEM_SENDERS: Record<string, string> = {
@@ -45,27 +40,37 @@ function avatarColor(slug: string): string {
   return AVATAR_COLORS[h % AVATAR_COLORS.length];
 }
 
-/** 把文本里命中角色的 @slug/@显示名 标黄；未命中角色的 @ 保持原样。 */
+/** 把文本里命中角色的 @slug/@显示名（昵称）标黄；未命中角色的 @ 保持原样。 */
 function renderMentionText(text: string, tokens: Map<string, string>): ReactNode {
   if (!text || tokens.size === 0) return text;
+  const keys = [...tokens.keys()].sort((a, b) => b.length - a.length);
+  const boundary = (ch: string | undefined) => !ch || /[\s，。；;:：,.!?！？、）)]/.test(ch);
   const out: ReactNode[] = [];
-  const re = /@([\w\-一-龥]+)/g;
+  let i = 0;
   let last = 0;
-  let match: RegExpExecArray | null;
   let idx = 0;
-  while ((match = re.exec(text)) !== null) {
-    if (!tokens.has(match[1].toLowerCase())) continue;
-    out.push(text.slice(last, match.index));
-    out.push(
-      <span className="mention-tag" key={`mention-${idx++}`}>@{match[1]}</span>,
-    );
-    last = match.index + match[0].length;
+  while (i < text.length) {
+    if (text[i] !== "@") { i += 1; continue; }
+    const rest = text.slice(i + 1).toLowerCase();
+    const hit = keys.find((k) => {
+      if (!rest.startsWith(k)) return false;
+      return boundary(text[i + 1 + k.length]);
+    });
+    if (!hit) { i += 1; continue; }
+    const original = text.slice(i + 1, i + 1 + hit.length);
+    out.push(text.slice(last, i));
+    out.push(<span className="mention-tag" key={`mention-${idx++}`}>@{original}</span>);
+    i += 1 + hit.length;
+    last = i;
   }
   out.push(text.slice(last));
   return out;
 }
 
-function describe(ev: TimelineEvent): { text: string; runStatus?: string; mention?: string } {
+function describe(
+  ev: TimelineEvent,
+  nameFor: (slug: string) => string = (slug) => slug,
+): { text: string; runStatus?: string; mention?: string } {
   const p = ev.payload;
   switch (ev.kind) {
     case "comment":
@@ -73,11 +78,18 @@ function describe(ev: TimelineEvent): { text: string; runStatus?: string; mentio
     case "mention": {
       const target = String(p.target ?? "human");
       const raw = String(p.message ?? "");
-      const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      return {
-        text: raw.replace(new RegExp(`^@\\s*${escaped}\\s*[，,:：]?\\s*`, "i"), ""),
-        mention: target,
-      };
+      // 正文可能以昵称或 slug 开头；两者都尝试去掉，避免标签与正文重复。
+      let body = raw;
+      for (const token of [nameFor(target), target]) {
+        if (!token) continue;
+        const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const re = new RegExp(`^@\\s*${escaped}\\s*[，,:：]?\\s*`, "i");
+        if (re.test(body)) {
+          body = body.replace(re, "");
+          break;
+        }
+      }
+      return { text: body, mention: target };
     }
     case "submit":
       return { text: "提交了评审" + (p.summary ? `：${p.summary}` : "") };
@@ -154,6 +166,7 @@ export function TaskDetail({ id }: { id: string }) {
   const [children, setChildren] = useState<Task[]>([]);
   const [wfView, setWfView] = useState<"graph" | "list">("graph");
   const [busy, setBusy] = useState(false);
+  const { slugs: liveSlugs, runtimes: roleRuntimes } = useRoleRuntimes(task);
 
   const refreshWorkflow = () =>
     api.getTaskWorkflow(id).then(setWorkflow).catch(() => setWorkflow(null));
@@ -280,6 +293,63 @@ export function TaskDetail({ id }: { id: string }) {
   if (error) return <p className="error">{error}</p>;
   if (!task) return <p className="muted">加载中…</p>;
 
+  /** 任务信息面板统一取数：点灯、状态徽标、排队数、详情文案。 */
+  const roleLiveFor = (slug: string) => {
+    const rt = roleRuntimes[slug];
+    const ctxHere = rt?.contexts?.find((c) => c.task_id === task.id);
+    const wfState = roleStatusFromWorkflow(workflow, slug);
+    const queued = rt?.queue_tasks?.find((q) => q.id === task.id)?.count ?? 0;
+    const live = roleLiveState(rt, task.id, {
+      hasOpenStep: wfState?.cls === "in_progress",
+      allDone: wfState?.cls === "done",
+      queuedHere: queued,
+    });
+    let state: { label: string; cls: string } = live;
+    if (wfState?.cls === "closed") state = wfState;
+    else if (live.cls === "todo" && wfState?.cls === "done") state = wfState;
+    const dot = roleLiveDot(
+      rt, task.id, Boolean(ctxHere?.has_session),
+      wfState?.cls === "in_progress", wfState?.cls === "closed",
+    );
+    const display = roles.find((r) => r.slug === slug)?.display_name ?? slug;
+    let detail = "";
+    if (rt?.switching) detail = "正在切换任务上下文…";
+    else if (live.cls === "busy") {
+      detail = `正在处理「${rt?.current_task?.title ?? rt?.current_task_id}」`;
+      if (queued) detail += ` · 本任务排队 ${queued} 条`;
+    } else if (live.cls === "in_progress") {
+      detail = rt?.current_step_id ? `当前步骤 ${rt.current_step_id}` : "正在本任务工作";
+    } else if (live.cls === "queued") {
+      detail = queued > 0 ? `本任务排队 ${queued} 条` : "等待上下文切换";
+    } else if (!rt) {
+      detail = "状态加载中…";
+    } else if (ctxHere?.has_session) {
+      detail = "空闲 · 本任务上下文已保留";
+    } else {
+      detail = "空闲 · 可安排任务";
+    }
+    const title = `${display}：${dot.title}`
+      + (queued ? ` · 本任务有 ${queued} 条消息排队，等当前轮结束` : "");
+    return { slug, rt, claim: (task.role_claims ?? []).find((c) => c.role_slug === slug),
+             state, dot, queued, detail, title };
+  };
+
+  /** 点灯 → 状态徽标 → slug 的统一呈现。 */
+  const renderRoleLive = (live: ReturnType<typeof roleLiveFor>) => (
+    <span className="role-live-chip" title={live.title}>
+      <i className={`role-live-dot ${live.dot.cls}`} aria-label={live.title} />
+      <span className={`status status-${stateClassForDot(live.dot.cls)} role-live-state`}>
+        {live.state.label}
+      </span>
+      <span className="role-live-name">{live.slug}</span>
+      {live.queued > 0 && (
+        <span className="role-live-queue" title={`本任务有 ${live.queued} 条消息排队，等当前轮结束`}>
+          排队 {live.queued}
+        </span>
+      )}
+    </span>
+  );
+
   const act = async (fn: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);
@@ -317,11 +387,21 @@ export function TaskDetail({ id }: { id: string }) {
   // Cindy/planner 放前面：候选最多只显示 10 条，不能让它们被大量任务成员挤出。
   const mentionRoles = [...extraMentionRoles, ...baseMentionRoles];
 
+  // slug 是后台身份；display_name 是界面昵称。两者都注册为 token，
+  // 发送时统一解析回 slug，保证消息正文可显示昵称、后台仍按 slug 激活角色。
   const roleTokens = new Map<string, string>();
   mentionRoles.forEach((r) => {
     roleTokens.set(r.slug.toLowerCase(), r.slug);
     if (r.display_name) roleTokens.set(r.display_name.toLowerCase(), r.slug);
   });
+
+  // human 是自然人身份，后台 slug 固定为 human，界面统一显示「你（自然人）」。
+  roleTokens.set("human", "human");
+  roleTokens.set("你（自然人）", "human");
+  const displayNameFor = (slug: string) =>
+    slug === "human"
+      ? "你（自然人）"
+      : (roles.find((r) => r.slug === slug)?.display_name || slug);
 
   const mentionQuery = (mention?.query || "").toLowerCase();
   const seenMentionSlugs = new Set<string>();
@@ -363,11 +443,12 @@ export function TaskDetail({ id }: { id: string }) {
     const caret = input.selectionStart ?? comment.length;
     let after = comment.slice(caret);
     if (after.startsWith(" ")) after = after.slice(1);
+    // 输入框显示昵称，真正发送时再解析回 slug；后台数据和激活都只用 slug。
     const next = comment.slice(0, mention.start)
-      + "@" + candidate.slug + " " + after;
+      + "@" + candidate.name + " " + after;
     setComment(next);
     setMention(null);
-    const pos = mention.start + candidate.slug.length + 2; // @ + slug + space
+    const pos = mention.start + candidate.name.length + 2; // @ + 昵称 + space
     requestAnimationFrame(() => {
       input.focus();
       input.setSelectionRange(pos, pos);
@@ -409,15 +490,22 @@ export function TaskDetail({ id }: { id: string }) {
     setMention(null);
     // 自动解析消息中的 @角色（slug 或显示名），命中参与角色/Cindy/planner
     // 即走 mention（唤醒 + 时间线标黄）
-    const byToken = new Map<string, string>();
-    mentionRoles.forEach((r) => {
-      byToken.set(r.slug.toLowerCase(), r.slug);
-      if (r.display_name) byToken.set(r.display_name.toLowerCase(), r.slug);
-    });
-    const targets = [...new Set(
-      [...text.matchAll(/@([\w\-\u4e00-\u9fa5]+)/g)]
-        .map((m) => byToken.get(m[1].toLowerCase()))
-        .filter((v): v is string => Boolean(v)))];
+    // 消息正文可以写昵称或 slug；这里统一解析回 slug 作为 mention target。
+    // 例：输入框显示「@产品经理」，发送时 target=「pm」，正文保留昵称。
+    const lower = text.toLowerCase();
+    const hasToken = (token: string) => {
+      const needle = "@" + token.toLowerCase();
+      let at = lower.indexOf(needle);
+      while (at >= 0) {
+        const next = text[at + needle.length];
+        if (!next || /[\s，。；;:：,.!?！？、）)]/.test(next)) return true;
+        at = lower.indexOf(needle, at + 1);
+      }
+      return false;
+    };
+    const targets = [...new Set(mentionRoles
+      .filter((r) => hasToken(r.slug) || (r.display_name ? hasToken(r.display_name) : false))
+      .map((r) => r.slug))];
     await act(async () => {
       if (targets.length) {
         for (const target of targets) {
@@ -655,7 +743,7 @@ export function TaskDetail({ id }: { id: string }) {
 
           {drafts.some((d) => d.status === "pending" && d.kind === "role_suggestion") && (
             <p className="muted">
-              有角色建议待审批，请到收件箱处理；批准后会自动创建角色、绑定任务并重新规划工作流。
+              有角色建议待审批，请到收件箱处理；批准只创建/绑定角色，需要继续时在任务会话 @Cindy 或对应角色。
             </p>
           )}
           {drafts.filter((d) => d.status === "pending" && d.kind !== "role_suggestion").length > 0 && (
@@ -743,28 +831,42 @@ export function TaskDetail({ id }: { id: string }) {
               <p className="muted empty">当前筛选下没有交互。</p>
             )}
             {visibleTimeline.map((ev) => {
-              const d = describe(ev);
+              const d = describe(ev, displayNameFor);
               const role = ev.role ?? "human";
+              const isHuman = role === "human";
               const systemLabel = SYSTEM_SENDERS[role];
-              const displayRole = systemLabel ?? role;
+              // 聊天框用户名显示昵称；后台仍保留 slug 作为身份。
+              const displayRole = isHuman
+                ? "你（自然人）"
+                : (systemLabel ?? displayNameFor(role));
               return (
                 <div
-                  className={`thread-item ${ev.kind === "comment" ? "is-message" : ""} ${d.mention ? "is-mention" : ""} ${systemLabel ? "is-system" : ""}`}
+                  className={`thread-item ${ev.kind === "comment" ? "is-message" : ""} ${d.mention ? "is-mention" : ""} ${systemLabel || isHuman ? "is-system" : ""}`}
                   key={ev.key}
                 >
-                  <span className="thread-avatar" style={{ background: d.mention ? "var(--amber)" : systemLabel ? "#475569" : avatarColor(role) }}>
-                    {d.mention ? "@" : systemLabel ? "⚙" : role.slice(0, 1).toUpperCase()}
+                  <span
+                    className="thread-avatar"
+                    style={{
+                      background: d.mention ? "var(--amber)"
+                        : isHuman ? "#0ea5a4" : systemLabel ? "#475569" : avatarColor(role),
+                    }}
+                  >
+                    {d.mention ? "@" : isHuman ? "人" : systemLabel ? "⚙" : role.slice(0, 1).toUpperCase()}
                   </span>
                   <div className="thread-body">
                     <div className="thread-meta">
-                      <strong>{displayRole}</strong>
-                      <span className="muted mono">{ev.ts.slice(11, 19)}</span>
+                      <strong title={isHuman ? "human" : `${displayRole}（${role}）`}>
+                        {displayRole}
+                      </strong>
+                      <span className="muted mono">{formatClock(ev.ts)}</span>
                       {d.runStatus && <span className={`status status-${d.runStatus}`}>{RUN_LABEL[d.runStatus]}</span>}
                     </div>
                     <div className="thread-text">
                       {d.mention ? (
                         <>
-                          <span className="mention-tag">@{d.mention}</span>{" "}
+                          <span className="mention-tag">
+                            @{displayNameFor(d.mention)}
+                          </span>{" "}
                           {renderMentionText(d.text, roleTokens)}
                         </>
                       ) : (
@@ -796,7 +898,7 @@ export function TaskDetail({ id }: { id: string }) {
                 }}
                 onClick={(e) => syncMention(comment, e.currentTarget.selectionStart)}
                 onBlur={() => window.setTimeout(() => setMention(null), 150)}
-                placeholder="输入消息；输入 @ 弹出角色选择，例如：@pm 请启动程序…"
+                placeholder="输入消息；输入 @ 选择角色（界面显示昵称，后台用 slug 激活）"
               />
               {mention && mentionCandidates.length > 0 && (
                 <div className="mention-menu" role="listbox" aria-label="选择要 @ 的角色">
@@ -811,8 +913,9 @@ export function TaskDetail({ id }: { id: string }) {
                       onMouseEnter={() => setMentionIndex(i)}
                       onClick={() => chooseMention(c)}
                     >
-                      <span className="mention-item-name">{c.name}</span>
-                      <span className="mention-item-slug">@{c.slug}</span>
+                      <span className="mention-item-name">
+                        {c.name !== c.slug ? `${c.name}（${c.slug}）` : c.slug}
+                      </span>
                     </button>
                   ))}
                 </div>
@@ -833,7 +936,11 @@ export function TaskDetail({ id }: { id: string }) {
             <dt>状态</dt>
             <dd><span className={`status status-${task.status}`}>{STATUS_LABEL[task.status]}</span></dd>
             <dt>领队</dt>
-            <dd>{task.assignee ?? (task.assignees?.length ? "待认领" : "未指派")}</dd>
+            <dd>
+              {task.assignee
+                ? renderRoleLive(roleLiveFor(task.assignee))
+                : (task.assignees?.length ? "待认领" : "未指派")}
+            </dd>
             <dt>类型</dt><dd>{task.type ?? "—"}</dd>
             <dt>标签</dt><dd>{task.tags?.length ? task.tags.join(", ") : "—"}</dd>
             <dt>ID</dt><dd className="mono">{task.id}</dd>
@@ -855,17 +962,17 @@ export function TaskDetail({ id }: { id: string }) {
           )}
 
           <h3 className="side-h">参与角色</h3>
-          <ul className="side-list">
-            {(task.role_claims ?? []).length === 0 && <li className="muted">（未绑定多角色）</li>}
-            {(task.role_claims ?? []).map((c) => {
-              const wfSt = roleStatusFromWorkflow(workflow, c.role_slug);
-              const cls = wfSt?.cls ?? (c.status === "submitted" ? "in_review" : c.status === "approved" ? "done" : c.status === "working" ? "in_progress" : "todo");
-              const label = wfSt?.label ?? ROLE_CLAIM_LABEL[c.status] ?? c.status;
+          <ul className="side-list side-roles">
+            {liveSlugs.length === 0 && <li className="muted">（未指派角色）</li>}
+            {liveSlugs.map((slug) => {
+              const live = roleLiveFor(slug);
               return (
-                <li key={c.role_slug}>
-                  <strong>{c.role_slug}</strong>{" "}
-                  <span className={`status status-${cls}`}>{label}</span>
-                  {c.summary && <div className="muted">{c.summary}</div>}
+                <li key={slug} className="side-role">
+                  {renderRoleLive(live)}
+                  <div className="side-role-detail muted">{live.detail}</div>
+                  {live.claim?.summary && (
+                    <div className="side-role-summary muted">{live.claim.summary}</div>
+                  )}
                 </li>
               );
             })}

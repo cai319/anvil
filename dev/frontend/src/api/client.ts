@@ -49,6 +49,37 @@ export interface Role {
   definition?: Record<string, unknown>;
 }
 
+export interface RoleTaskContext {
+  task_id: string | null;
+  task_title: string;
+  task_status: string | null;
+  has_session: boolean;
+  session_id: string;
+  context_tokens: number;
+  last_active_at: string | null;
+  status: string;
+  cwd: string | null;
+  workspace_path: string | null;
+}
+
+export interface RoleRuntimeStatus {
+  role_slug: string;
+  alive: boolean;
+  status: string;
+  busy_since: string | null;
+  current_task_id: string | null;
+  current_task: { id: string; title: string; status: string | null } | null;
+  current_run_id: string | null;
+  current_step_id: string | null;
+  context_task_id: string | null;
+  queue_len: number;
+  queue_tasks: { id: string; title: string; status: string | null; count: number }[];
+  contexts: RoleTaskContext[];
+  switching?: boolean;
+  context_tokens: number;
+  model_id: string | null;
+}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     // FastAPI 的错误原因在响应体 detail 里；只显示状态码会丢失最有用的诊断信息。
@@ -223,6 +254,8 @@ export const api = {
     }).then((r) => json<Role>(r)),
   updateRoleRuntime: (slug: string, runtimeId: string): Promise<Role> =>
     req("PUT", `/roles/${slug}/runtime`, { id: runtimeId }).then((r) => json<Role>(r)),
+  getRoleRuntime: (slug: string): Promise<RoleRuntimeStatus> =>
+    authFetch(`${BASE}/roles/${slug}/runtime`).then((r) => json<RoleRuntimeStatus>(r)),
   resetRoleSession: (slug: string): Promise<{ slug: string; reset: string }> =>
     req("POST", `/roles/${slug}/session-reset`, {}).then((r) => json(r)),
   deleteRole: (slug: string): Promise<void> => {

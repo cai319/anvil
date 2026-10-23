@@ -73,7 +73,7 @@ async def test_agent_self_reset_context_renews_run(client, app, monkeypatch):
                     "current_task_id": "T-SELF", "queue_len": 0,
                     "context_tokens": 70000}
 
-        def reset_session(self, role, cic=False):
+        def reset_session(self, role, cic=False, task_id=None):
             self.calls.append((role, cic))
 
     class FakeOrch:

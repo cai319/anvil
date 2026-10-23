@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, subscribeEvents, type Role, type Run, type Task } from "../api/client";
 import { navigate } from "../router";
+import { formatClock, parseTime, useNow } from "../time";
 import { NewTaskModal } from "./NewTaskModal";
 
 const COLUMNS: Task["status"][] = ["todo", "in_progress", "in_review", "done", "closed"];
@@ -52,9 +53,10 @@ const RUN_STATUS_LABEL: Record<string, string> = {
   suspended: "等待唤醒",
 };
 
-function fmtElapsed(start: string | null): string {
-  if (!start) return "";
-  const s = Math.max(0, Math.round((Date.now() - new Date(start).getTime()) / 1000));
+function fmtElapsed(start: string | null, now = Date.now()): string {
+  const d = parseTime(start);
+  if (!d) return "";
+  const s = Math.max(0, Math.round((now - d.getTime()) / 1000));
   if (s < 60) return `${s}s`;
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   return `${Math.floor(s / 3600)}h${Math.floor((s % 3600) / 60)}m`;
@@ -98,6 +100,7 @@ export function Lobby() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
+  const now = useNow(30_000); // 运行时长按系统当前时间刷新
 
   const refresh = () =>
     Promise.all([api.listTasks(), api.listRoles(), api.listActiveRuns()])
@@ -256,7 +259,7 @@ export function Lobby() {
                   <div className="run-title">
                     {roleName} · <span className={live ? "run-live" : "muted"}>{RUN_STATUS_LABEL[r.status] ?? r.status}</span>
                   </div>
-                  <div className="muted run-sub">{task?.title ?? "无任务会话"} · {fmtElapsed(r.started_at)}</div>
+                  <div className="muted run-sub">{task?.title ?? "无任务会话"} · {fmtElapsed(r.started_at, now)}</div>
                 </div>
                 <span className={`status-light ${live ? "running" : "idle"}`} />
               </a>
@@ -272,7 +275,7 @@ export function Lobby() {
             {recentActivity.map((a, i) => (
               <li key={i}>
                 <div className="act-meta">
-                  <span>{a.time.slice(11, 19)}</span>
+                  <span>{formatClock(a.time)}</span>
                   <span>{a.role ?? ""}</span>
                 </div>
                 <div className="act-body">

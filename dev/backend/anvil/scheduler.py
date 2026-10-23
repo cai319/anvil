@@ -184,8 +184,9 @@ class Scheduler:
                 st = mgr.status(target)
             except Exception:  # noqa: BLE001
                 st = {}
-            if st.get("alive") and (st.get("status") == "busy"
-                                    or int(st.get("queue_len") or 0) > 0):
+            if st.get("switching") or (
+                    st.get("alive") and (st.get("status") == "busy"
+                                         or int(st.get("queue_len") or 0) > 0)):
                 return True
         return False
 
@@ -268,7 +269,7 @@ class Scheduler:
     def _monitor(self, conn) -> None:
         pm = factory.get_platform()[0]
         rows = conn.execute(
-            "SELECT id, native_session_id, started_at, timeout_seconds FROM runs "
+            "SELECT id, task_id, native_session_id, started_at, timeout_seconds FROM runs "
             "WHERE status='running' AND native_session_id IS NOT NULL"
         ).fetchall()
         for r in rows:
@@ -281,16 +282,23 @@ class Scheduler:
                 role = sid[3:]
                 mgr = daemon_service.get_manager()
                 st = mgr.status(role) if mgr else {"alive": False}
+                if st.get("switching"):
+                    # 计划内上下文切换中：旧进程已退出、新进程尚未拉起，不是故障。
+                    continue
                 if not st.get("alive"):
                     self.orchestrator.pump(self.db_path, r["id"], "process_exit",
                                            {"exit_code": 1, "failure_class": "agent_exit_process"})
                     continue
+                # 角色正忙在别的任务上（含 __global__ 的 reminder）：这个 run 只是
+                # 排队，不能按 busy_since 判超时。
+                if st.get("current_task_id") != r["task_id"]:
+                    continue
                 if st.get("busy_since") and _elapsed_seconds(st["busy_since"]) > timeout:
-                    # 超时失败也按“新上下文重试”：终止常驻进程并清 session_id，
-                    # 避免下一次唤醒继续 --resume 卡死的上下文。
+                    # 超时失败也按“新上下文重试”：终止常驻进程并清当前任务槽，
+                    # 避免下一次唤醒继续 --resume 卡死的上下文；其它任务上下文保留。
                     # 换新上下文，但注入 CIC（记忆/工作流决策/知识快照），
                     # 避免自动恢复后的新会话对历史一无所知。
-                    mgr.reset_session(role, cic=True)  # type: ignore[union-attr]
+                    mgr.reset_session(role, cic=True, task_id=r["task_id"])  # type: ignore[union-attr]
                     self.orchestrator.pump(self.db_path, r["id"], "process_exit",
                                            {"exit_code": 1, "failure_class": "platform_timeout"})
                 continue
@@ -323,7 +331,7 @@ class Scheduler:
         if mgr is None or not getattr(mgr, "enabled", False):
             return
         rows = conn.execute(
-            "SELECT r.id, r.role_slug, rs.updated_at FROM runs r "
+            "SELECT r.id, r.role_slug, r.task_id, rs.updated_at FROM runs r "
             "JOIN role_sessions rs ON rs.role_slug=r.role_slug "
             "WHERE r.status='running' AND r.native_session_id LIKE 'rs:%'"
         ).fetchall()
@@ -335,6 +343,9 @@ class Scheduler:
             except Exception:  # noqa: BLE001
                 continue
             alive = bool(st.get("alive"))
+            # 上下文切换窗口内进程暂时不在，不能按死进程回收。
+            if st.get("switching"):
+                continue
             # 进程活着但正忙（或在处理排队消息）→ 这个 run 可能就在队列里，不能动。
             # 活着却空闲且队列为空 → 没有任何人在处理这个 running run，按死进程回收。
             if alive and (st.get("status") == "busy"
@@ -354,9 +365,11 @@ class Scheduler:
                 continue
             if not alive:
                 # 进程已死：下一次唤醒不要再 --resume 可能损坏的旧上下文。
+                # 只清该 run 所属任务的槽，其它任务的上下文保持可恢复。
                 try:
                     mgr.mark_needs_fresh_context(
-                        row["role_slug"], "run reaped: dead role process")
+                        row["role_slug"], "run reaped: dead role process",
+                        task_id=row["task_id"])
                 except Exception:  # noqa: BLE001
                     pass
             from .services import runs as runs_service

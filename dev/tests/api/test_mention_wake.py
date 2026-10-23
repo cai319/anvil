@@ -108,8 +108,8 @@ async def test_mention_resumes_suspended_run(client, app, seeded):
     assert _runs(app, "T-MENTION-RESUME", "report-collector")[0]["status"] == "suspended"
 
 
-async def test_human_mention_cindy_creates_reply_run(client, app, seeded):
-    """human @Cindy 是对话回复（reply run），不强制触发重规划。"""
+async def test_human_mention_cindy_starts_planner_run(client, app, seeded):
+    """自然人 @Cindy：交给有规划职责的角色处理（plan run），不是系统替人决策。"""
     r = await client.post(f"{API}/tasks", headers=auth_headers(),
                           json=task_payload(id="T-HUMAN-CINDY", assignee="pm"))
     assert r.status_code == 201, r.text
@@ -133,7 +133,10 @@ async def test_human_mention_cindy_creates_reply_run(client, app, seeded):
     assert m.status_code == 200, m.text
     runs = _runs(app, "T-HUMAN-CINDY", "cindy")
     assert len(runs) == 1
-    assert str(runs[0]["prompt"]).startswith("[anvil:reply]")
+    prompt = str(runs[0]["prompt"])
+    assert prompt.startswith("[anvil:plan]")
+    assert "通过，请总结并答复" in prompt
+    assert any(e == "wake" for _, e, _ in seeded.pumped)
 
 
 async def test_mention_pseudo_role_never_wakes(client, app, seeded):

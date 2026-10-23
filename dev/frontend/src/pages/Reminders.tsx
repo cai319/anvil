@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type Reminder, type Role } from "../api/client";
+import { formatDateTime } from "../time";
 
 const KIND_LABEL: Record<string, string> = { cron: "定时", at: "延时", when: "条件" };
 const STATUS_LABEL: Record<string, string> = {
@@ -13,7 +14,7 @@ export function Reminders() {
   const [items, setItems] = useState<Reminder[]>([]);
   const [roleSlug, setRoleSlug] = useState("");
   const [kind, setKind] = useState<Reminder["kind"]>("cron");
-  const [cron, setCron] = useState("0 9 * * 1");
+  const [cron, setCron] = useState("0 9 * * *");
   const [at, setAt] = useState("");
   const [when, setWhen] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -84,7 +85,7 @@ export function Reminders() {
           <option value="when">条件（任务 done）</option>
         </select>
         {kind === "cron" && (
-          <input value={cron} onChange={(e) => setCron(e.target.value)} placeholder="0 9 * * 1" />
+          <input value={cron} onChange={(e) => setCron(e.target.value)} placeholder="0 9 * * *" />
         )}
         {kind === "at" && (
           <input type="datetime-local" value={at} onChange={(e) => setAt(e.target.value)} />
@@ -116,7 +117,7 @@ export function Reminders() {
               <td>{KIND_LABEL[r.kind] ?? r.kind}</td>
               <td className="mono">{r.kind === "cron" ? r.cron_expr : r.kind === "at" ? r.fire_at : r.when_condition}</td>
               <td>{r.prompt ?? "—"}</td>
-              <td className="mono muted">{r.next_fire_at?.slice(0, 19) ?? "—"}</td>
+              <td className="mono muted">{formatDateTime(r.next_fire_at) || "—"}</td>
               <td>{STATUS_LABEL[r.status] ?? r.status}</td>
               <td>
                 <button className="small" onClick={() => fire(r.id)}>立即触发</button>

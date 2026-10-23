@@ -68,6 +68,9 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
            created_by: str | None = None, parent_id: str | None = None,
            depends_on: list[str] | None = None, cost_budget_usd: float | None = None) -> dict:
     tid = id or new_id()
+    if str(tid).startswith("__"):
+        # `__global__` 是角色上下文槽的保留 key，不能与真实任务 id 冲突。
+        raise ConflictError(f"task id {tid!r} is reserved")
     now = now_iso()
     _assert_assignable(conn, assignees or [])
     if parent_id:
@@ -556,7 +559,8 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
         return False
 
     runs = conn.execute(
-        "SELECT id, role_slug, native_session_id, status FROM runs WHERE task_id=?", (tid,)
+        "SELECT id, role_slug, native_session_id, status, started_at "
+        "FROM runs WHERE task_id=?", (tid,)
     ).fetchall()
     active = [r for r in runs if r["status"] not in ("completed", "failed", "abandoned")]
     if active and not force:
@@ -566,20 +570,55 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
     if children and not force:
         raise ConflictError(f"task {tid} has child tasks; delete them first or use force")
 
-    # 清理该任务的运行时进程：按角色去重，从所有 run 中收集（包括已完成的）。
+    # 删除前先让每个参与角色固化本任务知识快照，再终止/清理其运行时资源。
+    # 快照写入 notes/knowledge/<task>/<time>-task-deleted.md（文件 + FTS），
+    # 删除 activities/runs 后仍然保留，不会随任务物理删除而丢失。
+    latest_run: dict[str, tuple[str, str]] = {}
+    for r in runs:
+        role = r["role_slug"]
+        if not role:
+            continue
+        stamp = r["started_at"] or ""
+        if role not in latest_run or stamp > latest_run[role][0]:
+            latest_run[role] = (stamp, r["id"])
+    latest_run_id = {role: rid for role, (_stamp, rid) in latest_run.items()}
+    slot_roles = {row["role_slug"] for row in conn.execute(
+        "SELECT role_slug FROM role_task_sessions WHERE task_key=?", (tid,)).fetchall()}
+    task_roles = set(latest_run_id) | slot_roles
+    consolidated: list[str] = []
+    consolidation_errors: list[str] = []
+    if task_roles:
+        from . import memory as memory_service
+        for role_slug in sorted(task_roles):
+            try:
+                snap = memory_service.consolidate_context(
+                    conn, role_slug, tid, "task-deleted", latest_run_id.get(role_slug))
+                if snap:
+                    consolidated.append(role_slug)
+            except Exception as exc:  # noqa: BLE001 —— 快照失败不阻断删除，但写进删除审计
+                consolidation_errors.append(f"{role_slug}: {exc}")
+
+    # 清理该任务的运行时进程：按角色去重，从所有 run/上下文槽中收集。
     # cancel_task 只会终止「正忙于此任务」或「空闲且最后处理的就是此任务」的常驻进程，
     # 不会误杀正在处理其它任务的角色；平台 one-shot 只终止活跃 run 的 pg: 进程，
     # 避免 PID 复用导致误杀。
-    task_roles = {r["role_slug"] for r in runs if r["role_slug"]}
     if task_roles:
         from . import daemon as daemon_service
         mgr = daemon_service.get_manager()
         if mgr is not None and mgr.enabled:
-            for role_slug in task_roles:
+            for role_slug in sorted(task_roles):
                 try:
                     mgr.cancel_task(role_slug, tid)
                 except Exception:  # noqa: BLE001 —— 删除任务不因清理失败而回滚
                     pass
+        # daemon 未启用/已停机时也要清掉角色镜像；enabled 时这里是幂等的兜底。
+        for role_slug in sorted(task_roles):
+            try:
+                daemon_service.clear_session(
+                    conn, role_slug, "task deleted",
+                    task_key_value=daemon_service.task_key(tid))
+            except Exception:  # noqa: BLE001
+                pass
     if active:
         from ..platform import factory
         pm = None
@@ -611,12 +650,18 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
     conn.execute("DELETE FROM activities WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM sessions WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM role_inbox_cursors WHERE task_id=?", (tid,))
+    # 任务上下文槽（daemon 未启用/角色已停机时也要清，避免孤儿槽被下次同名任务复用）
+    conn.execute("DELETE FROM role_task_sessions WHERE task_key=?", (tid,))
     conn.execute("DELETE FROM audit WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM tasks WHERE id=?", (tid,))
     # 留一条删除审计（task_id 仍可读，便于知道这个 id 曾经存在）
     conn.execute(
         "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) VALUES (?,?,?,?,?)",
-        (role, tid, "delete", jdumps({"title": t.get("title"), "force": force}), now_iso()),
+        (role, tid, "delete", jdumps({
+            "title": t.get("title"), "force": force,
+            "consolidated_roles": consolidated,
+            "consolidation_errors": consolidation_errors,
+        }), now_iso()),
     )
     conn.commit()
     return True

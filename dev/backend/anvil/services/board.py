@@ -137,13 +137,8 @@ def list_drafts(conn: sqlite3.Connection, workspace_id: str | None = None,
     return out
 
 
-def _planner_for_task(task: dict, roles_service) -> str:
-    if task.get("plan_first") and task.get("planner"):
-        return str(task["planner"])
-    return roles_service.ONBOARDING_SLUG
-
-
-def _approve_role_suggestion(conn: sqlite3.Connection, draft: dict, by: str) -> tuple[dict | None, str | None]:
+def _approve_role_suggestion(conn: sqlite3.Connection, draft: dict,
+                             by: str) -> tuple[dict | None, str | None]:
     from .. import config
     from . import roles as roles_service
     from . import tasks as tasks_service
@@ -228,22 +223,14 @@ def _approve_role_suggestion(conn: sqlite3.Connection, draft: dict, by: str) -> 
         "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
         "VALUES (?,?,?,?,?)",
         (task_id, "human", "comment",
-         jdumps({"body": f"已批准角色建议，创建/绑定：{summary}；将基于新 Roster 重新规划。"}),
-         now),
+         jdumps({"body": f"已批准角色建议，创建/绑定：{summary}。"}), now),
     )
     conn.execute("UPDATE board_drafts SET status='approved', decided_at=? WHERE id=?",
                  (now, draft["id"]))
-    fresh = tasks_service.get(conn, task_id) or {}
-    planner = _planner_for_task(fresh, roles_service)
-    replan = {
-        "task_id": task_id,
-        "planner": planner,
-        "assignees": fresh.get("assignees") or bind,
-        "extra_constraint": "human 已批准新增角色并绑定到任务；请基于新 Roster 输出 workflow 草案。",
-        "replace_active": True,
-    }
+    # 批准本身只落角色，不替自然人 @ 任何角色、不启动重规划 run。
+    # 自然人后续在任务会话里自己 @ 规划者/执行角色；mention 端点负责唤醒对应角色。
     warning = None if to_create else f"all suggested roles already exist; bound only: {summary}"
-    return replan, warning
+    return None, warning
 
 
 def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human") -> dict:
@@ -342,16 +329,6 @@ def reject(conn: sqlite3.Connection, draft_id: str, by: str = "human",
                         "event": "role_suggestion_rejected",
                     }), now),
                 )
-            else:
-                replan = {
-                    "task_id": task_id,
-                    "planner": _planner_for_task(task, roles_service),
-                    "assignees": assignees,
-                    "extra_constraint": (
-                        "human 已拒绝新增角色；只能使用现有 Roster 中的角色规划；"
-                        "若能力不足，在草案中标注风险，不得虚构角色。"),
-                    "replace_active": True,
-                }
         if feedback:
             conn.execute(
                 "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "

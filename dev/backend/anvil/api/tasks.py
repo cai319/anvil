@@ -99,6 +99,65 @@ def assign_roles(tid: str, body: dict, conn=Depends(get_db),
     return result
 
 
+@router.post("/{tid}/assign-existing", response_model=TaskOut)
+def assign_existing_roles(tid: str, body: dict, request: Request,
+                          conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    """规划者自行绑定**现有角色**（非重大决策，不需要 human 审批）。
+
+    仅允许任务 planner 或内置 onboarding 助理在任务尚无 assignees 时调用；
+    只能绑定角色库中已存在且启用的角色，不能创建角色。创建新角色仍需
+    role_suggestion + human 审批（HITL）。
+    """
+    task = services.tasks.get(conn, tid)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    agent = auth.role
+    if not agent or agent == "human":
+        raise HTTPException(
+            status_code=403, detail="agent planner session required; human uses /assign")
+    if auth.task_id and auth.task_id != tid:
+        raise HTTPException(status_code=403, detail="session is bound to another task")
+    planner = task.get("planner") or ""
+    if agent != planner and not services.roles.is_onboarding(conn, agent):
+        raise HTTPException(
+            status_code=403,
+            detail="only the task planner or onboarding assistant can bind an initial roster")
+    if task.get("assignees"):
+        raise HTTPException(
+            status_code=409,
+            detail="task already has assignees; changing an existing roster requires human /assign")
+    roles = [str(r).strip() for r in (body.get("roles") or []) if str(r).strip()]
+    if not roles:
+        raise HTTPException(status_code=422, detail="roles is required")
+    for slug in roles:
+        role = services.roles.get(conn, slug)
+        if role is None:
+            raise HTTPException(status_code=409, detail=f"role {slug} does not exist")
+        if not role.get("enabled", True):
+            raise HTTPException(status_code=409, detail=f"role {slug} is disabled")
+        if services.roles.is_onboarding(conn, slug):
+            raise HTTPException(
+                status_code=409, detail=f"onboarding assistant {slug} cannot join tasks")
+    result = services.tasks.assign_roles(conn, tid, roles)
+    summary = "、".join(roles)
+    from ..util import jdumps, now_iso
+    conn.execute(
+        "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (tid, agent, "comment",
+         jdumps({"body": f"基于现有角色库绑定任务 Roster：{summary}。"}), now_iso()),
+    )
+    conn.execute(
+        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (agent, tid, "task.assign_existing",
+         jdumps({"roles": roles, "planner": planner}), now_iso()),
+    )
+    conn.commit()
+    events.publish("task", {"id": tid, "kind": "assign", "by": agent})
+    return result
+
+
 @router.get("", response_model=list[TaskOut])
 def list_tasks(status: str | None = Query(default=None), assignee: str | None = Query(default=None),
                workspace_id: str | None = Query(default=None), type: str | None = Query(default=None),
@@ -343,8 +402,7 @@ def mention_task(tid: str, body: dict, request: Request, conn=Depends(get_db), a
                          if s.get("role_slug"))
         is_planner = (
             target == services.roles.ONBOARDING_SLUG
-            or (target == (task.get("planner") or "") and target not in bound
-                and wf is not None))
+            or (bool(task.get("planner")) and target == task.get("planner")))
         # Cindy（内置 onboarding 助理）即使没有 roles 行也应可被 @ 触发重规划；
         # workflow/system 永远不作为可唤醒目标。
         target_exists = (
@@ -356,9 +414,9 @@ def mention_task(tid: str, body: dict, request: Request, conn=Depends(get_db), a
         sender = auth.role or "human"
         if not target_exists:
             pass  # 角色不存在/已禁用：只记录 mention，不唤醒
-        elif is_planner and sender != "human" and task.get("status") not in ("done", "closed"):
-            # Agent 对 planner/Cindy 提出 workflow 结构调整 → 重规划 run。
-            # Human @Cindy/planner 是对话回复，走 reply run（见下方 else）。
+        elif is_planner and task.get("status") not in ("done", "closed"):
+            # 自然人或其它角色 @planner/Cindy：由 planner 自己判断如何处理。
+            # 这是“让有职责的角色处理”，不是系统替人决策。
             try:
                 services.planning.start_planner_run(
                     conn,
@@ -368,11 +426,10 @@ def mention_task(tid: str, body: dict, request: Request, conn=Depends(get_db), a
                     target,
                     assignees=_assignee_slugs(conn, tid),
                     extra_constraint=(
-                        f"{auth.role or 'human'} 通过 @{target} 提出 workflow/loop "
-                        f"调整诉求：\n{message}\n\n"
-                        "请重新审阅当前 workflow，必要时提交修订后的 workflow 草案；"
-                        "角色分配只能由 planner 在 workflow/loop 模板中定义，"
-                        "不要让执行角色在切片计划里覆盖。"),
+                        f"{sender} 通过 @{target} 指示：\n{message}\n\n"
+                        "请按你的规划职责判断下一步：需要时提交/修订 workflow 草案；"
+                        "不需要时直接回复并说明理由。角色分配只能由 planner 在 "
+                        "workflow/loop 模板中定义。"),
                     replace_active=True,
                 )
                 events.publish("task", {"id": tid, "kind": "plan", "planner": target})

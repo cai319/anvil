@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
+import { formatDateTime } from "../time";
 
 /** 活动历史：完整审计记录（实时看板只显示最近 30 分钟，历史集中在这里）。 */
 
@@ -74,7 +75,7 @@ export function ActivityHistory() {
         <tbody>
           {rows.map((r) => (
             <tr key={r.id}>
-              <td className="mono">{r.created_at?.slice(0, 19).replace("T", " ")}</td>
+              <td className="mono">{formatDateTime(r.created_at)}</td>
               <td>{r.role_slug ?? "—"}</td>
               <td><span className="badge badge-in_progress">{r.action}</span></td>
               <td>{r.task_id ? <a href={`/tasks/${r.task_id}`}>{r.task_id.slice(0, 8)}</a> : "—"}</td>

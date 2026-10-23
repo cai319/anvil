@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
-import { api, subscribeEvents, type Role, type Run, type Task, type TimelineEvent, type Workflow } from "../api/client";
+import {
+  api, subscribeEvents,
+  type Role, type RoleRuntimeStatus, type Run, type Task, type TimelineEvent, type Workflow,
+} from "../api/client";
 import { roleStatusFromWorkflow } from "../workflowStatus";
+import { roleLiveDot, roleLiveState, stateClassForDot } from "../roleLive";
+import { formatClock, formatShort } from "../time";
 
 /** 任务详情「子任务」页签：每个参与角色当前的会话状态 + 执行日志 + 历史上下文。 */
 
@@ -32,7 +37,10 @@ function describeEvent(ev: TimelineEvent): string {
   const p = ev.payload ?? {};
   switch (ev.kind) {
     case "comment": return String(p.body ?? "");
-    case "mention": return `@${p.target ?? "human"}：${p.message ?? ""}`;
+    case "mention": {
+      const target = p.target === "human" ? "你（自然人）" : (p.target ?? "human");
+      return `@${target}：${p.message ?? ""}`;
+    }
     case "submit": return `提交：${p.summary ?? ""}`;
     case "review": return p.approve ? "评审通过" : "评审驳回";
     case "claim": return "认领任务";
@@ -48,9 +56,25 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
   const [subTab, setSubTab] = useState<"log" | "timeline">("log");
   const [logs, setLogs] = useState<Record<string, string>>({});
   const [timelines, setTimelines] = useState<Record<string, TimelineEvent[]>>({});
+  const [runtimes, setRuntimes] = useState<Record<string, RoleRuntimeStatus>>({});
+  // 参与角色 + planner（通常是 Cindy）：planner 也可能同时服务多个任务。
+  const slugs = Array.from(new Set([
+    ...(task.assignees?.length
+      ? task.assignees
+      : (task.role_claims ?? []).map((c) => c.role_slug)),
+    ...(task.planner ? [task.planner] : []),
+  ])).filter(Boolean);
+  const slugKey = slugs.join(",");
 
   useEffect(() => {
     let lastLogAt = 0;
+    const loadRuntimes = (roles: string[]) => {
+      for (const slug of roles) {
+        api.getRoleRuntime(slug)
+          .then((rt) => setRuntimes((prev) => ({ ...prev, [slug]: rt })))
+          .catch(() => {});
+      }
+    };
     const load = (ev?: { topic?: string }) => {
       if (expanded && ev?.topic === "tick" && Date.now() - lastLogAt > 3000) {
         lastLogAt = Date.now();
@@ -59,14 +83,20 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
           .catch(() => {});
       }
       api.listTaskRuns(task.id)
-        .then((r) => { setRuns(r); setRunsLoaded(true); })
+        .then((r) => {
+          setRuns(r);
+          setRunsLoaded(true);
+          // 被 @ 但不在 assignees 里的角色也会出现在本任务 run 列表中。
+          loadRuntimes(Array.from(new Set([...slugs, ...r.map((x) => x.role_slug)])));
+        })
         .catch(() => setRunsLoaded(true));
+      if (slugs.length) loadRuntimes(slugs);
     };
     load();
     return subscribeEvents((ev) => {
       if (ev.topic === "task" || ev.topic === "tick") load(ev);
     });
-  }, [task.id, task.status, expanded]);
+  }, [task.id, task.status, slugKey, expanded]);
 
   const latestByRole = new Map<string, Run>();
   for (const r of runs) {
@@ -79,7 +109,6 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
   for (const st of workflow?.steps ?? []) {
     if (st.run_id) stepRunByRole.set(st.role_slug, st.run_id);
   }
-  const slugs = (task.assignees?.length ? task.assignees : [...claims.keys()]);
   const roleName = (slug: string) => roles.find((r) => r.slug === slug)?.display_name ?? slug;
 
   const open = (run: Run | undefined) => {
@@ -98,21 +127,87 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
     }
   };
 
+  // 本任务出现过的所有角色（含被 @ 拉入、但不在 assignees 里的角色）。
+  const visibleSlugs = Array.from(new Set([
+    ...slugs,
+    ...runs.map((r) => r.role_slug),
+  ]));
+
   return (
     <div className="role-sessions">
-      {slugs.length === 0 && <p className="muted">该任务还没有参与角色。可在新建任务时选择成员。</p>}
-      {slugs.length > 0 && (
-        <p className="muted">每个角色的当前会话状态；点击行展开执行日志与历史上下文。</p>
+      {visibleSlugs.length === 0 && <p className="muted">该任务还没有参与角色。可在新建任务时选择成员。</p>}
+      {visibleSlugs.length > 0 && (
+        <>
+          <p className="muted">每个角色的当前会话状态；点击行展开执行日志与历史上下文。</p>
+          <div className="role-live-legend" aria-label="角色状态图例">
+            <span><i className="role-live-dot green" />进行中（本任务）</span>
+            <span><i className="role-live-dot red" />繁忙（其他任务，本任务等待其空闲）</span>
+            <span><i className="role-live-dot amber" />切换上下文中</span>
+            <span><i className="role-live-dot blue" />空闲 · 上下文已保留</span>
+            <span><i className="role-live-dot gray" />待办 / 冷启动</span>
+          </div>
+        </>
       )}
-      {slugs.map((slug) => {
+      {visibleSlugs.map((slug) => {
         const claim = claims.get(slug);
         const stepRunId = stepRunByRole.get(slug);
         const run = (stepRunId && runs.find((r) => r.id === stepRunId)) || latestByRole.get(slug);
-        const st = roleStatusFromWorkflow(workflow, slug) ?? roleStatus(claim, run);
+        const rt = runtimes[slug];
+        const busyElsewhere = Boolean(
+          rt?.alive && rt.status === "busy"
+          && rt.current_task_id && rt.current_task_id !== task.id,
+        );
+        const queuedHere = rt?.queue_tasks?.find((q) => q.id === task.id)?.count ?? 0;
+        const ctxHere = rt?.contexts?.find((c) => c.task_id === task.id);
+        const wfState = roleStatusFromWorkflow(workflow, slug);
+        const live = roleLiveState(rt, task.id, {
+          hasOpenStep: wfState?.cls === "in_progress",
+          allDone: wfState?.cls === "done",
+          queuedHere,
+        });
+        // 点灯表达实时运行态；徽标优先表达「进行中/繁忙/待办」。
+        // 失败等 workflow 异常状态保留原有语义。
+        let st: { label: string; cls: string } = live;
+        if (wfState?.cls === "closed") st = wfState;
+        else if (live.cls === "todo") {
+          st = wfState?.cls === "done" ? wfState : roleStatus(claim, run);
+        }
+        const dot = roleLiveDot(
+          rt, task.id, Boolean(ctxHere?.has_session),
+          wfState?.cls === "in_progress", wfState?.cls === "closed",
+        );
         const isOpen = expanded === run?.id && !!run;
+        let detail = "";
+        if (rt?.switching) {
+          detail = "正在切换任务上下文…";
+        } else if (busyElsewhere) {
+          detail = `繁忙 · 正在处理「${rt?.current_task?.title ?? rt?.current_task_id}」`;
+          if (queuedHere) detail += `，本任务有 ${queuedHere} 条消息排队`;
+        } else if (live.cls === "in_progress") {
+          detail = rt?.current_step_id
+            ? `正在处理本任务 · 步骤 ${rt.current_step_id}`
+            : "正在处理本任务";
+        } else if (live.cls === "queued") {
+          detail = queuedHere > 0
+            ? `本任务有 ${queuedHere} 条消息排队`
+            : "等待上下文切换";
+        } else if (!rt) {
+          detail = "状态加载中…";
+        } else if (ctxHere?.has_session) {
+          detail = `空闲 · 上下文已保留 · ${formatShort(ctxHere.last_active_at)}`;
+        } else {
+          detail = "空闲 · 首次进入将新建上下文";
+        }
         return (
           <div key={slug} className="rs-row-wrap">
             <button className="rs-row" onClick={() => open(run)} disabled={!run}>
+              <span
+                className={`role-live-dot ${dot.cls}`}
+                title={dot.title}
+                aria-label={dot.title}
+                role="img"
+              />
+              <span className={`status status-${stateClassForDot(dot.cls)}`}>{st.label}</span>
               <span className="role-avatar" style={{ background: avatarColor(slug) }}>
                 {roleName(slug).slice(0, 1)}
               </span>
@@ -120,10 +215,11 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
                 {roleName(slug)}
                 <small className="muted"> {slug}</small>
               </span>
-              <span className={`status status-${st.cls}`}>{st.label}</span>
-              {run ? (
+              {detail ? (
+                <span className="rs-run muted">{detail}</span>
+              ) : run ? (
                 <span className="rs-run muted">
-                  {RUN_LABEL[run.status] ?? run.status} · {run.started_at?.slice(11, 19)}
+                  {RUN_LABEL[run.status] ?? run.status} · {formatClock(run.started_at)}
                 </span>
               ) : (
                 <span className="rs-run muted">{runsLoaded ? "尚无会话" : "加载中…"}</span>
@@ -156,7 +252,7 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
                     {(timelines[run.id] ?? []).length === 0 && <li className="muted">暂无上下文事件。</li>}
                     {(timelines[run.id] ?? []).map((ev) => (
                       <li key={ev.key}>
-                        <span className="muted mono">{ev.ts?.slice(11, 19)}</span>{" "}
+                        <span className="muted mono">{formatClock(ev.ts)}</span>{" "}
                         <strong>{ev.role ?? "system"}</strong>{" "}
                         <span>{describeEvent(ev)}</span>
                       </li>

@@ -8,6 +8,8 @@ lesson 升格（§8.3）：pending → 人工审批 → approved，写入共享�
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -15,6 +17,7 @@ from pathlib import Path
 
 from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
+from . import knowledge as knowledge_service
 
 LESSON_CAP = 80
 
@@ -34,19 +37,112 @@ def append_memory(conn: sqlite3.Connection, role: str, content: str) -> dict:
     return {"id": mid, "role_slug": role, "content": content, "owner": role}
 
 
-def write_note(conn: sqlite3.Connection, role: str, path: str, content: str) -> dict:
-    nid = new_id()
-    conn.execute(
-        "INSERT INTO notes (id, role_slug, path, content, created_at) VALUES (?,?,?,?,?)",
-        (nid, role, path, content, now_iso()),
+def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
+               *, kind: str | None = None, scope: str | None = None,
+               task_id: str | None = None, source_task: str | None = None,
+               tags=None, repo: str | None = None, module: str | None = None,
+               confidence: float = 0.5, mode: str = "append",
+               source: str = "agent", updated_at: str | None = None) -> dict:
+    """写角色笔记：文件 + notes 索引 + notes_fts（触发器同步）。
+
+    - path 必须是 notes/ 下的安全相对路径；
+    - scope=task 必须绑定 task_id；scope=role 可跨任务复用；
+    - 一个 path 只有一行索引：append 累积文件正文后 upsert 同一行，
+      replace 用新内容覆盖文件和索引；
+    - 元数据只保留在文件头部的一份 `<!-- anvil: {...} -->` 注释里。
+    """
+    clean_path = knowledge_service.normalize_note_path(path)
+    rel_path = f"notes/{clean_path}"
+    existing = conn.execute(
+        "SELECT id, content, created_at FROM notes "
+        "WHERE role_slug=? AND path=?", (role, clean_path)).fetchone()
+    if mode == "replace":
+        body = content
+    else:
+        raw = _read_home_file(role, rel_path)
+        _old_meta, old_body = knowledge_service.parse_note_file(raw)
+        if not old_body and existing is not None:
+            # 文件缺失/为空时以索引内容为底，避免 append 丢历史。
+            old_body = str(existing["content"] or "")
+        body = (old_body.rstrip("\n") + "\n\n" + content.lstrip("\n")).strip() \
+            if old_body else content
+    body = body.strip()
+
+    meta = knowledge_service.infer_metadata(
+        conn, role, clean_path, body,
+        explicit={
+            "kind": kind, "scope": scope, "task_id": task_id,
+            "source_task": source_task, "tags": tags, "repo": repo,
+            "module": module, "confidence": confidence,
+            "updated_at": updated_at,
+        },
+        task_id_hint=task_id, for_reindex=False)
+    if kind is None and clean_path.startswith("knowledge/") and not meta.get("task_id"):
+        # 无法解析任务目录：保守地不进入自动注入。
+        meta["scope"] = "unclassified"
+    now = updated_at or now_iso()
+    meta["updated_at"] = now
+    payload = json.dumps({
+        "kind": meta["kind"], "scope": meta["scope"],
+        "task_id": meta.get("task_id"), "source_task": meta.get("source_task"),
+        "tags": meta.get("tags") or [], "repo": meta.get("repo"),
+        "module": meta.get("module"), "confidence": meta.get("confidence"),
+        "updated_at": now, "source": source,
+    }, ensure_ascii=False)
+    file_content = f"<!-- anvil: {payload} -->\n{body.strip()}\n"
+    _replace_home_file(role, rel_path, file_content)
+
+    nid = existing["id"] if existing is not None else new_id()
+    created_at = existing["created_at"] if existing is not None else now
+    values = (
+        nid, role, clean_path, body, created_at, meta["kind"], meta["scope"],
+        meta.get("task_id"), meta.get("source_task"),
+        jdumps(meta.get("tags") or []), meta.get("repo"), meta.get("module"),
+        meta.get("confidence"), now, source, meta.get("content_hash"),
     )
-    _index_fts(conn, role, content)
-    _append_to_home_file(role, f"notes/{path}", content)
+    if _notes_path_is_unique(conn):
+        conn.execute(
+            "INSERT INTO notes (id, role_slug, path, content, created_at, kind, scope, "
+            "task_id, source_task, tags_json, repo, module, confidence, updated_at, "
+            "source, content_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(role_slug, path) DO UPDATE SET "
+            "content=excluded.content, kind=excluded.kind, scope=excluded.scope, "
+            "task_id=excluded.task_id, source_task=excluded.source_task, "
+            "tags_json=excluded.tags_json, repo=excluded.repo, module=excluded.module, "
+            "confidence=excluded.confidence, updated_at=excluded.updated_at, "
+            "source=excluded.source, content_hash=excluded.content_hash",
+            values)
+    else:
+        conn.execute("DELETE FROM notes WHERE role_slug=? AND path=?",
+                     (role, clean_path))
+        conn.execute(
+            "INSERT INTO notes (id, role_slug, path, content, created_at, kind, scope, "
+            "task_id, source_task, tags_json, repo, module, confidence, updated_at, "
+            "source, content_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            values)
     conn.commit()
-    return {"id": nid, "role_slug": role, "path": path}
+    row = conn.execute(
+        "SELECT id, created_at FROM notes WHERE role_slug=? AND path=?",
+        (role, clean_path)).fetchone()
+    return {
+        "id": row["id"] if row else nid, "role_slug": role, "path": clean_path,
+        "kind": meta["kind"], "scope": meta["scope"],
+        "task_id": meta.get("task_id"), "source_task": meta.get("source_task"),
+        "tags": meta.get("tags") or [], "repo": meta.get("repo"),
+        "module": meta.get("module"), "confidence": meta.get("confidence"),
+        "updated_at": now, "created_at": row["created_at"] if row else created_at,
+        "content_hash": meta.get("content_hash"),
+    }
+
+
+def _notes_path_is_unique(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' "
+        "AND name='idx_notes_role_path_unique'").fetchone() is not None
 
 
 def _index_fts(conn: sqlite3.Connection, role: str, content: str) -> None:
+    """MEMORY 专用 FTS；notes 走 notes_fts（由触发器同步）。"""
     if not content:
         return
     try:
@@ -61,14 +157,19 @@ def _fts_query(q: str) -> str:
     return " OR ".join('"' + t.replace('"', '""') + '"' for t in tokens)
 
 
-def search_memory(conn: sqlite3.Connection, role: str, q: str, limit: int = 8) -> list[dict]:
-    """FTS5 检索**本角色**的 memories/notes；不可用时回退 LIKE。
+def search_memory(conn: sqlite3.Connection, role: str, q: str,
+                  limit: int = 8, *, task_id: str | None = None,
+                  scope: str | None = None,
+                  include_task_snapshots: bool = False) -> list[dict]:
+    """兼容入口：MEMORY 条目 + 角色知识库笔记合并检索。
 
-    长期记忆严格按角色隔离；跨角色共享只能走显式的 lesson 提案 + 人工审批
-    （`shared_lessons`），不混入个人记忆检索。
+    默认只返回 role-scoped 笔记；显式传 task_id 时才包含该任务的 task-scoped
+    内容（快照仍需 include_task_snapshots=True）。MEMORY 与 notes 都严格按
+    role_slug 隔离，绝不混入其它角色或其它任务的内容。
     """
     if not q.strip():
         return []
+    limit = max(1, int(limit or 8))
     try:
         rows = conn.execute(
             "SELECT role_slug, content, bm25(memory_fts) AS score FROM memory_fts "
@@ -76,25 +177,48 @@ def search_memory(conn: sqlite3.Connection, role: str, q: str, limit: int = 8) -
             "ORDER BY score LIMIT ?",
             (_fts_query(q), role, limit),
         ).fetchall()
-        return [{"role_slug": r["role_slug"], "content": r["content"], "score": r["score"]} for r in rows]
+        memories = [{"role_slug": r["role_slug"], "content": r["content"],
+                     "score": r["score"], "owner": "self"} for r in rows]
     except sqlite3.OperationalError:
-        pass
+        like = f"%{q}%"
+        memories = [
+            {"role_slug": r["role_slug"], "content": r["content"],
+             "score": None, "owner": "self"}
+            for r in conn.execute(
+                "SELECT role_slug, content, created_at FROM memories "
+                "WHERE owner = ? AND content LIKE ? ORDER BY created_at DESC LIMIT ?",
+                (role, like, limit),
+            ).fetchall()
+        ]
 
-    like = f"%{q}%"
-    out: list[dict] = []
-    for r in conn.execute(
-        "SELECT role_slug, content, created_at FROM memories "
-        "WHERE owner = ? AND content LIKE ? ORDER BY created_at DESC LIMIT ?",
-        (role, like, limit),
-    ).fetchall():
-        out.append({"role_slug": r["role_slug"], "content": r["content"], "score": None})
-    for r in conn.execute(
-        "SELECT role_slug, content, created_at FROM notes "
-        "WHERE role_slug=? AND content LIKE ? ORDER BY created_at DESC LIMIT ?",
-        (role, like, limit),
-    ).fetchall():
-        out.append({"role_slug": r["role_slug"], "content": r["content"], "score": None})
-    return out[:limit]
+    note_hits: list[dict] = []
+    effective_scope = scope or ("auto" if task_id else "role")
+    try:
+        hits = knowledge_service.search_knowledge(
+            conn, role, q, task_id=task_id,
+            scope=effective_scope if effective_scope in ("auto", "role", "task") else "role",
+            limit=limit, include_snapshots=include_task_snapshots)
+        note_hits = [{
+            "role_slug": role, "content": h["content"], "score": h["score"],
+            "owner": "self", "kind": h["kind"], "path": h["path"],
+            "scope": h["scope"], "task_id": h["task_id"],
+            "snippet": h["snippet"],
+        } for h in hits]
+    except sqlite3.OperationalError:
+        # 知识索引不可用（FTS5 缺失等）时仍返回 MEMORY 命中。
+        note_hits = []
+
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for item in [*memories, *note_hits]:
+        content = str(item.get("content") or "")
+        if content in seen:
+            continue
+        seen.add(content)
+        merged.append(item)
+        if len(merged) >= limit:
+            break
+    return merged
 
 
 def read_memory_file(role: str, max_chars: int = 4000) -> str:
@@ -118,16 +242,18 @@ def consolidate_context(conn: sqlite3.Connection, role: str, task_id: str | None
     if not task_id:
         return None
     task = conn.execute(
-        "SELECT id, title, status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        "SELECT id, title, status, tags_json, repo FROM tasks WHERE id=?",
+        (task_id,)).fetchone()
     if task is None:
         return None
 
     now = now_iso()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     safe_trigger = re.sub(r"[^A-Za-z0-9_.-]", "_", trigger or "manual")[:32]
-    safe_task = re.sub(r"[^A-Za-z0-9_.-]", "_", str(task_id))[:64]
+    # 目录段与 knowledge.task_path_segment 一致；真正的任务绑定靠 notes.task_id，
+    # 不再依赖 path LIKE（避免特殊字符/通配符误匹配）。
+    safe_task = knowledge_service.task_path_segment(task_id)
     run_suffix = re.sub(r"[^A-Za-z0-9]", "", str(run_id or ""))[:8]
-    # 按任务分目录：CIC 只取当前任务的快照，避免跨任务串味。
     path = f"knowledge/{safe_task}/{stamp}-{safe_trigger}"
     if run_suffix:
         path += f"-{run_suffix}"
@@ -176,7 +302,12 @@ def consolidate_context(conn: sqlite3.Connection, role: str, task_id: str | None
                 lines.append(line)
 
     content = "\n".join(lines)[:12000]
-    note = write_note(conn, role, path, content)
+    task_tags = [str(t) for t in jloads(task["tags_json"], [])]
+    note = write_note(
+        conn, role, path, content,
+        kind="task_snapshot", scope="task", task_id=task_id,
+        tags=[*task_tags, "snapshot"], repo=task["repo"],
+        confidence=0.9, source="consolidate")
     conn.execute(
         "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
         "VALUES (?,?,?,?,?)",
@@ -188,17 +319,51 @@ def consolidate_context(conn: sqlite3.Connection, role: str, task_id: str | None
     return {**note, "chars": len(content), "trigger": safe_trigger}
 
 
-def context_for_task(conn: sqlite3.Connection, role: str, task: dict | None) -> dict:
-    """组装注入上下文：MEMORY.md + FTS 命中的 notes + 按标签匹配的共享经验。"""
-    title = (task or {}).get("title") or ""
-    tags = (task or {}).get("tags") or []
+def context_for_task(conn: sqlite3.Connection, role: str, task: dict | None,
+                     *, task_id: str | None = None) -> dict:
+    """组装投影上下文：MEMORY + 可复用知识 + 共享经验。
+
+    任务隔离：task-scoped 只取当前 task；其它任务的行绝不进入投影。任务快照不进
+    投影（one-shot 无 CIC 时由步骤 prompt 的检索提示覆盖），避免把历史快照当成
+    当前事实。
+    """
+    task = dict(task or {})
+    task_id = task_id or task.get("id")
+    title = task.get("title") or ""
+    tags = task.get("tags") or []
     query = " ".join([title, *[str(t) for t in tags]]).strip()
-    hits = search_memory(conn, role, query, limit=5) if query else []
-    lessons = shared_lessons(conn, tags, limit=20)
+    task_hits = knowledge_service.search_knowledge(
+        conn, role, query, task_id=task_id, scope="auto",
+        limit=6, snippet_chars=800, repo_scope="same_or_shared") if query else []
+    role_hits = knowledge_service.search_knowledge(
+        conn, role, query, task_id=None, scope="role",
+        limit=6, snippet_chars=800, repo_scope="same_or_shared") if query else []
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for hit in [*task_hits, *role_hits]:
+        if hit["id"] in seen:
+            continue
+        seen.add(hit["id"])
+        merged.append(hit)
+        if len(merged) >= 8:
+            break
+    notes_text = knowledge_service.format_hits(
+        merged, max_item_chars=800, max_total_chars=4000)
+    lessons = shared_lessons(conn, tags, repo=task.get("repo"), limit=8)
+    lesson_lines: list[str] = []
+    used = 0
+    for lesson in lessons:
+        line = f"- {str(lesson.get('content') or '')[:600]}"
+        if used + len(line) + 1 > 2000:
+            break
+        lesson_lines.append(line)
+        used += len(line) + 1
     return {
         "memory": read_memory_file(role),
-        "notes": [h["content"] for h in hits],
-        "lessons": [l["content"] for l in lessons],
+        # 保留键位以兼容 project_instruction 调用方；按计划投影不注入任务快照。
+        "snapshot": "",
+        "notes": [notes_text] if notes_text else [],
+        "lessons": lesson_lines,
     }
 
 
@@ -298,14 +463,17 @@ def delete_lesson(conn: sqlite3.Connection, lid: str) -> bool:
 
 
 def shared_lessons(conn: sqlite3.Connection, tags: list[str] | None = None,
-                   limit: int = 20) -> list[dict]:
-    """按任务标签筛选已批准的共享经验；无标签时取最近批准的。"""
+                   limit: int = 20, *, repo: str | None = None) -> list[dict]:
+    """按任务标签/repo 筛选已批准的共享经验；无标签时取最近批准的。"""
     rows = conn.execute(
-        "SELECT * FROM lessons WHERE status='approved' ORDER BY COALESCE(approved_at, created_at) DESC"
+        "SELECT * FROM lessons WHERE status='approved' "
+        "ORDER BY COALESCE(approved_at, created_at) DESC"
     ).fetchall()
     wanted = {str(t).lower() for t in (tags or [])}
     out: list[dict] = []
     for r in rows:
+        if repo and (r["repo"] or "shared") not in (repo, "shared"):
+            continue
         item_tags = {str(t).lower() for t in jloads(r["tags_json"], [])}
         if wanted and item_tags and not (wanted & item_tags):
             continue
@@ -444,10 +612,37 @@ def write_instruction(conn: sqlite3.Connection, role: str, content: str) -> dict
     return {"role": role, "accepted": True, "path": str(home / "instruction.md")}
 
 
+def _read_home_file(role: str, rel_path: str) -> str:
+    """读角色 home 内文件；不存在/不可读时返回空串（调用方回退 DB）。"""
+    home = (config.AGENTS_DIR / role).resolve()
+    target = (home / rel_path).resolve()
+    if not target.is_relative_to(home):
+        raise ValueError("path escapes role home")
+    try:
+        return target.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 def _append_to_home_file(role: str, rel_path: str, content: str) -> None:
     """追加写文件（文件是真相）；失败不吞 OSError，直接抛出。"""
-    home = config.AGENTS_DIR / role
-    target = home / rel_path
+    home = (config.AGENTS_DIR / role).resolve()
+    target = (home / rel_path).resolve()
+    if not target.is_relative_to(home):
+        raise ValueError("path escapes role home")
     target.parent.mkdir(parents=True, exist_ok=True)
     with open(target, "a", encoding="utf-8") as fh:
         fh.write("\n" + content + "\n")
+
+
+def _replace_home_file(role: str, rel_path: str, content: str) -> None:
+    """原子替换文件（replace 模式）；先写同目录临时文件再 os.replace。"""
+    home = (config.AGENTS_DIR / role).resolve()
+    target = (home / rel_path).resolve()
+    if not target.is_relative_to(home):
+        raise ValueError("path escapes role home")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    os.replace(tmp, target)

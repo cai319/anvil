@@ -54,8 +54,11 @@ def test_consolidate_context_writes_indexed_snapshot(env):
     assert "请确认 S2" in body             # 其他角色的交接
     assert "context-high" in body          # 触发原因可追溯
 
-    # 写入 notes/FTS，清理上下文后可以检索到
-    hits = memory.search_memory(conn, "dev", "strict", limit=5)
+    # 写入 notes/FTS；清理上下文后可通过任务 scope 检索到（不再混入 memory search）
+    from anvil.services import knowledge
+    hits = knowledge.search_knowledge(
+        conn, "dev", "strict", task_id="T1", scope="task",
+        include_snapshots=True, limit=5)
     assert any("strict 口径" in h["content"] for h in hits)
     audit = conn.execute(
         "SELECT 1 FROM audit WHERE action='session.context_digest' AND role_slug='dev'"

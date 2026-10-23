@@ -613,3 +613,24 @@ def test_decision_prompt_lists_whole_slice_outputs(conn):
         assert sid in prompt
         assert summary in prompt
     assert "anvil step decide" in prompt
+
+
+def test_role_busy_on_another_task_blocks_new_step(conn):
+    """角色在别的任务上仍有活跃 run 时，本任务的步骤保持 pending；空出后再派发。"""
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO tasks (id,title,status,created_at,updated_at) "
+        "VALUES ('T2','另一个任务','todo',?,?)", (now, now))
+    conn.execute(
+        "INSERT INTO runs (id, role_slug, task_id, status, started_at) "
+        "VALUES ('R-OTHER', 'developer', 'T1', 'running', ?)", (now,))
+    conn.commit()
+
+    wf = wf_service.create_workflow(conn, "T2", {
+        "steps": [{"id": "S1", "title": "实现", "role": "developer", "depends_on": []}]
+    })
+    assert _advance(conn, wf) == []  # developer 正在 T1 上工作
+
+    conn.execute("UPDATE runs SET status='suspended' WHERE id='R-OTHER'")
+    conn.commit()
+    assert _advance(conn, wf) == ["S1"]  # 角色空出后本任务才能开始

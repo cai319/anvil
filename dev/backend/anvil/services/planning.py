@@ -75,6 +75,19 @@ def build_roster(conn: sqlite3.Connection, task_id: str,
     return roster
 
 
+def _repo_label(repo) -> str:
+    """角色 workspace.repos 既支持 "repo-name"，也支持 {name, access} 对象。"""
+    if isinstance(repo, dict):
+        name = str(repo.get("name") or repo.get("repo") or repo.get("slug") or "").strip()
+        access = str(repo.get("access") or "").strip()
+        if name and access:
+            return f"{name}({access})"
+        if name:
+            return name
+        return json.dumps(repo, ensure_ascii=False)
+    return str(repo)
+
+
 def render_roster(conn: sqlite3.Connection, task_id: str, roster: list[dict]) -> str:
     if not roster:
         return "-（当前未绑定角色）"
@@ -96,7 +109,7 @@ def render_roster(conn: sqlite3.Connection, task_id: str, roster: list[dict]) ->
             parts.append(f"并发上限：{r['max_parallel']}")
         parts.append(f"当前活跃 run：{r.get('active_runs', 0)}")
         if r.get("repos"):
-            parts.append("写权限仓库：" + "、".join(r["repos"]))
+            parts.append("写权限仓库：" + "、".join(_repo_label(x) for x in r["repos"]))
         if r.get("skills"):
             parts.append("skills：" + "、".join(r["skills"]))
         if r.get("mcp"):

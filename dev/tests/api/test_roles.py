@@ -102,3 +102,47 @@ async def test_config_snapshot_frozen(client):
     after = await client.get(f"{API}/roles/qa-role/effective-config")
     assert after.status_code == 200
     assert after.json() != before  # 当前配置变了；快照冻结在 run 层断言（见 test_tasks S-config）
+
+
+async def test_role_runtime_reports_busy_task_queue_and_contexts(client, app):
+    """任务详情用它判断角色是否忙在别的任务，以及本任务是否已有上下文槽。"""
+    from anvil.db import open_conn
+    from anvil.util import now_iso
+
+    await _seed_runtime(client)
+    await _post_role(client)
+    t = await client.post(f"{API}/tasks", json={"title": "任务 A"}, headers=auth_headers())
+    assert t.status_code == 201, t.text
+    task_id = t.json()["id"]
+
+    conn = open_conn(app.state.db_path)
+    try:
+        now = now_iso()
+        conn.execute(
+            "INSERT INTO role_task_sessions "
+            "(role_slug, task_key, session_id, cwd, workspace_path, status, "
+            " context_tokens, last_active_at, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("qa-role", task_id, "sid-a", "/tmp/a", "/tmp/a", "idle",
+             1234, now, now, now),
+        )
+        conn.execute(
+            "INSERT INTO role_sessions "
+            "(role_slug, session_id, status, current_task_id, current_run_id, updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("qa-role", "sid-a", "busy", task_id, "run-a", now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = await client.get(f"{API}/roles/qa-role/runtime")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["contexts"][0]["task_id"] == task_id
+    assert data["contexts"][0]["task_title"] == "任务 A"
+    assert data["contexts"][0]["has_session"] is True
+    assert data["contexts"][0]["context_tokens"] == 1234
+    assert data["current_task"]["id"] == task_id
+    assert data["current_task"]["title"] == "任务 A"
+    assert data["queue_tasks"] == []

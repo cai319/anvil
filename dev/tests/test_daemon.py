@@ -15,7 +15,9 @@ from anvil.db import connect, open_conn
 pytest.importorskip("anvil.graph")
 from anvil.services import runs as runs_service  # noqa: E402
 from anvil.services import tasks as tasks_service  # noqa: E402
-from anvil.services.daemon import DaemonManager, _clean_env, frame_user_message  # noqa: E402
+from anvil.services.daemon import (  # noqa: E402
+    DaemonManager, _SpawnSpec, _clean_env, frame_user_message,
+)
 
 FAKE_RUNTIME = '''
 import json, os, sys, time
@@ -27,6 +29,7 @@ init_model = os.environ.get("FAKE_MODEL", "fake-1m")
 switch_model = os.environ.get("FAKE_SWITCH_MODEL", "")
 result_usage = os.environ.get("FAKE_RESULT_USAGE", "")
 context_tokens = int(os.environ.get("FAKE_CONTEXT_TOKENS", "0"))
+turn_delay = float(os.environ.get("FAKE_TURN_DELAY", "0.2"))
 context_error = os.environ.get("FAKE_CONTEXT_ERROR", "")
 attachment_chars = int(os.environ.get("FAKE_ATTACHMENT_CHARS", "0"))
 result_text = os.environ.get("FAKE_RESULT_TEXT", "OK")
@@ -38,7 +41,7 @@ if warn_line:
 turn = 0
 for line in sys.stdin:
     turn += 1
-    time.sleep(0.2)
+    time.sleep(turn_delay)
     model = switch_model if (switch_model and turn >= 2) else init_model
     usage = {"input_tokens": 10, "output_tokens": 2}
     if context_tokens:
@@ -692,8 +695,11 @@ def test_spawn_uses_binary_utf8_pipes(env, monkeypatch):
 
     monkeypatch.setattr("anvil.services.daemon.subprocess.Popen", fake_popen)
     r = mgr._role("qa-role")
-    mgr._spawn(conn, r, sys.executable, ["--version"], ["--version"], {},
-               str(fake.parent), {})
+    mgr._spawn(conn, r, _SpawnSpec(
+        executable=sys.executable,
+        args_new=["--version"], args_resume=["--version"],
+        ctx={}, cwd=str(fake.parent), env={},
+    ))
 
     assert "text" not in captured or captured["text"] is False
     assert "encoding" not in captured
@@ -758,3 +764,209 @@ def test_failure_clears_session_for_next_wake(env, monkeypatch):
     assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
     modes = [line.split()[0] for line in log.read_text().splitlines()]
     assert modes == ["new", "new"]
+
+
+# ---- 多任务上下文槽 ---------------------------------------------------------
+
+def _role_log(run_id, conn):
+    row = runs_service.get_run(conn, run_id)
+    return open(row["log_path"], encoding="utf-8").read()
+
+
+def _argv_lines(log):
+    return [line.split() for line in log.read_text().splitlines() if line.strip()]
+
+
+def test_task_switch_uses_separate_session_per_task(env):
+    """A/B 两个任务各自新建会话；再回 A/B 时分别 resume 自己的 session。"""
+    conn, mgr, fake, log = env
+    ta = tasks_service.create(conn, title="Task A")
+    tb = tasks_service.create(conn, title="Task B")
+    ra = runs_service.create_run(conn, "qa-role", ta["id"])
+    rb = runs_service.create_run(conn, "qa-role", tb["id"])
+
+    _deliver(mgr, conn, fake, log, ra["id"], "A1", task_id=ta["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, ra["id"]) == "suspended")
+    assert mgr.status("qa-role")["context_task_id"] == ta["id"]
+
+    _deliver(mgr, conn, fake, log, rb["id"], "B1", task_id=tb["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended")
+    assert mgr.status("qa-role")["context_task_id"] == tb["id"]
+
+    lines = _argv_lines(log)
+    assert [x[0] for x in lines] == ["new", "new"]
+    sid_a, sid_b = lines[0][1], lines[1][1]
+    assert sid_a != sid_b
+
+    _deliver(mgr, conn, fake, log, ra["id"], "A2", task_id=ta["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, ra["id"]) == "suspended")
+    assert _argv_lines(log)[2] == ["resume", sid_a]
+
+    _deliver(mgr, conn, fake, log, rb["id"], "B2", task_id=tb["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended")
+    assert _argv_lines(log)[3] == ["resume", sid_b]
+
+    c = open_conn(mgr.db_path)
+    try:
+        rows = {
+            r["task_key"]: r["session_id"]
+            for r in c.execute(
+                "SELECT task_key, session_id FROM role_task_sessions "
+                "WHERE role_slug='qa-role'").fetchall()
+        }
+    finally:
+        c.close()
+    assert rows[ta["id"]] == sid_a
+    assert rows[tb["id"]] == sid_b
+
+
+def test_busy_role_queues_other_task_until_turn_end(env):
+    """角色忙 A 时 B 的消息排队；A 的 turn 结束后才切换上下文处理 B。"""
+    conn, mgr, fake, log = env
+    ta = tasks_service.create(conn, title="Task A")
+    tb = tasks_service.create(conn, title="Task B")
+    ra = runs_service.create_run(conn, "qa-role", ta["id"])
+    rb = runs_service.create_run(conn, "qa-role", tb["id"])
+
+    _deliver(mgr, conn, fake, log, ra["id"], "A1", task_id=ta["id"],
+             extra_env={"FAKE_TURN_DELAY": "1.0"})
+    assert _wait(lambda: mgr.status("qa-role")["status"] == "busy", timeout=2)
+    _deliver(mgr, conn, fake, log, rb["id"], "B1", task_id=tb["id"])
+    st = mgr.status("qa-role")
+    assert st["context_task_id"] == ta["id"]
+    assert st["queue_len"] == 1
+    assert st["queue"][0]["task_id"] == tb["id"]
+
+    assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended", timeout=6)
+    assert mgr.status("qa-role")["context_task_id"] == tb["id"]
+    assert [x[0] for x in _argv_lines(log)] == ["new", "new"]
+
+
+def test_reset_session_only_clears_target_task(env):
+    """run/任务级 reset 只清该任务槽；角色在别的任务上的上下文保持可恢复。"""
+    conn, mgr, fake, log = env
+    ta = tasks_service.create(conn, title="Task A")
+    tb = tasks_service.create(conn, title="Task B")
+    ra = runs_service.create_run(conn, "qa-role", ta["id"])
+    rb = runs_service.create_run(conn, "qa-role", tb["id"])
+
+    _deliver(mgr, conn, fake, log, ra["id"], "A1", task_id=ta["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, ra["id"]) == "suspended")
+    _deliver(mgr, conn, fake, log, rb["id"], "B1", task_id=tb["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended")
+    sid_a, sid_b = [x[1] for x in _argv_lines(log)[:2]]
+
+    # 当前加载 B；清 A 不应杀进程，也不应影响 B。
+    mgr.reset_session("qa-role", task_id=ta["id"])
+    assert mgr.status("qa-role")["alive"] is True
+    assert mgr.status("qa-role")["context_task_id"] == tb["id"]
+
+    c = open_conn(mgr.db_path)
+    try:
+        keys = {r["task_key"] for r in c.execute(
+            "SELECT task_key FROM role_task_sessions WHERE role_slug='qa-role'").fetchall()}
+    finally:
+        c.close()
+    assert ta["id"] not in keys and tb["id"] in keys
+
+    _deliver(mgr, conn, fake, log, ra["id"], "A2", task_id=ta["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, ra["id"]) == "suspended")
+    latest_a = [x for x in _argv_lines(log) if x[1] != sid_b][-1]
+    assert latest_a[0] == "new"  # A 的旧上下文已清，不能 resume
+
+    _deliver(mgr, conn, fake, log, rb["id"], "B2", task_id=tb["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended")
+    assert _argv_lines(log)[-1] == ["resume", sid_b]
+
+
+def test_idle_release_keeps_each_task_session_resumable(env):
+    """空闲释放进程后，A/B 仍能各自 resume 自己的会话。"""
+    conn, mgr, fake, log = env
+    ta = tasks_service.create(conn, title="Task A")
+    tb = tasks_service.create(conn, title="Task B")
+    ra = runs_service.create_run(conn, "qa-role", ta["id"])
+    rb = runs_service.create_run(conn, "qa-role", tb["id"])
+
+    _deliver(mgr, conn, fake, log, ra["id"], "A1", task_id=ta["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, ra["id"]) == "suspended")
+    _deliver(mgr, conn, fake, log, rb["id"], "B1", task_id=tb["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended")
+    sid_a, sid_b = [x[1] for x in _argv_lines(log)[:2]]
+
+    mgr.kill("qa-role")
+    assert _wait(lambda: not mgr.status("qa-role")["alive"])
+
+    _deliver(mgr, conn, fake, log, ra["id"], "A2", task_id=ta["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, ra["id"]) == "suspended")
+    assert _argv_lines(log)[-1] == ["resume", sid_a]
+
+    _deliver(mgr, conn, fake, log, rb["id"], "B2", task_id=tb["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended")
+    assert _argv_lines(log)[-1] == ["resume", sid_b]
+
+
+def test_first_entry_to_task_builds_cic_with_task_history(env):
+    """首次进入某任务：新会话前缀包含该任务的消息（CIC），而不是 A 的上下文。"""
+    conn, mgr, fake, log = env
+    ta = tasks_service.create(conn, title="Task A")
+    tb = tasks_service.create(conn, title="Task B")
+    tasks_service.comment(conn, tb["id"], "human", "SPECIAL-B-CONTEXT")
+    ra = runs_service.create_run(conn, "qa-role", ta["id"])
+    rb = runs_service.create_run(conn, "qa-role", tb["id"])
+
+    _deliver(mgr, conn, fake, log, ra["id"], "A1", task_id=ta["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, ra["id"]) == "suspended")
+    _deliver(mgr, conn, fake, log, rb["id"], "B1", task_id=tb["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended")
+    body = _role_log(rb["id"], conn)
+    assert "SPECIAL-B-CONTEXT" in body
+    assert "当前任务 ID：" + tb["id"] in body
+
+
+def test_resume_task_injects_delta_since_last_visit(env):
+    """回到任务 A 时恢复会话，并补上离开期间的新评论。"""
+    conn, mgr, fake, log = env
+    ta = tasks_service.create(conn, title="Task A")
+    tb = tasks_service.create(conn, title="Task B")
+    ra = runs_service.create_run(conn, "qa-role", ta["id"])
+    rb = runs_service.create_run(conn, "qa-role", tb["id"])
+
+    _deliver(mgr, conn, fake, log, ra["id"], "A1", task_id=ta["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, ra["id"]) == "suspended")
+    _deliver(mgr, conn, fake, log, rb["id"], "B1", task_id=tb["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended")
+
+    tasks_service.comment(conn, ta["id"], "human", "AFTER-LEAVING-A")
+    _deliver(mgr, conn, fake, log, ra["id"], "A2", task_id=ta["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, ra["id"]) == "suspended")
+    body = _role_log(ra["id"], conn)
+    assert "你离开任务期间的新进展" in body
+    assert "AFTER-LEAVING-A" in body
+
+
+def test_cancel_active_task_continues_with_queued_other_task(env):
+    """删除正忙任务 A：不能把已删槽又写回，且队列里的 B 应继续处理。"""
+    conn, mgr, fake, log = env
+    ta = tasks_service.create(conn, title="Task A")
+    tb = tasks_service.create(conn, title="Task B")
+    ra = runs_service.create_run(conn, "qa-role", ta["id"])
+    rb = runs_service.create_run(conn, "qa-role", tb["id"])
+
+    _deliver(mgr, conn, fake, log, ra["id"], "A1", task_id=ta["id"],
+             extra_env={"FAKE_TURN_DELAY": "1.0"})
+    assert _wait(lambda: mgr.status("qa-role")["status"] == "busy", timeout=2)
+    _deliver(mgr, conn, fake, log, rb["id"], "B1", task_id=tb["id"])
+
+    assert mgr.cancel_task("qa-role", ta["id"]) is True
+    assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended", timeout=6)
+    st = mgr.status("qa-role")
+    assert st["context_task_id"] == tb["id"]
+
+    c = open_conn(mgr.db_path)
+    try:
+        keys = {r["task_key"] for r in c.execute(
+            "SELECT task_key FROM role_task_sessions WHERE role_slug='qa-role'").fetchall()}
+    finally:
+        c.close()
+    assert ta["id"] not in keys  # 已删除任务不能被切回时重新写回
+    assert tb["id"] in keys

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, subscribeEvents, type InboxItem } from "../api/client";
+import { formatDateTime } from "../time";
 
 /** Inbox（信息架构重构）：四类人机决策点统一入口，action card 式就地操作。 */
 
@@ -172,7 +173,7 @@ export function Inbox() {
               {KIND_LABEL[it.kind]}
             </span>
             <strong>{it.title}</strong>
-            <span className="muted mono" style={{ fontSize: 11 }}>{it.created_at?.slice(0, 19).replace("T", " ")}</span>
+            <span className="muted mono" style={{ fontSize: 11 }}>{formatDateTime(it.created_at)}</span>
           </div>
           <div className="muted" style={{ margin: "4px 0 8px" }}>{it.detail}</div>
           {it.meta?.draft_kind === "role_suggestion" && (it.meta.suggested_roles?.length ?? 0) > 0 && (

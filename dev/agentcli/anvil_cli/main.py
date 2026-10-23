@@ -208,7 +208,7 @@ def task_cmd(
     assignee: str = typer.Option(None, "--assignee",
                                  help="子任务执行角色（create 用；单负责人）"),
     assignees: str = typer.Option(None, "--assignees",
-                                  help="子任务团队角色（create 用；逗号分隔）"),
+                                  help="团队角色（create / assign 用；逗号分隔；assign 仅限现有角色）"),
     summary: str = typer.Option(None, "--summary", help="submit 摘要"),
     paths: str = typer.Option(None, "--paths", help="认领范围路径（逗号分隔）"),
     force: bool = typer.Option(False, "--force", help="delete 强制；comment/mention 知情越过 held"),
@@ -216,10 +216,10 @@ def task_cmd(
                                         help="Held Draft：发送时依据的最新活动 id"),
     json_out: bool = typer.Option(False, "--json", help="输出 JSON"),
 ):
-    """anvil task <list|show|create|claim|unclaim|heartbeat|submit|comment|mention|cancel|reopen|delete|block> …"""
+    """anvil task <list|show|create|assign|claim|unclaim|heartbeat|submit|comment|mention|cancel|reopen|delete|block> …"""
     tid = target or DEFAULT_TASK
     needs_target = {"show", "claim", "unclaim", "heartbeat", "submit", "comment", "mention",
-                    "cancel", "reopen", "delete", "block"}
+                    "cancel", "reopen", "delete", "block", "assign"}
     if action in needs_target and not tid:
         typer.echo(f"task {action} 需要任务 id", err=True)
         raise typer.Exit(2)
@@ -245,6 +245,12 @@ def task_cmd(
         if AGENT_SLUG:
             p["created_by"] = f"agent:{AGENT_SLUG}"
         method, path, payload = "POST", "/api/v1/tasks", p
+    elif action == "assign":
+        roles = [x.strip() for x in (assignees or "").split(",") if x.strip()]
+        if not roles:
+            typer.echo("task assign 需要 --assignees a,b（仅限现有角色）", err=True)
+            raise typer.Exit(2)
+        method, path, payload = "POST", f"/api/v1/tasks/{tid}/assign-existing", {"roles": roles}
     elif action == "claim":
         p = {"paths": [x.strip() for x in paths.split(",")]} if paths else {}
         method, path, payload = "POST", f"/api/v1/tasks/{tid}/claim", p
@@ -311,9 +317,18 @@ def note_cmd(
     action: str = typer.Argument("write"),
     path: str = typer.Argument(None),
     content_file: str = typer.Option(None, "--content-file", help="从文件读取笔记内容"),
+    kind: str = typer.Option(None, "--kind", help="task_snapshot|vulnerability_pattern|failure_scenario|module_knowledge|decision|note"),
+    scope: str = typer.Option(None, "--scope", help="role|task"),
+    task: str = typer.Option(None, "--task", help="任务 id（scope=task 时必填，默认 $ANVIL_TASK_ID）"),
+    source_task: str = typer.Option(None, "--source-task", help="可复用知识来自哪个任务"),
+    tags: str = typer.Option(None, "--tags", help="逗号分隔标签"),
+    repo: str = typer.Option(None, "--repo"),
+    module: str = typer.Option(None, "--module"),
+    confidence: float = typer.Option(0.5, "--confidence", min=0.0, max=1.0),
+    replace: bool = typer.Option(False, "--replace", help="用完整内容替换同 path 旧笔记"),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    """anvil note write <path> [--content-file f]"""
+    """anvil note write <path> [--content-file f] [--kind/--scope/--tags/...]"""
     if action == "write":
         content = ""
         if content_file:
@@ -323,8 +338,92 @@ def note_cmd(
             except OSError as exc:
                 typer.echo(f"error: {exc}", err=True)
                 raise typer.Exit(2)
-        _emit(_call("POST", "/api/v1/me/notes", {"path": path, "content": content}), json_out)
+        payload: dict = {"path": path, "content": content, "confidence": confidence,
+                         "mode": "replace" if replace else "append"}
+        effective_scope = scope
+        if kind == "task_snapshot" and not effective_scope:
+            effective_scope = "task"
+        effective_task = task or (DEFAULT_TASK if effective_scope == "task" else None)
+        if effective_scope == "task" and not effective_task:
+            typer.echo("note: scope=task 需要 --task 或 ANVIL_TASK_ID", err=True)
+            raise typer.Exit(2)
+        for key, value in (
+            ("kind", kind), ("scope", effective_scope), ("task_id", effective_task),
+            ("source_task", source_task), ("repo", repo), ("module", module),
+        ):
+            if value:
+                payload[key] = value
+        if tags:
+            payload["tags"] = [x.strip() for x in tags.split(",") if x.strip()]
+        _emit(_call("POST", "/api/v1/me/notes", payload), json_out)
     else:
+        raise typer.Exit(2)
+
+
+@app.command("knowledge")
+def knowledge_cmd(
+    action: str = typer.Argument("search"),
+    query: str = typer.Argument(None),
+    note_id: str = typer.Option(None, "--id", help="show 的 note id"),
+    task: str = typer.Option(None, "--task", help="任务 id（默认 $ANVIL_TASK_ID）"),
+    scope: str = typer.Option("auto", "--scope", help="auto|role|task"),
+    kind: str = typer.Option(None, "--kind", help="逗号分隔 kind"),
+    tags: str = typer.Option(None, "--tags", help="逗号分隔标签"),
+    repo: str = typer.Option(None, "--repo"),
+    module: str = typer.Option(None, "--module"),
+    include_snapshots: bool = typer.Option(False, "--include-snapshots"),
+    include_unclassified: bool = typer.Option(False, "--include-unclassified"),
+    limit: int = typer.Option(8, "--limit"),
+    role: str = typer.Option(None, "--role", help="human 浏览角色知识时指定角色"),
+    self_only: bool = typer.Option(False, "--self", help="reindex 当前角色"),
+    all_roles: bool = typer.Option(False, "--all", help="reindex 所有角色（human）"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    prune: bool = typer.Option(False, "--prune"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """anvil knowledge <search|show|index|reindex> ..."""
+    if action == "search":
+        params = {
+            "q": query or "", "scope": scope, "limit": limit,
+            "include_snapshots": include_snapshots,
+            "include_unclassified": include_unclassified,
+        }
+        task_id = task or DEFAULT_TASK
+        if task_id:
+            params["task_id"] = task_id
+        for key, value in (("kind", kind), ("tags", tags),
+                           ("repo", repo), ("module", module), ("role", role)):
+            if value:
+                params[key] = value
+        _emit(_call("GET", "/api/v1/me/knowledge/search", params=params), json_out)
+    elif action == "show":
+        if not note_id:
+            typer.echo("knowledge show 需要 --id <note-id>", err=True)
+            raise typer.Exit(2)
+        params = {}
+        if task or DEFAULT_TASK:
+            params["task_id"] = task or DEFAULT_TASK
+        if role:
+            params["role"] = role
+        _emit(_call("GET", f"/api/v1/me/knowledge/{note_id}", params=params), json_out)
+    elif action == "index":
+        params = {}
+        if task or DEFAULT_TASK:
+            params["task_id"] = task or DEFAULT_TASK
+        if role:
+            params["role"] = role
+        _emit(_call("GET", "/api/v1/me/knowledge/index", params=params), json_out)
+    elif action == "reindex":
+        body = {"dry_run": dry_run, "prune": prune}
+        if all_roles or role:
+            body["role"] = role
+            if all_roles:
+                body.pop("role", None)
+            _emit(_call("POST", "/api/v1/knowledge/reindex", body), json_out)
+        else:
+            _emit(_call("POST", "/api/v1/me/knowledge/reindex", body), json_out)
+    else:
+        typer.echo("unknown knowledge action: " + action, err=True)
         raise typer.Exit(2)
 
 
