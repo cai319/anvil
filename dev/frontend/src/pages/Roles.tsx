@@ -79,6 +79,7 @@ export function Roles() {
   }, []);
 
   useEffect(() => {
+    setAvatarOpen(false);
     if (!selected) return;
     let cancelled = false;
     // 切换角色时立刻清空上一个角色的状态，避免串数据 / 旧请求回填。
@@ -703,6 +704,7 @@ export function Roles() {
             try {
               await api.updateRoleAvatar(current.slug, value);
               await refresh();
+              setError(null);
             } catch (e) {
               setError(String(e));
               throw e; // 让 AvatarPicker 保持弹窗打开并显示本地错误
