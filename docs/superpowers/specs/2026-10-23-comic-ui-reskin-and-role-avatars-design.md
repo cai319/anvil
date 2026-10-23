@@ -262,7 +262,7 @@ ALTER TABLE roles ADD COLUMN avatar TEXT;
 - `initials`：强制使用首字母 + `avatar_color`。
 - `NULL`：未选择，前端按 slug 计算默认漫画头像。
 
-`RoleIn` / `RoleOut` 增加 `avatar: str | None`；`services.roles.create` / `update` 同时写入列和 `definition_json`，`_row` 返回 `avatar`。
+`RoleIn` / `RoleOut` 增加 `avatar: str | None`；`services.roles.create` / `update` 同时写入列和 `definition_json`，`_row` 返回 `avatar`。克隆角色时把源角色的 `avatar` 复制到新角色；`rollback` 等走 `update` 的路径在 definition 显式携带 avatar 时同步列，避免列与 definition 长期分叉。
 
 ### 5.3 API
 

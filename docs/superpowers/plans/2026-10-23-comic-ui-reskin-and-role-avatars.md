@@ -150,7 +150,7 @@ def test_legacy_roles_table_gets_avatar_column(tmp_path):
 ```bash
 cd dev
 source .venv/bin/activate
-pytest tests/api/test_role_avatar.py::test_create_role_with_avatar -v
+python -m pytest tests/api/test_role_avatar.py::test_create_role_with_avatar -v
 ```
 
 Expected: FAIL —— 响应里没有 `avatar`，或 `PRAGMA table_info` 里没有 `avatar`。
@@ -254,7 +254,7 @@ def _validate_avatar(value: object) -> str | None:
 ```bash
 cd dev
 source .venv/bin/activate
-pytest tests/api/test_role_avatar.py::test_create_role_with_avatar tests/api/test_role_avatar.py::test_auto_create_role_with_avatar tests/api/test_role_avatar.py::test_legacy_roles_table_gets_avatar_column -v
+python -m pytest tests/api/test_role_avatar.py::test_create_role_with_avatar tests/api/test_role_avatar.py::test_auto_create_role_with_avatar tests/api/test_role_avatar.py::test_legacy_roles_table_gets_avatar_column -v
 ```
 
 Expected: 3 passed。
@@ -273,8 +273,8 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 ### Task 2: 头像独立更新接口 + 校验测试
 
 **Files:**
-- Modify: `dev/backend/anvil/services/roles.py`（新增 `update_avatar`）
-- Modify: `dev/backend/anvil/api/roles.py`（新增 `PUT /roles/{slug}/avatar`）
+- Modify: `dev/backend/anvil/services/roles.py`（新增 `update_avatar`；`update` 同步 avatar 列）
+- Modify: `dev/backend/anvil/api/roles.py`（新增 `PUT /roles/{slug}/avatar`；`clone_role` 复制头像）
 - Test: `dev/tests/api/test_role_avatar.py`
 
 - [ ] **Step 1: 追加失败的测试**
@@ -337,6 +337,48 @@ async def test_avatar_update_requires_human(client):
         headers=auth_headers(role="developer"),
     )
     assert r.status_code == 403
+
+
+async def test_clone_role_preserves_avatar(client):
+    await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
+    await client.post(
+        f"{API}/roles",
+        json=role_payload("dev", avatar="big-smile:ace"),
+        headers=human_headers(),
+    )
+    r = await client.post(f"{API}/roles/dev/clone", headers=human_headers())
+    assert r.status_code == 201, r.text
+    assert r.json()["avatar"] == "big-smile:ace"
+
+    got = await client.get(f"{API}/roles/dev-clone")
+    assert got.json()["avatar"] == "big-smile:ace"
+
+
+async def test_rollback_keeps_avatar_consistent(client):
+    await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
+    await client.post(
+        f"{API}/roles",
+        json=role_payload("dev", avatar="big-smile:ace"),
+        headers=human_headers(),
+    )
+    # 第二次配置更新会生成 version 2；随后头像改为 bee。
+    await client.put(
+        f"{API}/roles/dev",
+        json=role_payload("dev", display_name="Dev 2"),
+        headers=human_headers(),
+    )
+    await client.put(
+        f"{API}/roles/dev/avatar",
+        json={"avatar": "big-smile:bee"},
+        headers=human_headers(),
+    )
+    # 回滚到 version 1 应把 definition 里的 ace 同步回 avatar 列。
+    r = await client.post(f"{API}/roles/dev/rollback/1", headers=human_headers())
+    assert r.status_code == 200, r.text
+    assert r.json()["avatar"] == "big-smile:ace"
+
+    got = await client.get(f"{API}/roles/dev")
+    assert got.json()["avatar"] == "big-smile:ace"
 ```
 
 - [ ] **Step 2: 运行测试，确认失败**
@@ -344,7 +386,7 @@ async def test_avatar_update_requires_human(client):
 ```bash
 cd dev
 source .venv/bin/activate
-pytest tests/api/test_role_avatar.py::test_update_role_avatar -v
+python -m pytest tests/api/test_role_avatar.py::test_update_role_avatar -v
 ```
 
 Expected: FAIL —— 404，路由不存在。
@@ -370,6 +412,17 @@ def update_avatar(conn: sqlite3.Connection, slug: str, avatar: str | None) -> di
     return get(conn, slug)
 ```
 
+`dev/backend/anvil/services/roles.py` 的 `update` 中，把 definition 写入分支改成：
+
+```python
+    if definition is not None:
+        fields["definition_json"] = jdumps(definition)
+        if "avatar" in definition:
+            fields["avatar"] = definition.get("avatar")
+```
+
+这样 rollback / ensure_onboarding 等走 `update` 的路径会把 definition 里显式携带的 avatar 同步回列，避免列与 definition 不一致。
+
 `dev/backend/anvil/api/roles.py` 在 `update_role` 后面加：
 
 ```python
@@ -384,22 +437,31 @@ def update_role_avatar(slug: str, body: dict, conn=Depends(get_db),
     return services.roles.update_avatar(conn, slug, avatar)
 ```
 
+`clone_role` 中，读取 `definition` 后加：
+
+```python
+    if src.get("avatar"):
+        definition["avatar"] = src["avatar"]
+```
+
+这样克隆角色会继承当前头像，而不是只依赖可能已被通用 PUT 清掉 avatar 的 definition_json。
+
 - [ ] **Step 4: 运行全部头像测试**
 
 ```bash
 cd dev
 source .venv/bin/activate
-pytest tests/api/test_role_avatar.py -v
+python -m pytest tests/api/test_role_avatar.py -v
 ```
 
-Expected: 7 passed（3 个来自 Task 1 + 4 个新增）。
+Expected: `test_role_avatar.py` 全部通过（Task 1 的持久化/迁移测试 + 本任务的更新、克隆、回滚测试）。
 
 - [ ] **Step 5: 回归角色相关测试**
 
 ```bash
 cd dev
 source .venv/bin/activate
-pytest tests/api/test_roles.py tests/api/test_role_auto.py tests/api/test_role_profile.py -v
+python -m pytest tests/api/test_roles.py tests/api/test_role_auto.py tests/api/test_role_profile.py -v
 ```
 
 Expected: 全部 passed。
@@ -3968,7 +4030,7 @@ npm run build
 cd ../..
 cd dev
 source .venv/bin/activate
-pytest tests/api/test_role_avatar.py tests/api/test_roles.py tests/api/test_role_auto.py -v
+python -m pytest tests/api/test_role_avatar.py tests/api/test_roles.py tests/api/test_role_auto.py -v
 ```
 
 Expected: 前端构建成功；后端相关测试全部 passed。
@@ -4013,6 +4075,8 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 ## 执行说明
 
 - 按 Task 1 → 17 顺序执行；每个 Task 结束都提交，便于回滚。
+- **仓库根与提交位置**：所有 git 操作从 `/Users/ikaruga/cctest/aliceAgent` 执行。`dev/` 目录下还有一个嵌套的 `.git`；不要 `cd dev` 后提交。提交前用 `git rev-parse --show-toplevel` 确认输出是外层仓库根。
+- **测试命令**：在 `dev` 下使用 `python -m pytest ...`，不要用裸 `pytest`（pytest 9 下会有 `tests` 导入路径问题）。
 - Task 8–12 是样式拆分，期间页面可能短暂出现旧/新样式混合；Task 12 切换导入后统一验收。
 - 如果后端测试环境缺少依赖，先执行 `cd dev && source .venv/bin/activate && pip install -r backend/requirements.txt`。
 - 头像素材生成需要一次网络访问；之后运行期完全离线。
