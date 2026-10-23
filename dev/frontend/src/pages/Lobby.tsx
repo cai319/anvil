@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, subscribeEvents, type Role, type Run, type Task } from "../api/client";
 import { navigate } from "../router";
 import { formatClock, parseTime, useNow } from "../time";
+import { usePanelLayout } from "../usePanelLayout";
 import { NewTaskModal } from "./NewTaskModal";
 
 const COLUMNS: Task["status"][] = ["todo", "in_progress", "in_review", "done", "closed"];
@@ -100,6 +101,7 @@ export function Lobby() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
+  const panel = usePanelLayout({ storageKey: "lobby" });
   const now = useNow(30_000); // 运行时长按系统当前时间刷新
 
   const refresh = () =>
@@ -170,14 +172,20 @@ export function Lobby() {
         <button className="primary new-task-btn" onClick={() => setShowNew(true)}>
           <span className="plus">＋</span> 新建任务
         </button>
+        {panel.collapsed && (
+          <button className="small" onClick={panel.toggle}>显示右栏</button>
+        )}
         <small className="muted">选择参与成员后创建；多角色任务会先由 Cindy 规划工作流</small>
       </div>
 
       {error && <p className="error">{error}</p>}
 
-      <div className="lobby">
+      <div
+        className={`lobby ${panel.collapsed ? "panel-collapsed" : ""}`}
+        style={panel.style}
+      >
         {/* 中栏：任务看板 */}
-        <section>
+        <section className="lobby-main">
           <div className="kanban">
             {COLUMNS.map((status) => (
               <div
@@ -240,9 +248,34 @@ export function Lobby() {
           </div>
         </section>
 
+        <div
+          className={`splitter ${panel.dragging ? "dragging" : ""}`}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="调整右栏宽度"
+          aria-valuemin={300}
+          aria-valuemax={560}
+          aria-valuenow={panel.width}
+          tabIndex={0}
+          onPointerDown={panel.onPointerDown}
+          onKeyDown={panel.onKeyDown}
+          onDoubleClick={panel.reset}
+        />
+
         {/* 右栏：实时会话 + 最近活动（历史见 /activity） */}
-        <section>
-          <h2 className="pane-title">实时会话 · {runs.length}</h2>
+        <section className="lobby-side" aria-hidden={panel.collapsed || undefined}>
+          <div className="pane-head">
+            <h2 className="pane-title">实时会话 · {runs.length}</h2>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={panel.toggle}
+              aria-label="折叠右栏"
+              title="折叠右栏"
+            >
+              ⇥
+            </button>
+          </div>
           {runs.length === 0 && (
             <p className="muted">当前没有活跃会话。角色空闲时进程释放，不是故障。</p>
           )}
