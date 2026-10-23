@@ -9,6 +9,7 @@ import { useRoleRuntimes } from "../useRoleRuntimes";
 import { usePanelLayout } from "../usePanelLayout";
 import { STATUS_META, isDynamicStep, summarizeLoops, type LoopSummary } from "../workflowGroups";
 import { RoleAvatar } from "../components/RoleAvatar";
+import { Icon } from "../components/Icon";
 
 const STATUS_LABEL: Record<Task["status"], string> = {
   todo: "待办",
@@ -457,6 +458,18 @@ export function TaskDetail({ id }: { id: string }) {
     setMentionIndex(0);
   };
 
+  const insertMention = () => {
+    const el = inputRef.current;
+    const pos = el?.selectionStart ?? comment.length;
+    const next = comment.slice(0, pos) + "@" + comment.slice(pos);
+    setComment(next);
+    syncMention(next, pos + 1);
+    requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(pos + 1, pos + 1);
+    });
+  };
+
   const chooseMention = (candidate: { slug: string; name: string }) => {
     const input = inputRef.current;
     if (!input || !mention) return;
@@ -627,7 +640,10 @@ export function TaskDetail({ id }: { id: string }) {
 
   return (
     <div className="session">
-      <p className="session-back"><a href="/">← 任务大厅</a></p>
+      <div className="task-sheet">
+      <p className="session-back">
+        <a href="/"><Icon name="chevron-left" /> 任务大厅</a>
+      </p>
 
       {/* 头部 */}
       <div className="session-head">
@@ -636,9 +652,11 @@ export function TaskDetail({ id }: { id: string }) {
           <span className={`status status-${task.status}`}>{STATUS_LABEL[task.status]}</span>
         </div>
         <div className="session-meta">
-          {task.assignee && <span>👤 {task.assignee}</span>}
+          {task.assignee && (
+            <span className="session-meta-item"><Icon name="user" /> {task.assignee}</span>
+          )}
           {task.assignees?.length > 0 ? (
-            <span>👥 {task.assignees.join("、")}</span>
+            <span className="session-meta-item"><Icon name="users" /> {task.assignees.join("、")}</span>
           ) : !task.assignee ? (
             <span className="muted">未指派</span>
           ) : null}
@@ -650,7 +668,7 @@ export function TaskDetail({ id }: { id: string }) {
       {/* 待评审横幅（HITL 醒目提示） */}
       {task.status === "in_review" && (
         <div className="review-banner">
-          <span className="review-banner-text">🔔 待人工评审 —— 请确认产出后「通过」或「驳回」</span>
+          <span className="review-banner-text"><Icon name="alert" /> 待人工评审 —— 请确认产出后「通过」或「驳回」</span>
           <button className="primary" onClick={() => act(() => api.reviewTask(id, true))} disabled={busy}>通过</button>
           <button className="danger" onClick={() => act(() => api.reviewTask(id, false))} disabled={busy}>驳回</button>
         </div>
@@ -679,6 +697,7 @@ export function TaskDetail({ id }: { id: string }) {
             显示任务信息
           </button>
         )}
+      </div>
       </div>
 
       {tab === "chat" && (
@@ -920,6 +939,15 @@ export function TaskDetail({ id }: { id: string }) {
 
           {/* 评论 / @提及 框 */}
           <div className="session-compose">
+            <button
+              type="button"
+              className="compose-at"
+              onClick={insertMention}
+              aria-label="提及角色"
+              title="提及角色"
+            >
+              <Icon name="at-sign" />
+            </button>
             <div className="mention-input-wrap">
               <input
                 ref={inputRef}
@@ -984,7 +1012,7 @@ export function TaskDetail({ id }: { id: string }) {
         />
         <aside className="task-side">
           <div className="pane-head">
-            <h2 className="pane-title">任务信息</h2>
+            <h2 className="pane-title">任务档案</h2>
             <button
               type="button"
               className="icon-btn"
@@ -992,7 +1020,7 @@ export function TaskDetail({ id }: { id: string }) {
               aria-label="折叠任务信息"
               title="折叠任务信息"
             >
-              ⇥
+              <Icon name="panel-right" />
             </button>
           </div>
           <dl className="task-meta">
