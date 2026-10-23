@@ -147,6 +147,7 @@ export function TaskDetail({ id }: { id: string }) {
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const blurTimerRef = useRef<number | null>(null);
   const descRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [gone, setGone] = useState(false);
@@ -459,14 +460,23 @@ export function TaskDetail({ id }: { id: string }) {
   };
 
   const insertMention = () => {
+    if (blurTimerRef.current != null) {
+      window.clearTimeout(blurTimerRef.current);
+      blurTimerRef.current = null;
+    }
     const el = inputRef.current;
-    const pos = el?.selectionStart ?? comment.length;
-    const next = comment.slice(0, pos) + "@" + comment.slice(pos);
+    const focused = el != null && document.activeElement === el;
+    const start = focused && el.selectionStart != null ? el.selectionStart : comment.length;
+    const end = focused && el.selectionEnd != null ? el.selectionEnd : start;
+    const before = comment.slice(0, start);
+    const token = before && !/[\s（(，,。.;；:：]$/.test(before) ? " @" : "@";
+    const next = comment.slice(0, start) + token + comment.slice(end);
     setComment(next);
-    syncMention(next, pos + 1);
+    const caret = start + token.length;
+    syncMention(next, caret);
     requestAnimationFrame(() => {
       el?.focus();
-      el?.setSelectionRange(pos + 1, pos + 1);
+      el?.setSelectionRange(caret, caret);
     });
   };
 
@@ -942,6 +952,7 @@ export function TaskDetail({ id }: { id: string }) {
             <button
               type="button"
               className="compose-at"
+              onMouseDown={(event) => event.preventDefault()}
               onClick={insertMention}
               aria-label="提及角色"
               title="提及角色"
@@ -964,7 +975,9 @@ export function TaskDetail({ id }: { id: string }) {
                   }
                 }}
                 onClick={(e) => syncMention(comment, e.currentTarget.selectionStart)}
-                onBlur={() => window.setTimeout(() => setMention(null), 150)}
+                onBlur={() => {
+                  blurTimerRef.current = window.setTimeout(() => setMention(null), 150);
+                }}
                 placeholder="输入消息；输入 @ 选择角色（界面显示昵称，后台用 slug 激活）"
               />
               {mention && mentionCandidates.length > 0 && (
