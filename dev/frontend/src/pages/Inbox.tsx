@@ -18,10 +18,10 @@ const KIND_LABEL: Record<InboxItem["kind"], string> = {
 const KIND_COLOR: Record<InboxItem["kind"], string> = {
   review: "#b91c1c",
   mention: "#1d4ed8",
-  draft: "#5b50d6",
-  lesson: "#15803d",
-  proposal: "#a16207",
-  gate: "#b45309",
+  draft: "#6b21a8",
+  lesson: "#166534",
+  proposal: "#854d0e",
+  gate: "#92400e",
   action: "#be185d",
 };
 

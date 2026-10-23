@@ -629,7 +629,7 @@ export function TaskDetail({ id }: { id: string }) {
     return (
       <details key={`loop-${loop.sourceStepId}`} className="wf-loop-list">
         <summary className="wf-loop-summary">
-          <span className="wf-loop-mark">↻ 切片循环</span>
+          <span className="wf-loop-mark"><Icon name="refresh" size={12} /> 切片循环</span>
           <span className={`status status-${statusClass(loop.status)}`}>{meta.label}</span>
           <span className="muted">
             {loop.totalSlices} 片 · {loop.totalSteps} 步 · 已完成 {loop.doneSlices}/{loop.totalSlices} 片

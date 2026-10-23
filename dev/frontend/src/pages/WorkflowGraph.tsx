@@ -14,7 +14,7 @@ import { Icon } from "../components/Icon";
  *
  * 图谱只表达 workflow 的逻辑与架构：
  * - 静态步骤按依赖分层；
- * - 运行期切片的每个小闭环折叠成一个「↻ 切片循环」节点，
+ * - 运行期切片的每个小闭环折叠成一个「切片循环」节点，
  *   节点上实时显示当前片 / 阶段 / 完成计数，不展开全部步骤。
  */
 
@@ -206,14 +206,14 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
           </span>
         ))}
         <span className="wf-legend-item">
-          <i style={{ background: "#60a5fa" }} /> ↻ = 切片循环（不展开每步）
+          <i style={{ background: "#60a5fa" }} /> <Icon name="refresh" size={12} /> = 切片循环（不展开每步）
         </span>
         <span className="wf-legend-item">
           <i style={{ background: "#fb923c" }} /> 虚线 = 决策打回重做
         </span>
         <span className="muted">· 同一行（层）= 可并行；箭头向下 = 依赖</span>
         <span className="wf-zoom">
-          <button className="small" title="缩小" onClick={() => setZoom(Math.max(0.3, scale - 0.15))}>−</button>
+          <button className="small" title="缩小" onClick={() => setZoom(Math.max(0.3, scale - 0.15))}><Icon name="minus" /></button>
           <span className="muted">{Math.round(scale * 100)}%</span>
           <button className="small" title="放大" onClick={() => setZoom(Math.min(1.6, scale + 0.15))}><Icon name="plus" /></button>
           <button className="small" title="横向填满容器（纵向滚动查看全图）"
@@ -271,7 +271,7 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
                   title={`切片循环 · ${meta.label} · ${loop.totalSlices} 片 / ${loop.totalSteps} 步`}
                 >
                   <span className="wf-node-top">
-                    <span className="wf-node-id mono">↻ 切片循环</span>
+                    <span className="wf-node-id mono"><Icon name="refresh" size={12} /> 切片循环</span>
                     <span className="wf-node-status" style={{ color: meta.color }}>{meta.label}</span>
                   </span>
                   <span className="wf-node-title">
@@ -324,7 +324,7 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
       {selectedLoop && activeGroup && (
         <div className="wf-detail card">
           <div className="wf-detail-head">
-            <strong>↻ 切片循环 · {activeGroup.title}</strong>
+            <strong><Icon name="refresh" size={12} /> 切片循环 · {activeGroup.title}</strong>
             <span className="muted">
               第 {selectedLoop.groups.findIndex((g) => g.key === activeGroup.key) + 1}/{selectedLoop.totalSlices} 片
               {" · "}本片 {activeGroup.done}/{activeGroup.total}
