@@ -54,7 +54,7 @@ def create(conn: sqlite3.Connection, *, slug: str, display_name: str,
            ON CONFLICT(slug) DO UPDATE SET
              display_name=excluded.display_name,
              avatar_color=excluded.avatar_color,
-             avatar=excluded.avatar,
+             avatar=COALESCE(excluded.avatar, avatar),
              definition_json=excluded.definition_json,
              updated_at=excluded.updated_at""",
         (slug, display_name, definition.get("avatar_color"), definition.get("avatar"),
@@ -583,7 +583,8 @@ def _row(r) -> dict:
     d["definition"] = jloads(d.get("definition_json") or "{}", {})  # 供 API/前端读取角色画像
     if not d.get("avatar"):
         definition = d.get("definition") or {}
-        d["avatar"] = definition.get("avatar") if isinstance(definition, dict) else None
+        fallback = definition.get("avatar") if isinstance(definition, dict) else None
+        d["avatar"] = fallback if isinstance(fallback, str) else None
     # 跨平台/迁移：DB 里的绝对 home_path 可能来自旧系统；以当前数据目录为准。
     d["home_path"] = str(config.AGENTS_DIR / d["slug"])
     return d

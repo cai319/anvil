@@ -22,9 +22,11 @@ AVATAR_RE = re.compile(r"^big-smile:[a-z0-9-]{1,32}$")
 
 def _validate_avatar(value: object) -> str | None:
     """头像只接受 null / initials / big-smile:<id>。"""
-    if value is None or value == "initials":
-        return value  # type: ignore[return-value]
-    if not isinstance(value, str) or not AVATAR_RE.match(value):
+    if value is None:
+        return None
+    if value == "initials":
+        return "initials"
+    if not isinstance(value, str) or not AVATAR_RE.fullmatch(value):
         raise HTTPException(
             status_code=422,
             detail="avatar must be null, 'initials', or 'big-smile:<id>'",
@@ -88,7 +90,6 @@ def auto_create_role(body: dict, conn=Depends(get_db),
     data = _extract_json(text) or {}
     definition = {
         "kind": "member",
-        "avatar": avatar,
         "description": data.get("description") or brief,
         "runtime": {"id": resolved_runtime_id},
         "workspace": {"repos": []},
@@ -100,6 +101,8 @@ def auto_create_role(body: dict, conn=Depends(get_db),
         "system_prompt": data.get("system_prompt") or "",
         "responsibilities": data.get("responsibilities") or [],
     }
+    if avatar is not None:
+        definition["avatar"] = avatar
     display_name = str(data.get("display_name") or body.get("display_name") or slug)
     try:
         return services.roles.create(conn, slug=slug, display_name=display_name,
@@ -215,7 +218,9 @@ def create_role(body: RoleIn, conn=Depends(get_db),
     if definition.get("kind") == "onboarding":
         raise HTTPException(status_code=422, detail="cannot create onboarding role via API")
     definition.setdefault("kind", "member")
-    definition["avatar"] = _validate_avatar(body.avatar)
+    avatar = _validate_avatar(body.avatar)
+    if avatar is not None:
+        definition["avatar"] = avatar
     try:
         return services.roles.create(conn, slug=body.slug, display_name=body.display_name,
                                      definition=definition)
