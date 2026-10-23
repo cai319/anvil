@@ -1,12 +1,6 @@
 import { useState } from "react";
 import { api, isOnboardingRole, type Role, type Task } from "../api/client";
-
-const AVATAR_COLORS = ["#6d7cff", "#34d399", "#fbbf24", "#60a5fa", "#f472b6", "#2dd4bf", "#fb923c", "#a78bfa"];
-function avatarColor(slug: string): string {
-  let h = 0;
-  for (const c of slug) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return AVATAR_COLORS[h % AVATAR_COLORS.length];
-}
+import { RoleAvatar } from "../components/RoleAvatar";
 
 /** 新建任务弹窗（参考 multica/raft：名称 + 描述 + 可滚动角色多选）。 */
 export function NewTaskModal({ roles, onClose, onCreated }: {
@@ -77,9 +71,13 @@ export function NewTaskModal({ roles, onClose, onCreated }: {
                   onClick={() => toggle(r.slug)}
                   aria-pressed={picked}
                 >
-                  <span className="member-avatar" style={{ background: avatarColor(r.slug) }}>
-                    {r.display_name.slice(0, 1)}
-                  </span>
+                  <RoleAvatar
+                    slug={r.slug}
+                    name={r.display_name}
+                    avatar={r.avatar}
+                    color={r.avatar_color}
+                    size={30}
+                  />
                   <span className="member-main">
                     <span className="member-line">
                       <span className="member-name">{r.display_name}</span>

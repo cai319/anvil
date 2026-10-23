@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, subscribeEvents, type Role, type Run, type Task } from "../api/client";
 import { formatClock, parseTime, useNow } from "../time";
+import { RoleAvatar } from "../components/RoleAvatar";
 
 const RUN_LABEL: Record<string, string> = {
   created: "已创建",
@@ -13,13 +14,6 @@ const RUN_LABEL: Record<string, string> = {
   abandoned: "已放弃",
   suspended: "已挂起",
 };
-
-const AVATAR_COLORS = ["#6d7cff", "#34d399", "#fbbf24", "#60a5fa", "#f472b6", "#2dd4bf", "#fb923c", "#a78bfa"];
-function avatarColor(slug: string): string {
-  let h = 0;
-  for (const c of slug) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return AVATAR_COLORS[h % AVATAR_COLORS.length];
-}
 
 function fmtDuration(start: string | null, end: string | null, now = Date.now()): string {
   const a = parseTime(start);
@@ -65,7 +59,13 @@ export function AgentSessions({ slug }: { slug: string }) {
 
       <div className="session-head">
         <div className="session-title">
-          <span className="role-avatar" style={{ background: avatarColor(slug), width: 34, height: 34 }}>{role.display_name.slice(0, 1)}</span>
+          <RoleAvatar
+            slug={slug}
+            name={role.display_name}
+            avatar={role.avatar}
+            color={role.avatar_color}
+            size={34}
+          />
           <h1>{role.display_name}</h1>
           <span className={`status-light ${active ? "running" : "idle"}`} title={active ? "运行中" : "空闲"} />
         </div>

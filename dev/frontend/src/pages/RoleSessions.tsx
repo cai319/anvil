@@ -6,6 +6,7 @@ import {
 import { roleStatusFromWorkflow } from "../workflowStatus";
 import { roleLiveDot, roleLiveState, stateClassForDot } from "../roleLive";
 import { formatClock, formatShort } from "../time";
+import { RoleAvatar } from "../components/RoleAvatar";
 
 /** 任务详情「子任务」页签：每个参与角色当前的会话状态 + 执行日志 + 历史上下文。 */
 
@@ -13,13 +14,6 @@ const RUN_LABEL: Record<string, string> = {
   created: "已创建", projecting: "投影中", running: "运行中", submitted: "已提交",
   reviewing: "评审中", completed: "已完成", failed: "失败", abandoned: "已放弃", suspended: "等待唤醒",
 };
-
-const AVATAR_COLORS = ["#6d7cff", "#34d399", "#fbbf24", "#60a5fa", "#f472b6", "#2dd4bf", "#fb923c", "#a78bfa"];
-function avatarColor(slug: string): string {
-  let h = 0;
-  for (const c of slug) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return AVATAR_COLORS[h % AVATAR_COLORS.length];
-}
 
 type Claim = Task["role_claims"][number];
 
@@ -110,6 +104,7 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
     if (st.run_id) stepRunByRole.set(st.role_slug, st.run_id);
   }
   const roleName = (slug: string) => roles.find((r) => r.slug === slug)?.display_name ?? slug;
+  const roleFor = (slug: string) => roles.find((r) => r.slug === slug);
 
   const open = (run: Run | undefined) => {
     if (!run) return;
@@ -208,9 +203,13 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
                 role="img"
               />
               <span className={`status status-${stateClassForDot(dot.cls)}`}>{st.label}</span>
-              <span className="role-avatar" style={{ background: avatarColor(slug) }}>
-                {roleName(slug).slice(0, 1)}
-              </span>
+              <RoleAvatar
+                slug={slug}
+                name={roleName(slug)}
+                avatar={roleFor(slug)?.avatar}
+                color={roleFor(slug)?.avatar_color}
+                size={28}
+              />
               <span className="rs-name">
                 {roleName(slug)}
                 <small className="muted"> {slug}</small>

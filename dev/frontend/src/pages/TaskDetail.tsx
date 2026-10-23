@@ -8,6 +8,7 @@ import { roleLiveDot, roleLiveState, stateClassForDot } from "../roleLive";
 import { useRoleRuntimes } from "../useRoleRuntimes";
 import { usePanelLayout } from "../usePanelLayout";
 import { STATUS_META, isDynamicStep, summarizeLoops, type LoopSummary } from "../workflowGroups";
+import { RoleAvatar } from "../components/RoleAvatar";
 
 const STATUS_LABEL: Record<Task["status"], string> = {
   todo: "待办",
@@ -29,17 +30,11 @@ const RUN_LABEL: Record<string, string> = {
   suspended: "已挂起",
 };
 
-const AVATAR_COLORS = ["#6d7cff", "#34d399", "#fbbf24", "#60a5fa", "#f472b6", "#2dd4bf", "#fb923c", "#a78bfa"];
 // 系统伪发送者：workflow 引擎/系统通知不是真实 Agent 角色。
 const SYSTEM_SENDERS: Record<string, string> = {
   workflow: "工作流引擎",
   system: "系统",
 };
-function avatarColor(slug: string): string {
-  let h = 0;
-  for (const c of slug) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return AVATAR_COLORS[h % AVATAR_COLORS.length];
-}
 
 /** 把文本里命中角色的 @slug/@显示名（昵称）标黄；未命中角色的 @ 保持原样。 */
 function renderMentionText(text: string, tokens: Map<string, string>): ReactNode {
@@ -355,6 +350,13 @@ export function TaskDetail({ id }: { id: string }) {
   /** 点灯 → 状态徽标 → slug 的统一呈现。 */
   const renderRoleLive = (live: ReturnType<typeof roleLiveFor>) => (
     <span className="role-live-chip" title={live.title}>
+      <RoleAvatar
+        slug={live.slug}
+        name={roles.find((r) => r.slug === live.slug)?.display_name ?? live.slug}
+        avatar={roles.find((r) => r.slug === live.slug)?.avatar}
+        color={roles.find((r) => r.slug === live.slug)?.avatar_color}
+        size={18}
+      />
       <i className={`role-live-dot ${live.dot.cls}`} aria-label={live.title} />
       <span className={`status status-${stateClassForDot(live.dot.cls)} role-live-state`}>
         {live.state.label}
@@ -870,20 +872,26 @@ export function TaskDetail({ id }: { id: string }) {
               const displayRole = isHuman
                 ? "你（自然人）"
                 : (systemLabel ?? displayNameFor(role));
+              const roleInfo = roles.find((r) => r.slug === role);
               return (
                 <div
-                  className={`thread-item ${ev.kind === "comment" ? "is-message" : ""} ${d.mention ? "is-mention" : ""} ${systemLabel || isHuman ? "is-system" : ""}`}
+                  className={`thread-item ${ev.kind === "comment" ? "is-message" : ""} ${d.mention ? "is-mention" : ""} ${isHuman ? "is-human" : ""} ${systemLabel ? "is-system-event" : ""}`}
                   key={ev.key}
                 >
-                  <span
-                    className="thread-avatar"
-                    style={{
-                      background: d.mention ? "var(--amber)"
-                        : isHuman ? "#0ea5a4" : systemLabel ? "#475569" : avatarColor(role),
-                    }}
-                  >
-                    {d.mention ? "@" : isHuman ? "人" : systemLabel ? "⚙" : role.slice(0, 1).toUpperCase()}
-                  </span>
+                  {d.mention ? (
+                    <span className="thread-avatar mention-avatar">@</span>
+                  ) : isHuman ? (
+                    <span className="thread-avatar human-avatar">人</span>
+                  ) : systemLabel ? null : (
+                    <RoleAvatar
+                      slug={role}
+                      name={displayRole}
+                      avatar={roleInfo?.avatar}
+                      color={roleInfo?.avatar_color}
+                      size={32}
+                      className="thread-role-avatar"
+                    />
+                  )}
                   <div className="thread-body">
                     <div className="thread-meta">
                       <strong title={isHuman ? "human" : `${displayRole}（${role}）`}>

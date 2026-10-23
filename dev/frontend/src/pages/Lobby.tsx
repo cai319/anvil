@@ -4,6 +4,7 @@ import { navigate } from "../router";
 import { formatClock, parseTime, useNow } from "../time";
 import { usePanelLayout } from "../usePanelLayout";
 import { NewTaskModal } from "./NewTaskModal";
+import { RoleAvatar } from "../components/RoleAvatar";
 
 const COLUMNS: Task["status"][] = ["todo", "in_progress", "in_review", "done", "closed"];
 const STATUS_LABEL: Record<Task["status"], string> = {
@@ -13,14 +14,6 @@ const STATUS_LABEL: Record<Task["status"], string> = {
   done: "完成",
   closed: "已关闭",
 };
-
-const AVATAR_COLORS = ["#6d7cff", "#34d399", "#fbbf24", "#60a5fa", "#f472b6", "#2dd4bf", "#fb923c", "#a78bfa"];
-
-function avatarColor(slug: string): string {
-  let h = 0;
-  for (const c of slug) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return AVATAR_COLORS[h % AVATAR_COLORS.length];
-}
 
 interface Activity {
   time: string;
@@ -285,9 +278,13 @@ export function Lobby() {
             const live = r.status === "running" || r.status === "projecting";
             return (
               <a key={r.id} className="run-card" href={`/runs/${r.id}`} title="查看该会话详情">
-                <span className="role-avatar" style={{ background: avatarColor(r.role_slug), width: 28, height: 28, fontSize: 12 }}>
-                  {roleName.slice(0, 1)}
-                </span>
+                <RoleAvatar
+                  slug={r.role_slug}
+                  name={roleName}
+                  avatar={roles.find((x) => x.slug === r.role_slug)?.avatar}
+                  color={roles.find((x) => x.slug === r.role_slug)?.avatar_color}
+                  size={28}
+                />
                 <div className="run-body">
                   <div className="run-title">
                     {roleName} · <span className={live ? "run-live" : "muted"}>{RUN_STATUS_LABEL[r.status] ?? r.status}</span>
