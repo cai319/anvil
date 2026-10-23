@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, isOnboardingRole, type Role, type Runtime } from "../api/client";
+import { AvatarPicker } from "../components/AvatarPicker";
+import { RoleAvatar } from "../components/RoleAvatar";
 import { formatDateTime } from "../time";
 
 type Tab = "basic" | "instruction" | "tools" | "catalog" | "home" | "permissions" | "runtime";
@@ -36,6 +38,8 @@ export function Roles() {
   const [brief, setBrief] = useState("");
   const [genResult, setGenResult] = useState<{ working_mode?: string; skill_description?: string } | null>(null);
   const [genBusy, setGenBusy] = useState(false);
+  const [newAvatar, setNewAvatar] = useState<string | null>(null);
+  const [avatarOpen, setAvatarOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [homeFiles, setHomeFiles] = useState<string[]>([]);
   const [homeFile, setHomeFile] = useState<{ path: string; content: string } | null>(null);
@@ -155,9 +159,10 @@ export function Roles() {
       return;
     }
     try {
-      const r = await api.createRole(slug, displayName, runtimeId);
+      const r = await api.createRole(slug, displayName, runtimeId, newAvatar);
       setSlug("");
       setDisplayName("");
+      setNewAvatar(null);
       await refresh();
       setSelected(r.slug);
       setTab("basic");
@@ -171,8 +176,9 @@ export function Roles() {
     setAutoBusy(true);
     setError(null);
     try {
-      const r = await api.autoCreateRole(autoBrief.trim(), runtimeId || undefined);
+      const r = await api.autoCreateRole(autoBrief.trim(), runtimeId || undefined, newAvatar);
       setAutoBrief("");
+      setNewAvatar(null);
       setGenResult(null);
       setProfile({ system_prompt: "", responsibilities: [] });
       setBrief("");
@@ -283,65 +289,99 @@ export function Roles() {
       <h1>角色工坊</h1>
       {error && <p className="error">{error}</p>}
 
-      <div className="toolbar">
-        <input
-          value={slug}
-          onChange={(e) => setSlug(e.target.value)}
-          placeholder="slug（小写字母/数字/-/_）"
-          pattern="[a-z0-9][a-z0-9_-]{1,63}"
-          maxLength={64}
-          autoCapitalize="off"
-          autoCorrect="off"
-          spellCheck={false}
-          title={SLUG_HINT}
-          aria-invalid={slugInvalid}
+      <section className="create-role-panel">
+        <div className="toolbar">
+          <input
+            value={slug}
+            onChange={(e) => setSlug(e.target.value)}
+            placeholder="slug（小写字母/数字/-/_）"
+            pattern="[a-z0-9][a-z0-9_-]{1,63}"
+            maxLength={64}
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            title={SLUG_HINT}
+            aria-invalid={slugInvalid}
+          />
+          <input
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            placeholder="显示名"
+          />
+          <select
+            value={runtimeId}
+            onChange={(e) => setRuntimeId(e.target.value)}
+            title="角色绑定的运行时"
+          >
+            {runtimes.length === 0 && <option value="">（无可用运行时）</option>}
+            {runtimeId && !runtimes.some((r) => r.id === runtimeId) && (
+              <option value={runtimeId}>{runtimeId}（未注册）</option>
+            )}
+            {runtimes.map((r) => (
+              <option key={r.id} value={r.id}>{r.display_name} · {r.status}</option>
+            ))}
+          </select>
+          <button onClick={create} disabled={!slug || !displayName || !runtimeId || slugInvalid}>
+            新建角色
+          </button>
+        </div>
+        <p className={slugInvalid ? "error role-slug-hint" : "muted role-slug-hint"}>
+          {slugInvalid ? SLUG_HINT : "slug：小写字母、数字、-、_，2–64 位；不支持中文/大写/空格。"}
+        </p>
+        <div className="toolbar">
+          <input
+            value={autoBrief}
+            onChange={(e) => setAutoBrief(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && autoCreate()}
+            placeholder="一句话描述角色，AI 生成能力与定位后创建：如「负责后端 API、数据库迁移和性能优化」"
+            style={{ flex: 1 }}
+          />
+          <button
+            className="primary"
+            onClick={autoCreate}
+            disabled={autoBusy || !autoBrief.trim() || !runtimeId}
+          >
+            {autoBusy ? "生成中…" : "AI 生成并创建"}
+          </button>
+        </div>
+        {runtimes.length === 0 && (
+          <p className="muted">
+            没有可用运行时：请先到「运行时」页扫描，或在角色创建前新增自定义运行时。
+          </p>
+        )}
+        <AvatarPicker
+          mode="inline"
+          slug={slug || displayName || "new-role"}
+          name={displayName || "新角色"}
+          value={newAvatar}
+          onChange={setNewAvatar}
         />
-        <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="显示名" />
-        <select value={runtimeId} onChange={(e) => setRuntimeId(e.target.value)} title="角色绑定的运行时">
-          {runtimes.length === 0 && <option value="">（无可用运行时）</option>}
-          {runtimeId && !runtimes.some((r) => r.id === runtimeId) && (
-            <option value={runtimeId}>{runtimeId}（未注册）</option>
-          )}
-          {runtimes.map((r) => (
-            <option key={r.id} value={r.id}>{r.display_name} · {r.status}</option>
-          ))}
-        </select>
-        <button onClick={create} disabled={!slug || !displayName || !runtimeId || slugInvalid}>
-          新建角色
-        </button>
-      </div>
-      <p className={slugInvalid ? "error role-slug-hint" : "muted role-slug-hint"}>
-        {slugInvalid ? SLUG_HINT : "slug：小写字母、数字、-、_，2–64 位；不支持中文/大写/空格。"}
-      </p>
-      <div className="toolbar">
-        <input
-          value={autoBrief}
-          onChange={(e) => setAutoBrief(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && autoCreate()}
-          placeholder="一句话描述角色，AI 生成能力与定位后创建：如「负责后端 API、数据库迁移和性能优化」"
-          style={{ flex: 1 }}
-        />
-        <button className="primary" onClick={autoCreate} disabled={autoBusy || !autoBrief.trim() || !runtimeId}>
-          {autoBusy ? "生成中…" : "AI 生成并创建"}
-        </button>
-      </div>
-      {runtimes.length === 0 && (
-        <p className="muted">没有可用运行时：请先到「运行时」页扫描，或在角色创建前新增自定义运行时。</p>
-      )}
+      </section>
 
       <div className="roles-layout">
         <ul className="roles-list">
           {roles.length === 0 && <li className="muted">暂无角色，先在右侧新建。</li>}
           {roles.map((r) => (
             <li key={r.slug} className={selected === r.slug ? "active" : ""}>
-              <a href="#" onClick={(e) => { e.preventDefault(); setSelected(r.slug); setTab("basic"); }}>
-                {r.display_name} <small>({r.slug})</small>
-                {isOnboardingRole(r) && <span className="badge badge-in_progress" title="默认助理，不可删除">默认助理</span>}
-                {!isOnboardingRole(r) && !SLUG_RE.test(r.slug) && (
-                  <span className="badge wf-gate" title="slug 含中文/非法字符，建议删除并重建">
-                    slug 不合规
-                  </span>
-                )}
+              <a
+                href="#"
+                className="role-list-main"
+                onClick={(e) => { e.preventDefault(); setSelected(r.slug); setTab("basic"); }}
+              >
+                <RoleAvatar
+                  slug={r.slug}
+                  name={r.display_name}
+                  avatar={r.avatar}
+                  color={r.avatar_color}
+                  size={28}
+                />
+                <span className="role-list-text">
+                  {r.display_name} <small>({r.slug})</small>
+                  {isOnboardingRole(r) && <span className="badge badge-in_progress" title="默认助理，不可删除">默认助理</span>}
+                  {!isOnboardingRole(r) && !SLUG_RE.test(r.slug) && (
+                    <span className="badge wf-gate" title="slug 含中文/非法字符，建议删除并重建">slug 不合规</span>
+                  )}
+                </span>
               </a>
               {!isOnboardingRole(r) && (
                 <button onClick={() => remove(r)} className="danger">删</button>
@@ -355,6 +395,30 @@ export function Roles() {
             <p className="muted">选择左侧角色查看详情。</p>
           ) : (
             <>
+              <div className="role-detail-head">
+                <button
+                  type="button"
+                  className="role-detail-avatar"
+                  onClick={() => setAvatarOpen(true)}
+                  aria-label="更换角色头像"
+                  title="更换头像"
+                >
+                  <RoleAvatar
+                    slug={current.slug}
+                    name={current.display_name}
+                    avatar={current.avatar}
+                    color={current.avatar_color}
+                    size={52}
+                  />
+                </button>
+                <div className="role-detail-title">
+                  <h2>{current.display_name}</h2>
+                  <span className="mono">{current.slug}</span>
+                </div>
+                <button type="button" className="small" onClick={() => setAvatarOpen(true)}>
+                  更换头像
+                </button>
+              </div>
               <div className="tabs">
                 {TABS.map((t) => (
                   <button key={t.key} className={tab === t.key ? "active" : ""} onClick={() => setTab(t.key)}>
@@ -368,6 +432,12 @@ export function Roles() {
                   <dl>
                     <dt>slug</dt><dd>{current.slug}</dd>
                     <dt>显示名</dt><dd>{current.display_name}</dd>
+                    <dt>头像</dt>
+                    <dd>
+                      <button type="button" className="small" onClick={() => setAvatarOpen(true)}>
+                        更换头像
+                      </button>
+                    </dd>
                     <dt>home</dt><dd className="mono">{current.home_path}</dd>
                     <dt>启用</dt><dd>{current.enabled ? "是" : "否"}</dd>
                   </dl>
@@ -622,6 +692,25 @@ export function Roles() {
           )}
         </div>
       </div>
+
+      {avatarOpen && current && (
+        <AvatarPicker
+          mode="modal"
+          slug={current.slug}
+          name={current.display_name}
+          value={current.avatar ?? null}
+          onChange={async (value) => {
+            try {
+              await api.updateRoleAvatar(current.slug, value);
+              await refresh();
+            } catch (e) {
+              setError(String(e));
+              throw e; // 让 AvatarPicker 保持弹窗打开并显示本地错误
+            }
+          }}
+          onClose={() => setAvatarOpen(false)}
+        />
+      )}
     </div>
   );
 }
