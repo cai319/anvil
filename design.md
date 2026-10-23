@@ -939,6 +939,13 @@ Reminder 可由人设置，**也可由 Agent 自己设置**（`anvil reminder ad
 
 每次运行结束后，从运行时输出中解析 token 用量（各运行时格式不同；解析不到则记为未知）。成本统一用 token 量表示，不计算也不展示金额。汇总维度：按角色、按运行时、按任务类型、按日；前端提供日/周 Token 趋势与角色排行。
 
+> **实现口径（2026-10-23）**：Claude Code 的 `assistant` 事件 `usage.output_tokens`
+> 恒为 0，且同一轮的多个 assistant 事件会重复携带完整 input；真实输出量只在
+> `result` 事件里。Token 账本因此**每轮只在 result 事件记一次**，优先读取
+> `model_usage_since_last_result`（没有时退回 `usage`/`modelUsage`）。治理页、
+> 角色指标和每日预算闸门都使用这份 token 数据；旧版按 assistant 事件写入的
+> 重复/零输出记录已通过一次性迁移清空。
+
 这套观测的准确性受限于运行时是否报告用量，做不到精确。它的用途是发现异常趋势（"这个角色的平均 token 消耗翻倍了"），而不是财务核算。
 
 ---
