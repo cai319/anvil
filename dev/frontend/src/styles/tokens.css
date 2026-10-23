@@ -1,0 +1,70 @@
+:root {
+  color-scheme: dark;
+
+  /* 墨色壳层 */
+  --ink-900: #14131a;
+  --ink-800: #1b1a23;
+  --ink-700: #241f2e;
+  --ink-line: rgba(247, 239, 227, 0.16);
+  --ink-line-strong: rgba(247, 239, 227, 0.28);
+
+  /* 纸面 */
+  --paper: #f7efe3;
+  --paper-2: #efe4d2;
+  --paper-3: #fffaf1;
+
+  /* 文字 */
+  --text-on-ink: #f7efe3;
+  --text-on-ink-muted: #a8a0b4;
+  --text-on-ink-faint: #6f6878;
+  --text-on-paper: #14131a;
+  --text-on-paper-soft: #4b4652;
+  --text-on-paper-muted: #7a7385;
+
+  /* 状态与强调 */
+  --yellow: #facc15;
+  --yellow-hover: #ffe066;
+  --cyan: #22d3ee;
+  --red: #f87171;
+  --green: #4ade80;
+  --blue: #60a5fa;
+  --paper-hover: #fff3c4;
+
+  /* 描边、圆角、阴影 */
+  --stroke: 2px;
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+  --shadow-1: 2px 2px 0 rgba(20, 19, 26, 0.22);
+  --shadow-2: 4px 4px 0 rgba(0, 0, 0, 0.4);
+  --shadow-3: 6px 6px 0 rgba(0, 0, 0, 0.42);
+  --shadow-yellow: 3px 3px 0 var(--yellow);
+  --shadow-cyan: 3px 3px 0 var(--cyan);
+  --shadow-red: 3px 3px 0 var(--red);
+
+  /* 字体与尺度 */
+  --font-body: "Inter", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --mono: var(--font-mono);
+  --sidebar-w: clamp(200px, 12vw, 248px);
+  --sidebar-rail-w: 68px;
+  --panel-w: clamp(320px, 20vw, 440px);
+  --content-pad: clamp(14px, 1.15vw, 30px);
+  --fs-base: clamp(13px, 0.3vw + 9px, 15px);
+  --fs-h1: clamp(1.4rem, 0.25vw + 1.15rem, 1.85rem);
+  --header-h: 56px;
+
+  /* 旧变量兼容：pages.css 里的历史规则继续可用 */
+  --bg: var(--ink-900);
+  --bg-soft: var(--ink-800);
+  --surface: var(--ink-700);
+  --surface-2: #2d2738;
+  --border: var(--ink-line);
+  --border-strong: var(--ink-line-strong);
+  --text: var(--text-on-ink);
+  --muted: var(--text-on-ink-muted);
+  --faint: var(--text-on-ink-faint);
+  --accent: var(--yellow);
+  --accent-strong: var(--cyan);
+  --amber: var(--yellow);
+}
