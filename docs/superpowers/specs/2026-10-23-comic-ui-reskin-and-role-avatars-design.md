@@ -279,6 +279,7 @@ ALTER TABLE roles ADD COLUMN avatar TEXT;
 - `null` / `"initials"` / `^big-smile:[a-z0-9-]{1,32}$`；
 - 其他格式返回 422；
 - 未知 id 允许写入，由前端回退到默认头像，便于以后扩展素材包。
+- 通用 `services.roles.update()` 在把 definition 里的 avatar 同步到列之前复用同一套校验；非法值（如提案系统传入的 dict/非头像字符串）从 definition 中丢弃并保留原列，避免绕过校验或产生 500。
 
 头像字段以 `roles.avatar` 列为准；创建时同时镜像进 `definition_json` 以保持现有 `avatar_color` 的存储习惯。头像单独更新时合并 `definition_json`，但不触发角色画像版本快照，避免把纯外观修改混进版本历史。
 

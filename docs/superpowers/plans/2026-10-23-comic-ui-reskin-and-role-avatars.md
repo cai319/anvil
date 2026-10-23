@@ -412,16 +412,34 @@ def update_avatar(conn: sqlite3.Connection, slug: str, avatar: str | None) -> di
     return get(conn, slug)
 ```
 
-`dev/backend/anvil/services/roles.py` 的 `update` 中，把 definition 写入分支改成：
+`dev/backend/anvil/services/roles.py` 顶部加共享校验：
+
+```python
+AVATAR_RE = re.compile(r"^big-smile:[a-z0-9-]{1,32}$")
+
+
+def is_valid_avatar(value: object) -> bool:
+    return value is None or value == "initials" or (
+        isinstance(value, str) and AVATAR_RE.fullmatch(value) is not None
+    )
+```
+
+`update` 中把 definition 写入分支改成：
 
 ```python
     if definition is not None:
-        fields["definition_json"] = jdumps(definition)
         if "avatar" in definition:
-            fields["avatar"] = definition.get("avatar")
+            avatar = definition.get("avatar")
+            if is_valid_avatar(avatar):
+                fields["avatar"] = avatar
+            else:
+                definition.pop("avatar", None)
+        fields["definition_json"] = jdumps(definition)
 ```
 
-这样 rollback / ensure_onboarding 等走 `update` 的路径会把 definition 里显式携带的 avatar 同步回列，避免列与 definition 不一致。
+这样 rollback / ensure_onboarding 等走 `update` 的路径会把 definition 里显式携带的合法 avatar 同步回列；非法值（例如提案系统传入的 dict）会被丢弃且不覆盖已有列，避免 500 或无效值入库。
+
+`api/roles.py` 的 `_validate_avatar` 复用 `services.roles.AVATAR_RE` / `services.roles.is_valid_avatar`，保持 422 行为不变，避免两套正则。
 
 `dev/backend/anvil/api/roles.py` 在 `update_role` 后面加：
 
@@ -474,6 +492,19 @@ git commit -m "feat(roles): add dedicated avatar update endpoint
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>"
 ```
+
+#### Review hardening（2026-10-23 质量审查追加）
+
+通用 `roles.update()` 的 avatar 同步必须校验来源：提案系统等内部调用可能传入 dict / 非法字符串。追加 `is_valid_avatar` 服务层守卫（非法值丢弃、不覆盖已有列），并补以下回归测试：
+
+- `test_update_ignores_invalid_definition_avatar`：直接调用 `services.roles.update` 传 dict / 非法字符串，列保持原值，definition 不再包含 avatar。
+- `test_avatar_update_creates_no_version_snapshot`：头像更新前后 `/roles/{slug}/versions` 长度不变。
+- `test_generic_put_does_not_clear_avatar`：通用 PUT 不带头像不会清空列。
+- `test_avatar_update_missing_role_404`：缺失角色返回 404。
+- 强化 `test_invalid_avatar_is_rejected`：422 后列保持原值。
+- 强化 `test_update_role_avatar`：definition 里镜像了新头像。
+
+提交信息：`fix(roles): validate avatar writes from generic updates` + Co-Authored-By trailer。
 
 ---
 
