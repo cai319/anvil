@@ -210,6 +210,7 @@ input::placeholder { color: var(--faint); }
 .toolbar > select { flex: 0 1 220px; max-width: 260px; }
 .toolbar > input[type="number"] { flex: 0 0 120px; max-width: 140px; }
 .toolbar > label:not(.field) { display: inline-flex; align-items: center; gap: 6px; }
+.toolbar > label:not(.field) input[type="number"] { flex: 0 0 120px; width: 120px; }
 .toolbar .field { flex: 0 1 320px; max-width: 400px; min-width: 0; }
 .toolbar .field select { width: 100%; max-width: 100%; }
 .toolbar > button { flex: none; }
