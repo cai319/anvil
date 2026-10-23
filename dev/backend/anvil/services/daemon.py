@@ -566,7 +566,10 @@ class DaemonManager:
         threshold = self._cic_threshold(r)
         changed = bool(r.last_task_id and task_id and r.last_task_id != task_id)
         high = tokens >= self._hint_threshold(r)
-        if not (changed or high):
+        payload = int(r.payload_chars or 0)
+        payload_hint = int(config.PAYLOAD_HINT_CHARS)
+        payload_high = payload_hint > 0 and payload >= payload_hint
+        if not (changed or high or payload_high):
             return ""
 
         def fmt(n: int) -> str:
@@ -599,6 +602,13 @@ class DaemonManager:
             lines.append(
                 "- 重置前先用 `anvil memory append \"关键结论/口径/证据路径\"` 写入长期记忆；"
                 "Anvil 在换会话前也会自动保存一份任务知识快照。")
+        if payload_high:
+            lines.append(
+                f"- 本会话已累计约 {fmt(payload)} 字符的图片/附件"
+                f"（预算 {fmt(int(config.PAYLOAD_HARD_RESET_CHARS))}）；"
+                "请勿再读取大图/大文件，优先用片段读取（head/tail/grep/offset+limit）"
+                "或引用文件路径；先把关键结论写入 memory/notes，"
+                "接近预算时 Anvil 会自动换新会话。")
         cmd = (f"anvil self reset-context --task {task_id} --reason \"...\""
                if task_id else "anvil self reset-context --reason \"...\"")
         lines.append(

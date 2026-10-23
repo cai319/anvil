@@ -413,6 +413,20 @@ def test_reset_session_starts_new_context(env):
     assert sid1 not in sids[1:]
 
 
+def test_context_hint_warns_when_attachments_near_budget(env):
+    """附件接近预算时，唤醒提示要提醒角色自律：别带大图、先固化结论。"""
+    conn, mgr, fake, log = env
+    r = mgr._role("qa-role")
+    r.model_id = "test-200k"
+    r.context_tokens = 100
+    r.payload_chars = 9_000_000
+    hint = mgr._context_hint(r, None)
+    assert "图片/附件" in hint
+    assert "预算" in hint
+    assert "片段读取" in hint
+    assert "memory/notes" in hint
+
+
 def test_context_hint_only_on_task_switch_or_high_usage(env):
     conn, mgr, fake, log = env
     r = mgr._role("qa-role")

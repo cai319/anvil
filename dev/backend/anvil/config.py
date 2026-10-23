@@ -97,6 +97,9 @@ CONTEXT_OUTPUT_RESERVE_TOKENS = int(_env("ANVIL_CONTEXT_OUTPUT_RESERVE", "32000"
 # 可能先撞上 “request too large (max 32mb)”；超过该值时主动换新会话。
 # 0 = 关闭。默认 24MB，给 JSON/文本留 8MB 余量。
 PAYLOAD_HARD_RESET_CHARS = int(_env("ANVIL_PAYLOAD_HARD_RESET_CHARS", "24000000"))
+# 附件预算提示：达到该字符数时在唤醒提示里提醒角色“不要再携带大图/大文件”，
+# 先固化结论、必要时主动 reset-context。默认 8MB（硬阈值的 1/3）。
+PAYLOAD_HINT_CHARS = int(_env("ANVIL_PAYLOAD_HINT_CHARS", "8000000"))
 # 同一 run 因上下文溢出自动换会话的最大次数；超过则交给步骤自动恢复队列
 # （指数退避重排队，不 @human）。主动水位轮换不计入此预算。
 CONTEXT_RESET_MAX_RETRIES = int(_env("ANVIL_CONTEXT_RESET_MAX_RETRIES", "3"))

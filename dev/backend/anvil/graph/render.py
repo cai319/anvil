@@ -9,6 +9,16 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+# 请求体/附件预算：角色自律优先（协议 + 唤醒提示），Anvil 的硬保护只是兜底。
+ATTACHMENT_BUDGET = (
+    "## 请求体/附件预算（必须遵守）\n"
+    "· 不要把大文件、整页截图或长日志直接塞进对话；优先用 grep/head/tail 或 Read 的 "
+    "offset+limit 读取片段，大产物写入磁盘后用路径引用。\n"
+    "· 图片只在必要时读取；先裁剪/压缩，同一图片不要反复读取。\n"
+    "· 会话累计附件接近预算时，唤醒提示会给出占用；先把关键结论写入 memory/notes，"
+    "再执行 `anvil self reset-context`。\n"
+)
+
 # §7.4 注入给 Agent 的协议说明（约 400 token）。
 PROTOCOL = (
     "你在 Anvil 环境中运行。当前环境变量 ANVIL_TASK_ID 指示你被分配的任务。\n"
@@ -26,7 +36,7 @@ PROTOCOL = (
     "`anvil task unclaim <id>` 再 @对方认领（单负责人任务一旦被 claim 就是排他的）。\n"
     "只有需要人类决策（评审）时，系统会 @human 通知自然人；其余事务由角色间 @提及自行协商。\n"
     "只修改 scope 范围内的文件，越界的提交会被拒绝。"
-)
+) + "\n\n" + ATTACHMENT_BUDGET
 
 # 角色被 @ 且当前没有工作流步骤时的回复协议：只讨论，不 claim/submit 任务。
 REPLY_PROTOCOL = (
@@ -98,7 +108,7 @@ STEP_PROTOCOL = (
     "`anvil step submit <工作流ID> <步骤ID> --summary \"...\"`；"
     "不要调用 `anvil task submit` 或 `anvil task claim`。\n"
     "只修改本步骤范围内的文件；越界提交会被拒绝。"
-)
+) + "\n\n" + ATTACHMENT_BUDGET
 
 # P1-0 计划先行：规划者（leader）的专用协议。规划 → 草案 → @human → 挂起；不亲自实现。
 PLANNING_PROTOCOL = (

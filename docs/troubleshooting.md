@@ -269,7 +269,11 @@ reader 遇到解码/管道异常时会记录完整 traceback 到 `role-session.l
   conversation.`
 - 原因：图片/附件不计 token，但会计入请求体；token 阈值不会触发。长会话反复读截图、
   大文件或图片时会先撞 32MB 请求体上限。
-- 自动处理：Anvil 累计每个会话的图片/附件 base64 字符数，达到
+- 角色自律（第一道防线）：角色协议明确要求不把大文件/整页截图/长日志直接塞进对话，
+  优先用 `grep/head/tail` 或 `Read offset+limit` 读片段、大产物落盘用路径引用；
+  同一图片不要反复读取。累计附件达到 `ANVIL_PAYLOAD_HINT_CHARS`（默认 8MB）时，
+  唤醒提示会要求先固化结论并停止携带大图。
+- 自动处理（兜底）：Anvil 累计每个会话的图片/附件 base64 字符数，达到
   `ANVIL_PAYLOAD_HARD_RESET_CHARS`（默认 24MB）时保存知识快照并换新 CIC 会话；
   API 返回该错误时也会识别（`reason=payload`），**强制新会话**（不 `--resume`，
   避免旧附件被原样带回）并重投当前 run。

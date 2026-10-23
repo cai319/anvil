@@ -50,6 +50,14 @@ def test_reply_prompt_uses_reply_protocol(conn):
     assert "anvil step submit" not in prompt
 
 
+def test_protocols_include_attachment_budget():
+    """角色协议必须要求自律：不携带大文件/大图，优先片段读取与路径引用。"""
+    assert "附件预算" in render.PROTOCOL
+    assert "附件预算" in render.STEP_PROTOCOL
+    assert "offset+limit" in render.STEP_PROTOCOL
+    assert "不要反复读取" in render.STEP_PROTOCOL
+
+
 def test_step_prompt_uses_agent_inbox_and_stays_small(conn):
     for i in range(60):
         tasks_service.comment(conn, "T1", "pm", f"{i}:" + "长内容" * 100)
