@@ -51,7 +51,9 @@ Anvil 前端目前是深色玻璃质感：单文件 `dev/frontend/src/style.css`
   --text-on-ink-faint: #6f6878;
   --text-on-paper: #14131a;
   --text-on-paper-soft: #4b4652;
-  --text-on-paper-muted: #7a7385;
+  --text-on-paper-muted: #6b6375;
+  --link-on-paper: #0e7490;
+  --red-on-paper: #b91c1c;
 
   /* 状态与强调 */
   --yellow: #facc15;

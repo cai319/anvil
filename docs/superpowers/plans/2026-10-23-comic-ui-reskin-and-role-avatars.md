@@ -1476,7 +1476,9 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
   --text-on-ink-faint: #6f6878;
   --text-on-paper: #14131a;
   --text-on-paper-soft: #4b4652;
-  --text-on-paper-muted: #7a7385;
+  --text-on-paper-muted: #6b6375;
+  --link-on-paper: #0e7490;
+  --red-on-paper: #b91c1c;
 
   /* 状态与强调 */
   --yellow: #facc15;
@@ -1674,13 +1676,13 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 ```bash
 mkdir -p dev/frontend/src/styles
 {
-  sed -n '36,742p' dev/frontend/src/style.css
+  sed -n '45,742p' dev/frontend/src/style.css
   echo
   sed -n '1060,1091p' dev/frontend/src/style.css
 } > dev/frontend/src/styles/pages.css
 ```
 
-说明：36–742 是旧组件/页面规则；1060–1091 是角色工坊/表格/宽屏卡片覆盖。743–1059 是旧 app shell 布局，1092–1161 是旧响应式，会由 `layout.css` 取代。
+说明：1–44 是旧 tokens/reset/body/a，已由 `tokens.css` + `base.css` 取代；45–742 才是旧组件/页面规则。1060–1091 是角色工坊/表格/宽屏卡片覆盖。743–1059 是旧 app shell 布局，1092–1161 是旧响应式，会由 `layout.css` 取代。不要从 36 开始——36 仍在旧 `body` 规则内部，会生成断头声明。
 
 - [ ] **Step 2: 替换旧硬编码颜色**
 
@@ -1743,6 +1745,7 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 
 **Files:**
 - Create: `dev/frontend/src/styles/components.css`
+- Modify: `dev/frontend/src/styles/tokens.css`（补充 `--link-on-paper` / `--red-on-paper`，如 Task 8 未提前加入）
 
 - [ ] **Step 1: 写 components.css**
 
@@ -1770,10 +1773,34 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 .kanban-col .empty .muted,
 .roles-detail .empty .muted,
 .modal .empty .muted,
+.board .muted,
+.history-table .muted,
+.table-scroll .muted,
 .thread-item.is-message .muted {
   color: var(--text-on-paper-muted);
 }
 .faint { color: var(--text-on-ink-faint); }
+
+/* 纸面链接与错误色：全局 a 用青色，纸面上改用深青；错误用深红 */
+.card a,
+.inbox-item a,
+.modal a,
+.board a,
+.history-table a,
+.roles-detail a,
+.task-side a,
+.session-head a,
+.create-role-panel a {
+  color: var(--link-on-paper);
+}
+.card .error,
+.modal .error,
+.roles-detail .error,
+.task-side .error,
+.session-head .error,
+.create-role-panel .error {
+  color: var(--red-on-paper);
+}
 
 /* ===== 页头 ===== */
 .page-header {
@@ -1948,7 +1975,13 @@ select:focus,
 textarea:focus {
   outline: none;
   border-color: var(--ink-900);
+}
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
   box-shadow: var(--shadow-cyan);
+  outline: 2px solid transparent; /* forced-colors 下仍可见 */
+  outline-offset: 2px;
 }
 input[type="checkbox"],
 input[type="radio"] {
@@ -2183,6 +2216,32 @@ select { height: 34px; }
   position: sticky;
   top: 0;
   z-index: 1;
+}
+
+/* 纸面容器使用浅色原生控件/滚动条 */
+.card,
+.modal,
+.roles-detail,
+.task-side,
+.session-head,
+.create-role-panel,
+.board,
+.history-table,
+.table-scroll { color-scheme: light; }
+.modal,
+.table-scroll,
+.session-thread,
+.task-side,
+.roles-detail {
+  scrollbar-color: rgba(20, 19, 26, 0.28) rgba(239, 228, 210, 0.6);
+}
+.modal::-webkit-scrollbar-thumb,
+.table-scroll::-webkit-scrollbar-thumb,
+.session-thread::-webkit-scrollbar-thumb,
+.task-side::-webkit-scrollbar-thumb,
+.roles-detail::-webkit-scrollbar-thumb {
+  background: rgba(20, 19, 26, 0.28);
+  border-color: var(--paper);
 }
 
 /* ===== 页签 ===== */
