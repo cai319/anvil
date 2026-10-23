@@ -7,6 +7,7 @@ import { roleStatusFromWorkflow } from "../workflowStatus";
 import { roleLiveDot, roleLiveState, stateClassForDot } from "../roleLive";
 import { formatClock, formatShort } from "../time";
 import { RoleAvatar } from "../components/RoleAvatar";
+import { Icon } from "../components/Icon";
 
 /** 任务详情「子任务」页签：每个参与角色当前的会话状态 + 执行日志 + 历史上下文。 */
 
@@ -38,7 +39,7 @@ function describeEvent(ev: TimelineEvent): string {
     case "submit": return `提交：${p.summary ?? ""}`;
     case "review": return p.approve ? "评审通过" : "评审驳回";
     case "claim": return "认领任务";
-    case "run": return `运行状态 → ${RUN_LABEL[String(p.status)] ?? p.status}`;
+    case "run": return `运行状态：${RUN_LABEL[String(p.status)] ?? p.status}`;
     default: return ev.kind;
   }
 }
@@ -223,7 +224,7 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
               ) : (
                 <span className="rs-run muted">{runsLoaded ? "尚无会话" : "加载中…"}</span>
               )}
-              <span className="rs-chevron">{isOpen ? "▾" : "▸"}</span>
+              <span className="rs-chevron">{isOpen ? <Icon name="chevron-down" size={14} /> : <Icon name="chevron-right" size={14} />}</span>
             </button>
             {claim?.summary && <div className="rs-summary muted">提交摘要：{claim.summary}</div>}
 
@@ -233,7 +234,7 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
                   <span className="mono">run {run.id.slice(0, 8)}</span>
                   <span className={`status status-${run.status}`}>{RUN_LABEL[run.status] ?? run.status}</span>
                   {run.failure_class && <span className="badge badge-in_progress">{run.failure_class}</span>}
-                  <a href={`/runs/${run.id}`}>打开完整会话页 →</a>
+                  <a href={`/runs/${run.id}`}>打开完整会话页 <Icon name="chevron-right" size={12} /></a>
                 </div>
                 <div className="rs-tabs">
                   <button className={`small ${subTab === "log" ? "primary" : ""}`} onClick={() => setSubTab("log")}>完整交互（上下文 / 模型 / 工具）</button>

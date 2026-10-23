@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { formatDateTime } from "../time";
 import { PageHeader } from "../components/ui";
+import { Icon } from "../components/Icon";
 
 /** 活动历史：完整审计记录（实时看板只显示最近 30 分钟，历史集中在这里）。 */
 
@@ -63,7 +64,7 @@ export function ActivityHistory() {
         </select>
         <button className="primary" onClick={load} disabled={loading}>{loading ? "加载中…" : "查询"}</button>
         <span className="spacer" />
-        <a className="muted" href="/">← 返回任务大厅</a>
+        <a className="muted" href="/"><Icon name="chevron-left" /> 返回任务大厅</a>
       </div>
 
       {error && <p className="error">{error}</p>}

@@ -512,9 +512,9 @@ export function Roles() {
                   <dl>
                     <dt>裁剪精度</dt>
                     <dd>
-                      {projection.runtime_capabilities?.tool_level_grant === "exact" && "✅ 精确裁剪"
-                        || projection.runtime_capabilities?.tool_level_grant === "server" && "⚠️ 服务器级"
-                        || projection.runtime_capabilities?.tool_level_grant === "inherit" && "⛔ 继承全局（Anvil 无法约束）"
+                      {projection.runtime_capabilities?.tool_level_grant === "exact" && "精确裁剪"
+                        || projection.runtime_capabilities?.tool_level_grant === "server" && "服务器级"
+                        || projection.runtime_capabilities?.tool_level_grant === "inherit" && "继承全局（Anvil 无法约束）"
                         || "未知"}
                     </dd>
                   </dl>

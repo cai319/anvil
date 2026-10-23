@@ -136,7 +136,7 @@ button {
   white-space: nowrap;
   transition: background 0.12s, border-color 0.12s;
 }
-button:hover:not(:disabled) { background: var(--ink-line); border-color: #3a4560; }
+button:hover:not(:disabled) { background: var(--ink-line); border-color: var(--ink-line-strong); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--ink-900); font-weight: 600; }
 button.primary:hover:not(:disabled) { background: var(--accent-strong); }
@@ -467,7 +467,7 @@ dd { margin: 0; }
 .member-row:hover { border-color: var(--border-strong); background: var(--surface-2); }
 .member-row.picked {
   border-color: var(--accent);
-  background: rgba(109, 124, 255, .12);
+  background: var(--paper-2);
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 .member-avatar {
@@ -498,7 +498,7 @@ dd { margin: 0; }
 .tab { background: none; border: none; padding: 8px 14px; cursor: pointer; color: var(--muted, #888);
   border-bottom: 2px solid transparent; font-size: 14px; }
 .tab.active { color: var(--text, #222); border-bottom-color: var(--cyan); font-weight: 600; }
-.tab-count { background: rgba(122,111,240,.15); color: #5b50d6; border-radius: 8px; padding: 0 6px;
+.tab-count { background: var(--paper-2); color: var(--ink-900); border-radius: 8px; padding: 0 6px;
   font-size: 11px; margin-left: 4px; }
 
 /* ---- 子任务（角色会话）-------------------------------------------------- */
@@ -512,7 +512,7 @@ dd { margin: 0; }
   flex: 0 0 auto; background: var(--text-on-ink-muted); }
 .role-live-dot.green { background: var(--green); box-shadow: 0 0 0 3px rgba(46, 204, 113, .18);
   animation: role-live-pulse 1.8s ease-in-out infinite; }
-.role-live-dot.red { background: var(--red); box-shadow: 0 0 0 3px rgba(239, 83, 80, .18);
+.role-live-dot.red { background: var(--red); box-shadow: 0 0 0 3px rgba(248, 113, 113, .18);
   animation: role-live-pulse 1.8s ease-in-out infinite; }
 .role-live-dot.amber { background: var(--yellow); box-shadow: 0 0 0 3px rgba(245, 179, 1, .18);
   animation: role-live-pulse 1.1s ease-in-out infinite; }
@@ -533,7 +533,7 @@ dd { margin: 0; }
 .role-live-chip .status.role-live-state { font-size: 10px; padding: 1px 6px;
   border-radius: 999px; font-weight: 600; }
 .role-live-queue { font-size: 10px; line-height: 1; color: var(--red);
-  background: rgba(239, 83, 80, .13); border-radius: 999px; padding: 2px 5px; }
+  background: rgba(248, 113, 113, .13); border-radius: 999px; padding: 2px 5px; }
 .rs-name { font-weight: 600; }
 .rs-run { margin-left: auto; font-size: 12px; }
 .rs-chevron { color: #999; }
@@ -572,7 +572,7 @@ dd { margin: 0; }
 .wf-main { flex: 1; min-width: 0; }
 .wf-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 600; }
 .wf-role { font-size: 11px; color: var(--muted); font-weight: 400; }
-.wf-gate { background: rgba(224,138,60,.15); color: #e08a3c; font-size: 11px; }
+.wf-gate { background: var(--paper-2); color: var(--yellow); font-size: 11px; }
 .wf-deps, .wf-summary { font-size: 12px; margin-top: 2px; }
 .wf-actions { display: flex; gap: 6px; align-items: center; white-space: nowrap; }
 
@@ -592,7 +592,7 @@ dd { margin: 0; }
 .wf-node.selected { box-shadow: 0 0 0 2px var(--accent-strong); }
 .wf-node-top { display: flex; align-items: center; gap: 6px; font-size: 11px; }
 .wf-node-id { color: var(--muted); }
-.wf-node-gate { color: #e08a3c; font-size: 10px; }
+.wf-node-gate { color: var(--yellow); font-size: 10px; }
 .wf-node-status { margin-left: auto; font-weight: 600; }
 .wf-node-title { font-size: 12px; font-weight: 600; line-height: 1.3; overflow: hidden;
   text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }

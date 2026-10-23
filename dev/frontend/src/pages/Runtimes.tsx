@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type Runtime } from "../api/client";
 import { PageHeader } from "../components/ui";
+import { Icon } from "../components/Icon";
 
 const STATUS_LABEL: Record<string, string> = {
   ready: "就绪",
@@ -268,7 +269,7 @@ export function Runtimes() {
           <div className="modal" role="dialog" aria-label="运行时 YAML">
             <div className="modal-head">
               <h2>{editor.isNew ? "新增自定义运行时" : `编辑运行时 · ${editor.id}`}</h2>
-              <button className="modal-close" onClick={() => setEditor(null)} aria-label="关闭">×</button>
+              <button className="modal-close" onClick={() => setEditor(null)} aria-label="关闭"><Icon name="x" size={12} /></button>
             </div>
 
             {editor.isNew && (

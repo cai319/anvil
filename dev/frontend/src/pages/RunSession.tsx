@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, subscribeEvents, type Run, type TimelineEvent } from "../api/client";
 import { formatClock, formatDateTime, parseTime, useNow } from "../time";
+import { Icon } from "../components/Icon";
 
 const RUN_LABEL: Record<string, string> = {
   created: "已创建",
@@ -55,7 +56,7 @@ export function RunSession({ id }: { id: string }) {
   return (
     <div className="session">
       <p className="session-back">
-        <a href={`/agents/${run.role_slug}`}>← {run.role_slug}</a>
+        <a href={`/agents/${run.role_slug}`}><Icon name="chevron-left" /> {run.role_slug}</a>
       </p>
 
       <div className="session-head">
@@ -111,7 +112,7 @@ export function RunSession({ id }: { id: string }) {
             <li key={e.key}>
               <span className={`status status-${String(e.payload.status)}`}>{RUN_LABEL[String(e.payload.status)] ?? e.payload.status}</span>
               <span className="mono muted">{formatClock(e.ts)}</span>
-              {e.payload.prev ? <span className="muted">← {RUN_LABEL[String(e.payload.prev)] ?? e.payload.prev}</span> : null}
+              {e.payload.prev ? <span className="muted">由 {RUN_LABEL[String(e.payload.prev)] ?? e.payload.prev}</span> : null}
             </li>
           ))}
         </ul>

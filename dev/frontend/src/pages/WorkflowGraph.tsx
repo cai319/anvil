@@ -7,6 +7,7 @@ import {
   summarizeLoops,
   type LoopSummary,
 } from "../workflowGroups";
+import { Icon } from "../components/Icon";
 
 /**
  * 工作流 DAG 图谱（纯 SVG，无第三方依赖）。
@@ -214,7 +215,7 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
         <span className="wf-zoom">
           <button className="small" title="缩小" onClick={() => setZoom(Math.max(0.3, scale - 0.15))}>−</button>
           <span className="muted">{Math.round(scale * 100)}%</span>
-          <button className="small" title="放大" onClick={() => setZoom(Math.min(1.6, scale + 0.15))}>＋</button>
+          <button className="small" title="放大" onClick={() => setZoom(Math.min(1.6, scale + 0.15))}><Icon name="plus" /></button>
           <button className="small" title="横向填满容器（纵向滚动查看全图）"
             onClick={() => setZoom(null)}>适应宽度</button>
         </span>
@@ -299,9 +300,9 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
               >
                 <span className="wf-node-top">
                   <span className="wf-node-id mono">{s.step_id}</span>
-                  {s.gate && <span className="wf-node-gate">◆ 审核门</span>}
-                  {s.kind === "decision" && <span className="wf-node-gate">◇ 决策</span>}
-                  {s.kind === "plan_slices" && <span className="wf-node-gate">◇ 切片计划</span>}
+                  {s.gate && <span className="wf-node-gate">审核门</span>}
+                  {s.kind === "decision" && <span className="wf-node-gate">决策</span>}
+                  {s.kind === "plan_slices" && <span className="wf-node-gate">切片计划</span>}
                   <span className="wf-node-status" style={{ color: meta.color }}>{meta.label}</span>
                 </span>
                 <span className="wf-node-title">{s.title}</span>
@@ -342,7 +343,7 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
             </button>
           )}
 
-          {/* 单一循环流程：scope → execute → verify → fix → verify2 → decide */}
+          {/* 单一循环流程：scope -> execute -> verify -> fix -> verify2 -> decide */}
           <div className="wf-loop-flow">
             {activePhases.map((phase, i) => {
               const meta = STATUS_META[phase.status];
@@ -350,7 +351,7 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
                 && phase.steps.some((s) => s.step_id === activeStep.step_id));
               return (
                 <Fragment key={phase.key}>
-                  {i > 0 && <span className="wf-flow-arrow">→</span>}
+                  {i > 0 && <span className="wf-flow-arrow"><Icon name="chevron-right" size={12} /></span>}
                   <div
                     className={`wf-flow-phase ${isCurrent ? "active" : ""}`}
                     style={{ borderColor: meta.color, background: meta.bg }}
@@ -449,7 +450,7 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
           {selectedStep.kind === "plan_slices" && (
             <div className="muted">
               切片计划步骤：由该角色盘点项目并产出切片；服务端按 loop 模板为每片生成
-              execute → verify → fix → verify2 → decide 闭环。
+              {"execute -> verify -> fix -> verify2 -> decide 闭环。"}
             </div>
           )}
           {selectedStep.kind === "decision" && (

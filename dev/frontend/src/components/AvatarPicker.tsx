@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { AVATAR_PRESETS, initialFor, resolveAvatar } from "./avatarPresets";
+import { Icon } from "./Icon";
 
 type Props = {
   mode: "inline" | "modal";
@@ -135,7 +136,7 @@ export function AvatarPicker({
             onClick={dismiss}
             aria-label="关闭"
           >
-            ×
+            <Icon name="x" size={12} />
           </button>
         </div>
         <p className="avatar-picker-hint">

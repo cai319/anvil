@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, subscribeEvents, type InboxItem } from "../api/client";
 import { formatDateTime } from "../time";
+import { PageHeader } from "../components/ui";
 
 /** Inbox（信息架构重构）：四类人机决策点统一入口，action card 式就地操作。 */
 
@@ -15,13 +16,13 @@ const KIND_LABEL: Record<InboxItem["kind"], string> = {
 };
 
 const KIND_COLOR: Record<InboxItem["kind"], string> = {
-  review: "#e05d5d",
-  mention: "#4a5fd0",
-  draft: "#7a6ff0",
-  lesson: "#2f9e6e",
-  proposal: "#c98a1e",
-  gate: "#e08a3c",
-  action: "#f472b6",
+  review: "#b91c1c",
+  mention: "#1d4ed8",
+  draft: "#5b50d6",
+  lesson: "#15803d",
+  proposal: "#a16207",
+  gate: "#b45309",
+  action: "#be185d",
 };
 
 type Tab = "all" | InboxItem["kind"];
@@ -69,7 +70,7 @@ export function Inbox() {
 
   const renderActions = (it: InboxItem) => {
     const disabled = busyId !== null;
-    const raw = it.id.split(":", 2)[1]; // review:T → T；draft:D → D；lesson:L → L；proposal:P → P
+    const raw = it.id.split(":", 2)[1]; // review:T -> T；draft:D -> D；lesson:L -> L；proposal:P -> P
     switch (it.kind) {
       case "review":
         return (
@@ -149,9 +150,10 @@ export function Inbox() {
 
   return (
     <div className="session">
-      <div className="toolbar">
-        <h1 style={{ margin: 0 }}>📥 收件箱 · 待我处理 {items.length > 0 && <span className="badge badge-in_progress">{items.length}</span>}</h1>
-      </div>
+      <PageHeader
+        kicker="INBOX"
+        title={<>收件箱 · 待我处理 {items.length > 0 && <span className="badge badge-in_progress">{items.length}</span>}</>}
+      />
 
       {error && <p className="error">{error}</p>}
 

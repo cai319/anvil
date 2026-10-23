@@ -37,6 +37,9 @@ const SYSTEM_SENDERS: Record<string, string> = {
   system: "系统",
 };
 
+// @ 提及的边界字符：空白、开括号、常见中英文标点都可结束上一个词。
+const MENTION_BOUNDARY = /[\s([{,，。；;:：.!?！？、）)]/;
+
 /** 把文本里命中角色的 @slug/@显示名（昵称）标黄；未命中角色的 @ 保持原样。 */
 function renderMentionText(text: string, tokens: Map<string, string>): ReactNode {
   if (!text || tokens.size === 0) return text;
@@ -91,7 +94,7 @@ function describe(
     case "submit":
       return { text: "提交了评审" + (p.summary ? `：${p.summary}` : "") };
     case "review":
-      return { text: p.approve ? "评审通过 ✅" : "评审驳回 ↩️" };
+      return { text: p.approve ? "评审通过" : "评审驳回" };
     case "claim":
       return { text: "认领了任务" };
     case "unclaim":
@@ -103,7 +106,7 @@ function describe(
     case "starvation":
       return { text: "饥饿升级（无角色可认领）" };
     case "run":
-      return { text: `运行状态 → ${RUN_LABEL[String(p.status)] ?? p.status}`, runStatus: String(p.status) };
+      return { text: `运行状态：${RUN_LABEL[String(p.status)] ?? p.status}`, runStatus: String(p.status) };
     case "step": {
       const status = String(p.status ?? "");
       const label: Record<string, string> = {
@@ -148,6 +151,11 @@ export function TaskDetail({ id }: { id: string }) {
   const [mentionIndex, setMentionIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const blurTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (blurTimerRef.current != null) window.clearTimeout(blurTimerRef.current);
+    };
+  }, []);
   const descRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [gone, setGone] = useState(false);
@@ -302,7 +310,7 @@ export function TaskDetail({ id }: { id: string }) {
     return (
       <div className="session">
         <p className="error">任务不存在或已被删除。</p>
-        <p><a href="/">← 返回任务大厅</a></p>
+        <p><a href="/"><Icon name="chevron-left" /> 返回任务大厅</a></p>
       </div>
     );
   if (error) return <p className="error">{error}</p>;
@@ -349,7 +357,7 @@ export function TaskDetail({ id }: { id: string }) {
              state, dot, queued, detail, title };
   };
 
-  /** 点灯 → 状态徽标 → slug 的统一呈现。 */
+  /** 点灯 -> 状态徽标 -> slug 的统一呈现。 */
   const renderRoleLive = (live: ReturnType<typeof roleLiveFor>) => (
     <span className="role-live-chip" title={live.title}>
       <RoleAvatar
@@ -446,7 +454,7 @@ export function TaskDetail({ id }: { id: string }) {
       return;
     }
     const prev = at > 0 ? before[at - 1] : "";
-    if (prev && !/[\s([{,，。；;:：]/.test(prev)) {
+    if (prev && !MENTION_BOUNDARY.test(prev)) {
       setMention(null);
       return;
     }
@@ -469,7 +477,7 @@ export function TaskDetail({ id }: { id: string }) {
     const start = focused && el.selectionStart != null ? el.selectionStart : comment.length;
     const end = focused && el.selectionEnd != null ? el.selectionEnd : start;
     const before = comment.slice(0, start);
-    const token = before && !/[\s（(，,。.;；:：]$/.test(before) ? " @" : "@";
+    const token = before && !MENTION_BOUNDARY.test(before.slice(-1)) ? " @" : "@";
     const next = comment.slice(0, start) + token + comment.slice(end);
     setComment(next);
     const caret = start + token.length;
@@ -826,14 +834,14 @@ export function TaskDetail({ id }: { id: string }) {
                   {d.tree?.loop && (
                     <div className="muted">
                       动态切片：切片计划步骤由执行角色运行时盘点项目后产出；
-                      服务端按 loop 模板为每片生成 execute → verify → fix → verify2 → decide 小闭环。
+                      {"服务端按 loop 模板为每片生成 execute -> verify -> fix -> verify2 -> decide 小闭环。"}
                     </div>
                   )}
                   {d.tree?.steps?.length ? (
                     <ul className="muted" style={{ margin: "6px 0", paddingLeft: 18 }}>
                       {d.tree.steps.map((s, i) => (
                         <li key={s.id ?? i}>
-                          {s.id ? `${s.id} ` : ""}{s.title} → {s.role ?? "未指派"}
+                          {s.id ? `${s.id} ` : ""}{s.title}{" -> "}{s.role ?? "未指派"}
                           {s.kind === "plan_slices" ? "（切片计划）" : ""}
                           {s.depends_on?.length ? `（依赖 ${s.depends_on.join("、")}）` : ""}
                         </li>
@@ -843,7 +851,7 @@ export function TaskDetail({ id }: { id: string }) {
                     <ul className="muted" style={{ margin: "6px 0", paddingLeft: 18 }}>
                       {d.tree.children.map((c, i) => (
                         <li key={c.id ?? i}>
-                          {c.title} → {c.role ?? "未指派"}
+                          {c.title}{" -> "}{c.role ?? "未指派"}
                           {c.depends_on?.length ? `（依赖 ${c.depends_on.join("、")}）` : ""}
                         </li>
                       ))}
@@ -872,10 +880,10 @@ export function TaskDetail({ id }: { id: string }) {
               <h2 className="pane-title">会话 · {filteredTimeline.length} 条</h2>
               <div className="thread-head-right">
                 <button className="small thread-jump" onClick={scrollToTop}
-                  title="跳到最早一条消息">↑ 最早</button>
+                  title="跳到最早一条消息">最早</button>
                 <button className="small thread-jump"
                   onClick={() => scrollToBottom("smooth")}
-                  title="跳到最新一条消息">↓ 最新</button>
+                  title="跳到最新一条消息">最新</button>
                 <div className="thread-filters">
                   {TL_FILTERS.map((f) => (
                     <button key={f.key} className={`small ${tlKind === f.key ? "primary" : ""}`}
@@ -976,6 +984,9 @@ export function TaskDetail({ id }: { id: string }) {
                 }}
                 onClick={(e) => syncMention(comment, e.currentTarget.selectionStart)}
                 onBlur={() => {
+                  if (blurTimerRef.current != null) {
+                    window.clearTimeout(blurTimerRef.current);
+                  }
                   blurTimerRef.current = window.setTimeout(() => setMention(null), 150);
                 }}
                 placeholder="输入消息；输入 @ 选择角色（界面显示昵称，后台用 slug 激活）"
@@ -1004,7 +1015,7 @@ export function TaskDetail({ id }: { id: string }) {
             <button className="primary" onClick={send} disabled={busy || !comment.trim()}>发送</button>
           </div>
           <p className="muted" style={{ fontSize: 11, margin: "4px 2px 0" }}>
-            提示：输入 <strong>@</strong> 会弹出角色选择（↑/↓ 选择，Enter 确认）；选中后按 Enter 发送。
+            提示：输入 <strong>@</strong> 会弹出角色选择（上下键选择，Enter 确认）；选中后按 Enter 发送。
             @角色 消息会按「@提及」发送——时间线标黄并唤醒该角色。
           </p>
         </div>

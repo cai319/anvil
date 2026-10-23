@@ -84,7 +84,7 @@ async function moveTask(task: Task, target: Task["status"]): Promise<unknown> {
   if (s === "in_review" && target === "done") return api.reviewTask(task.id, true);
   if (s === "in_review" && target === "in_progress") return api.reviewTask(task.id, false);
   if (s === "in_progress" && target === "todo") return api.unclaimTask(task.id);
-  throw new Error(`不支持 ${s} → ${target}`);
+  throw new Error(`不支持 ${s} -> ${target}`);
 }
 
 export function Lobby() {
@@ -250,7 +250,7 @@ export function Lobby() {
                     {status === "in_review" && (
                       <div className="card-meta" style={{ marginTop: 2 }}>
                         <a className="badge review-flag" href="/inbox" draggable={false}
-                          title="进入收件箱处理">⏳ 等人类评审 → 收件箱</a>
+                          title="进入收件箱处理"><Icon name="clock" /> 等人类评审</a>
                       </div>
                     )}
                     {status === "todo" && (t.assignees?.length ?? 0) > 0 && (
@@ -304,7 +304,7 @@ export function Lobby() {
               aria-label="折叠右栏"
               title="折叠右栏"
             >
-              ⇥
+              <Icon name="panel-right" />
             </button>
           </div>
           {runs.length === 0 && (
@@ -336,7 +336,7 @@ export function Lobby() {
 
           <h2 className="pane-title activity-head">
             <span>最近活动（30 分钟）</span>
-            <a className="muted history-link" href="/activity">全部历史 →</a>
+            <a className="muted history-link" href="/activity">全部历史 <Icon name="chevron-right" size={12} /></a>
           </h2>
           <ul className="activity">
             {recentActivity.length === 0 && <li className="muted">最近 30 分钟没有新活动。</li>}

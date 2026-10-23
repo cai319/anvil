@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, subscribeEvents, type Role, type Run, type Task } from "../api/client";
 import { formatClock, parseTime, useNow } from "../time";
 import { RoleAvatar } from "../components/RoleAvatar";
+import { Icon } from "../components/Icon";
 
 const RUN_LABEL: Record<string, string> = {
   created: "已创建",
@@ -55,7 +56,7 @@ export function AgentSessions({ slug }: { slug: string }) {
 
   return (
     <div className="session">
-      <p className="session-back"><a href="/">← 任务大厅</a></p>
+      <p className="session-back"><a href="/"><Icon name="chevron-left" /> 任务大厅</a></p>
 
       <div className="session-head">
         <div className="session-title">

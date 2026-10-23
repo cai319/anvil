@@ -68,7 +68,7 @@ export function Decompose() {
         <input value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="输入顶层目标（如：实现订单分页）" />
         <select value={template} onChange={(e) => setTemplate(e.target.value)} title="工作流模板（SOP）">
           {templates.map((t) => (
-            <option key={t.name} value={t.name}>{t.name} · {t.steps.join(" → ")}</option>
+            <option key={t.name} value={t.name}>{t.name} · {t.steps.join(" / ")}</option>
           ))}
         </select>
         <button onClick={decompose} disabled={busy}>{busy ? "拆解中…" : "拆解"}</button>

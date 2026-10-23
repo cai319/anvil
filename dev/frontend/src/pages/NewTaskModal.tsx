@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api, isOnboardingRole, type Role, type Task } from "../api/client";
 import { RoleAvatar } from "../components/RoleAvatar";
+import { Icon } from "../components/Icon";
 
 /** 新建任务弹窗（参考 multica/raft：名称 + 描述 + 可滚动角色多选）。 */
 export function NewTaskModal({ roles, onClose, onCreated }: {
@@ -40,7 +41,7 @@ export function NewTaskModal({ roles, onClose, onCreated }: {
       <div className="modal" role="dialog" aria-label="新建任务">
         <div className="modal-head">
           <h2>新建任务</h2>
-          <button className="modal-close" onClick={onClose} aria-label="关闭">×</button>
+          <button className="modal-close" onClick={onClose} aria-label="关闭"><Icon name="x" size={12} /></button>
         </div>
 
         <label className="field">
