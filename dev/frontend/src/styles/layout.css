@@ -410,3 +410,16 @@ dd { margin: 0; }
   .sidebar,
   .splitter { transition: none !important; }
 }
+
+/* ===== Review hardening: shell details ===== */
+.lobby > .splitter { align-self: stretch; }
+.drawer-mask { border-radius: 0; }
+.brand,
+.brand:hover { text-decoration: none; }
+.nav-label { color: var(--text-on-ink-muted); }
+@media (max-width: 1199px) {
+  .sidebar .rail-btn { display: none; }
+}
+@media (max-width: 899px) {
+  .app-shell .sidebar .brand { padding: 0 8px 12px !important; }
+}
