@@ -3433,6 +3433,11 @@ git commit -m "feat(ui): add comic app shell and responsive layout
 Co-Authored-By: Claude Code <noreply@anthropic.com>"
 ```
 
+#### Review hardening（2026-10-24 质量审查追加）
+
+- Lobby 的 `.lobby` 使用 `align-items: start`，空 `.splitter` 高度为 0；追加 `.lobby > .splitter { align-self: stretch; }` 恢复分隔线和拖拽/键盘命中区。
+- 同时修正：`.drawer-mask` 全屏遮罩圆角归零；`.brand` 链接 hover 取消下划线；`.nav-label` 改用 `--text-on-ink-muted` 提升对比度；≤1199 隐藏无意义的 rail 切换按钮；≤899 恢复移动端品牌内边距。
+
 ---
 
 ### Task 12: 切换样式入口并删除旧 style.css
