@@ -2983,7 +2983,8 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 - 线程：只有 `.is-message` 的消息气泡使用纸面文字；`is-human` 非消息事件不再填充黄色；审计/系统事件保持深色画布浅色文字。
 - 纸面按钮/链接/焦点：`button.danger` 用 `--red-on-paper`，`.run-live` 用新增 `--green-on-paper`，纸面容器焦点环改墨色，modal 输入 focus 覆盖旧黄色描边。
 - 通用 `button:hover` 的状态保护：`.drawer-mask`、`.member-row.picked`、`.mention-item.active`、`.avatar-tile.selected`、`.wf-slice-row-btn`。
-- 工作流：图谱节点/阶段保留内联深色背景并改浅色文字；`.wf-node-title` 允许换行；纸面切片行/详情里的内联状态色强制墨色；`.wf-flow-arrow`/`.wf-loop-phases` 改纸面 muted；`.wf-loop-mark` 改墨色。
+- 工作流：图谱节点保留内联深色背景并改浅色文字；`.wf-flow-phase` 实际在纸面 `.wf-detail` 内，文字保持墨色；`.wf-node-title` 允许换行；纸面切片行/详情里的内联状态色强制墨色；`.wf-flow-arrow`/`.wf-loop-phases` 改纸面 muted；`.wf-loop-mark` 改墨色。
+- 补充：纸面焦点列表扩展到 review-banner / rs-row-wrap / wf-detail / mention-menu / session-compose / roles-list / run-timeline / 切片列表；修正 wf-slice-row-btn / avatar-tile.selected / mention-item 的 hover 竞态；kanban-empty 改用纸面可见描边。
 
 ---
 
