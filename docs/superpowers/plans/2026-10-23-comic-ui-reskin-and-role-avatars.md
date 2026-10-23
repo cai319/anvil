@@ -1782,15 +1782,15 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 .faint { color: var(--text-on-ink-faint); }
 
 /* 纸面链接与错误色：全局 a 用青色，纸面上改用深青；错误用深红 */
-.card a,
-.inbox-item a,
-.modal a,
-.board a,
-.history-table a,
-.roles-detail a,
-.task-side a,
-.session-head a,
-.create-role-panel a {
+.card :where(a),
+.inbox-item :where(a),
+.modal :where(a),
+.board :where(a),
+.history-table :where(a),
+.roles-detail :where(a),
+.task-side :where(a),
+.session-head :where(a),
+.create-role-panel :where(a) {
   color: var(--link-on-paper);
 }
 .card .error,
