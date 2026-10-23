@@ -115,6 +115,7 @@ export function Governance() {
 
       <section>
         <h2>成本分解 · 总 ${(costs?.total_usd ?? 0).toFixed(4)}</h2>
+        <div className="table-scroll">
         <table className="board">
           <thead><tr><th>角色</th><th>成本（USD）</th></tr></thead>
           <tbody>
@@ -126,9 +127,11 @@ export function Governance() {
             ))}
           </tbody>
         </table>
+        </div>
       </section>
 
       <h2>审计日志</h2>
+      <div className="table-scroll">
       <table className="board">
         <thead>
           <tr><th>时间</th><th>角色</th><th>任务</th><th>动作</th></tr>
@@ -147,6 +150,7 @@ export function Governance() {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

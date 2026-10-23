@@ -68,6 +68,7 @@ export function ActivityHistory() {
       {error && <p className="error">{error}</p>}
       {rows.length === 0 && !loading && <p className="muted">没有匹配的记录。</p>}
 
+      <div className="table-scroll">
       <table className="history-table">
         <thead>
           <tr><th>时间</th><th>角色</th><th>动作</th><th>任务</th><th>详情</th></tr>
@@ -84,6 +85,7 @@ export function ActivityHistory() {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

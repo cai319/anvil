@@ -200,6 +200,7 @@ export function Runtimes() {
         <button onClick={discover} disabled={busy}>{busy ? "扫描中…" : "扫描本地运行时"}</button>
         <button onClick={openNew}>新增自定义运行时</button>
       </div>
+      <div className="table-scroll">
       <table className="board">
         <thead>
           <tr><th>名称</th><th>ID</th><th>状态</th><th>默认</th><th>版本</th><th>路径</th><th>操作</th></tr>
@@ -254,6 +255,7 @@ export function Runtimes() {
           ))}
         </tbody>
       </table>
+      </div>
 
       {editor && (
         <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && setEditor(null)}>
