@@ -1220,7 +1220,7 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
 .side-role-summary { opacity: 1; }
 .side-role .role-live-chip { padding: 2px 8px 2px 5px; }
 .activity .act-meta { color: var(--text-on-ink-muted); }
-.kanban-empty { border-color: var(--border-strong); }
+.kanban-empty { border-color: var(--text-on-paper-muted); }
 .modal input:not([type="checkbox"]),
 .modal textarea { padding: 6px 9px; border-radius: var(--radius-sm); }
 .card :focus-visible,
@@ -1231,7 +1231,16 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
 .roles-detail :focus-visible,
 .task-side :focus-visible,
 .session-head :focus-visible,
-.create-role-panel :focus-visible { outline-color: var(--ink-900); }
+.create-role-panel :focus-visible,
+.review-banner :focus-visible,
+.rs-row-wrap :focus-visible,
+.wf-detail :focus-visible,
+.mention-menu :focus-visible,
+.session-compose :focus-visible,
+.roles-list li :focus-visible,
+.run-timeline li :focus-visible,
+.wf-slice-step-list :focus-visible,
+.wf-slice-list :focus-visible { outline-color: var(--ink-900); }
 .modal input:not([type="checkbox"]):focus,
 .modal textarea:focus { border-color: var(--ink-900); box-shadow: var(--shadow-cyan); }
 
@@ -1239,19 +1248,26 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
 .drawer-mask:hover:not(:disabled) { background: rgba(20, 19, 26, 0.6); }
 .member-row.picked:hover:not(:disabled) { background: var(--yellow); }
 .mention-item.active:hover:not(:disabled) { background: var(--yellow); color: var(--ink-900); }
-.avatar-tile.selected:hover:not(:disabled) { background: var(--paper-3); }
-.wf-slice-row-btn:hover { background: var(--paper-hover); }
+.mention-menu .mention-item:hover:not(:disabled) {
+  background: var(--yellow);
+  color: var(--ink-900);
+}
+.avatar-tile.selected:hover:not(:disabled) {
+  background: var(--paper-3);
+  box-shadow: var(--shadow-yellow);
+}
+.wf-slice-row-btn:hover:not(:disabled) { background: var(--paper-hover); }
 
 /* 工作流：图谱节点/阶段保留内联深色背景，文字改为浅色；纸面行内的内联状态色强制为墨色 */
 .wf-node { color: var(--text-on-ink); }
 .wf-node-title { white-space: normal; }
 .wf-node-id,
-.wf-node-role,
+.wf-node-role { color: var(--text-on-ink-muted); }
 .wf-flow-phase-role,
 .wf-flow-phase-count,
-.wf-flow-phase-sub { color: var(--text-on-ink-muted); }
+.wf-flow-phase-sub { color: var(--text-on-paper-muted); }
 .wf-node-gate { color: var(--yellow); }
-.wf-flow-phase { color: var(--text-on-ink); }
+.wf-flow-phase { color: var(--ink-900); }
 .wf-flow-arrow,
 .wf-loop-phases { color: var(--text-on-paper-muted); }
 .wf-loop-mark { color: var(--ink-900); }
