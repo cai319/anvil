@@ -12,6 +12,7 @@ async def _seed(client):
     await client.post(f"{API}/runtimes", json=runtime_payload())
     await client.post(f"{API}/roles", json=role_payload())
     await client.post(f"{API}/roles", json=role_payload(slug="reviewer"))
+    await client.post(f"{API}/roles", json=role_payload(slug="developer"))
     await client.post(f"{API}/tasks", json=task_payload(id_="T-TL"), headers=auth_headers())
 
 

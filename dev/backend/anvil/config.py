@@ -93,6 +93,10 @@ CONTEXT_HARD_RESET_RATIO = float(_env("ANVIL_CONTEXT_HARD_RESET_RATIO", "0.9"))
 # 给单次响应预留的 output 额度；API 的上下文上限是 input+max_tokens，
 # 只按窗口算会留下正好一个 max_tokens 的溢出空间。
 CONTEXT_OUTPUT_RESERVE_TOKENS = int(_env("ANVIL_CONTEXT_OUTPUT_RESERVE", "32000"))
+# 单次 API 请求体上限（按图片/附件 base64 字符数累计估算）。图片/附件不计 token，
+# 可能先撞上 “request too large (max 32mb)”；超过该值时主动换新会话。
+# 0 = 关闭。默认 24MB，给 JSON/文本留 8MB 余量。
+PAYLOAD_HARD_RESET_CHARS = int(_env("ANVIL_PAYLOAD_HARD_RESET_CHARS", "24000000"))
 # 同一 run 因上下文溢出自动换会话的最大次数；超过则交给步骤自动恢复队列
 # （指数退避重排队，不 @human）。主动水位轮换不计入此预算。
 CONTEXT_RESET_MAX_RETRIES = int(_env("ANVIL_CONTEXT_RESET_MAX_RETRIES", "3"))

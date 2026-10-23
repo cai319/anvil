@@ -255,6 +255,10 @@ def task_cmd(
     elif action == "submit":
         method, path, payload = "POST", f"/api/v1/tasks/{tid}/submit", {"summary": summary or body}
     elif action == "comment":
+        if body and "@" in body:
+            typer.echo(
+                "warning: 评论中的 @ 只是文本，不会唤醒角色；请改用 "
+                "`anvil task mention <task-id> --to <role> \"...\"`。", err=True)
         payload = {"body": body}
         if expect_activity:
             payload["expect_activity_id"] = expect_activity

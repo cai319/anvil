@@ -262,6 +262,22 @@ reader 遇到解码/管道异常时会记录完整 traceback 到 `role-session.l
 > 调度器不会每 5 秒就动一次等待中的角色；它只处理明确异常（死进程、僵尸 run、
 > 卡住的 projecting、到期的退避重试）。等待中的正常会话由事件（mention 回复）唤醒。
 
+**`request too large (max 32mb)`**
+
+- 现象：`Request too large (max 32mb): accumulated images and attachments in the
+  conversation pushed the request over the limit. Remove older images or compact the
+  conversation.`
+- 原因：图片/附件不计 token，但会计入请求体；token 阈值不会触发。长会话反复读截图、
+  大文件或图片时会先撞 32MB 请求体上限。
+- 自动处理：Anvil 累计每个会话的图片/附件 base64 字符数，达到
+  `ANVIL_PAYLOAD_HARD_RESET_CHARS`（默认 24MB）时保存知识快照并换新 CIC 会话；
+  API 返回该错误时也会识别（`reason=payload`），**强制新会话**（不 `--resume`，
+  避免旧附件被原样带回）并重投当前 run。
+- 调参：降低 `ANVIL_PAYLOAD_HARD_RESET_CHARS` 会更早换会话；`0` 关闭主动保护
+  （仍会识别 API 错误）。
+- 注意：新会话从 CIC 恢复，旧图片不会保留；需要保留下来的结论应先写入
+  `MEMORY.md` 或 notes。
+
 **手动处理**
 
 - Run 详情 → **重置会话（新上下文）**，或 `POST /api/v1/runs/<run-id>/session-reset`；
@@ -296,5 +312,53 @@ reader 遇到解码/管道异常时会记录完整 traceback 到 `role-session.l
 
 > 只有通过 `anvil memory append` / `anvil note write` 写入的内容会进入 FTS 索引；
 > 直接编辑 `MEMORY.md` 仍会被 CIC 直接读取，但直接编辑 `notes/` 不会自动重建索引。
+
+### Q18. 角色被 @ 了但没被唤醒 / @ 没标黄
+
+**1. 评论里的 @ 不是 mention**
+
+- 只有 `anvil task mention ... --to <role>` 会产生 `kind=mention` 事件并唤醒角色；
+  `anvil task comment "... @role ..."` 里的 @ 只是普通文本，不会唤醒。
+- 当前版本：
+  - `anvil task comment` 检测到 `@` 会打印 warning，提示改用 mention；
+  - 前端会把评论正文里命中角色的 `@slug` / `@显示名` 标黄（只是视觉提示）；
+  - 需要对方行动时，请用 `anvil task mention`。
+
+**2. @ 的对象没有被识别为任务参与者**
+
+旧版本只检查 `task_assignees`，因此下面这些合法场景会漏唤醒：
+
+- 子任务只有单负责人 `assignee`，`assignees=[]`；
+- 角色只出现在 workflow 步骤里，但没有写进 `task_assignees`；
+- 想通过 `@角色` 把任务转交给尚未绑定的执行者（协议里的“先 unclaim 再 @ 对方认领”）。
+
+当前唤醒范围已扩大为：`task_assignees` + 单负责人 `assignee` + `task.planner` +
+workflow 步骤角色 + **被明确 @ 的现有角色**。
+
+- 普通任务/子任务：起普通 run（任务协议会引导对方 `claim`）；
+- 工作流任务：起 `[anvil:reply]` run（只讨论，不覆盖 workflow 角色分配）；
+- 回复 run 的协议允许按消息明确指示 `claim` **另一个任务/子任务**，当前任务的
+  claim/submit 仍禁止。
+
+**3. 子任务认领仍受“单负责人排他”限制**
+
+如果子任务是 `assignee=picky-pm`、`assignees=[]`，被 @ 的 report-collector 虽然会被
+唤醒，但仍无法 claim：单负责人任务已被 picky-pm 独占。解决方式：
+
+- 创建者先 `anvil task unclaim <子任务ID>`，再 @ 目标角色 claim；
+- 或者创建时直接用 `anvil task create ... --assignee report-collector`（单人）
+  或 `--assignees report-collector,...`（团队）。
+
+**4. 检查是否真的产生了 mention 事件**
+
+```sql
+SELECT id, role_slug, kind, payload_json, created_at
+FROM activities
+WHERE task_id='<task-id>' AND kind='mention'
+ORDER BY id DESC LIMIT 10;
+```
+
+如果没有 `kind=mention`，说明发送方用的是 comment；如果有 mention 但角色仍未唤醒，
+检查目标角色是否存在/启用，以及日志中是否有 `spawn` / `wake`。
 
 ---

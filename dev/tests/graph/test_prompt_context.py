@@ -45,7 +45,8 @@ def test_reply_prompt_uses_reply_protocol(conn):
     prompt = nodes._prompt_for_run(conn, run, {"title": "跳棋", "description": "实现跳棋"})
     assert "验收口径有歧义" in prompt
     assert "只做讨论" in prompt
-    assert "anvil task claim" not in prompt         # 不会让回复 run 去 claim 任务
+    assert "不要 claim 或 submit **当前任务**" in prompt
+    assert "另一个任务或子任务" in prompt             # 允许按消息指示 claim 子任务
     assert "anvil step submit" not in prompt
 
 

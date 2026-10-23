@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type Role, type Task, type TimelineEvent, type Workflow, type WorkflowStep } from "../api/client";
 import { RoleSessions } from "./RoleSessions";
 import { WorkflowGraph } from "./WorkflowGraph";
@@ -38,6 +38,26 @@ function avatarColor(slug: string): string {
   let h = 0;
   for (const c of slug) h = (h * 31 + c.charCodeAt(0)) >>> 0;
   return AVATAR_COLORS[h % AVATAR_COLORS.length];
+}
+
+/** 把文本里命中角色的 @slug/@显示名 标黄；未命中角色的 @ 保持原样。 */
+function renderMentionText(text: string, tokens: Map<string, string>): ReactNode {
+  if (!text || tokens.size === 0) return text;
+  const out: ReactNode[] = [];
+  const re = /@([\w\-一-龥]+)/g;
+  let last = 0;
+  let match: RegExpExecArray | null;
+  let idx = 0;
+  while ((match = re.exec(text)) !== null) {
+    if (!tokens.has(match[1].toLowerCase())) continue;
+    out.push(text.slice(last, match.index));
+    out.push(
+      <span className="mention-tag" key={`mention-${idx++}`}>@{match[1]}</span>,
+    );
+    last = match.index + match[0].length;
+  }
+  out.push(text.slice(last));
+  return out;
 }
 
 function describe(ev: TimelineEvent): { text: string; runStatus?: string; mention?: string } {
@@ -269,6 +289,11 @@ export function TaskDetail({ id }: { id: string }) {
   };
 
   const assignableRoles = roles.filter((r) => !isOnboardingRole(r));
+  const roleTokens = new Map<string, string>();
+  assignableRoles.forEach((r) => {
+    roleTokens.set(r.slug.toLowerCase(), r.slug);
+    if (r.display_name) roleTokens.set(r.display_name.toLowerCase(), r.slug);
+  });
 
   // 优先只联想任务参与角色（@ 才会唤醒）；任务尚未绑定角色时退回全部可指派角色。
   const assignedToTask = new Set(task.assignees ?? []);
@@ -714,10 +739,11 @@ export function TaskDetail({ id }: { id: string }) {
                     <div className="thread-text">
                       {d.mention ? (
                         <>
-                          <span className="mention-tag">@{d.mention}</span> {d.text}
+                          <span className="mention-tag">@{d.mention}</span>{" "}
+                          {renderMentionText(d.text, roleTokens)}
                         </>
                       ) : (
-                        d.text
+                        renderMentionText(d.text, roleTokens)
                       )}
                     </div>
                   </div>

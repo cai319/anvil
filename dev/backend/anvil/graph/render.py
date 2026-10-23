@@ -32,7 +32,9 @@ PROTOCOL = (
 REPLY_PROTOCOL = (
     "你被 @ 到任务会话中。请阅读消息与最近会话，评估对方提出的问题/反馈，并给出你的判断、"
     "依据与建议；如果你不同意，直接说明反驳理由。\n"
-    "本轮只做讨论与回复：不要 claim 或 submit 任务，也不要开始新的工作流步骤。\n"
+    "本轮只做讨论与回复：不要 claim 或 submit **当前任务**（$ANVIL_TASK_ID），"
+    "也不要开始新的工作流步骤；如果消息明确要求你 claim/submit **另一个任务或子任务**"
+    "（例如 `anvil task claim <子任务ID>`），按消息指示执行。\n"
     "如果你在回复中创建或转交子任务：用 `anvil task create ... --assignee <执行角色>`"
     "（团队用 `--assignees a,b`）指定执行者，**不要 claim 你拆给别人的子任务**；"
     "若已 claim 但要让别人执行，先 `anvil task unclaim <id>` 再 @对方认领。\n"

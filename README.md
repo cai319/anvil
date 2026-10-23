@@ -190,6 +190,9 @@ anvil init --with-roles
   - 等模型/工具返回（run=`running`、进程 busy）：5 秒 tick 只做 liveness 检查；
     超过 run 级 timeout（默认 3600 秒）才重置会话并进入自动恢复。
   - 等待期间任务/角色租约会自动续租，不会因为 30 分钟没 heartbeat 被判失联。
+- **请求体大小保护**：图片/附件不计 token，但会计入请求体。Anvil 按累计附件 base64
+  字符数估算，达到 `ANVIL_PAYLOAD_HARD_RESET_CHARS`（默认 24MB）时主动换新会话；API
+  返回 `request too large (max 32mb)` 时也会识别并强制新会话重投，避免角色卡住。
 - 用 `anvil whoami --json` 查看 `context_tokens`、窗口、`model_pool_windows`、
   `context_fit`、`hard_limit_tokens` 等指标。
 - **删除 vs 取消**：删除任务会回收该任务的常驻进程/会话；取消（`closed`）保留进程/会话，`reopen` 可继续。
@@ -257,6 +260,7 @@ anvil action prepare --kind task.cancel --task $ANVIL_TASK_ID --reason "..."
 | `ANVIL_CONTEXT_HINT_RATIO` | `0.5` | 上下文提示阈值占模型窗口比例 |
 | `ANVIL_CONTEXT_HARD_RESET_RATIO` | `0.9` | 单轮内上下文达到窗口比例时主动换会话；`0`=关闭 |
 | `ANVIL_CONTEXT_OUTPUT_RESERVE` | `32000` | 硬阈值预留的响应额度（API 上限为 input+max_tokens） |
+| `ANVIL_PAYLOAD_HARD_RESET_CHARS` | `24000000` | 累计图片/附件字符数阈值；超过换新会话（0=关闭） |
 | `ANVIL_CONTEXT_RESET_MAX_RETRIES` | `3` | 同一 run 因上下文溢出自动换会话的最大次数 |
 | `ANVIL_RUN_DEAD_GRACE_SECONDS` | `60` | 常驻进程死亡后，卡在 running 的 run 回收宽限期 |
 | `ANVIL_RUN_PHASE_STALL_SECONDS` | `60` | run 卡在 `projecting` 时重新投递的宽限期 |

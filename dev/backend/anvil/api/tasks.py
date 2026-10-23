@@ -279,6 +279,37 @@ def comment_task(tid: str, body: CommentIn, conn=Depends(get_db), auth: Auth = D
     return result
 
 
+def _wake_mentioned_role(conn, request: Request, task: dict, target: str,
+                         message: str, sender: str, wf: dict | None) -> None:
+    """唤醒被 @ 的角色：有活跃 run 则 resume；否则起 reply/normal run。
+
+    - 工作流任务：起 `[anvil:reply]` run（只讨论，不改 workflow 结构）；
+    - 普通任务/子任务：起普通 run，让被 @ 的角色可以直接 claim 执行。
+    """
+    orch = getattr(request.app.state, "orchestrator", None)
+    active = services.runs.find_active_run(conn, task["id"], target)
+    if active:
+        if orch:
+            try:
+                orch.pump(request.app.state.db_path, active["id"], "resume", {})
+            except Exception:  # noqa: BLE001
+                pass
+        return
+    if wf is not None:
+        run = services.runs.create_run(
+            conn, target, task["id"],
+            prompt=("[anvil:reply]你在任务会话中被 "
+                    f"{sender} @：\n{message}\n\n"
+                    "请评估该反馈并回复你的判断与依据。"))
+    else:
+        run = services.runs.create_run(conn, target, task["id"])
+    if orch:
+        try:
+            orch.pump(request.app.state.db_path, run["id"], "wake", {})
+        except Exception:  # noqa: BLE001
+            pass
+
+
 @router.post("/{tid}/mention", response_model=TaskOut)
 def mention_task(tid: str, body: dict, request: Request, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """@提及某角色，注入注意事项/上下文；@的是角色时唤醒该角色（raft inbox：@ 即拉入）。"""
@@ -292,68 +323,55 @@ def mention_task(tid: str, body: dict, request: Request, conn=Depends(get_db), a
     target = str(body.get("target") or "human")
     message = _strip_leading_mention(conn, str(body.get("message") or ""), target)
     result = services.tasks.mention(conn, tid, auth.role or "human", target, message)
-    # @的是角色（非 human）且是任务参与角色 → 唤醒该角色（挂起中则 resume 续跑，否则新起 run）
     if target != "human":
-        roles = [x["role_slug"] for x in conn.execute(
-            "SELECT role_slug FROM task_assignees WHERE task_id=?", (tid,)
-        )]
-        if target in roles:
-            orch = getattr(request.app.state, "orchestrator", None)
-            active = services.runs.find_active_run(conn, tid, target)
-            if active:
-                if orch:
-                    try:
-                        orch.pump(request.app.state.db_path, active["id"], "resume", {})
-                    except Exception:  # noqa: BLE001
-                        pass
-            else:
-                # 工作流任务：空闲角色被 @ → 起一条「回复」run（只讨论，不 claim/submit 任务）
-                wf = services.workflow.get_for_task(conn, tid)
-                if wf is not None:
-                    run = services.runs.create_run(
-                        conn, target, tid,
-                        prompt=("[anvil:reply]你在任务会话中被 "
-                                f"{auth.role or 'human'} @：\n{message}\n\n"
-                                "请评估该反馈并回复你的判断与依据。"))
-                else:
-                    run = services.runs.create_run(conn, target, tid)
-                if orch:
-                    try:
-                        orch.pump(request.app.state.db_path, run["id"], "wake", {})
-                    except Exception:  # noqa: BLE001
-                        pass
+        target_role = services.roles.get(conn, target)
+        wf = services.workflow.get_for_task(conn, tid)
+        # 唤醒范围不只 task_assignees：单负责人 assignee、workflow 步骤角色、
+        # 以及被明确 @ 的现有角色都算“可拉入”，否则子任务/工作流角色会漏唤醒。
+        bound = {x["role_slug"] for x in conn.execute(
+            "SELECT role_slug FROM task_assignees WHERE task_id=?", (tid,))}
+        if task.get("assignee"):
+            bound.add(task["assignee"])
+        if task.get("planner"):
+            bound.add(task["planner"])
+        if wf is not None:
+            bound.update(str(s.get("role_slug")) for s in (wf.get("steps") or [])
+                         if s.get("role_slug"))
+        is_planner = (
+            target == services.roles.ONBOARDING_SLUG
+            or (target == (task.get("planner") or "") and target not in bound
+                and wf is not None))
+        # Cindy（内置 onboarding 助理）即使没有 roles 行也应可被 @ 触发重规划。
+        target_exists = (
+            target == services.roles.ONBOARDING_SLUG
+            or (target_role is not None and bool(target_role.get("enabled", True)))
+        )
+        if not target_exists:
+            pass  # 角色不存在/已禁用：只记录 mention，不唤醒
+        elif is_planner and task.get("status") not in ("done", "closed"):
+            # planner/Cindy 被 @：走重规划 run（workflow 结构只能由 planner 调整）。
+            try:
+                services.planning.start_planner_run(
+                    conn,
+                    request.app.state.db_path,
+                    getattr(request.app.state, "orchestrator", None),
+                    tid,
+                    target,
+                    assignees=_assignee_slugs(conn, tid),
+                    extra_constraint=(
+                        f"{auth.role or 'human'} 通过 @{target} 提出 workflow/loop "
+                        f"调整诉求：\n{message}\n\n"
+                        "请重新审阅当前 workflow，必要时提交修订后的 workflow 草案；"
+                        "角色分配只能由 planner 在 workflow/loop 模板中定义，"
+                        "不要让执行角色在切片计划里覆盖。"),
+                    replace_active=True,
+                )
+                events.publish("task", {"id": tid, "kind": "plan", "planner": target})
+            except Exception:  # noqa: BLE001 —— 规划失败不阻断已记录的 mention
+                pass
         else:
-            # 非参与角色被 @：只有 planner/Cindy 具备 workflow 定制权。
-            # 执行角色对 loop 结构有诉求时 @cindy，这里为其拉起一次重规划 run。
-            planner = None
-            if target == services.roles.ONBOARDING_SLUG:
-                planner = target
-            elif target == (task.get("planner") or ""):
-                planner = target
-            if planner and task.get("status") not in ("done", "closed"):
-                if planner != services.roles.ONBOARDING_SLUG and \
-                        services.roles.get(conn, planner) is None:
-                    planner = None
-            if planner:
-                try:
-                    services.planning.start_planner_run(
-                        conn,
-                        request.app.state.db_path,
-                        getattr(request.app.state, "orchestrator", None),
-                        tid,
-                        planner,
-                        assignees=_assignee_slugs(conn, tid),
-                        extra_constraint=(
-                            f"{auth.role or 'human'} 通过 @{target} 提出 workflow/loop "
-                            f"调整诉求：\n{message}\n\n"
-                            "请重新审阅当前 workflow，必要时提交修订后的 workflow 草案；"
-                            "角色分配只能由 planner 在 workflow/loop 模板中定义，"
-                            "不要让执行角色在切片计划里覆盖。"),
-                        replace_active=True,
-                    )
-                    events.publish("task", {"id": tid, "kind": "plan", "planner": planner})
-                except Exception:  # noqa: BLE001 —— 规划失败不阻断已记录的 mention
-                    pass
+            _wake_mentioned_role(conn, request, task, target, message,
+                                 auth.role or "human", wf)
     events.publish("task", {"id": tid, "kind": "mention", "target": target})
     return result
 

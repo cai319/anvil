@@ -85,6 +85,46 @@ def _is_context_overflow(text: str) -> bool:
     return any(marker in low for marker in _CONTEXT_OVERFLOW_MARKERS)
 
 
+# 请求体超限（图片/附件累计）与 token 超限是两类错误；前者换新会话即可清除附件。
+_PAYLOAD_OVERFLOW_MARKERS = (
+    "request too large",
+    "max 32mb",
+    "accumulated images and attachments",
+    "pushed the request over the limit",
+    "remove older images",
+    "payload too large",
+    "request_too_large",
+)
+
+
+def _is_payload_overflow(text: str) -> bool:
+    low = (text or "").lower()
+    return any(marker in low for marker in _PAYLOAD_OVERFLOW_MARKERS)
+
+
+def _attachment_chars(ev: dict) -> int:
+    """估算事件中图片/附件的 base64 字符数（用于请求体大小保护）。"""
+    def block_chars(block) -> int:
+        if not isinstance(block, dict):
+            return 0
+        kind = block.get("type")
+        if kind == "image":
+            return len(str((block.get("source") or {}).get("data") or ""))
+        if kind == "tool_result":
+            content = block.get("content")
+            if isinstance(content, list):
+                return sum(block_chars(x) for x in content)
+            return 0
+        if kind in ("attachment", "file"):
+            return len(str(block.get("data") or block.get("content") or ""))
+        return 0
+
+    content = (ev.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        return 0
+    return sum(block_chars(b) for b in content)
+
+
 def extract_usage(ev: dict) -> dict:
     """从 result 事件提取 usage；兼容 modelUsage（camelCase）聚合。"""
     usage = ev.get("usage")
@@ -144,6 +184,8 @@ class _Role:
     last_task_id: str | None = None
     last_step_id: str | None = None
     context_tokens: int = 0
+    # 当前会话累计的图片/附件 base64 字符数（约等于请求体大小）。
+    payload_chars: int = 0
     # API 报错后自适应收紧的窗口（只调小不调大）；用于修正模型名推断不准的情况。
     adaptive_window: int | None = None
     cic_pending: bool = False
@@ -231,6 +273,8 @@ class DaemonManager:
                     else int(window * config.CIC_RESET_RATIO)),
                 "hard_limit_tokens": _hard_limit_for(window),
                 "hint_tokens": int(window * config.CONTEXT_HINT_RATIO),
+                "payload_chars": 0,
+                "payload_limit_chars": int(config.PAYLOAD_HARD_RESET_CHARS),
             }
         alive = r.proc is not None and r.proc.poll() is None
         tokens = int(r.context_tokens or 0)
@@ -262,6 +306,8 @@ class DaemonManager:
             "cic_threshold_tokens": self._cic_threshold(r),
             "hard_limit_tokens": self._hard_threshold(r),
             "hint_tokens": self._hint_threshold(r),
+            "payload_chars": int(r.payload_chars or 0),
+            "payload_limit_chars": int(config.PAYLOAD_HARD_RESET_CHARS),
         }
 
     def cancel_task(self, role: str, task_id: str) -> bool:
@@ -341,6 +387,7 @@ class DaemonManager:
                 self._kill_locked(r, graceful=True)
                 r.session_id = None
                 r.context_tokens = 0
+                r.payload_chars = 0
                 r.cic_pending = cic
                 r.busy = False
                 r.busy_since = None
@@ -364,6 +411,7 @@ class DaemonManager:
             r.session_id = None
             r.cic_pending = True
             r.context_tokens = 0
+            r.payload_chars = 0
         conn = open_conn(self.db_path)
         try:
             conn.execute(
@@ -405,6 +453,8 @@ class DaemonManager:
             resume = False
             r.cic_pending = True
         sid = (row["session_id"] if resume else str(uuid.uuid4()))
+        if not resume:
+            r.payload_chars = 0  # 新会话不再携带旧图片/附件
         token = (row["token"] if row else None) or self._issue_token(conn, r.role)
 
         tpl = args_resume if resume else args_new
@@ -608,6 +658,9 @@ class DaemonManager:
                     continue
                 if not line.startswith("{"):
                     self._log(r.role, line)  # claude 的警告行（如 unrecognized_model）
+                    if _is_payload_overflow(line):
+                        self._begin_context_overflow(r, "payload")
+                        break
                     if _is_context_overflow(line):
                         self._begin_context_overflow(r, "api_error")
                         break
@@ -618,6 +671,15 @@ class DaemonManager:
                     self._log(r.role, line)
                     continue
                 self._append_run_log(r, self._format_event(ev))
+                # 图片/附件不计 token，但会计入请求体；累计到阈值时主动换新会话，
+                # 避免撞上 “request too large (max 32mb)”。
+                added_chars = _attachment_chars(ev)
+                if added_chars:
+                    r.payload_chars = int(r.payload_chars or 0) + added_chars
+                    if (r.current_run_id and config.PAYLOAD_HARD_RESET_CHARS > 0
+                            and r.payload_chars >= config.PAYLOAD_HARD_RESET_CHARS):
+                        self._begin_context_overflow(r, "payload")
+                        break
                 etype = ev.get("type")
                 if etype == "system" and ev.get("session_id"):
                     r.session_id = ev["session_id"]
@@ -628,6 +690,9 @@ class DaemonManager:
                     # 只认错误结果里的文本；正常 result 是 agent 的最终回答，
                     # 里面可能出现 “prompt is too long” 等字样（例如正在分析本 bug）。
                     result_text = str(ev.get("result") or ev.get("error") or "")
+                    if ev.get("is_error") and _is_payload_overflow(result_text):
+                        self._begin_context_overflow(r, "payload")
+                        break
                     if ev.get("is_error") and _is_context_overflow(result_text):
                         self._begin_context_overflow(r, "api_error")
                         break
@@ -671,6 +736,9 @@ class DaemonManager:
                         blocks = msg.get("content") or []
                         err_text = "".join(
                             b.get("text", "") for b in blocks if isinstance(b, dict))
+                        if _is_payload_overflow(err_text):
+                            self._begin_context_overflow(r, "payload")
+                            break
                         if _is_context_overflow(err_text):
                             self._begin_context_overflow(r, "api_error")
                             break
@@ -869,6 +937,9 @@ class DaemonManager:
                 conn.close()
         r.cic_pending = True
         r.suppress_exit = True
+        # 强制下一次 _spawn 新建会话：payload 溢出时 token 可能不高，
+        # 不能依赖 token 阈值决定是否 --resume（否则旧附件会被原样带回）。
+        r.session_id = None
         try:
             r.context_tokens = max(int(r.context_tokens or 0),
                                    self._hard_threshold(r) + 1)
@@ -893,7 +964,11 @@ class DaemonManager:
                     proc.kill()
                 except Exception:  # noqa: BLE001
                     pass
-        self._log(r.role, f"[anvil] context overflow ({reason}) → 将用 CIC 新会话重投当前 run")
+        self._log(
+            r.role,
+            f"[anvil] context/payload overflow ({reason}; "
+            f"context≈{r.context_tokens}, payload≈{r.payload_chars} chars) "
+            "→ 将用 CIC 新会话重投当前 run")
 
     def _consolidate_context(self, conn, r: _Role, trigger: str) -> None:
         """上下文清理前固化任务知识；失败只记日志，不阻断换会话。"""
@@ -938,9 +1013,14 @@ class DaemonManager:
                 # 轮次边界是唯一安全的“换会话”时机：上下文已过高水位且没有排队消息时，
                 # 释放进程，下一次唤醒由 _spawn 用 CIC 新建会话。否则一条大上下文会被
                 # 后续消息继续 --resume，直到单轮内撞上 API 硬上限。
+                payload_high = (
+                    config.PAYLOAD_HARD_RESET_CHARS > 0
+                    and int(r.payload_chars or 0) >= config.PAYLOAD_HARD_RESET_CHARS)
                 if (not r.queue and r.proc is not None
-                        and int(r.context_tokens or 0) >= self._cic_threshold(r)):
-                    self._consolidate_context(conn, r, "context-high")
+                        and (int(r.context_tokens or 0) >= self._cic_threshold(r)
+                             or payload_high)):
+                    self._consolidate_context(
+                        conn, r, "payload-high" if payload_high else "context-high")
                     r.cic_pending = True
                     r.suppress_exit = True
                     self._log(

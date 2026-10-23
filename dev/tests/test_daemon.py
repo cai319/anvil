@@ -28,6 +28,7 @@ switch_model = os.environ.get("FAKE_SWITCH_MODEL", "")
 result_usage = os.environ.get("FAKE_RESULT_USAGE", "")
 context_tokens = int(os.environ.get("FAKE_CONTEXT_TOKENS", "0"))
 context_error = os.environ.get("FAKE_CONTEXT_ERROR", "")
+attachment_chars = int(os.environ.get("FAKE_ATTACHMENT_CHARS", "0"))
 result_text = os.environ.get("FAKE_RESULT_TEXT", "OK")
 warn_line = os.environ.get("FAKE_WARN_LINE", "")
 print(json.dumps({"type": "system", "subtype": "init", "session_id": sid,
@@ -61,8 +62,21 @@ for line in sys.stdin:
         print(json.dumps({"type": "result", "subtype": "error", "is_error": True,
                           "result": "Prompt is too long"}), flush=True)
         continue
+    if context_error == "payload":
+        print("Request too large (max 32mb): accumulated images and attachments "
+              "in the conversation pushed the request over the limit. "
+              "Remove older images or compact the conversation.", flush=True)
+        continue
+    tool_content = "file.txt"
+    if attachment_chars:
+        tool_content = [
+            {"type": "text", "text": "file.txt"},
+            {"type": "image", "source": {"type": "base64",
+                                         "media_type": "image/png",
+                                         "data": "A" * attachment_chars}},
+        ]
     print(json.dumps({"type": "user", "message": {"content": [
-        {"type": "tool_result", "content": "file.txt"}]}}), flush=True)
+        {"type": "tool_result", "content": tool_content}]}}), flush=True)
     result = {"type": "result", "subtype": "success", "result": result_text,
               "total_cost_usd": 0.01}
     if result_usage:
@@ -217,6 +231,49 @@ def test_context_rotation_saves_knowledge_snapshot(env):
     body = files[0].read_text(encoding="utf-8")
     assert "关键结论：strict 口径" in body
     assert "S1 通过：72 字段一致" in body
+
+
+def test_payload_error_triggers_fresh_cic(env):
+    """request too large (32MB 图片/附件) 也要识别，并换新会话。"""
+    conn, mgr, fake, log = env
+    seen: list[tuple] = []
+    mgr.on_context_overflow = lambda role, run_id, reason: seen.append((role, run_id, reason))
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "first",
+             extra_env={"FAKE_CONTEXT_ERROR": "payload"})
+    assert _wait(lambda: seen), "payload 超限应触发恢复"
+    assert seen[0][1] == run["id"]
+    assert seen[0][2] == "payload"
+    assert mgr._role("qa-role").cic_pending is True
+    assert mgr._role("qa-role").session_id is None  # 强制新会话，不能再 resume
+
+
+def test_payload_guard_rotates_before_api_error(env, monkeypatch):
+    """累计图片/附件达到阈值时主动换会话，不等 32MB 报错。"""
+    monkeypatch.setattr(config, "PAYLOAD_HARD_RESET_CHARS", 1000)
+    conn, mgr, fake, log = env
+    seen: list[tuple] = []
+    mgr.on_context_overflow = lambda role, run_id, reason: seen.append((role, run_id, reason))
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "first",
+             extra_env={"FAKE_ATTACHMENT_CHARS": "2000"})
+    assert _wait(lambda: seen), "附件累计超阈值应主动轮换"
+    assert seen[0][2] == "payload"
+    assert mgr._role("qa-role").cic_pending is True
+
+
+def test_new_session_clears_payload_counter(env, monkeypatch):
+    monkeypatch.setattr(config, "PAYLOAD_HARD_RESET_CHARS", 10_000_000)
+    conn, mgr, fake, log = env
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "first",
+             extra_env={"FAKE_ATTACHMENT_CHARS": "5000"})
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    assert mgr._role("qa-role").payload_chars >= 5000
+    mgr.reset_session("qa-role", cic=True)
+    _deliver(mgr, conn, fake, log, run["id"], "second")
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    assert mgr._role("qa-role").payload_chars == 0
 
 
 def test_api_error_adapts_context_window_downward(env):
