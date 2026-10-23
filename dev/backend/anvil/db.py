@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS roles (
     slug            TEXT PRIMARY KEY,
     display_name    TEXT NOT NULL,
     avatar_color    TEXT,
+    avatar          TEXT,
     home_path       TEXT NOT NULL,
     definition_json TEXT NOT NULL DEFAULT '{}',
     created_at      TEXT NOT NULL,
@@ -485,6 +486,11 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # 迁移：既有 tasks 表补 workspace_id 列（B 多频道）
     try:
         conn.execute("ALTER TABLE tasks ADD COLUMN workspace_id TEXT")
+    except sqlite3.OperationalError:
+        pass
+    # 迁移：roles 补 avatar 列（角色头像预设；NULL = 按 slug 自动匹配）
+    try:
+        conn.execute("ALTER TABLE roles ADD COLUMN avatar TEXT")
     except sqlite3.OperationalError:
         pass
     # 迁移：role_tools 补 skill/mcp 选择列（M3 工具治理）

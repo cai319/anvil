@@ -17,6 +17,20 @@ from ..util import ConflictError
 router = APIRouter()
 logger = logging.getLogger("anvil.roles")
 
+AVATAR_RE = re.compile(r"^big-smile:[a-z0-9-]{1,32}$")
+
+
+def _validate_avatar(value: object) -> str | None:
+    """头像只接受 null / initials / big-smile:<id>。"""
+    if value is None or value == "initials":
+        return value  # type: ignore[return-value]
+    if not isinstance(value, str) or not AVATAR_RE.match(value):
+        raise HTTPException(
+            status_code=422,
+            detail="avatar must be null, 'initials', or 'big-smile:<id>'",
+        )
+    return value
+
 
 def _extract_json(text: str) -> dict | None:
     """从运行时输出中取第一个完整 JSON 对象（兼容前后夹杂说明文字）。"""
@@ -45,6 +59,7 @@ def auto_create_role(body: dict, conn=Depends(get_db),
     brief = str(body.get("brief") or "").strip()
     if not brief:
         raise HTTPException(status_code=422, detail="brief is required")
+    avatar = _validate_avatar(body.get("avatar"))
     slug = str(body.get("slug") or "").strip()
     if not slug:
         ascii_part = re.sub(r"[^a-z0-9]+", "-", brief.lower()).strip("-")[:20]
@@ -73,6 +88,7 @@ def auto_create_role(body: dict, conn=Depends(get_db),
     data = _extract_json(text) or {}
     definition = {
         "kind": "member",
+        "avatar": avatar,
         "description": data.get("description") or brief,
         "runtime": {"id": resolved_runtime_id},
         "workspace": {"repos": []},
@@ -199,6 +215,7 @@ def create_role(body: RoleIn, conn=Depends(get_db),
     if definition.get("kind") == "onboarding":
         raise HTTPException(status_code=422, detail="cannot create onboarding role via API")
     definition.setdefault("kind", "member")
+    definition["avatar"] = _validate_avatar(body.avatar)
     try:
         return services.roles.create(conn, slug=body.slug, display_name=body.display_name,
                                      definition=definition)
@@ -228,6 +245,9 @@ def update_role(slug: str, body: RoleIn, conn=Depends(get_db),
     definition = body.model_dump(exclude_none=True)
     definition.pop("slug", None)
     definition.pop("display_name", None)
+    # 头像以 roles.avatar 列为准；纯头像更新走 PUT /roles/{slug}/avatar，
+    # 避免通用 PUT 写入与列不一致的 definition 值。
+    definition.pop("avatar", None)
     if definition.get("kind") == "onboarding":
         raise HTTPException(status_code=422, detail="cannot convert role to onboarding via API")
     services.roles.update(conn, slug, display_name=body.display_name, definition=definition)

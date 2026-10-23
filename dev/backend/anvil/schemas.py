@@ -73,6 +73,7 @@ class RoleIn(BaseModel):
     slug: str
     display_name: str
     avatar_color: str | None = None
+    avatar: str | None = None
     kind: str | None = None
     description: str | None = None
     capabilities: dict[str, Any] | None = None
@@ -90,6 +91,7 @@ class RoleOut(BaseModel):
     slug: str
     display_name: str
     avatar_color: str | None = None
+    avatar: str | None = None
     home_path: str
     enabled: bool = True
     created_at: str
