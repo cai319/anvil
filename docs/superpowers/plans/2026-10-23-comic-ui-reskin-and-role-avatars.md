@@ -2976,6 +2976,15 @@ git commit -m "feat(ui): add comic component styles
 Co-Authored-By: Claude Code <noreply@anthropic.com>"
 ```
 
+#### Review hardening（2026-10-24 质量审查追加）
+
+质量审查发现 WorkflowGraph 的内联深色背景与纸面化冲突、线程审计行被误套纸面文字色。追加提交 `fix(ui): keep workflow and audit rows readable`：
+
+- 线程：只有 `.is-message` 的消息气泡使用纸面文字；`is-human` 非消息事件不再填充黄色；审计/系统事件保持深色画布浅色文字。
+- 纸面按钮/链接/焦点：`button.danger` 用 `--red-on-paper`，`.run-live` 用新增 `--green-on-paper`，纸面容器焦点环改墨色，modal 输入 focus 覆盖旧黄色描边。
+- 通用 `button:hover` 的状态保护：`.drawer-mask`、`.member-row.picked`、`.mention-item.active`、`.avatar-tile.selected`、`.wf-slice-row-btn`。
+- 工作流：图谱节点/阶段保留内联深色背景并改浅色文字；`.wf-node-title` 允许换行；纸面切片行/详情里的内联状态色强制墨色；`.wf-flow-arrow`/`.wf-loop-phases` 改纸面 muted；`.wf-loop-mark` 改墨色。
+
 ---
 
 ### Task 11: layout.css（壳层与响应式）
