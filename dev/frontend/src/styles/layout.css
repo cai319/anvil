@@ -419,6 +419,7 @@ dd { margin: 0; }
 .nav-label { color: var(--text-on-ink-muted); }
 @media (max-width: 1199px) {
   .sidebar .rail-btn { display: none; }
+  .sidebar-foot { display: none; }
 }
 @media (max-width: 899px) {
   .app-shell .sidebar .brand { padding: 0 8px 12px !important; }

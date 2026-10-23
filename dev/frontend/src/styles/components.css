@@ -262,16 +262,32 @@ select { height: 34px; }
   flex-direction: column;
   gap: 5px;
   margin-bottom: 12px;
-  color: var(--text-on-paper);
+  color: var(--text-on-ink);
   font-size: 12px;
   font-weight: 700;
 }
 .field > span { font-weight: 800; }
 .field small,
 .field .muted {
-  color: var(--text-on-paper-muted);
+  color: var(--text-on-ink-muted);
   font-weight: 600;
 }
+.modal .field,
+.create-role-panel .field,
+.roles-detail .field,
+.task-side .field,
+.session-head .field { color: var(--text-on-paper); }
+
+.modal .field small,
+.modal .field .muted,
+.create-role-panel .field small,
+.create-role-panel .field .muted,
+.roles-detail .field small,
+.roles-detail .field .muted,
+.task-side .field small,
+.task-side .field .muted,
+.session-head .field small,
+.session-head .field .muted { color: var(--text-on-paper-muted); }
 
 /* ===== 徽章 ===== */
 .chip {
@@ -472,6 +488,11 @@ select { height: 34px; }
   top: 0;
   z-index: 1;
   background: var(--ink-900);
+}
+.history-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 /* 纸面容器使用浅色原生控件/滚动条 */
@@ -996,6 +1017,7 @@ select { height: 34px; }
   margin-bottom: 16px;
   padding: 14px;
   background: var(--paper);
+  color: var(--text-on-paper);
   border: var(--stroke) solid var(--ink-900);
   border-radius: var(--radius);
   box-shadow: var(--shadow-2);
