@@ -24,7 +24,7 @@ export function initialFor(name: string, slug: string): string {
 }
 
 export type ResolvedAvatar =
-  | { kind: "image"; src: string }
+  | { kind: "image"; src: string; presetId: string }
   | { kind: "initials" };
 
 export function resolveAvatar(
@@ -38,5 +38,5 @@ export function resolveAvatar(
     ? preset
     : defaultAvatarFor(slug).slice("big-smile:".length);
 
-  return { kind: "image", src: `/avatars/big-smile/${id}.svg` };
+  return { kind: "image", src: `/avatars/big-smile/${id}.svg`, presetId: id };
 }

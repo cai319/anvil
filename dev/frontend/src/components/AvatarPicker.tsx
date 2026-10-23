@@ -20,6 +20,7 @@ export function AvatarPicker({
 }: Props) {
   const [draft, setDraft] = useState<string | null>(value);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -29,19 +30,22 @@ export function AvatarPicker({
   useEffect(() => {
     if (mode !== "modal") return;
     closeRef.current?.focus();
+  }, [mode]);
+
+  useEffect(() => {
+    if (mode !== "modal") return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose?.();
+      if (event.key === "Escape" && !saving) onClose?.();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [mode, onClose]);
+  }, [mode, onClose, saving]);
 
   const resolved = resolveAvatar(draft, slug);
-  const currentPreset = resolved.kind === "image"
-    ? resolved.src.slice("/avatars/big-smile/".length, -".svg".length)
-    : null;
+  const currentPreset = resolved.kind === "image" ? resolved.presetId : null;
 
   const pick = (next: string) => {
+    if (saving) return;
     if (mode === "inline") {
       void onChange(next);
     } else {
@@ -49,11 +53,18 @@ export function AvatarPicker({
     }
   };
 
+  const dismiss = () => {
+    if (!saving) onClose?.();
+  };
+
   const save = async () => {
     setSaving(true);
+    setSaveError(null);
     try {
       await onChange(draft);
       onClose?.();
+    } catch {
+      setSaveError("保存失败，请重试");
     } finally {
       setSaving(false);
     }
@@ -106,7 +117,7 @@ export function AvatarPicker({
     <div
       className="modal-overlay"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose?.();
+        if (event.button === 0 && event.target === event.currentTarget) dismiss();
       }}
     >
       <div
@@ -121,7 +132,7 @@ export function AvatarPicker({
             ref={closeRef}
             type="button"
             className="modal-close"
-            onClick={onClose}
+            onClick={dismiss}
             aria-label="关闭"
           >
             ×
@@ -131,8 +142,9 @@ export function AvatarPicker({
           给「{name}」选一个头像。创建后也可以随时更换。
         </p>
         {grid}
+        {saveError && <p className="error">{saveError}</p>}
         <div className="modal-actions">
-          <button type="button" onClick={onClose} disabled={saving}>取消</button>
+          <button type="button" onClick={dismiss} disabled={saving}>取消</button>
           <button type="button" className="primary" onClick={save} disabled={saving}>
             {saving ? "保存中…" : "保存头像"}
           </button>
