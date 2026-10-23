@@ -17,21 +17,14 @@ from ..util import ConflictError
 router = APIRouter()
 logger = logging.getLogger("anvil.roles")
 
-AVATAR_RE = re.compile(r"^big-smile:[a-z0-9-]{1,32}$")
-
-
 def _validate_avatar(value: object) -> str | None:
-    """头像只接受 null / initials / big-smile:<id>。"""
-    if value is None:
-        return None
-    if value == "initials":
-        return "initials"
-    if not isinstance(value, str) or not AVATAR_RE.fullmatch(value):
+    """头像只接受 null / initials / big-smile:<id>（规则见 services.roles）。"""
+    if not services.roles.is_valid_avatar(value):
         raise HTTPException(
             status_code=422,
             detail="avatar must be null, 'initials', or 'big-smile:<id>'",
         )
-    return value
+    return value  # type: ignore[return-value]
 
 
 def _extract_json(text: str) -> dict | None:

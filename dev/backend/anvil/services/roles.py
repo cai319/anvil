@@ -17,6 +17,16 @@ logger = logging.getLogger("anvil.roles")
 # Naive token estimate until the real estimator (M3) lands: fixed cost per tool.
 TOKENS_PER_TOOL = 500
 
+# 头像只允许 null / initials / big-smile:<id>；服务层统一校验，
+# 防止提案审批等非 API 路径把任意值写入 avatar 列。
+AVATAR_RE = re.compile(r"^big-smile:[a-z0-9-]{1,32}$")
+
+
+def is_valid_avatar(value: object) -> bool:
+    return value is None or value == "initials" or (
+        isinstance(value, str) and AVATAR_RE.fullmatch(value) is not None
+    )
+
 # slug 会进入文件路径（agents/<slug>/）、分支名与 CLI 参数；限定 ASCII 可避免
 # Windows 代码页 / 路径 / 编码问题。
 ROLE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
@@ -376,9 +386,13 @@ def list_all(conn: sqlite3.Connection) -> list[dict]:
 def update(conn: sqlite3.Connection, slug: str, **fields) -> dict | None:
     definition = fields.pop("definition", None)
     if definition is not None:
-        fields["definition_json"] = jdumps(definition)
         if "avatar" in definition:
-            fields["avatar"] = definition.get("avatar")
+            avatar = definition.get("avatar")
+            if is_valid_avatar(avatar):
+                fields["avatar"] = avatar
+            else:
+                definition.pop("avatar", None)
+        fields["definition_json"] = jdumps(definition)
     if not fields:
         return get(conn, slug)
     fields = {**fields, "updated_at": now_iso()}

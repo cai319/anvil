@@ -8,6 +8,7 @@ import pytest
 
 pytest.importorskip("anvil.main")
 from anvil.db import open_conn  # noqa: E402
+from anvil.services import roles as roles_service  # noqa: E402
 from tests.conftest import API, auth_headers, human_headers, role_payload, runtime_payload  # noqa: E402
 
 GEN = {
@@ -147,6 +148,7 @@ async def test_update_role_avatar(client):
     )
     assert r.status_code == 200, r.text
     assert r.json()["avatar"] == "big-smile:cid"
+    assert r.json()["definition"]["avatar"] == "big-smile:cid"
 
     got = await client.get(f"{API}/roles/dev")
     assert got.json()["avatar"] == "big-smile:cid"
@@ -171,7 +173,11 @@ async def test_avatar_accepts_initials_and_null(client):
 
 async def test_invalid_avatar_is_rejected(client):
     await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
-    await client.post(f"{API}/roles", json=role_payload("dev"), headers=human_headers())
+    await client.post(
+        f"{API}/roles",
+        json=role_payload("dev", avatar="big-smile:ace"),
+        headers=human_headers(),
+    )
 
     r = await client.put(
         f"{API}/roles/dev/avatar",
@@ -179,6 +185,9 @@ async def test_invalid_avatar_is_rejected(client):
         headers=human_headers(),
     )
     assert r.status_code == 422
+
+    got = await client.get(f"{API}/roles/dev")
+    assert got.json()["avatar"] == "big-smile:ace"
 
 
 async def test_avatar_update_requires_human(client):
@@ -256,6 +265,78 @@ async def test_recreate_role_preserves_avatar(client):
     )
     assert r.status_code == 201, r.text
     assert r.json()["avatar"] == "big-smile:bee"
+
+
+async def test_update_ignores_invalid_definition_avatar(client, app):
+    await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
+    await client.post(
+        f"{API}/roles",
+        json=role_payload("dev", avatar="big-smile:ace"),
+        headers=human_headers(),
+    )
+
+    conn = open_conn(app.state.db_path)
+    try:
+        roles_service.update(
+            conn, "dev",
+            definition={"avatar": {"bad": 1}, "display_name": "Dev"},
+        )
+        roles_service.update(
+            conn, "dev",
+            definition={"avatar": "javascript:alert(1)", "display_name": "Dev"},
+        )
+    finally:
+        conn.close()
+
+    got = await client.get(f"{API}/roles/dev")
+    assert got.status_code == 200
+    assert got.json()["avatar"] == "big-smile:ace"
+    assert "avatar" not in got.json()["definition"]
+
+
+async def test_avatar_update_creates_no_version_snapshot(client):
+    await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
+    await client.post(f"{API}/roles", json=role_payload("dev"), headers=human_headers())
+
+    before = await client.get(f"{API}/roles/dev/versions")
+    assert before.status_code == 200
+
+    r = await client.put(
+        f"{API}/roles/dev/avatar",
+        json={"avatar": "big-smile:cid"},
+        headers=human_headers(),
+    )
+    assert r.status_code == 200, r.text
+
+    after = await client.get(f"{API}/roles/dev/versions")
+    assert after.status_code == 200
+    assert len(after.json()) == len(before.json())
+
+
+async def test_generic_put_does_not_clear_avatar(client):
+    await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
+    await client.post(
+        f"{API}/roles",
+        json=role_payload("dev", avatar="big-smile:ace"),
+        headers=human_headers(),
+    )
+    r = await client.put(
+        f"{API}/roles/dev",
+        json=role_payload("dev", display_name="Dev 2"),
+        headers=human_headers(),
+    )
+    assert r.status_code == 200, r.text
+    got = await client.get(f"{API}/roles/dev")
+    assert got.json()["avatar"] == "big-smile:ace"
+
+
+async def test_avatar_update_missing_role_404(client):
+    r = await client.put(
+        f"{API}/roles/missing/avatar",
+        json={"avatar": "big-smile:ace"},
+        headers=human_headers(),
+    )
+    assert r.status_code == 404
 
 
 def test_legacy_roles_table_gets_avatar_column(tmp_path):
