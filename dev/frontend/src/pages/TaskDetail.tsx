@@ -6,6 +6,7 @@ import { roleStatusFromWorkflow } from "../workflowStatus";
 import { formatClock } from "../time";
 import { roleLiveDot, roleLiveState, stateClassForDot } from "../roleLive";
 import { useRoleRuntimes } from "../useRoleRuntimes";
+import { usePanelLayout } from "../usePanelLayout";
 import { STATUS_META, isDynamicStep, summarizeLoops, type LoopSummary } from "../workflowGroups";
 
 const STATUS_LABEL: Record<Task["status"], string> = {
@@ -167,6 +168,7 @@ export function TaskDetail({ id }: { id: string }) {
   const [wfView, setWfView] = useState<"graph" | "list">("graph");
   const [busy, setBusy] = useState(false);
   const { slugs: liveSlugs, runtimes: roleRuntimes } = useRoleRuntimes(task);
+  const panel = usePanelLayout({ storageKey: "task" });
 
   const refreshWorkflow = () =>
     api.getTaskWorkflow(id).then(setWorkflow).catch(() => setWorkflow(null));
@@ -649,10 +651,23 @@ export function TaskDetail({ id }: { id: string }) {
         <button className={`tab ${tab === "runtime" ? "active" : ""}`} onClick={() => setTab("runtime")}>
           角色运行时 {(task.assignees ?? []).length > 0 && <span className="tab-count">{task.assignees.length}</span>}
         </button>
+        {panel.collapsed && (
+          <button
+            type="button"
+            className="small"
+            style={{ marginLeft: "auto", alignSelf: "center" }}
+            onClick={panel.toggle}
+          >
+            显示任务信息
+          </button>
+        )}
       </div>
 
       {tab === "chat" && (
-      <div className="task-layout">
+      <div
+        className={`task-layout ${panel.collapsed ? "panel-collapsed" : ""}`}
+        style={panel.style}
+      >
         {/* 左：会话流 */}
         <div className="task-main">
           <div className="session-actions">
@@ -930,8 +945,32 @@ export function TaskDetail({ id }: { id: string }) {
         </div>
 
         {/* 右：任务信息面板 */}
+        <div
+          className={`splitter ${panel.dragging ? "dragging" : ""}`}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="调整任务信息面板宽度"
+          aria-valuemin={300}
+          aria-valuemax={560}
+          aria-valuenow={panel.width}
+          tabIndex={0}
+          onPointerDown={panel.onPointerDown}
+          onKeyDown={panel.onKeyDown}
+          onDoubleClick={panel.reset}
+        />
         <aside className="task-side">
-          <h2 className="pane-title">任务信息</h2>
+          <div className="pane-head">
+            <h2 className="pane-title">任务信息</h2>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={panel.toggle}
+              aria-label="折叠任务信息"
+              title="折叠任务信息"
+            >
+              ⇥
+            </button>
+          </div>
           <dl className="task-meta">
             <dt>状态</dt>
             <dd><span className={`status status-${task.status}`}>{STATUS_LABEL[task.status]}</span></dd>
