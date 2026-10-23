@@ -5,6 +5,8 @@ import { formatClock, parseTime, useNow } from "../time";
 import { usePanelLayout } from "../usePanelLayout";
 import { NewTaskModal } from "./NewTaskModal";
 import { RoleAvatar } from "../components/RoleAvatar";
+import { Icon } from "../components/Icon";
+import { PageHeader } from "../components/ui";
 
 const COLUMNS: Task["status"][] = ["todo", "in_progress", "in_review", "done", "closed"];
 const STATUS_LABEL: Record<Task["status"], string> = {
@@ -161,15 +163,24 @@ export function Lobby() {
 
   return (
     <div>
-      <div className="toolbar">
-        <button className="primary new-task-btn" onClick={() => setShowNew(true)}>
-          <span className="plus">＋</span> 新建任务
-        </button>
-        {panel.collapsed && (
-          <button className="small" onClick={panel.toggle}>显示右栏</button>
-        )}
-        <small className="muted">选择参与成员后创建；多角色任务会先由 Cindy 规划工作流</small>
-      </div>
+      <PageHeader
+        kicker="MISSION BOARD"
+        title="任务大厅"
+        subtitle={`${roles.length} 个角色 · ${runs.length} 个活跃会话`}
+        actions={
+          <>
+            {panel.collapsed && (
+              <button className="small" onClick={panel.toggle}>显示右栏</button>
+            )}
+            <button className="primary new-task-btn" onClick={() => setShowNew(true)}>
+              <Icon name="plus" /> 新建任务
+            </button>
+          </>
+        }
+      />
+      <p className="muted" style={{ marginBottom: 12 }}>
+        选择参与成员后创建；多角色任务会先由 Cindy 规划工作流。
+      </p>
 
       {error && <p className="error">{error}</p>}
 
@@ -203,9 +214,33 @@ export function Lobby() {
                       <strong>{t.title}</strong>
                       <div className="card-meta">
                         {t.assignees?.length ? (
-                          <span>👥 {t.assignees.join("、")}</span>
+                          <span className="card-roles">
+                            {t.assignees.map((slug) => {
+                              const role = roles.find((r) => r.slug === slug);
+                              return (
+                                <RoleAvatar
+                                  key={slug}
+                                  slug={slug}
+                                  name={role?.display_name ?? slug}
+                                  avatar={role?.avatar}
+                                  color={role?.avatar_color}
+                                  size={20}
+                                />
+                              );
+                            })}
+                            <span>{t.assignees.join("、")}</span>
+                          </span>
                         ) : t.assignee ? (
-                          <span>👤 {t.assignee}</span>
+                          <span className="card-roles">
+                            <RoleAvatar
+                              slug={t.assignee}
+                              name={roles.find((r) => r.slug === t.assignee)?.display_name ?? t.assignee}
+                              avatar={roles.find((r) => r.slug === t.assignee)?.avatar}
+                              color={roles.find((r) => r.slug === t.assignee)?.avatar_color}
+                              size={20}
+                            />
+                            <span>{t.assignee}</span>
+                          </span>
                         ) : (
                           <span className="muted">未指派</span>
                         )}
@@ -236,6 +271,9 @@ export function Lobby() {
                     )}
                   </div>
                 ))}
+                {boardTasks.filter((t) => t.status === status).length === 0 && (
+                  <p className="muted kanban-empty">暂无任务</p>
+                )}
               </div>
             ))}
           </div>
