@@ -1790,7 +1790,11 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 .roles-detail :where(a),
 .task-side :where(a),
 .session-head :where(a),
-.create-role-panel :where(a) {
+.create-role-panel :where(a),
+.rs-row-wrap :where(a),
+.child-task :where(a),
+.run-card :where(a),
+.drafts > li :where(a) {
   color: var(--link-on-paper);
 }
 .card .error,
@@ -1894,6 +1898,8 @@ button {
   transition: transform 0.1s ease, box-shadow 0.1s ease, background 0.1s ease;
 }
 button:hover:not(:disabled) {
+  background: var(--paper-2);
+  border-color: var(--ink-900);
   transform: translate(-1px, -1px);
   box-shadow: var(--shadow-2);
 }
@@ -2122,6 +2128,7 @@ select { height: 34px; }
 .run-card:hover,
 .run-row:hover,
 .child-task:hover {
+  border-color: var(--ink-900);
   transform: translate(-1px, -1px);
   box-shadow: var(--shadow-2);
 }
@@ -2216,6 +2223,7 @@ select { height: 34px; }
   position: sticky;
   top: 0;
   z-index: 1;
+  background: var(--ink-900);
 }
 
 /* 纸面容器使用浅色原生控件/滚动条 */
@@ -2365,10 +2373,16 @@ select { height: 34px; }
   box-shadow: 2px 2px 0 rgba(20, 19, 26, 0.16);
   color: var(--text-on-paper);
 }
+.member-row:hover {
+  background: var(--paper-2);
+  border-color: var(--ink-900);
+}
 .member-row.picked {
   background: var(--yellow);
+  border-color: var(--ink-900);
   box-shadow: var(--shadow-red);
 }
+.member-desc { color: var(--text-on-paper-muted); }
 .member-avatar {
   border: 2px solid var(--ink-900);
   color: var(--ink-900);
@@ -2429,7 +2443,7 @@ select { height: 34px; }
   color: var(--ink-900);
   box-shadow: var(--shadow-1);
 }
-.review-banner-text { flex: 1; font-weight: 800; }
+.review-banner-text { flex: 1; font-weight: 800; color: var(--ink-900); }
 
 /* ===== 角色头像 ===== */
 .role-avatar {
@@ -2483,6 +2497,7 @@ select { height: 34px; }
   font-size: 10px;
 }
 .role-live-name { font-family: var(--font-mono); font-size: 9px; color: var(--text-on-paper-soft); }
+.role-live-queue { color: var(--red-on-paper); background: rgba(185, 28, 28, 0.08); }
 .role-live-chip .status::before { display: none; }
 .role-live-legend { color: var(--text-on-paper-muted); }
 @keyframes role-live-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
@@ -2660,6 +2675,13 @@ select { height: 34px; }
   background: var(--cyan);
   color: var(--ink-900);
   font-weight: 900;
+}
+.button-like {
+  background: var(--paper-3);
+  border: var(--stroke) solid var(--ink-900);
+  border-radius: var(--radius-sm);
+  color: var(--ink-900);
+  text-decoration: none;
 }
 .session-compose {
   padding: 7px;
@@ -2891,6 +2913,7 @@ select { height: 34px; }
 .wf-role, .wf-deps, .wf-summary, .wf-node-role { color: var(--text-on-paper-muted); }
 .wf-id, .wf-node-id, .wf-node-role, .wf-flow-phase-role,
 .wf-flow-phase-count, .wf-flow-phase-sub { color: var(--text-on-paper-muted); }
+.wf-flow-current { color: var(--ink-900); }
 .wf-gate { background: var(--yellow); color: var(--ink-900); }
 .wf-loop-progress { background: var(--paper-2); }
 .wf-loop-list,
@@ -4108,10 +4131,12 @@ grep -rnE '[✉▦⑂◉⚙◇◷⌘◈👥👤⏳🔔⇥＋←→↑↓▾▸×
 - [ ] **Step 2: 检查旧颜色残留**
 
 ```bash
-grep -rnE '#(0b0e15|10141f|151a28|1b2133|232a3d|2e3850|6d7cff|8a96ff|fdeaea|7a6ff0|0a0d13|0f1117|0ea5a4|475569|f5b301|ef5350|2ecc71|5aa9ff|9aa4b2)' dev/frontend/src --include='*.css' --include='*.tsx' || echo "no legacy core colors"
+grep -rnE '#(0b0e15|10141f|151a28|1b2133|232a3d|2e3850|6d7cff|8a96ff|fdeaea|7a6ff0|0a0d13|0f1117|0ea5a4|475569|f5b301|ef5350|2ecc71|5aa9ff|9aa4b2|3a4560|5b50d6|e08a3c)' dev/frontend/src --include='*.css' --include='*.tsx' || echo "no legacy core colors"
+# 再检查旧 rgba 调色板
+grep -rnE 'rgba\((109, 124, 255|122, 111, 240|224, 138, 60|239, 83, 80)' dev/frontend/src --include='*.css' --include='*.tsx' || echo "no legacy rgba palettes"
 ```
 
-Expected: 无输出。`avatarColor.ts` 是 `.ts`，不在检查范围；它保留的头像兜底色是允许的。
+Expected: 无输出。`avatarColor.ts` 是 `.ts`，不在检查范围；它保留的头像兜底色是允许的。pages.css 中仅作为 `var()` fallback 的 `#e5e2dc`/`#eee` 等可保留。
 
 - [ ] **Step 3: 响应式走查**
 
