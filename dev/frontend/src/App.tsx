@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, subscribeEvents } from "./api/client";
 import { installLinkInterceptor, setRouteListener } from "./router";
+import { Icon, type IconName } from "./components/Icon";
 import { ActivityHistory } from "./pages/ActivityHistory";
 import { AgentSessions } from "./pages/AgentSessions";
 import { Channels } from "./pages/Channels";
@@ -36,29 +37,32 @@ const NAV_GROUPS = [
   {
     label: "工作台",
     items: [
-      { href: "/inbox", label: "收件箱", icon: "✉" },
-      { href: "/", label: "任务大厅", icon: "▦" },
-      { href: "/decompose", label: "目标拆解", icon: "⑂" },
-      { href: "/channels", label: "频道", icon: "#" },
+      { href: "/inbox", label: "收件箱", icon: "inbox" },
+      { href: "/", label: "任务大厅", icon: "dashboard" },
+      { href: "/decompose", label: "目标拆解", icon: "git-branch" },
+      { href: "/channels", label: "频道", icon: "hash" },
     ],
   },
   {
     label: "角色与知识",
     items: [
-      { href: "/roles", label: "角色工坊", icon: "◉" },
-      { href: "/runtimes", label: "运行时", icon: "⚙" },
-      { href: "/knowledge", label: "知识库", icon: "◇" },
-      { href: "/reminders", label: "提醒", icon: "◷" },
+      { href: "/roles", label: "角色工坊", icon: "users" },
+      { href: "/runtimes", label: "运行时", icon: "cpu" },
+      { href: "/knowledge", label: "知识库", icon: "book" },
+      { href: "/reminders", label: "提醒", icon: "bell" },
     ],
   },
   {
     label: "系统",
     items: [
-      { href: "/tooling", label: "工具", icon: "⌘" },
-      { href: "/governance", label: "治理", icon: "◈" },
+      { href: "/tooling", label: "工具", icon: "wrench" },
+      { href: "/governance", label: "治理", icon: "shield" },
     ],
   },
-] as const;
+] as const satisfies ReadonlyArray<{
+  label: string;
+  items: ReadonlyArray<{ href: string; label: string; icon: IconName }>;
+}>;
 
 const PAGE_TITLE: Record<Route["page"], string> = {
   lobby: "任务大厅",
@@ -249,7 +253,7 @@ export default function App() {
                   aria-current={active === item.href ? "page" : undefined}
                   onClick={() => setDrawerOpen(false)}
                 >
-                  <span className="nav-icon" aria-hidden="true">{item.icon}</span>
+                  <span className="nav-icon" aria-hidden="true"><Icon name={item.icon} /></span>
                   <span className="nav-text">{item.label}</span>
                   {item.href === "/inbox" && <InboxBadge />}
                 </a>
@@ -266,7 +270,7 @@ export default function App() {
             aria-expanded={!sidebarCollapsed}
             aria-label={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
           >
-            <span aria-hidden="true">{sidebarCollapsed ? "→" : "←"}</span>
+            <Icon name={sidebarCollapsed ? "chevron-right" : "chevron-left"} />
             <span className="nav-text">{sidebarCollapsed ? "展开侧栏" : "收起侧栏"}</span>
           </button>
         </div>
@@ -283,7 +287,7 @@ export default function App() {
             aria-expanded={drawerOpen}
             aria-controls="app-sidebar"
           >
-            ☰
+            <Icon name="menu" size={18} />
           </button>
           <div className="page-crumb">
             <span>{PAGE_TITLE[route.page]}</span>
