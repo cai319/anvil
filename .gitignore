@@ -20,3 +20,6 @@ dev/dist/
 # Local runtime data: DB, tokens, role homes, logs, repos, worktrees
 # Never commit this directory.
 data/
+
+# Superpowers local brainstorm/cache
+.superpowers/
