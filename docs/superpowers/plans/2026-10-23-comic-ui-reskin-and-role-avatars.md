@@ -4133,6 +4133,11 @@ git commit -m "feat(ui): restyle task detail as a mission sheet
 Co-Authored-By: Claude Code <noreply@anthropic.com>"
 ```
 
+#### Review hardening（2026-10-24 质量审查追加）
+
+- `@` 按钮点击会触发输入框 blur 的 150ms 定时器，导致刚打开的 mention 菜单被关闭。追加 `blurTimerRef`：`insertMention` 先清除定时器；`.compose-at` 加 `onMouseDown preventDefault`。
+- 同时改进插入逻辑：有选区时替换选区；光标不在输入框时插入末尾；光标紧跟单词时自动补一个空格；caret 按插入 token 长度更新。
+
 ---
 
 ### Task 17: 配置/表格页统一 + 响应式与可访问性收尾
