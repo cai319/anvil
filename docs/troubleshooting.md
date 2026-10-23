@@ -365,4 +365,36 @@ ORDER BY id DESC LIMIT 10;
 如果没有 `kind=mention`，说明发送方用的是 comment；如果有 mention 但角色仍未唤醒，
 检查目标角色是否存在/启用，以及日志中是否有 `spawn` / `wake`。
 
+### Q19. 出现了 slug 为 `workflow` / `system` 的“角色”
+
+它们**不是 Agent 角色**，是任务时间线与收件箱的系统伪发送者：
+
+| slug | 显示名 | 用途 |
+|---|---|---|
+| `workflow` | 工作流引擎 | 工作流最终评审、角色建议被拒、旧版步骤失败通知 |
+| `system` | 系统 | 上游任务完成等系统通知 |
+
+它们没有 `roles` 行、没有 `data/agents/<slug>/` home、没有 session/run，不会消耗 token。
+前端时间线显示“工作流引擎”/“系统”，收件箱 detail 为“系统通知，请处理”。
+
+- 2026-10-23 起，`workflow` / `system` / `human` 是**保留 slug**：不能创建为角色；
+  即使历史数据里有同名 role 行，`@workflow` / `@system` 也不会唤醒。
+- **需要人类回复的 @human 通知不再由 `workflow` 发出**：最终评审、决策重做耗尽、
+  角色建议被拒等通知，发送者取 workflow 创建者（通常 Cindy）、任务 `planner` 字段
+  所指的真实角色或任务 assignee，回退 Cindy。这样 human 可以直接 @ 该角色答复。
+- 任务会话的 @ 候选始终包含 **Cindy** 和任务 `planner` 字段指向的真实角色
+  （即使它们不是任务执行成员）；
+  人类 @Cindy 会触发一次规划消费/回复 run，由 Cindy 处理。
+- 旧版 `fail_step` 会以 `workflow` sender @human；新版已改为非阻塞 comment。
+  历史时间线里的旧消息仍会显示，但不影响运行。
+- 如果确实在 `roles` 表里看到了同名真实角色（通常由旧版 agent 扩员/角色建议创建）：
+
+```sql
+SELECT slug, display_name, home_path, created_at
+FROM roles WHERE slug IN ('workflow','system','human');
+```
+
+确认它是误创建后，在角色工坊删除或调用人类身份的角色删除端点；不要直接删 home，
+先确认其中是否有需要保留的 notes。
+
 ---

@@ -24,11 +24,21 @@ ROLE_SLUG_HINT = (
     "角色 slug 只能使用小写英文字母、数字、-、_（2-64 个字符，且以字母或数字开头）；"
     "不支持中文、大写、空格或其它特殊字符")
 
+# 这些 slug 是系统身份/伪发送者，不是真实 Agent 角色：
+# - workflow：workflow 引擎写任务时间线/收件箱时的 sender
+# - system：系统通知（如上游任务完成）
+# - human：自然人身份
+RESERVED_SLUGS = {"workflow", "system", "human"}
+RESERVED_SLUG_HINT = (
+    "角色 slug 不能使用系统保留字：workflow/system/human；请换一个 slug")
+
 
 def validate_slug(slug: str) -> str:
     text = str(slug or "").strip()
     if not ROLE_SLUG_RE.match(text):
         raise ConflictError(ROLE_SLUG_HINT)
+    if text in RESERVED_SLUGS:
+        raise ConflictError(RESERVED_SLUG_HINT)
     return text
 
 
@@ -168,6 +178,40 @@ def is_onboarding(conn: sqlite3.Connection, slug: str) -> bool:
     if role is None:
         return False
     return jloads(role["definition_json"], {}).get("kind") == "onboarding"
+
+
+def notification_sender(conn: sqlite3.Connection, task_id: str,
+                        preferred: str | None = None) -> str:
+    """@human 通知的发送角色：优先显式 creator，其次 task `planner` 字段所指的真实角色，最后 Cindy。
+
+    必须返回一个“人类能 @ 回去”的真实角色（任务 assignee、planner 或 Cindy），
+    这样 human 在任务会话里可以直接 @ 该角色答复；`workflow`/`system` 这类系统
+    伪发送者不再用于需要人类回复的通知。
+    """
+    task = conn.execute(
+        "SELECT assignee, planner FROM tasks WHERE id=?", (task_id,)).fetchone()
+    assignees = {r["role_slug"] for r in conn.execute(
+        "SELECT role_slug FROM task_assignees WHERE task_id=?", (task_id,))}
+    if task and task["assignee"]:
+        assignees.add(task["assignee"])
+    planner = str(task["planner"] or "") if task else ""
+
+    def norm(raw: str | None) -> str:
+        text = str(raw or "").strip()
+        return text[6:] if text.startswith("agent:") else text
+
+    candidates = [norm(preferred), planner, ONBOARDING_SLUG]
+    for slug in candidates:
+        if not slug or slug in RESERVED_SLUGS:
+            continue
+        role = get(conn, slug)
+        if role is None or not role.get("enabled", True):
+            continue
+        if slug == ONBOARDING_SLUG or slug == planner or slug in assignees:
+            return slug
+    # Cindy 由 onboarding/planning 流程保证存在；这里不创建角色/不 commit，
+    # 避免在 workflow/board 的事务中途产生额外提交。
+    return ONBOARDING_SLUG
 
 
 WEEKLY_REVIEW_PROMPT = (

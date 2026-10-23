@@ -109,6 +109,7 @@ anvil init --with-roles
 在「角色工坊」新建角色：
 
 - **slug**：小写 ASCII 字母/数字/`-`/`_`，2–64 位；会进入目录与分支名。
+  `workflow` / `system` / `human` 是系统保留字，不能用作角色 slug。
 - **运行时**：选择该角色绑定的运行时；角色执行任务时始终使用自己的运行时。
 - **指令**：`instruction.md`；**记忆**：`MEMORY.md` + `notes/`。
 - **技能/MCP**：在角色详情中按角色独立勾选，默认全部不选。
@@ -141,6 +142,10 @@ anvil init --with-roles
 收件箱聚合：`in_review` 任务、`@human` 提及、待审 workflow/角色建议、gate 步骤、lesson/提案、操作卡片。
 
 所有审批必须由自然人完成；Agent 调用审批端点会被拒绝。
+
+需要人类回复的系统通知（最终评审、决策重做耗尽、角色建议被拒）由 **Cindy、任务
+`planner` 字段所指的真实角色或任务 assignee** 发出，而不是 `workflow` 伪角色；任务会话
+的 @ 候选始终包含 Cindy（以及 `planner` 字段指向的真实角色），human 可以直接 @ 回去答复。
 
 ### 3.5 上下文与模型窗口
 

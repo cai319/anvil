@@ -330,10 +330,12 @@ def reject(conn: sqlite3.Connection, draft_id: str, by: str = "human",
             assignees = task.get("assignees") or []
             if not assignees:
                 blocked = "no_roles"
+                sender = roles_service.notification_sender(
+                    conn, task_id, draft.get("created_by"))
                 conn.execute(
                     "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
                     "VALUES (?,?,?,?,?)",
-                    (task_id, "workflow", "mention", jdumps({
+                    (task_id, sender, "mention", jdumps({
                         "target": "human",
                         "message": "角色建议已被拒绝，但任务当前没有可用角色；"
                                    "请先创建/绑定至少一个角色后重新派发。",

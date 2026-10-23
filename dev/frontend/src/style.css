@@ -308,6 +308,8 @@ dd { margin: 0; }
 .thread-body { min-width: 0; flex: 1; }
 .thread-meta { display: flex; align-items: center; gap: 0.5rem; font-size: 12px; margin-bottom: 0.15rem; }
 .thread-meta strong { color: var(--text); }
+.thread-item.is-system .thread-avatar { color: #fff; }
+.thread-item.is-system .thread-meta strong { color: var(--muted); }
 .thread-text { font-size: 13px; color: var(--text); }
 .thread-item.is-message .thread-body {
   background: var(--surface-2);

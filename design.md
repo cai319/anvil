@@ -469,6 +469,8 @@ lifecycle:
 > 且以字母或数字开头）；禁止中文、大写、空格等字符。slug 会进入 `agents/<slug>/`
 > 路径、分支名与 CLI 参数，限定 ASCII 可避免 Windows 代码页/路径/编码问题。
 > API 非法 slug 返回 422；角色工坊实时提示并禁用提交；角色建议审批复用同一校验。
+> `workflow` / `system` / `human` 是系统伪发送者或身份，不能注册为真实角色
+> （2026-10-23 起为保留 slug）。
 
 **`description` 与 `instruction` 的区分是从 multica 借来的，很值得照搬。** 描述用来在界面上让你一眼认出这个角色是干嘛的，写得再长也不花 token；指令才是真正注入的内容，要精简。混在一起会导致人为了看清而写长描述，白白吃掉每一轮的上下文。
 
@@ -759,6 +761,19 @@ def tick_once():
 > 普通任务/子任务起普通 run（可直接 claim）；工作流任务起 `[anvil:reply]` run
 > （只讨论，不覆盖 workflow 角色分配）。**评论正文里的 @ 只是文本，不会唤醒**；
 > 需要唤醒必须用 `anvil task mention`（CLI 会 warning，前端会把命中角色的 @ 标黄）。
+>
+> **系统伪发送者（owner 2026-10-23）**：`workflow` 与 `system` 是任务时间线/收件箱的
+> 系统 sender，不是 Agent 角色——没有 `roles` 行、home、session 或 run。前端显示为
+> “工作流引擎”/“系统”，收件箱 detail 为“系统通知，请处理”。二者是保留 slug，
+> 不能注册为角色，也不能被 @ 唤醒。
+>
+> **需要人类回复的 @human 通知不再由 `workflow` 发出**：最终评审、决策重做耗尽、
+> 角色建议被拒等通知，发送者取 workflow 创建者（通常 Cindy）、任务 `planner` 字段
+> 所指的真实角色或任务 assignee，回退 Cindy；这样 human 在任务会话里可以直接 @ 该角色
+> 答复。前端聊天框的 @ 候选始终包含 Cindy 与 `planner` 字段指向的真实角色（即使它们
+> 不是任务执行成员）。`workflow` 仅保留
+> 给步骤进度等不需要人类回复的事件；旧版 `fail_step` 的 `workflow` mention 历史数据
+> 仍会显示，但新版本已改为非阻塞 comment。
 
 `wake()` 做的事：创建 run 记录、冻结 profile 快照、准备 worktree、执行投影、拉起子进程。**唤醒提示只含任务 id 与标题，不含任务正文**——正文由 Agent 自己通过 `anvil task show` 取。这样编排器不承担内容组装的责任，也让 Agent 的信息获取路径统一。
 

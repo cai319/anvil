@@ -8,6 +8,9 @@ import sqlite3
 
 from ..util import jloads
 
+# 系统伪发送者：workflow 引擎/系统通知不是真实 Agent 角色。
+SYSTEM_SENDERS = {"workflow": "工作流引擎", "system": "系统"}
+
 
 def collect(conn: sqlite3.Connection) -> dict:
     """聚合待人类处理条目：review / mention / draft / lesson / proposal，created_at 倒序。"""
@@ -101,11 +104,15 @@ def _mentions(conn: sqlite3.Connection) -> list[dict]:
                 resolved = failed is None
             if resolved:
                 continue  # 已重试/已提交/已通过，失败通知不再滞留
-        who = r["role_slug"] or "human"
+        sender = r["role_slug"] or "human"
+        is_system = sender in SYSTEM_SENDERS
+        who = SYSTEM_SENDERS.get(sender, sender)
         out.append({
             "id": f"mention:{tid}:{r['aid']}", "kind": "mention",
             "title": f"{who}：{p.get('message', '')}",
-            "detail": "需要你回复后 agent 才继续", "task_id": tid,
+            "detail": "系统通知，请处理" if is_system
+            else "需要你回复后 agent 才继续",
+            "task_id": tid,
             "created_at": r["created_at"],
         })
     return out

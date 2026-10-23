@@ -14,6 +14,8 @@ async def seeded(client):
 
 @pytest.mark.parametrize("slug", [
     "天才", "Role", "bad slug", "a", "-lead", "角色-1", "x" * 65, "emoji😀",
+    # 系统伪发送者/身份，不能注册为真实 Agent 角色
+    "workflow", "system", "human",
 ])
 async def test_invalid_role_slug_rejected(client, seeded, slug):
     r = await client.post(f"{API}/roles", json=role_payload(slug),

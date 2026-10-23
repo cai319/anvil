@@ -1,13 +1,18 @@
 """@ 唤醒回归：子任务/未绑定角色/工作流非参与角色都必须能被 @ 唤醒。"""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytest.importorskip("anvil.main")
 
 from anvil.db import open_conn  # noqa: E402
 from anvil.services import workflow as workflow_service  # noqa: E402
-from tests.conftest import API, auth_headers, role_payload, runtime_payload, task_payload  # noqa: E402
+from anvil.util import now_iso  # noqa: E402
+from tests.conftest import (  # noqa: E402
+    API, auth_headers, human_headers, role_payload, runtime_payload, task_payload,
+)
 
 
 class _Orch:
@@ -101,6 +106,57 @@ async def test_mention_resumes_suspended_run(client, app, seeded):
     assert m.status_code == 200, m.text
     assert seeded.pumped == [("R-SUSP", "resume", {})]
     assert _runs(app, "T-MENTION-RESUME", "report-collector")[0]["status"] == "suspended"
+
+
+async def test_human_mention_cindy_creates_reply_run(client, app, seeded):
+    """human @Cindy 是对话回复（reply run），不强制触发重规划。"""
+    r = await client.post(f"{API}/tasks", headers=auth_headers(),
+                          json=task_payload(id="T-HUMAN-CINDY", assignee="pm"))
+    assert r.status_code == 201, r.text
+    conn = open_conn(app.state.db_path)
+    try:
+        now = now_iso()
+        conn.execute(
+            "INSERT INTO roles (slug, display_name, home_path, definition_json, "
+            "created_at, updated_at, enabled) VALUES (?,?,?,?,?,?,1)",
+            ("cindy", "Cindy", "/tmp/cindy",
+             json.dumps({"kind": "onboarding"}), now, now))
+        conn.commit()
+        workflow_service.create_workflow(conn, "T-HUMAN-CINDY", {
+            "steps": [{"id": "S1", "title": "x", "role": "pm"}]})
+    finally:
+        conn.close()
+
+    m = await client.post(f"{API}/tasks/T-HUMAN-CINDY/mention",
+                          headers=human_headers(),
+                          json={"target": "cindy", "message": "通过，请总结并答复"})
+    assert m.status_code == 200, m.text
+    runs = _runs(app, "T-HUMAN-CINDY", "cindy")
+    assert len(runs) == 1
+    assert str(runs[0]["prompt"]).startswith("[anvil:reply]")
+
+
+async def test_mention_pseudo_role_never_wakes(client, app, seeded):
+    """workflow/system 是系统伪发送者；即使历史数据里有同名 role 行也不能被 @ 唤醒。"""
+    r = await client.post(f"{API}/tasks", headers=auth_headers(),
+                          json=task_payload(id="T-MENTION-PSEUDO", assignee="pm"))
+    assert r.status_code == 201, r.text
+    conn = open_conn(app.state.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO roles (slug, display_name, home_path, definition_json, "
+            "created_at, updated_at, enabled) VALUES "
+            "('workflow','Workflow','/tmp/workflow','{}','2026-01-01T00:00:00+00:00',"
+            "'2026-01-01T00:00:00+00:00',1)")
+        conn.commit()
+    finally:
+        conn.close()
+    m = await client.post(f"{API}/tasks/T-MENTION-PSEUDO/mention",
+                          headers=auth_headers("pm"),
+                          json={"target": "workflow", "message": "在吗"})
+    assert m.status_code == 200, m.text
+    assert _runs(app, "T-MENTION-PSEUDO", "workflow") == []
+    assert seeded.pumped == []
 
 
 async def test_mention_unknown_role_only_records_text(client, app, seeded):

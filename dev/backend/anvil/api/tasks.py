@@ -295,7 +295,8 @@ def _wake_mentioned_role(conn, request: Request, task: dict, target: str,
             except Exception:  # noqa: BLE001
                 pass
         return
-    if wf is not None:
+    if wf is not None or target == services.roles.ONBOARDING_SLUG:
+        # 工作流任务或 Cindy：起回复 run（只讨论，不 claim/改 workflow）。
         run = services.runs.create_run(
             conn, target, task["id"],
             prompt=("[anvil:reply]你在任务会话中被 "
@@ -323,6 +324,9 @@ def mention_task(tid: str, body: dict, request: Request, conn=Depends(get_db), a
     target = str(body.get("target") or "human")
     message = _strip_leading_mention(conn, str(body.get("message") or ""), target)
     result = services.tasks.mention(conn, tid, auth.role or "human", target, message)
+    # workflow/system 是系统伪发送者，不是真实角色；即使历史数据里有同名 role 行，
+    # 也不允许通过 @ 唤醒它。
+    pseudo_targets = {"workflow", "system"}
     if target != "human":
         target_role = services.roles.get(conn, target)
         wf = services.workflow.get_for_task(conn, tid)
@@ -341,15 +345,20 @@ def mention_task(tid: str, body: dict, request: Request, conn=Depends(get_db), a
             target == services.roles.ONBOARDING_SLUG
             or (target == (task.get("planner") or "") and target not in bound
                 and wf is not None))
-        # Cindy（内置 onboarding 助理）即使没有 roles 行也应可被 @ 触发重规划。
+        # Cindy（内置 onboarding 助理）即使没有 roles 行也应可被 @ 触发重规划；
+        # workflow/system 永远不作为可唤醒目标。
         target_exists = (
-            target == services.roles.ONBOARDING_SLUG
-            or (target_role is not None and bool(target_role.get("enabled", True)))
+            target not in pseudo_targets
+            and (target == services.roles.ONBOARDING_SLUG
+                 or (target_role is not None
+                     and bool(target_role.get("enabled", True))))
         )
+        sender = auth.role or "human"
         if not target_exists:
             pass  # 角色不存在/已禁用：只记录 mention，不唤醒
-        elif is_planner and task.get("status") not in ("done", "closed"):
-            # planner/Cindy 被 @：走重规划 run（workflow 结构只能由 planner 调整）。
+        elif is_planner and sender != "human" and task.get("status") not in ("done", "closed"):
+            # Agent 对 planner/Cindy 提出 workflow 结构调整 → 重规划 run。
+            # Human @Cindy/planner 是对话回复，走 reply run（见下方 else）。
             try:
                 services.planning.start_planner_run(
                     conn,

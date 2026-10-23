@@ -34,6 +34,11 @@ const ROLE_CLAIM_LABEL: Record<string, string> = {
 };
 
 const AVATAR_COLORS = ["#6d7cff", "#34d399", "#fbbf24", "#60a5fa", "#f472b6", "#2dd4bf", "#fb923c", "#a78bfa"];
+// 系统伪发送者：workflow 引擎/系统通知不是真实 Agent 角色。
+const SYSTEM_SENDERS: Record<string, string> = {
+  workflow: "工作流引擎",
+  system: "系统",
+};
 function avatarColor(slug: string): string {
   let h = 0;
   for (const c of slug) h = (h * 31 + c.charCodeAt(0)) >>> 0;
@@ -289,17 +294,27 @@ export function TaskDetail({ id }: { id: string }) {
   };
 
   const assignableRoles = roles.filter((r) => !isOnboardingRole(r));
+
+  // 优先联想任务参与角色；Cindy（onboarding 助理）和 task.planner 指向的真实角色始终加入：
+  // 系统 @human 通知由它们发出，human 需要能直接 @ 回去答复。
+  const assignedToTask = new Set(task.assignees ?? []);
+  const baseMentionRoles = assignedToTask.size
+    ? assignableRoles.filter((r) => assignedToTask.has(r.slug))
+    : assignableRoles;
+  const onboardingAssistant = roles.find((r) => isOnboardingRole(r));
+  const plannerRole = task.planner
+    ? roles.find((r) => r.slug === task.planner)
+    : undefined;
+  const extraMentionRoles = [onboardingAssistant, plannerRole]
+    .filter((r): r is Role => Boolean(r))
+    .filter((r) => !baseMentionRoles.some((x) => x.slug === r.slug));
+  const mentionRoles = [...baseMentionRoles, ...extraMentionRoles];
+
   const roleTokens = new Map<string, string>();
-  assignableRoles.forEach((r) => {
+  mentionRoles.forEach((r) => {
     roleTokens.set(r.slug.toLowerCase(), r.slug);
     if (r.display_name) roleTokens.set(r.display_name.toLowerCase(), r.slug);
   });
-
-  // 优先只联想任务参与角色（@ 才会唤醒）；任务尚未绑定角色时退回全部可指派角色。
-  const assignedToTask = new Set(task.assignees ?? []);
-  const mentionRoles = assignedToTask.size
-    ? assignableRoles.filter((r) => assignedToTask.has(r.slug))
-    : assignableRoles;
 
   const mentionQuery = (mention?.query || "").toLowerCase();
   const seenMentionSlugs = new Set<string>();
@@ -385,9 +400,10 @@ export function TaskDetail({ id }: { id: string }) {
     const text = comment.trim();
     if (!text) return;
     setMention(null);
-    // 自动解析消息中的 @角色（slug 或显示名），命中参与角色即走 mention（唤醒 + 时间线标黄）
+    // 自动解析消息中的 @角色（slug 或显示名），命中参与角色/Cindy/planner
+    // 即走 mention（唤醒 + 时间线标黄）
     const byToken = new Map<string, string>();
-    assignableRoles.forEach((r) => {
+    mentionRoles.forEach((r) => {
       byToken.set(r.slug.toLowerCase(), r.slug);
       if (r.display_name) byToken.set(r.display_name.toLowerCase(), r.slug);
     });
@@ -722,17 +738,19 @@ export function TaskDetail({ id }: { id: string }) {
             {visibleTimeline.map((ev) => {
               const d = describe(ev);
               const role = ev.role ?? "human";
+              const systemLabel = SYSTEM_SENDERS[role];
+              const displayRole = systemLabel ?? role;
               return (
                 <div
-                  className={`thread-item ${ev.kind === "comment" ? "is-message" : ""} ${d.mention ? "is-mention" : ""}`}
+                  className={`thread-item ${ev.kind === "comment" ? "is-message" : ""} ${d.mention ? "is-mention" : ""} ${systemLabel ? "is-system" : ""}`}
                   key={ev.key}
                 >
-                  <span className="thread-avatar" style={{ background: d.mention ? "var(--amber)" : avatarColor(role) }}>
-                    {d.mention ? "@" : role.slice(0, 1).toUpperCase()}
+                  <span className="thread-avatar" style={{ background: d.mention ? "var(--amber)" : systemLabel ? "#475569" : avatarColor(role) }}>
+                    {d.mention ? "@" : systemLabel ? "⚙" : role.slice(0, 1).toUpperCase()}
                   </span>
                   <div className="thread-body">
                     <div className="thread-meta">
-                      <strong>{role}</strong>
+                      <strong>{displayRole}</strong>
                       <span className="muted mono">{ev.ts.slice(11, 19)}</span>
                       {d.runStatus && <span className={`status status-${d.runStatus}`}>{RUN_LABEL[d.runStatus]}</span>}
                     </div>

@@ -182,6 +182,49 @@ def test_advance_respects_retry_backoff(conn):
     assert len(started) == 1
 
 
+def _insert_role(conn, slug: str, kind: str = "member") -> None:
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO roles (slug, display_name, home_path, definition_json, "
+        "created_at, updated_at, enabled) VALUES (?,?,?,?,?,?,1)",
+        (slug, slug, f"/tmp/{slug}", json.dumps({"kind": kind}), now, now))
+    conn.commit()
+
+
+def test_final_review_notification_uses_real_sender(conn):
+    """@human 的最终评审通知由 planner/Cindy 发出，human 才能 @ 回去答复。"""
+    _insert_role(conn, "cindy", "onboarding")
+    _insert_role(conn, "dev")
+    conn.execute("UPDATE tasks SET planner='cindy' WHERE id='T1'")
+    wf = wf_service.create_workflow(conn, "T1", {
+        "steps": [{"id": "S1", "title": "x", "role": "dev"}]})
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' WHERE workflow_id=? AND step_id='S1'",
+        (wf["id"],))
+    conn.commit()
+    wf_service._finalize_if_done(conn, wf["id"])
+    row = conn.execute(
+        "SELECT role_slug, payload_json FROM activities "
+        "WHERE task_id='T1' AND kind='mention' ORDER BY id DESC LIMIT 1").fetchone()
+    assert row is not None
+    assert row["role_slug"] == "cindy"
+    assert '"target": "human"' in row["payload_json"]
+
+
+def test_notification_sender_prefers_assignee_creator(conn):
+    from anvil.services import roles as roles_service
+
+    _insert_role(conn, "cindy", "onboarding")
+    _insert_role(conn, "dev")
+    conn.execute(
+        "INSERT INTO task_assignees (task_id, role_slug, joined_at) VALUES ('T1','dev',?)",
+        (now_iso(),))
+    conn.commit()
+    assert roles_service.notification_sender(conn, "T1", "agent:dev") == "dev"
+    # 未绑定/未知的 creator 回退到 Cindy
+    assert roles_service.notification_sender(conn, "T1", "orchestrator") == "cindy"
+
+
 def test_retry_prompt_includes_recovery_reason(conn):
     """自动恢复重跑时，步骤提示要带上次失败原因，避免 agent 重复踩坑。"""
     wf = wf_service.create_workflow(conn, "T1", {"steps": [

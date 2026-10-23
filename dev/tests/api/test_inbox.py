@@ -1,9 +1,13 @@
 """Inbox 聚合端点（信息架构重构）：四类人机决策点统一入口。"""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytest.importorskip("anvil.main")
+from anvil.db import open_conn  # noqa: E402
+from anvil.util import now_iso  # noqa: E402
 from tests.conftest import auth_headers, role_payload, runtime_payload, task_payload, human_headers  # noqa: E402
 
 
@@ -54,6 +58,27 @@ async def test_inbox_mention_lifecycle(client, seeded):
                       headers=human_headers())
     body = await _inbox(client)
     assert all(i["kind"] != "mention" for i in body["items"])
+
+
+async def test_inbox_labels_workflow_sender(client, app, seeded):
+    """workflow 是系统伪发送者，不是 Agent：收件箱要显示“工作流引擎/系统通知”。"""
+    await client.post("/api/v1/tasks", json=task_payload(id="T-SYS"), headers=auth_headers())
+    conn = open_conn(app.state.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
+            "VALUES (?,?,?,?,?)",
+            ("T-SYS", "workflow", "mention",
+             json.dumps({"target": "human",
+                         "message": "工作流全部步骤完成，请做最终评审（通过/驳回）"}),
+             now_iso()))
+        conn.commit()
+    finally:
+        conn.close()
+    body = await _inbox(client)
+    item = next(i for i in body["items"] if i["kind"] == "mention")
+    assert "工作流引擎" in item["title"]
+    assert "系统通知" in item["detail"]
 
 
 async def test_inbox_draft_lesson_proposal(client, seeded):

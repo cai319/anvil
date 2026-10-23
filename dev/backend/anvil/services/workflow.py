@@ -1416,10 +1416,13 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
                 (note, now, now, wid, step_id))
             _step_activity(conn, wf["task_id"], step["role_slug"], step,
                            "rework_exhausted", note)
+            from . import roles as roles_service
+            sender = roles_service.notification_sender(
+                conn, wf["task_id"], wf.get("created_by"))
             conn.execute(
                 "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
                 "VALUES (?,?,?,?,?)",
-                (wf["task_id"], "workflow", "mention", jdumps({
+                (wf["task_id"], sender, "mention", jdumps({
                     "target": "human",
                     "message": f"决策步骤「{step['title']}」已超过最大重做次数"
                                f"（{max_rework} 次）；请人工介入。反馈：{note}",
@@ -1490,8 +1493,12 @@ def review_step(conn: sqlite3.Connection, wid: str, step_id: str, approve: bool,
             (feedback, now, wid, step_id))
         _step_activity(conn, wf["task_id"], "human", step, "rejected",
                        feedback or "请按评审意见修改后重新提交")
-        _mention(conn, wf["task_id"], step["role_slug"],
-                 f"步骤「{step['title']}」被驳回：{feedback or '请按评审意见修改后重新提交'}。")
+        from . import roles as roles_service
+        _mention(
+            conn, wf["task_id"], step["role_slug"],
+            f"步骤「{step['title']}」被驳回：{feedback or '请按评审意见修改后重新提交'}。",
+            sender=roles_service.notification_sender(
+                conn, wf["task_id"], wf.get("created_by")))
     conn.commit()
     return get_workflow(conn, wid)  # type: ignore[return-value]
 
@@ -1610,10 +1617,18 @@ def _finalize_if_done(conn: sqlite3.Connection, wid: str) -> None:
     conn.execute(
         "UPDATE tasks SET status='in_review', lease_expires_at=NULL, updated_at=? "
         "WHERE id=? AND status IN ('in_progress','todo')", (now, wf["task_id"]))
-    _mention(conn, wf["task_id"], "human", "工作流全部步骤完成，请做最终评审（通过/驳回）")
+    from . import roles as roles_service
+    sender = roles_service.notification_sender(
+        conn, wf["task_id"], wf.get("created_by"))
+    _mention(conn, wf["task_id"], "human",
+             "工作流全部步骤完成，请做最终评审（通过/驳回）", sender=sender)
     conn.commit()
 
 
-def _mention(conn, task_id: str, target: str, message: str) -> None:
+def _mention(conn, task_id: str, target: str, message: str,
+             sender: str | None = None) -> None:
+    """系统通知：发送者必须是人类能 @ 回去的真实角色（planner/Cindy/assignee）。"""
+    from . import roles as roles_service
     from . import tasks as tasks_service
-    tasks_service.mention(conn, task_id, "workflow", target, message)
+    who = sender or roles_service.notification_sender(conn, task_id)
+    tasks_service.mention(conn, task_id, who, target, message)
