@@ -4,6 +4,8 @@ from __future__ import annotations
 from anvil import config
 from anvil.db import open_conn
 from anvil.scheduler import Scheduler
+from anvil.services import daemon as daemon_service
+from anvil.util import now_iso
 
 from tests.graph.conftest import make_env
 
@@ -262,3 +264,35 @@ def test_run_timeout_failed(tmp_path, monkeypatch):
     conn.close()
     assert r["status"] == "failed"
     assert env["fake"].terminated  # 超时 run 被 terminate
+
+def test_monitor_grace_for_persistent_startup(tmp_path, monkeypatch):
+    """常驻进程刚拉起、daemon 尚未登记时，monitor 不能立刻把 run 判死。"""
+    env = make_env(tmp_path, monkeypatch)
+
+    class FakeMgr:
+        enabled = True
+
+        def status(self, role):
+            return {"alive": False, "switching": False, "status": "dead"}
+
+    monkeypatch.setattr(daemon_service, "get_manager", lambda: FakeMgr())
+    conn = open_conn(env["db_path"])
+    conn.execute(
+        "INSERT INTO runs (id, role_slug, task_id, status, native_session_id, started_at) "
+        "VALUES ('R-P','dev',NULL,'running','rs:dev',?)", (now_iso(),))
+    conn.commit()
+    conn.close()
+
+    sched = Scheduler(env["db_path"], env["orch"])
+    sched.tick_once()
+    assert next(r for r in _runs(env) if r["id"] == "R-P")["status"] == "running"
+
+    # 超过宽限期仍 dead → 才判 agent_exit_process
+    conn = open_conn(env["db_path"])
+    conn.execute("UPDATE runs SET started_at='2020-01-01T00:00:00+00:00' WHERE id='R-P'")
+    conn.commit()
+    conn.close()
+    sched.tick_once()
+    row = next(r for r in _runs(env) if r["id"] == "R-P")
+    assert row["status"] == "failed"
+    assert row["failure_class"] == "agent_exit_process"

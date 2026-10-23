@@ -103,6 +103,7 @@ export function Reminders() {
         <button className="primary" onClick={create} disabled={!roleSlug || !prompt.trim()}>添加提醒</button>
       </div>
 
+      <div className="table-scroll">
       <table className="board">
         <thead>
           <tr><th>角色</th><th>类型</th><th>表达式 / 条件</th><th>提示</th><th>下次触发</th><th>状态</th><th>操作</th></tr>
@@ -127,6 +128,7 @@ export function Reminders() {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

@@ -286,6 +286,11 @@ class Scheduler:
                     # 计划内上下文切换中：旧进程已退出、新进程尚未拉起，不是故障。
                     continue
                 if not st.get("alive"):
+                    # 常驻进程刚拉起时，daemon 可能尚未登记 pid/proc；此时 status
+                    # 会短暂返回 dead，但进程其实已经开始工作。宽限期内不判死，
+                    # 否则会把正在规划的 run 误标 agent_exit_process。
+                    if _elapsed_seconds(r["started_at"]) < config.RUN_DEAD_GRACE_SECONDS:
+                        continue
                     self.orchestrator.pump(self.db_path, r["id"], "process_exit",
                                            {"exit_code": 1, "failure_class": "agent_exit_process"})
                     continue

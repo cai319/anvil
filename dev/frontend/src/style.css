@@ -170,12 +170,14 @@ a:hover { text-decoration: underline; }
 /* ── 控件 ─────────────────────────────────────────── */
 button {
   font: inherit;
+  min-height: 34px;
   padding: 0.4rem 0.85rem;
   border-radius: 8px;
   border: 1px solid var(--border-strong);
   background: var(--surface-2);
   color: var(--text);
   cursor: pointer;
+  white-space: nowrap;
   transition: background 0.12s, border-color 0.12s;
 }
 button:hover:not(:disabled) { background: #232a3d; border-color: #3a4560; }
@@ -184,21 +186,33 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.primary:hover:not(:disabled) { background: var(--accent-strong); }
 button.danger { color: var(--red); border-color: rgba(248, 113, 113, 0.4); }
 button.danger:hover:not(:disabled) { background: rgba(248, 113, 113, 0.12); }
-button.small { padding: 0.2rem 0.55rem; font-size: 12px; }
+button.small { min-height: 28px; padding: 0.2rem 0.55rem; font-size: 12px; }
 
 input, select, textarea {
   font: inherit;
+  min-height: 34px;
   padding: 0.4rem 0.6rem;
   border-radius: 8px;
   border: 1px solid var(--border-strong);
   background: var(--bg-soft);
   color: var(--text);
 }
+select { height: 36px; padding-top: 0.3rem; padding-bottom: 0.3rem; }
+input[type="checkbox"], input[type="radio"] { min-height: 0; height: auto; }
+.session-actions select { max-width: 260px; }
+.content textarea { max-width: 1200px; }
+.modal textarea { max-width: none; }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
 input::placeholder { color: var(--faint); }
 
 .toolbar { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; align-items: center; }
-.toolbar input { flex: 0 1 280px; }
+.toolbar > input { flex: 0 1 280px; max-width: 380px; }
+.toolbar > select { flex: 0 1 220px; max-width: 260px; }
+.toolbar > input[type="number"] { flex: 0 0 120px; max-width: 140px; }
+.toolbar > label:not(.field) { display: inline-flex; align-items: center; gap: 6px; }
+.toolbar .field { flex: 0 1 320px; max-width: 400px; min-width: 0; }
+.toolbar .field select { width: 100%; max-width: 100%; }
+.toolbar > button { flex: none; }
 .role-picker { display: flex; gap: 0.7rem; flex-wrap: wrap; align-items: center; }
 .role-check { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 13px; cursor: pointer; user-select: none; }
 .role-check input { accent-color: var(--accent); }
@@ -465,9 +479,9 @@ dd { margin: 0; }
   max-height: 86vh; overflow: auto; padding: 16px 18px; box-shadow: 0 12px 40px rgba(0,0,0,.25); }
 .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .modal-close { background: none; border: none; font-size: 22px; cursor: pointer; line-height: 1; color: inherit; }
-.field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; font-size: 13px; }
+.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; margin-bottom: 12px; font-size: 13px; }
 .field > span { font-weight: 600; }
-.field input, .field textarea { width: 100%; box-sizing: border-box; }
+.field input, .field select, .field textarea { width: 100%; max-width: 100%; box-sizing: border-box; }
 .member-list { max-height: 280px; overflow-y: auto; padding: 2px;
   display: flex; flex-direction: column; gap: 6px; }
 .member-row {
@@ -1040,8 +1054,9 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
 }
 
 /* 宽屏卡片网格与表单 */
-.toolbar input,
-.toolbar select { flex: 1 1 260px; max-width: 720px; }
+/* 只作用于工具栏直接子控件；label.field 内的 select 走 .field 的宽度规则 */
+.toolbar > input,
+.toolbar > select { flex: 0 1 300px; max-width: 420px; }
 @media (min-width: 1500px) {
   .drafts {
     display: grid;
