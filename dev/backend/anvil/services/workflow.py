@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 
 from .. import config
@@ -1251,7 +1252,16 @@ def _step_activity(conn: sqlite3.Connection, task_id: str, role: str | None,
     )
 
 
+_ADVANCE_LOCK = threading.Lock()
+
+
 def advance(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
+    """串行化工作流推进，避免 scheduler 与 API 同时通过“无活跃 run”检查。"""
+    with _ADVANCE_LOCK:
+        return _advance_locked(conn, wid, starter)
+
+
+def _advance_locked(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
     """推进工作流：为依赖满足且角色空闲的步骤创建 run。
 
     starter(role, task_id, prompt, step) -> run dict（由 scheduler/API 注入）。

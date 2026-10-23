@@ -1026,12 +1026,17 @@ body {
 .session-thread {
   max-height: calc(100dvh - var(--header-h) - (var(--content-pad) * 2) - 210px);
   min-height: 320px;
+  /* reserve the sticky compose height so the last messages can scroll above it */
+  padding-bottom: 84px;
+  scroll-padding-bottom: 84px;
 }
 .session-compose {
   position: sticky;
   bottom: 0;
   z-index: 2;
+  margin-top: 8px;
   background: var(--bg);
+  box-shadow: 0 -10px 18px var(--bg);
 }
 .thread-body { max-width: 1600px; }
 

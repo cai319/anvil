@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 
 import pytest
 
@@ -634,3 +636,27 @@ def test_role_busy_on_another_task_blocks_new_step(conn):
     conn.execute("UPDATE runs SET status='suspended' WHERE id='R-OTHER'")
     conn.commit()
     assert _advance(conn, wf) == ["S1"]  # 角色空出后本任务才能开始
+
+def test_advance_is_serialized(conn):
+    """scheduler 与 API 同时 advance 时，同一步骤只能被 starter 拉起一次。"""
+    wf = wf_service.create_workflow(conn, "T1", {
+        "steps": [{"id": "S1", "title": "基线", "role": "pm", "depends_on": []}]
+    })
+    started: list[str] = []
+    barrier = threading.Barrier(2)
+
+    def starter(role, task_id, prompt, step):
+        started.append(step["step_id"])
+        time.sleep(0.05)
+        return {"id": "run-S1"}
+
+    def run():
+        barrier.wait()
+        wf_service.advance(conn, wf["id"], starter=starter)
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert started == ["S1"]
