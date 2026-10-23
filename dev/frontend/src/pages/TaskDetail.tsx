@@ -305,10 +305,17 @@ export function TaskDetail({ id }: { id: string }) {
   const plannerRole = task.planner
     ? roles.find((r) => r.slug === task.planner)
     : undefined;
+  const extraSeen = new Set<string>();
   const extraMentionRoles = [onboardingAssistant, plannerRole]
     .filter((r): r is Role => Boolean(r))
-    .filter((r) => !baseMentionRoles.some((x) => x.slug === r.slug));
-  const mentionRoles = [...baseMentionRoles, ...extraMentionRoles];
+    .filter((r) => {
+      if (baseMentionRoles.some((x) => x.slug === r.slug)
+          || extraSeen.has(r.slug)) return false;
+      extraSeen.add(r.slug);
+      return true;
+    });
+  // Cindy/planner 放前面：候选最多只显示 10 条，不能让它们被大量任务成员挤出。
+  const mentionRoles = [...extraMentionRoles, ...baseMentionRoles];
 
   const roleTokens = new Map<string, string>();
   mentionRoles.forEach((r) => {
