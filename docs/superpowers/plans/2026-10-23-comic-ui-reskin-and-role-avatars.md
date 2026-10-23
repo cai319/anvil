@@ -965,6 +965,13 @@ git commit -m "feat(ui): add avatar picker component
 Co-Authored-By: Claude Code <noreply@anthropic.com>"
 ```
 
+#### Review hardening（2026-10-23 质量审查追加）
+
+- `save()` 捕获 `onChange` rejection，只成功时关闭弹窗，并在弹窗内显示「保存失败，请重试」；Task 6 的 `onChange` 在 `setError` 后 `throw e`。
+- 新增 `dismiss()`：`saving` 时忽略 Escape / 遮罩 / × / 取消；`pick()` 在 saving 时 no-op；遮罩只响应左键。
+- 聚焦 effect 只依赖 `[mode]`，Escape 监听单独依赖 `[mode, onClose, saving]`，避免父组件重渲染抢焦点。
+- `ResolvedAvatar` 的 image 分支增加 `presetId`，AvatarPicker 不再从 `src` 反解 id。
+
 ---
 
 ### Task 6: 角色工坊接入头像选择与修改
@@ -1189,6 +1196,7 @@ import { RoleAvatar } from "../components/RoleAvatar";
               await refresh();
             } catch (e) {
               setError(String(e));
+              throw e; // 让 AvatarPicker 保持弹窗打开并显示本地错误
             }
           }}
           onClose={() => setAvatarOpen(false)}
