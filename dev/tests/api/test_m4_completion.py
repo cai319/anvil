@@ -273,13 +273,27 @@ async def test_budget_limits_block_claim(client):
     assert allowed.status_code == 200
 
 
-async def test_costs_aggregation(client):
+async def test_token_aggregation(client, app):
     await _seed(client)
-    await client.post(f"{API}/budget", json={"usd": 1.25}, headers=auth_headers())
-    await client.post(f"{API}/budget", json={"usd": 0.75}, headers=auth_headers())
-    costs = (await client.get(f"{API}/costs", headers=auth_headers())).json()
-    assert costs["total_usd"] == pytest.approx(2.0)
-    assert any(r["role"] == "qa-role" for r in costs["by_role"])
+    from anvil.db import open_conn
+    from anvil.services import tokens
+    conn = open_conn(app.state.db_path)
+    try:
+        tokens.record(conn, "qa-role", "T1", "r1", {
+            "input_tokens": 100, "output_tokens": 20,
+            "cache_read_input_tokens": 30, "cache_creation_input_tokens": 10,
+        })
+        tokens.record(conn, "developer", "T1", "r2", {
+            "input_tokens": 50, "output_tokens": 5,
+        })
+    finally:
+        conn.close()
+    data = (await client.get(f"{API}/tokens", headers=auth_headers())).json()
+    assert data["total_tokens"] == 215
+    assert data["input_tokens"] == 190
+    assert data["output_tokens"] == 25
+    assert any(r["role"] == "qa-role" and r["total_tokens"] == 160
+               for r in data["by_role"])
 
 
 # ---- 本地 token 轻校验（写操作必须带 X-Anvil-Session） --------------------

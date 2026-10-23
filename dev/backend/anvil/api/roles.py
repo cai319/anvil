@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import RoleIn, RoleOut, ToolsIn
-from ..services import utility
+from ..services import tokens as tokens_service, utility
 from ..util import ConflictError
 
 router = APIRouter()
@@ -343,16 +343,14 @@ def message_role(slug: str, body: dict, request: Request, conn=Depends(get_db),
 
 @router.get("/roles/{slug}/metrics")
 def role_metrics(slug: str, conn=Depends(get_db)):
-    """角色执行指标（design §10 / §6.5）：run 分布 + 成本 + 任务吞吐。"""
+    """角色执行指标（design §10 / §6.5）：run 分布 + Token 用量 + 任务吞吐。"""
     if services.roles.get(conn, slug) is None:
         raise HTTPException(status_code=404, detail="role not found")
     runs = conn.execute(
         "SELECT status, COUNT(*) AS n FROM runs WHERE role_slug=? GROUP BY status", (slug,)
     ).fetchall()
     runs_by_status = {r["status"]: r["n"] for r in runs}
-    cost = conn.execute(
-        "SELECT COALESCE(SUM(usd),0) AS s FROM cost_ledger WHERE role_slug=?", (slug,)
-    ).fetchone()["s"]
+    token_usage = tokens_service.summary(conn, scope=slug)
     done = conn.execute(
         "SELECT COUNT(*) AS n FROM tasks WHERE assignee=? AND status IN ('done','closed')", (slug,)
     ).fetchone()["n"]
@@ -365,7 +363,10 @@ def role_metrics(slug: str, conn=Depends(get_db)):
         "runs_by_status": runs_by_status,
         "tasks_total": total,
         "tasks_done": done,
-        "cost_used_usd": cost,
+        "input_tokens": token_usage["input_tokens"],
+        "output_tokens": token_usage["output_tokens"],
+        "total_tokens": token_usage["total_tokens"],
+        "today_total_tokens": token_usage["today_total_tokens"],
     }
 
 

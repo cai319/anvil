@@ -78,7 +78,6 @@ def create_task(body: TaskIn, conn=Depends(get_db),
         plan_first=body.plan_first, planner=body.planner,
         created_by=body.created_by,
         parent_id=body.parent_id, depends_on=body.depends_on,
-        cost_budget_usd=body.cost_budget_usd,
         )
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))

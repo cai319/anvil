@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     claimed_at       TEXT,
     created_by       TEXT,
     parent_id        TEXT,
+    -- DEPRECATED: 旧版美元成本字段，仅保留兼容；不再写入/展示。Token 见 token_usage。
     cost_budget_usd  REAL,
     cost_used_usd    REAL NOT NULL DEFAULT 0,
     created_at       TEXT NOT NULL,
@@ -231,6 +232,7 @@ CREATE TABLE IF NOT EXISTS token_usage (
     recorded_at           TEXT NOT NULL
 );
 
+-- DEPRECATED: 旧版美元成本账本；不再写入/展示。Token 统计见 token_usage。
 CREATE TABLE IF NOT EXISTS cost_ledger (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     role_slug   TEXT,
@@ -679,6 +681,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_legacy_note_scopes(conn)
     _ensure_notes_path_unique(conn)
     _rebuild_memory_fts_once(conn)
+    _reset_legacy_token_usage_once(conn)
     conn.commit()
 
 
@@ -888,6 +891,20 @@ def _ensure_notes_path_unique(conn: sqlite3.Connection) -> None:
             conn.execute("DROP INDEX IF EXISTS idx_notes_role_path")
         except sqlite3.OperationalError:
             pass
+    conn.commit()
+
+
+def _reset_legacy_token_usage_once(conn: sqlite3.Connection) -> None:
+    """一次性清空旧版 token 记账。
+
+    旧逻辑在每条 assistant 事件上记账：同一轮会重复累计完整 input/cache，且
+    assistant.usage.output_tokens 恒为 0（真实输出在 result 事件里）。这些行
+    无法恢复真实输出，清空后由 result 事件重新开始准确统计。
+    """
+    if _setting(conn, "schema.token_usage_reset_v1"):
+        return
+    conn.execute("DELETE FROM token_usage")
+    _set_setting(conn, "schema.token_usage_reset_v1", "1")
     conn.commit()
 
 

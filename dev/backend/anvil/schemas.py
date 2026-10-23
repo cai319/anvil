@@ -125,7 +125,6 @@ class TaskIn(BaseModel):
     created_by: str | None = None
     parent_id: str | None = None
     depends_on: list[str] = Field(default_factory=list)
-    cost_budget_usd: float | None = None
 
 
 class TaskPatch(BaseModel):
@@ -140,7 +139,6 @@ class TaskPatch(BaseModel):
     description: str | None = None
     acceptance: list[str] | None = None
     assignee: str | None = None
-    cost_budget_usd: float | None = None
 
 
 class TaskOut(BaseModel):
@@ -166,8 +164,6 @@ class TaskOut(BaseModel):
     created_by: str | None = None
     parent_id: str | None = None
     depends_on: list[str] = Field(default_factory=list)
-    cost_budget_usd: float | None = None
-    cost_used_usd: float = 0
     created_at: str
     updated_at: str
 

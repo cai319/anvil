@@ -24,7 +24,7 @@
 | [3](#ch3) | 角色模型 | 角色是什么、home 里有什么 |
 | [4](#ch4) | 工作区模型 | 私有 home 与共享仓库如何协作 |
 | [5](#ch5) | 任务板与认领机制 | 任务状态、认领、租约、并发 |
-| [6](#ch6) | 编排与执行引擎 | 调度、run 生命周期、重置、reminder、成本 |
+| [6](#ch6) | 编排与执行引擎 | 调度、run 生命周期、重置、reminder、Token 观测 |
 | [7](#ch7) | Agent CLI 契约 | Agent 如何主动上报状态 |
 | [8](#ch8) | 记忆与知识库 | MEMORY/notes/FTS/CIC/知识快照 |
 | [9](#ch9) | 角色演化 | 自主编辑 + 人工审批 |
@@ -70,7 +70,7 @@ Anvil 要解决的就是这一层。它不重新实现 Agent，不代理模型�
 
 ### 1.3 范围界定
 
-**做：** 运行时发现与绑定、角色定义与投影、私有与共享工作区、任务板与认领、并发编排与租约、Agent 侧 CLI、文件优先的记忆与知识库、受控的角色演化、Web 操作界面、Reminder 定时唤醒、成本与 token 观测。
+**做：** 运行时发现与绑定、角色定义与投影、私有与共享工作区、任务板与认领、并发编排与租约、Agent 侧 CLI、文件优先的记忆与知识库、受控的角色演化、Web 操作界面、Reminder 定时唤醒、Token 观测。
 
 **不做：** 账号体系与软件注册（单人本机，无此必要）、多人协作与团队移交、手机端、模型 API 代理转发、自研工具循环、容器级强隔离（列为 v4）、向量检索（v1 只用 SQLite FTS5，v2 再评估）。
 
@@ -89,7 +89,7 @@ Anvil 要解决的就是这一层。它不重新实现 Agent，不代理模型�
 | 前端 | Vite + React 18 + TypeScript | 标准化工程 |
 | 组件 | shadcn/ui + Tailwind | 可控、无重型运行时 |
 | 数据层 | TanStack Query + Zustand | 服务端状态与本地状态分离 |
-| 图表 / 拖拽 | Recharts / dnd-kit | 任务板拖拽与成本图 |
+| 图表 / 拖拽 | Recharts / dnd-kit | 任务板拖拽与 Token 图 |
 | 实时推送 | SSE | 单向为主，比 WebSocket 轻 |
 | 打包 | PyInstaller | 单 exe，前端静态资源内嵌 |
 | 客户端生成 | openapi-typescript | 消除手写接口类型 |
@@ -656,7 +656,6 @@ assignee: null
 lease_expires_at: null
 created_by: human                # human | agent:<slug>
 parent_id: null
-cost_budget_usd: 2.0             # 可选，超出则闸门拦截
 ```
 
 ### 5.3 认领策略
@@ -731,9 +730,9 @@ SQLite 的 `BEGIN IMMEDIATE` 加上单进程编排，足以保证排他性。不
 1. **角色级** `concurrency.max_parallel`，默认 2
 2. **运行时级** 同一运行时的全局并发上限，默认 4（避免同一订阅被打爆）
 3. **系统级** 全局并发上限，默认 6
-4. **成本级** 当日累计花费超阈值时停止新建运行
+4. **Token 预算级** 当日累计 token 消耗超阈值时停止新建运行
 
-两级并发上限的思路来自 multica（角色级默认 6、守护进程级默认 20，取较小值），Anvil 因为是单机个人使用，默认值调得更保守。成本闸门是我加的，没有先例，但对个人用户来说防止一晚上烧掉几百块是有实际价值的。
+两级并发上限的思路来自 multica（角色级默认 6、守护进程级默认 20，取较小值），Anvil 因为是单机个人使用，默认值调得更保守。Token 预算闸门是我加的，没有先例，但对个人用户来说防止一晚上烧掉大量 token 有实际价值。
 
 > **实现口径（owner 2026-10-22）**：角色/系统/运行时并发只统计
 > `created/projecting/running` 的 run；空闲 claim 与 `suspended/submitted/reviewing`
@@ -936,9 +935,9 @@ Reminder 可由人设置，**也可由 Agent 自己设置**（`anvil reminder ad
 
 到期的 reminder 生成一个特殊的 run（无关联任务），把 reminder 的 prompt 作为任务描述注入。
 
-### 6.5 成本与 token 观测
+### 6.5 Token 消耗观测
 
-每次运行结束后，从运行时输出中尽力解析 token 用量与花费（各运行时格式不同，由 YAML 里的解析规则处理；解析不到则记为未知）。汇总维度：按角色、按运行时、按任务类型、按日。前端提供日/周成本折线图与角色成本排行。
+每次运行结束后，从运行时输出中解析 token 用量（各运行时格式不同；解析不到则记为未知）。成本统一用 token 量表示，不计算也不展示金额。汇总维度：按角色、按运行时、按任务类型、按日；前端提供日/周 Token 趋势与角色排行。
 
 这套观测的准确性受限于运行时是否报告用量，做不到精确。它的用途是发现异常趋势（"这个角色的平均 token 消耗翻倍了"），而不是财务核算。
 
@@ -1200,7 +1199,7 @@ raft 的实际做法极简：Agent 可以编辑自己的 description，加一条
 | **审批** | `capabilities` 权重、`tools`（预设与白名单）、`responsibilities`、`claim` 规则 | 写入 `.anvil/pending/`，前端审批后生效 |
 | **禁止** | `permissions`、`runtime`（含 model）、`description`、`workspace.repos`、`concurrency` | Agent 无接口可改，只能建议 |
 
-`description` 放进禁止档是因为它是给人看的，Agent 改它没有意义还会造成人机认知不一致。`runtime` 与 `permissions` 涉及成本和安全边界，必须由人决定。
+`description` 放进禁止档是因为它是给人看的，Agent 改它没有意义还会造成人机认知不一致。`runtime` 与 `permissions` 涉及 Token 预算和安全边界，必须由人决定。
 
 ### 9.3 提案格式
 
@@ -1358,7 +1357,7 @@ POST   /api/v1/proposals/{id}/approve
 POST   /api/v1/proposals/{id}/reject
 
 # 记忆、知识库与自我（Agent 写路径，走后端以同步 FTS）
-GET    /api/v1/me                            # anvil self show（profile 快照 + 身份 + 并发 + 成本）
+GET    /api/v1/me                            # anvil self show（profile 快照 + 身份 + 并发 + Token）
 POST   /api/v1/me/memory                     # anvil memory append（追加自身 MEMORY.md）
 GET    /api/v1/me/memory/search?q=           # anvil memory search（MEMORY + role notes）
 POST   /api/v1/me/notes                      # anvil note write（kind/scope/task_id/tags/repo/...）
@@ -1371,7 +1370,7 @@ POST   /api/v1/me/instruction                # anvil self edit-instruction
 
 # 治理
 GET    /api/v1/budget                   PUT    /api/v1/budget
-GET    /api/v1/costs?scope=&from=&to=
+GET    /api/v1/tokens?scope=&from=&to=
 POST   /api/v1/control/freeze-all       POST   /api/v1/control/resume-all
 GET    /api/v1/audit?role=&task=&action=&from=&to=
 
@@ -1391,7 +1390,7 @@ Agent 侧 CLI 调用的是同一套 API 的子集，附加 `X-Anvil-Session` 头
 
 ### 11.1 视图清单
 
-**大厅（默认页）**。左栏角色卡片列：头像、名称、状态灯（运行中/空闲/已释放/异常）、当前任务、运行时标签、今日成本。中栏任务板看板，按状态分列，dnd-kit 拖拽改状态。右栏全局实时活动流。顶栏常驻「全场冻结」按钮与今日成本进度条。
+**大厅（默认页）**。左栏角色卡片列：头像、名称、状态灯（运行中/空闲/已释放/异常）、当前任务、运行时标签、今日 Token。中栏任务板看板，按状态分列，dnd-kit 拖拽改状态。右栏全局实时活动流。顶栏常驻「全场冻结」按钮与今日 Token 预算进度。
 
 状态灯的图例必须写清楚**灰点不代表故障**——Raft 特别强调了这一点，安静的 Agent 通常只是空闲，进程被正常释放了。这个误解会让你反复去重启健康的角色。
 
@@ -1411,7 +1410,7 @@ Agent 侧 CLI 调用的是同一套 API 的子集，附加 `X-Anvil-Session` 头
 
 *工具/技能与 MCP* —— 「技能/MCP」tab：角色绑定运行时后自动拉取该运行时默认的 skill/MCP 目录，复选框勾选加载哪些 skill/MCP 并保存（spawn 时 symlink skill + 写 `.claude/settings.json`）。工具预算与 token 估算沿用原「工具」tab 的勾选矩阵。
 
-*权限* —— 写入范围用目录树可视化，可写目录标绿、禁写标红。shell 白名单、审批项、成本上限。
+*权限* —— 写入范围用目录树可视化，可写目录标绿、禁写标红。shell 白名单、审批项、Token 预算。
 
 *运行时* —— 运行时选择与降级链排序、模型与思考强度（不支持的运行时该项不显示）、会话策略、环境变量、自定义参数（附 argv 泄露警告）。
 
@@ -1427,7 +1426,7 @@ Agent 侧 CLI 调用的是同一套 API 的子集，附加 `X-Anvil-Session` 头
 
 **提案审批**。待审提案列表，每条给出 diff 视图与一键接受/拒绝。这是你与角色演化的唯一交互面（§6.3）。
 
-**审计与成本**。日志多维筛选与全文检索、成本按角色/日期/运行时分解图表、token 消耗趋势。
+**审计与 Token**。日志多维筛选与全文检索、Token 按角色/日期/运行时分解图表、消耗趋势。
 
 ### 11.2 实时事件消费
 
@@ -1456,7 +1455,7 @@ export function useEventStream() {
 
 ### 11.3 启动体验
 
-`anvil.exe` 双击后：启动 Uvicorn、注册系统托盘、默认浏览器打开 `http://127.0.0.1:7317`。托盘常驻显示活跃角色数与今日成本，右键菜单含「打开界面」「全场冻结」「退出」。
+`anvil.exe` 双击后：启动 Uvicorn、注册系统托盘、默认浏览器打开 `http://127.0.0.1:7317`。托盘常驻显示活跃角色数与今日 Token，右键菜单含「打开界面」「全场冻结」「退出」。
 
 首次启动引导四步：扫描并确认运行时 → 选择或创建项目工作区 → 从模板导入 2–3 个角色 → 提交第一个目标试跑。引导流程结束时应该已经有一个任务在跑，这是建立信心最有效的方式。
 
@@ -1478,7 +1477,7 @@ export function useEventStream() {
 
 ### 12.2 M2 协作与治理（3 周）
 
-认领机制（`first_come`）、租约与心跳、配置快照、八态状态机、依赖解算、评审流程、分支隔离与 diff 越界校验、四层成本闸门、两级并发上限、全场冻结、审计日志、角色工坊页。
+认领机制（`first_come`）、租约与心跳、配置快照、八态状态机、依赖解算、评审流程、分支隔离与 diff 越界校验、四层 Token 预算闸门、两级并发上限、全场冻结、审计日志、角色工坊页。
 
 **此时系统已实用。** 我建议在这里停下来用两三周，只用不开发，把实际遇到的问题记下来再决定 M3 做什么。这个暂停很重要——下面两个里程碑的优先级应该由你的真实使用体验决定，而不是由这份文档决定。
 
@@ -1514,7 +1513,7 @@ WSL2 或容器强隔离 —— 触发条件是你需要让 Agent 跑不受信任
 
 ### 13.1 多 Agent 常常不如单 Agent
 
-Cognition 有篇被广泛引用的文章论证过：并行子 Agent 因上下文割裂容易产出互相冲突的结果，合并成本可能超过收益。我认为这个批评是对的，但它针对的是"把一个任务切碎给多个无记忆 Agent 并行"。
+Cognition 有篇被广泛引用的文章论证过：并行子 Agent 因上下文割裂容易产出互相冲突的结果，合并开销可能超过收益。我认为这个批评是对的，但它针对的是"把一个任务切碎给多个无记忆 Agent 并行"。
 
 你要做的是有持久身份、有私有记忆、通过任务板显性通信、任务边界较粗的模式，更接近人类团队分工，风险小得多。Raft 与 Multica 两个真实产品的存在也说明这条路走得通。
 
@@ -1526,11 +1525,11 @@ Cognition 有篇被广泛引用的文章论证过：并行子 Agent 因上下文
 
 这对单人本地开发是合适的强度。但你应当清楚：Agent 在执行过程中读到了什么，Anvil 管不住。如果你的项目里有不能被模型看到的东西（真实生产密钥、他人隐私数据），把它们放到工作区之外，并依赖 `permissions.deny` 之外的手段——最可靠的是根本不放在这台机器上。
 
-### 13.3 成本会超出直觉
+### 13.3 Token 消耗会超出直觉
 
-多个长会话 Agent 并发跑商业 API，烧钱速度比单 Agent 快得多，而且是超线性的——因为返工、互相驳回、重复读同一份代码都在烧钱。Raft 与 Multica 都不管这件事（成本归你的订阅），所以你没有现成参照。
+多个长会话 Agent 并发跑商业 API，token 消耗比单 Agent 快得多，而且是超线性的——因为返工、互相驳回、重复读同一份代码都在消耗 token。Raft 与 Multica 都不管这件事（开销归你的订阅），所以你没有现成参照。
 
-四层预算闸门务必在 M2 就做。另外建议第一个月每天看一次成本分解页，你会发现钱主要花在哪些意想不到的地方。
+四层预算闸门务必在 M2 就做。另外建议第一个月每天看一次 Token 分解页，你会发现消耗主要来自哪些意想不到的地方。
 
 ### 13.4 我改口的两处，值得你知道原因
 

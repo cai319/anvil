@@ -131,6 +131,23 @@ def _attachment_chars(ev: dict) -> int:
     return sum(block_chars(b) for b in content)
 
 
+_USAGE_CAMEL = {
+    "input_tokens": "inputTokens",
+    "output_tokens": "outputTokens",
+    "cache_read_input_tokens": "cacheReadInputTokens",
+    "cache_creation_input_tokens": "cacheCreationInputTokens",
+}
+
+
+def _aggregate_model_usage(models: dict) -> dict:
+    agg = {}
+    for snake, camel in _USAGE_CAMEL.items():
+        agg[snake] = sum(
+            int((v or {}).get(camel) or 0)
+            for v in models.values() if isinstance(v, dict))
+    return agg
+
+
 def extract_usage(ev: dict) -> dict:
     """从 result 事件提取 usage；兼容 modelUsage（camelCase）聚合。"""
     usage = ev.get("usage")
@@ -138,19 +155,29 @@ def extract_usage(ev: dict) -> dict:
         return usage
     mu = ev.get("modelUsage")
     if isinstance(mu, dict):
-        mapping = {
-            "input_tokens": "inputTokens",
-            "output_tokens": "outputTokens",
-            "cache_read_input_tokens": "cacheReadInputTokens",
-            "cache_creation_input_tokens": "cacheCreationInputTokens",
-        }
-        agg = {}
-        for snake, camel in mapping.items():
-            agg[snake] = sum(
-                int((v or {}).get(camel) or 0) for v in mu.values() if isinstance(v, dict))
+        agg = _aggregate_model_usage(mu)
         if any(agg.values()):
             return agg
     return {}
+
+
+def extract_turn_usage(ev: dict) -> dict:
+    """取「本轮」token 用量。
+
+    Claude Code 的 assistant 事件 usage.output_tokens 恒为 0，且同一轮多个
+    assistant 事件会重复携带完整 input；只有 result 事件带真实输出量。
+    优先用 model_usage_since_last_result（明确标注为 since last result），
+    再退回 result.usage / modelUsage。
+    """
+    since = ev.get("model_usage_since_last_result")
+    if isinstance(since, dict):
+        agg = _aggregate_model_usage(since)
+        if any(agg.values()):
+            return agg
+    usage = ev.get("usage")
+    if isinstance(usage, dict) and usage:
+        return usage
+    return extract_usage(ev)
 
 
 def frame_user_message(text: str) -> str:
@@ -1117,6 +1144,14 @@ class DaemonManager:
                         if model:
                             r.model_id = str(model)
                 elif etype == "result":
+                    # Token 记账以 result 事件为准：assistant 事件没有 output_tokens，
+                    # 且同一轮会重复带 input。每轮只记一次。
+                    turn_usage = extract_turn_usage(ev)
+                    if turn_usage:
+                        with r.lock:
+                            usage_task_id = r.current_task_id
+                            usage_run_id = r.current_run_id
+                        self._record_usage(r, turn_usage, usage_task_id, usage_run_id)
                     # 只认错误结果里的文本；正常 result 是 agent 的最终回答，
                     # 里面可能出现 “prompt is too long” 等字样（例如正在分析本 bug）。
                     result_text = str(ev.get("result") or ev.get("error") or "")
@@ -1173,8 +1208,6 @@ class DaemonManager:
                             r.current_run_id
                             and int(r.context_tokens or 0) >= self._hard_threshold(r))
                     self._log(r.role, self._assistant_text(ev))
-                    if usage:
-                        self._record_usage(r, usage, task_id, run_id)
                     if switched:
                         self._on_model_switch(r, old_model, r.model_id, task_id)
                     # 结构化 API 错误（synthetic assistant 消息）也要识别，避免只依赖
@@ -1315,7 +1348,7 @@ class DaemonManager:
             return "\n".join(out) if out else None
         if t == "result":
             usage = ev.get("usage") or {}
-            out = [f"[result] usage={jdumps(usage)} cost={ev.get('total_cost_usd')}"]
+            out = [f"[result] usage={jdumps(usage)}"]
             if ev.get("result") is not None:
                 out.append(str(ev.get("result")))
             return "\n".join(out)
@@ -1471,13 +1504,6 @@ class DaemonManager:
             # 注意：result.usage 是会话累计消耗（含历史所有 API 调用的 cache read），
             # 不是当前上下文大小。上下文只认 assistant 事件的单次请求 usage；
             # 用 result 覆盖会让 whoami/CIC 阈值全部失真（实测被放大到 1.5M–3M）。
-            cost = ev.get("total_cost_usd")
-            if cost:
-                try:
-                    from . import governance
-                    governance.report_cost(conn, task_id, r.role, float(cost), "reported")
-                except Exception:  # noqa: BLE001
-                    pass
             # 一轮结束仍未 submit → run 进入 suspended（等待下一条消息）
             if run_id:
                 row = conn.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()

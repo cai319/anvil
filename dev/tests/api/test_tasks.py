@@ -118,10 +118,10 @@ async def test_S7_parent_cannot_submit_before_children(client):
     assert r.status_code in (409, 422)  # 子未完成 → 拒绝提交
 
 
-async def test_S8_reject_loop_triggers_cost_gate(client):
-    """S8 reject 循环下成本闸门生效（@anvil-se 点名）：反复 reject 至 cost_budget 触发。"""
+async def test_S8_reject_loop_stays_in_progress(client):
+    """S8 反复 reject 后任务仍停在可重做态（不再按金额触发闸门）。"""
     await _seed(client)
-    await _post_task(client, id_="T-LOOP", cost_budget_usd=0.01)
+    await _post_task(client, id_="T-LOOP")
     await _claim(client, "T-LOOP")
     for _ in range(5):
         await client.post(
@@ -130,7 +130,6 @@ async def test_S8_reject_loop_triggers_cost_gate(client):
         await client.post(
             f"{API}/tasks/T-LOOP/review", json={"approve": False}, headers=human_headers()
         )
-    # 成本达限 → 新 claim / 新 run 被闸门拦截（具体阈值待 owner 定，此处断言存在拦截）
     body = (await client.get(f"{API}/tasks/T-LOOP")).json()
     assert body["status"] in ("in_progress", "todo")  # 仍停在可重做态
     # 闸门断言：见 test_budget.py 的 G4/G5；这里验证循环不改变非法状态即可

@@ -1,12 +1,12 @@
 """L2 · M2 协作与治理契约测试（task #9）。
 
-覆盖 M2 出口「多角色各自认领、越界被拦、成本达限停新认领」，接口以 SE v1.0 §1 M2
+覆盖 M2 出口「多角色各自认领、越界被拦、每日 Token 预算达限停新认领」，接口以 SE v1.0 §1 M2
 + task #7 已修正的五态机为准：
   - claim 原子化（BEGIN IMMEDIATE + 条件 UPDATE + rowcount）
   - 依赖两守卫分离：claim 查 depends_on、submit 查「子任务 parent_id==本任务 都 done」
   - diff 三交集（scope_paths ∩ role access ∩ .anvilignore）
   - 租约 1800s / 心跳 2min / 缺 3 周期回收
-  - 成本闸门 + 并发四层闸门 + 全场冻结 + 审计
+  - Token 预算闸门 + 并发四层闸门 + 全场冻结 + 审计
 
 M2（task #8）未落地前整文件 skip；落地后移除 skip 即跑。
 """
@@ -160,21 +160,38 @@ async def test_lease_timeout_reclaims(client):
     assert body["status"] == "todo"
 
 
-# ---- 成本闸门 + 并发闸门 + 全场冻结 --------------------------------------
+# ---- Token 预算闸门 + 并发闸门 + 全场冻结 --------------------------------
 
 
-async def test_cost_gate_blocks_new_claim(client):
-    """任务 cost_used 达 cost_budget_usd → 停新 claim（进行中允许收尾）。"""
+async def test_token_budget_blocks_new_claim(client, app):
+    """每日 Token 预算达限 → 停新 claim（进行中允许收尾）。"""
     await _seed(client)
-    await _task(client, id_="T-COST", cost_budget_usd=0.01)
-    await client.post(f"{API}/tasks/T-COST/claim", json={}, headers=auth_headers())
-    # 累计成本到顶（实现侧注入 cost_ledger 或测试后门）
-    await client.post(f"{API}/budget", json={"role": "qa-role", "usd": 0.02}, headers=auth_headers())
-    r = await client.post(f"{API}/tasks/T-COST/claim", json={}, headers=auth_headers())
-    # 已 in_progress 的任务不能重复 claim；新任务应被成本闸门拒
+    await client.put(
+        f"{API}/budget", json={"daily_token_budget": 100}, headers=human_headers())
+
+    from anvil.db import open_conn
+    from anvil.services import tokens
+    conn = open_conn(app.state.db_path)
+    try:
+        tokens.record(conn, "qa-role", None, None, {"input_tokens": 200})
+    finally:
+        conn.close()
+
     await _task(client, id_="T-NEW")
-    r2 = await client.post(f"{API}/tasks/T-NEW/claim", json={}, headers=auth_headers())
-    assert r2.status_code in (409, 429)  # 成本达限 → 停新认领
+    r = await client.post(f"{API}/tasks/T-NEW/claim", json={}, headers=auth_headers())
+    assert r.status_code == 409
+
+
+async def test_daily_token_budget_can_be_cleared(client):
+    await _seed(client)
+    await client.put(
+        f"{API}/budget", json={"daily_token_budget": 100}, headers=human_headers())
+    body = (await client.get(f"{API}/budget", headers=human_headers())).json()
+    assert body["daily_token_budget"] == 100
+    await client.put(
+        f"{API}/budget", json={"daily_token_budget": ""}, headers=human_headers())
+    body = (await client.get(f"{API}/budget", headers=human_headers())).json()
+    assert body["daily_token_budget"] is None
 
 
 async def test_concurrency_gate_role_max_parallel(client):

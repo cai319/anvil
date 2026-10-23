@@ -20,3 +20,28 @@ def test_token_summary(tmp_path):
     assert any(r["role"] == "pm" and r["total_tokens"] == 160 for r in s["by_role"])
     assert s["today_total_tokens"] == 215
     conn.close()
+
+
+def test_legacy_token_usage_reset_once(tmp_path):
+    """旧 assistant 事件记账（output=0、input 重复）一次性清空，之后不再清。"""
+    db = str(tmp_path / "legacy.db")
+    conn = connect(db)
+    tokens.record(conn, "pm", None, None, {
+        "input_tokens": 100, "output_tokens": 0})
+    conn.execute("DELETE FROM settings WHERE key='schema.token_usage_reset_v1'")
+    conn.commit()
+    conn.close()
+
+    conn = connect(db)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM token_usage").fetchone()[0] == 0
+        tokens.record(conn, "pm", None, None, {
+            "input_tokens": 10, "output_tokens": 2})
+    finally:
+        conn.close()
+
+    conn = connect(db)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM token_usage").fetchone()[0] == 1
+    finally:
+        conn.close()

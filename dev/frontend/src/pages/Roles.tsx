@@ -41,7 +41,7 @@ export function Roles() {
   const [homeFile, setHomeFile] = useState<{ path: string; content: string } | null>(null);
   const [message, setMessage] = useState("");
   const [versions, setVersions] = useState<{ version: number; display_name: string; source: string; created_at: string }[]>([]);
-  const [metrics, setMetrics] = useState<{ runs: number; tasks_total: number; tasks_done: number; cost_used_usd: number } | null>(null);
+  const [metrics, setMetrics] = useState<{ runs: number; tasks_total: number; tasks_done: number; input_tokens: number; output_tokens: number; total_tokens: number; today_total_tokens: number } | null>(null);
   const [toolsForm, setToolsForm] = useState({ preset: "", max_tool_tokens: "", allowlist: "[]" });
   const [runtimes, setRuntimes] = useState<Runtime[]>([]);
   const [runtimeId, setRuntimeId] = useState("");
@@ -377,7 +377,7 @@ export function Roles() {
                     <dl>
                       <dt>运行次数</dt><dd>{metrics.runs}</dd>
                       <dt>任务</dt><dd>{metrics.tasks_done} done / {metrics.tasks_total} 总</dd>
-                      <dt>成本</dt><dd>${metrics.cost_used_usd.toFixed(4)}</dd>
+                      <dt>Token</dt><dd>{metrics.total_tokens.toLocaleString()}</dd>
                     </dl>
                   ) : <p className="muted">加载中…</p>}
 

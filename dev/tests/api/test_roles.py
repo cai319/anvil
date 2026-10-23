@@ -71,7 +71,7 @@ async def test_effective_config_preview(client):
 
 
 async def test_me_endpoint(client):
-    """GET /api/v1/me 返回身份 + 并发额度 + 已用成本（SE §3.3，M1 必选，QA #1 回归）。"""
+    """GET /api/v1/me 返回身份 + 并发额度 + Token 用量（SE §3.3，M1 必选，QA #1 回归）。"""
     await _seed_runtime(client)
     await _post_role(client)
     r = await client.get(f"{API}/me", headers=auth_headers())
@@ -79,7 +79,7 @@ async def test_me_endpoint(client):
     body = r.json()
     assert body["role_slug"] == "qa-role"
     assert "concurrency_quota" in body
-    assert "cost_used_usd" in body
+    assert "token_usage" in body
     # 角色自主上下文管理所需信息
     assert "session" in body
     assert "context_tokens" in body["session"]

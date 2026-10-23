@@ -216,10 +216,25 @@ def test_cic_knowledge_index_lists_up_to_eight_titles(tmp_path, monkeypatch):
 
 
 def test_extract_usage_fallbacks():
-    from anvil.services.daemon import extract_usage
+    from anvil.services.daemon import extract_turn_usage, extract_usage
     assert extract_usage({"usage": {"input_tokens": 5, "output_tokens": 2}})["input_tokens"] == 5
     agg = extract_usage({"modelUsage": {
         "m1": {"inputTokens": 10, "outputTokens": 3},
         "m2": {"inputTokens": 2, "outputTokens": 1},
     }})
     assert agg["input_tokens"] == 12 and agg["output_tokens"] == 4
+    # result 事件里的 since-last-result 才带真实 output；assistant usage 的 output 为 0。
+    turn = extract_turn_usage({
+        "usage": {"input_tokens": 999, "output_tokens": 0},
+        "model_usage_since_last_result": {
+            "m1": {"inputTokens": 100, "outputTokens": 7,
+                   "cacheReadInputTokens": 3, "cacheCreationInputTokens": 1},
+            "m2": {"inputTokens": 50, "outputTokens": 2,
+                   "cacheReadInputTokens": 4, "cacheCreationInputTokens": 0},
+        },
+    })
+    assert turn == {
+        "input_tokens": 150, "output_tokens": 9,
+        "cache_read_input_tokens": 7, "cache_creation_input_tokens": 1,
+    }
+    assert extract_turn_usage({"usage": {"input_tokens": 5, "output_tokens": 2}})["output_tokens"] == 2

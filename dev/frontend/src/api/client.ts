@@ -270,10 +270,18 @@ export const api = {
   resumeAll: (): Promise<{ frozen: boolean }> => req("POST", "/control/resume-all").then((r) => json(r)),
   getTokens: (): Promise<{
     input_tokens: number; output_tokens: number; total_tokens: number;
-    today_total_tokens: number; by_role: { role: string; total_tokens: number }[];
+    today_total_tokens: number;
+    by_role: { role: string; input_tokens: number; output_tokens: number; total_tokens: number }[];
+    by_day: { day: string; input_tokens: number; output_tokens: number; total_tokens: number }[];
   }> => authFetch(`${BASE}/tokens`).then((r) => json(r)),
-  getBudget: (): Promise<{ role: string; cost_used_usd: number }> =>
-    authFetch(`${BASE}/budget`).then((r) => json(r)),
+  getBudget: (): Promise<{
+    role: string | null;
+    input_tokens: number; output_tokens: number; total_tokens: number;
+    today_total_tokens: number;
+    max_parallel_system?: number;
+    max_parallel_runtime?: number;
+    daily_token_budget?: number | null;
+  }> => authFetch(`${BASE}/budget`).then((r) => json(r)),
   listAudit: (opts?: { limit?: number; role?: string; action?: string }): Promise<unknown[]> => {
     const q = new URLSearchParams();
     if (opts?.limit) q.set("limit", String(opts.limit));
@@ -381,16 +389,17 @@ export const api = {
     req("POST", `/roles/${slug}/rollback/${version}`, {}).then((r) => json(r)),
   getRoleHomeFile: (slug: string, path: string): Promise<{ path: string; content: string }> =>
     authFetch(`${BASE}/roles/${slug}/home/file?path=${encodeURIComponent(path)}`).then((r) => json(r)),
-  getRoleMetrics: (slug: string): Promise<{ runs: number; tasks_total: number; tasks_done: number; cost_used_usd: number }> =>
-    authFetch(`${BASE}/roles/${slug}/metrics`).then((r) => json(r)),
+  getRoleMetrics: (slug: string): Promise<{
+    runs: number; tasks_total: number; tasks_done: number;
+    input_tokens: number; output_tokens: number; total_tokens: number;
+    today_total_tokens: number;
+  }> => authFetch(`${BASE}/roles/${slug}/metrics`).then((r) => json(r)),
   sendRoleMessage: (slug: string, message: string): Promise<Run> =>
     req("POST", `/roles/${slug}/message`, { message }).then((r) => json(r)),
 
   // governance extras
   updateBudget: (body: Record<string, unknown>): Promise<Record<string, unknown>> =>
     req("PUT", "/budget", body).then((r) => json(r)),
-  getCosts: (): Promise<{ total_usd: number; by_role: { role: string; usd: number }[]; by_day: { day: string; usd: number }[] }> =>
-    authFetch(`${BASE}/costs`).then((r) => json(r)),
 };
 
 export interface Channel {

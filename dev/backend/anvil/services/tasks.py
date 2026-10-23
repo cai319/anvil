@@ -1,7 +1,7 @@
 """Task CRUD + manual assignment + agent-side state transitions + 治理闸门（M2）。
 
 状态机：todo → in_progress → in_review → done/closed。
-认领原子（BEGIN IMMEDIATE + 条件 UPDATE + rowcount）；治理闸门（冻结/成本/并发）见
+认领原子（BEGIN IMMEDIATE + 条件 UPDATE + rowcount）；治理闸门（冻结/Token 预算/并发）见
 `services.governance`；关键转换写审计日志。
 """
 from __future__ import annotations
@@ -66,7 +66,7 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
            assignees: list[str] | None = None,
            plan_first: bool = False, planner: str | None = None,
            created_by: str | None = None, parent_id: str | None = None,
-           depends_on: list[str] | None = None, cost_budget_usd: float | None = None) -> dict:
+           depends_on: list[str] | None = None) -> dict:
     tid = id or new_id()
     if str(tid).startswith("__"):
         # `__global__` 是角色上下文槽的保留 key，不能与真实任务 id 冲突。
@@ -82,12 +82,12 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
     conn.execute(
         """INSERT INTO tasks (id, title, type, status, priority, tags_json, repo, workspace_id,
                               base_branch, scope_paths_json, description, acceptance_json,
-                              assignee, plan_first, planner, created_by, parent_id, cost_budget_usd,
-                              cost_used_usd, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)""",
+                              assignee, plan_first, planner, created_by, parent_id,
+                              created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (tid, title, type, "todo", priority, jdumps(tags or []), repo, workspace_id, base_branch,
          jdumps(scope_paths or []), description, jdumps(acceptance or []),
-         assignee, int(plan_first), planner, created_by, parent_id, cost_budget_usd, now, now),
+         assignee, int(plan_first), planner, created_by, parent_id, now, now),
     )
     for d in (depends_on or []):
         conn.execute("INSERT OR IGNORE INTO task_deps (task_id, depends_on) VALUES (?,?)", (tid, d))

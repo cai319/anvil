@@ -1,6 +1,6 @@
-"""治理（M2）：租约回收 / 全场冻结 / 成本闸门 / 并发闸门 / 审计。
+"""治理（M2）：租约回收 / 全场冻结 / Token 预算闸门 / 并发闸门 / 审计。
 
-owner 口径：成本「不限制」→ 成本闸门是软闸门（未设阈值 = 不限；设了才拦）。
+owner 口径：成本统一用 token 量，不计算金额；Token 预算未设阈值 = 不限。
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def set_setting(conn: sqlite3.Connection, key: str, value) -> None:
 
 
 def get_limits(conn: sqlite3.Connection) -> dict:
-    """系统级 / 运行时级并发上限 + 日成本预算（None = 不限）。"""
+    """系统级 / 运行时级并发上限 + 每日 Token 预算（None = 不限）。"""
     def as_int(key: str, default: int) -> int:
         raw = get_setting(conn, key)
         try:
@@ -41,26 +41,27 @@ def get_limits(conn: sqlite3.Connection) -> dict:
         except (TypeError, ValueError):
             return default
 
-    raw_budget = get_setting(conn, "daily_cost_budget_usd")
+    raw_budget = get_setting(conn, "daily_token_budget")
     try:
-        daily_budget = float(raw_budget) if raw_budget not in (None, "") else None
+        daily_budget = int(raw_budget) if raw_budget not in (None, "") else None
     except (TypeError, ValueError):
         daily_budget = None
     return {
         "max_parallel_system": as_int("max_parallel_system", DEFAULT_MAX_PARALLEL_SYSTEM),
         "max_parallel_runtime": as_int("max_parallel_runtime", DEFAULT_MAX_PARALLEL_RUNTIME),
-        "daily_cost_budget_usd": daily_budget,
+        "daily_token_budget": daily_budget,
     }
 
 
 def update_limits(conn: sqlite3.Connection, *, max_parallel_system=None,
-                  max_parallel_runtime=None, daily_cost_budget_usd=None) -> dict:
+                  max_parallel_runtime=None, daily_token_budget=None) -> dict:
     if max_parallel_system is not None:
         set_setting(conn, "max_parallel_system", int(max_parallel_system))
     if max_parallel_runtime is not None:
         set_setting(conn, "max_parallel_runtime", int(max_parallel_runtime))
-    if daily_cost_budget_usd is not None:
-        set_setting(conn, "daily_cost_budget_usd", "" if daily_cost_budget_usd == "" else float(daily_cost_budget_usd))
+    if daily_token_budget is not None:
+        set_setting(conn, "daily_token_budget",
+                    "" if daily_token_budget == "" else int(daily_token_budget))
     return get_limits(conn)
 
 
@@ -117,12 +118,10 @@ def _role_active_count(conn: sqlite3.Connection, role: str) -> int:
     return int(row["n"])
 
 
-def daily_cost_usd(conn: sqlite3.Connection) -> float:
-    day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    row = conn.execute(
-        "SELECT COALESCE(SUM(usd),0) AS s FROM cost_ledger WHERE recorded_at >= ?", (day_start,)
-    ).fetchone()
-    return float(row["s"] or 0.0)
+def daily_tokens_used(conn: sqlite3.Connection) -> int:
+    """今日已消耗 token（来自 CLI result.usage 的记录）。"""
+    from . import tokens as tokens_service
+    return int(tokens_service.summary(conn)["today_total_tokens"])
 
 
 def tick(conn: sqlite3.Connection, force: bool = False, dispatch: bool = True,
@@ -452,30 +451,16 @@ def set_freeze(conn: sqlite3.Connection, frozen: bool) -> dict:
 
 
 def check_claim_allowed(conn: sqlite3.Connection, task: dict, role: str) -> None:
-    """认领前的治理闸门：全场冻结 / 成本达限 / 并发达限 → ConflictError(409)。"""
+    """认领前的治理闸门：全场冻结 / 每日 Token 预算达限 / 并发达限 → ConflictError(409)。"""
     if is_frozen(conn):
         raise ConflictError("global freeze active")
 
-    # 任务级成本：本任务 cost_used 达 cost_budget_usd
-    budget = task.get("cost_budget_usd")
-    if budget is not None and task.get("cost_used_usd", 0) >= budget:
-        raise ConflictError(f"cost budget {budget} exhausted")
-
-    # 角色级成本：角色已有 in_progress 任务超预算 → 停新认领（进行中允许收尾）
-    over = conn.execute(
-        "SELECT id FROM tasks WHERE assignee=? AND status='in_progress' "
-        "AND cost_budget_usd IS NOT NULL AND cost_used_usd >= cost_budget_usd",
-        (role,),
-    ).fetchone()
-    if over:
-        raise ConflictError(f"role {role} has an over-budget task {over['id']}")
-
     limits = get_limits(conn)
 
-    # 日成本闸门（软闸门：未设阈值 = 不限）
-    budget = limits["daily_cost_budget_usd"]
-    if budget is not None and daily_cost_usd(conn) >= budget:
-        raise ConflictError(f"daily cost budget ${budget} exhausted")
+    # 每日 Token 闸门（软闸门：未设阈值 = 不限）
+    budget = limits["daily_token_budget"]
+    if budget is not None and daily_tokens_used(conn) >= budget:
+        raise ConflictError(f"daily token budget {budget} exhausted")
 
     # 并发闸门：角色级 max_parallel（按活跃 run 计数；空闲 claim 不占额度）
     max_parallel = _role_max_parallel(conn, role)
@@ -496,77 +481,18 @@ def check_claim_allowed(conn: sqlite3.Connection, task: dict, role: str) -> None
         raise ConflictError(f"system concurrency limit {limits['max_parallel_system']} reached")
 
 
-def inject_cost(conn: sqlite3.Connection, role: str, usd: float, source: str = "reported") -> dict:
-    """成本注入（测试后门 + 成本上报）：记 cost_ledger + 累加到角色 in_progress 任务。"""
-    conn.execute(
-        "INSERT INTO cost_ledger (role_slug, usd, source, recorded_at) VALUES (?,?,?,?)",
-        (role, usd, source, now_iso()),
-    )
-    conn.execute(
-        "UPDATE tasks SET cost_used_usd = cost_used_usd + ? WHERE assignee=? AND status='in_progress'",
-        (usd, role),
-    )
-    conn.commit()
-    return budget_status(conn, role)
-
-
-def report_cost(conn: sqlite3.Connection, task_id: str, role: str | None, usd: float, source: str = "reported") -> dict:
-    """记成本账 + 累加指定任务 cost_used_usd。"""
-    conn.execute(
-        "INSERT INTO cost_ledger (role_slug, task_id, usd, source, recorded_at) VALUES (?,?,?,?,?)",
-        (role, task_id, usd, source, now_iso()),
-    )
-    conn.execute("UPDATE tasks SET cost_used_usd = cost_used_usd + ?, updated_at=? WHERE id=?", (usd, now_iso(), task_id))
-    conn.commit()
-    row = conn.execute("SELECT cost_used_usd FROM tasks WHERE id=?", (task_id,)).fetchone()
-    return {"task_id": task_id, "cost_used_usd": row["cost_used_usd"] if row else 0.0}
-
-
 def budget_status(conn: sqlite3.Connection, role: str | None = None) -> dict:
-    if role:
-        spent = conn.execute(
-            "SELECT COALESCE(SUM(usd),0) AS s FROM cost_ledger WHERE role_slug=?", (role,)
-        ).fetchone()["s"]
-    else:
-        spent = conn.execute(
-            "SELECT COALESCE(SUM(usd),0) AS s FROM cost_ledger"
-        ).fetchone()["s"]
+    """Token 使用量 + 并发/Token 预算。金额不再计算，也不对外暴露。"""
+    from . import tokens as tokens_service
+    summary = tokens_service.summary(conn, scope=role)
     return {
         "role": role,
-        "cost_used_usd": spent,
-        "cost_today_usd": daily_cost_usd(conn),
+        "input_tokens": summary["input_tokens"],
+        "output_tokens": summary["output_tokens"],
+        "total_tokens": summary["total_tokens"],
+        "today_total_tokens": summary["today_total_tokens"],
         **get_limits(conn),
     }
-
-
-def costs(conn: sqlite3.Connection, scope: str | None = None,
-          date_from: str | None = None, date_to: str | None = None) -> dict:
-    """成本聚合：按角色 / 按日（design §6.5，用于发现异常趋势而非财务核算）。"""
-    clauses, params = [], []
-    if scope:
-        clauses.append("role_slug=?")
-        params.append(scope)
-    if date_from:
-        clauses.append("recorded_at >= ?")
-        params.append(date_from)
-    if date_to:
-        clauses.append("recorded_at <= ?")
-        params.append(date_to)
-    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-    by_role = [
-        dict(r) for r in conn.execute(
-            f"SELECT COALESCE(role_slug,'unknown') AS role, COALESCE(SUM(usd),0) AS usd, COUNT(*) AS entries "
-            f"FROM cost_ledger{where} GROUP BY role_slug ORDER BY usd DESC", params
-        )
-    ]
-    by_day = [
-        dict(r) for r in conn.execute(
-            f"SELECT substr(recorded_at,1,10) AS day, COALESCE(SUM(usd),0) AS usd "
-            f"FROM cost_ledger{where} GROUP BY day ORDER BY day", params
-        )
-    ]
-    total = sum(r["usd"] for r in by_role)
-    return {"scope": scope, "total_usd": total, "by_role": by_role, "by_day": by_day}
 
 
 def list_audit(conn: sqlite3.Connection, task_id: str | None = None, limit: int = 100,

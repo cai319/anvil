@@ -80,8 +80,7 @@ for line in sys.stdin:
         ]
     print(json.dumps({"type": "user", "message": {"content": [
         {"type": "tool_result", "content": tool_content}]}}), flush=True)
-    result = {"type": "result", "subtype": "success", "result": result_text,
-              "total_cost_usd": 0.01}
+    result = {"type": "result", "subtype": "success", "result": result_text}
     if result_usage:
         result["usage"] = json.loads(result_usage)
     print(json.dumps(result), flush=True)
@@ -169,10 +168,23 @@ def test_result_usage_does_not_overwrite_context_size(env):
         "FAKE_RESULT_USAGE": json.dumps({
             "input_tokens": 5_000_000,
             "cache_read_input_tokens": 9_000_000,
+            "output_tokens": 2,
         }),
     })
     assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
     assert mgr.status("qa-role")["context_tokens"] == 10
+    # Token 记账只认 result：input 不重复累计，output 不再为 0。
+    check = open_conn(mgr.db_path)
+    try:
+        rows = check.execute(
+            "SELECT input_tokens, output_tokens, cache_read_tokens FROM token_usage"
+        ).fetchall()
+    finally:
+        check.close()
+    assert len(rows) == 1
+    assert rows[0]["input_tokens"] == 5_000_000
+    assert rows[0]["cache_read_tokens"] == 9_000_000
+    assert rows[0]["output_tokens"] == 2
 
 
 def test_hard_context_threshold_rotates_before_api_error(env):

@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
+from ..services import tokens as tokens_service
 from ..schemas import InstructionIn, LessonIn, MemoryAppendIn, NoteWriteIn, ProposalIn
 from ..util import ConflictError, jdumps, now_iso
 from . import events
@@ -14,13 +15,11 @@ router = APIRouter()
 
 @router.get("/me")
 def get_me(conn=Depends(get_db), auth: Auth = Depends(get_auth)):
-    """anvil self show — 返回自身身份 + 并发额度 + 已用成本（SE §3.3）。"""
+    """anvil self show — 返回自身身份 + 并发额度 + Token 用量（SE §3.3）。"""
     from ..util import jloads
 
     role_slug = auth.role or "qa-role"
-    cost = conn.execute(
-        "SELECT COALESCE(SUM(usd), 0) FROM cost_ledger WHERE role_slug=?", (role_slug,)
-    ).fetchone()[0]
+    token_usage = tokens_service.summary(conn, scope=role_slug)
     profile: dict = {}
     role = services.roles.get(conn, role_slug)
     if role:
@@ -36,7 +35,12 @@ def get_me(conn=Depends(get_db), auth: Auth = Depends(get_auth)):
         "role_slug": role_slug,
         "profile": profile,
         "concurrency_quota": concurrency,
-        "cost_used_usd": cost,
+        "token_usage": {
+            "input_tokens": token_usage["input_tokens"],
+            "output_tokens": token_usage["output_tokens"],
+            "total_tokens": token_usage["total_tokens"],
+            "today_total_tokens": token_usage["today_total_tokens"],
+        },
         # 供角色自主判断是否 reset-context：上下文占用 + 队列/当前 run + 模型窗口。
         "session": {
             "context_tokens": int(st.get("context_tokens") or 0),
