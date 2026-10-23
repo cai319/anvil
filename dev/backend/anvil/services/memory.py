@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import config
@@ -61,13 +62,17 @@ def _fts_query(q: str) -> str:
 
 
 def search_memory(conn: sqlite3.Connection, role: str, q: str, limit: int = 8) -> list[dict]:
-    """FTS5 检索自己的 memories/notes（+ shared）；不可用时回退 LIKE。"""
+    """FTS5 检索**本角色**的 memories/notes；不可用时回退 LIKE。
+
+    长期记忆严格按角色隔离；跨角色共享只能走显式的 lesson 提案 + 人工审批
+    （`shared_lessons`），不混入个人记忆检索。
+    """
     if not q.strip():
         return []
     try:
         rows = conn.execute(
             "SELECT role_slug, content, bm25(memory_fts) AS score FROM memory_fts "
-            "WHERE memory_fts MATCH ? AND role_slug IN (?, 'shared') "
+            "WHERE memory_fts MATCH ? AND role_slug = ? "
             "ORDER BY score LIMIT ?",
             (_fts_query(q), role, limit),
         ).fetchall()
@@ -79,7 +84,7 @@ def search_memory(conn: sqlite3.Connection, role: str, q: str, limit: int = 8) -
     out: list[dict] = []
     for r in conn.execute(
         "SELECT role_slug, content, created_at FROM memories "
-        "WHERE owner IN (?, 'shared') AND content LIKE ? ORDER BY created_at DESC LIMIT ?",
+        "WHERE owner = ? AND content LIKE ? ORDER BY created_at DESC LIMIT ?",
         (role, like, limit),
     ).fetchall():
         out.append({"role_slug": r["role_slug"], "content": r["content"], "score": None})
@@ -100,6 +105,87 @@ def read_memory_file(role: str, max_chars: int = 4000) -> str:
     except OSError:
         return ""
     return text[-max_chars:] if len(text) > max_chars else text
+
+
+def consolidate_context(conn: sqlite3.Connection, role: str, task_id: str | None,
+                        trigger: str, run_id: str | None = None) -> dict | None:
+    """把任务的决策/进度快照写入 notes/knowledge/（文件 + FTS 索引）。
+
+    用于上下文即将被清空（CIC/主动换会话）的场景：新会话不依赖旧对话历史，
+    也能从 MEMORY.md + FTS 检索 + 最近快照恢复对历史判断的理解。
+    纯 DB 生成，不调用模型，幂等成本低。
+    """
+    if not task_id:
+        return None
+    task = conn.execute(
+        "SELECT id, title, status FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if task is None:
+        return None
+
+    now = now_iso()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    safe_trigger = re.sub(r"[^A-Za-z0-9_.-]", "_", trigger or "manual")[:32]
+    safe_task = re.sub(r"[^A-Za-z0-9_.-]", "_", str(task_id))[:64]
+    run_suffix = re.sub(r"[^A-Za-z0-9]", "", str(run_id or ""))[:8]
+    # 按任务分目录：CIC 只取当前任务的快照，避免跨任务串味。
+    path = f"knowledge/{safe_task}/{stamp}-{safe_trigger}"
+    if run_suffix:
+        path += f"-{run_suffix}"
+    path += ".md"
+
+    lines = [
+        "# 任务知识快照",
+        f"- 任务：{task['title']}（{task_id}）",
+        f"- 状态：{task['status']}",
+        f"- 时间：{now}",
+        f"- 触发：{safe_trigger}",
+    ]
+    # 最近结论放在工作流进度之前：快照有长度上限时，优先保住角色自己的判断。
+    acts = conn.execute(
+        "SELECT role_slug, kind, payload_json FROM activities "
+        "WHERE task_id=? AND kind IN ('comment','mention') ORDER BY id DESC LIMIT 30",
+        (task_id,)).fetchall()
+    if acts:
+        lines += ["", "## 最近结论与交接"]
+        for a in reversed(acts):
+            payload = jloads(a["payload_json"], {})
+            if a["kind"] == "comment":
+                text = str(payload.get("body") or "")
+            else:
+                text = f"@{payload.get('target', '')}: {payload.get('message', '')}"
+            lines.append(f"- [{a['role_slug'] or 'system'}] {text[:300]}")
+
+    wf = conn.execute(
+        "SELECT id FROM workflows WHERE task_id=? ORDER BY created_at DESC LIMIT 1",
+        (task_id,)).fetchone()
+    if wf is not None:
+        steps = conn.execute(
+            "SELECT step_id, title, role_slug, status, summary, feedback "
+            "FROM workflow_steps WHERE workflow_id=? "
+            "ORDER BY updated_at DESC, step_id DESC LIMIT 60",
+            (wf["id"],)).fetchall()
+        if steps:
+            lines += ["", "## 工作流进度"]
+            for s in reversed(steps):
+                line = (f"- [{s['status']}] {s['step_id']} {s['title']}"
+                        f"（{s['role_slug']}）")
+                if s["summary"]:
+                    line += f"：{str(s['summary'])[:160]}"
+                if s["feedback"]:
+                    line += f"；反馈：{str(s['feedback'])[:160]}"
+                lines.append(line)
+
+    content = "\n".join(lines)[:12000]
+    note = write_note(conn, role, path, content)
+    conn.execute(
+        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (role, task_id, "session.context_digest",
+         jdumps({"path": path, "trigger": safe_trigger, "run_id": run_id,
+                 "chars": len(content)}), now),
+    )
+    conn.commit()
+    return {**note, "chars": len(content), "trigger": safe_trigger}
 
 
 def context_for_task(conn: sqlite3.Connection, role: str, task: dict | None) -> dict:

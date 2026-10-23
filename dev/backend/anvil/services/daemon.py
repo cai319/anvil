@@ -29,19 +29,22 @@ from .. import config
 from ..db import open_conn
 from ..util import decode_child_output, jdumps, jloads, now_iso
 
-# 不泄漏给子进程的编排器会话变量（与 platform/darwin.py 保持一致）
-_SESSION_ENV_PREFIXES = ("CLAUDE_CODE_",)
-_SESSION_ENV_KEYS = {"CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ATTENDED"}
+# 不泄漏给子进程的编排器会话变量（与 platform/darwin.py 保持一致）。
+# 注意：不能按 `CLAUDE_CODE_` 前缀整片剥离——该命名空间里还有自动压缩窗口、
+# effort、子代理模型等配置项；剥离后角色进程会比交互会话更早撞到上下文上限。
+_SESSION_ENV_KEYS = {
+    "CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_ENTRYPOINT",
+}
 
 # 模型别名的上下文变体后缀，例如 deepseek-flash[1m] / foo[200k]。
 _MODEL_VARIANT_SUFFIX = re.compile(r"\[(?:1m|200k|128k)\]$", re.IGNORECASE)
 
 
 def _clean_env(extra: dict[str, str]) -> dict[str, str]:
-    merged = {
-        k: v for k, v in os.environ.items()
-        if not k.startswith(_SESSION_ENV_PREFIXES) and k not in _SESSION_ENV_KEYS
-    }
+    merged = {k: v for k, v in os.environ.items() if k not in _SESSION_ENV_KEYS}
     merged.update(extra)
     if os.name == "nt":
         # Windows 默认按系统 ANSI/OEM 代码页输出；强制 Python 子进程使用 UTF-8，
@@ -50,6 +53,36 @@ def _clean_env(extra: dict[str, str]) -> dict[str, str]:
         merged.setdefault("PYTHONUTF8", "1")
         merged.setdefault("PYTHONLEGACYWINDOWSSTDIO", "0")
     return merged
+
+
+def _hard_limit_for(window: int) -> int:
+    """给定窗口的硬阈值；0 比例表示关闭（返回窗口+1）。"""
+    ratio = float(config.CONTEXT_HARD_RESET_RATIO)
+    if ratio <= 0:
+        return window + 1
+    reserve = max(0, int(config.CONTEXT_OUTPUT_RESERVE_TOKENS))
+    # API 上限按 input+max_tokens 计：既要留出响应额度，也要留出比例余量。
+    return max(1, min(int(window * min(ratio, 1.0)), max(1, window - reserve)))
+
+
+# 只匹配明确的超限措辞；不能用「context + window」这类宽泛组合，否则
+# Claude Code 的 unrecognized_model 提示（"the context window it assumes"）
+# 或角色自己讨论该错误的输出都会误触发换会话。
+_CONTEXT_OVERFLOW_MARKERS = (
+    "prompt is too long",
+    "context limit reached",
+    "context window exceeded",
+    "exceeds the context window",
+    "reached its context window limit",
+    "context_length_exceeded",
+    "input length and max_tokens exceed",
+)
+
+
+def _is_context_overflow(text: str) -> bool:
+    """识别各 CLI/API 形态的上下文超限错误（大小写不敏感）。"""
+    low = (text or "").lower()
+    return any(marker in low for marker in _CONTEXT_OVERFLOW_MARKERS)
 
 
 def extract_usage(ev: dict) -> dict:
@@ -111,7 +144,11 @@ class _Role:
     last_task_id: str | None = None
     last_step_id: str | None = None
     context_tokens: int = 0
+    # API 报错后自适应收紧的窗口（只调小不调大）；用于修正模型名推断不准的情况。
+    adaptive_window: int | None = None
     cic_pending: bool = False
+    context_overflow: bool = False
+    context_overflow_reason: str | None = None
     suppress_exit: bool = False
     current_log_path: str | None = None
     log_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -132,6 +169,9 @@ class DaemonManager:
             else config.ROLE_IDLE_RELEASE_MINUTES
         )
         self.on_exit = None  # 回调(role, exit_code)：由 create_app 注入，泵 process_exit
+        # 回调(role, run_id, reason)：上下文溢出被主动/被动终止后，由 create_app
+        # 负责清 run 的会话标记并用 CIC 新会话重投；daemon 不直接依赖编排器。
+        self.on_context_overflow = None
         self._roles: dict[str, _Role] = {}
         self._guard = threading.Lock()
         self._stop = threading.Event()
@@ -189,6 +229,7 @@ class DaemonManager:
                 "cic_threshold_tokens": (
                     int(config.CIC_THRESHOLD_TOKENS) if config.CIC_THRESHOLD_TOKENS > 0
                     else int(window * config.CIC_RESET_RATIO)),
+                "hard_limit_tokens": _hard_limit_for(window),
                 "hint_tokens": int(window * config.CONTEXT_HINT_RATIO),
             }
         alive = r.proc is not None and r.proc.poll() is None
@@ -219,6 +260,7 @@ class DaemonManager:
                 for m in r.model_pool
             ],
             "cic_threshold_tokens": self._cic_threshold(r),
+            "hard_limit_tokens": self._hard_threshold(r),
             "hint_tokens": self._hint_threshold(r),
         }
 
@@ -308,6 +350,27 @@ class DaemonManager:
         conn = open_conn(self.db_path)
         try:
             clear_session(conn, role, "session reset")
+        finally:
+            conn.close()
+
+    def mark_needs_fresh_context(self, role: str, note: str = "fresh context required") -> None:
+        """标记角色下次唤醒使用全新 CIC 会话（不杀进程、不清排队消息）。
+
+        周期性健康检查发现角色进程已死、会话可能损坏时使用：丢弃旧 session 与
+        上下文水位，但保留队列里属于其它 run 的消息。
+        """
+        r = self._role(role)
+        with r.lock:
+            r.session_id = None
+            r.cic_pending = True
+            r.context_tokens = 0
+        conn = open_conn(self.db_path)
+        try:
+            conn.execute(
+                "UPDATE role_sessions SET session_id='', last_context_tokens=NULL, "
+                "last_error=?, updated_at=? WHERE role_slug=?",
+                (note, now_iso(), role))
+            conn.commit()
         finally:
             conn.close()
 
@@ -412,7 +475,10 @@ class DaemonManager:
         return self._model_window_info(model_id)[0]
 
     def _active_context_window(self, r: _Role) -> int:
-        return self._model_window(r.model_id)
+        window = self._model_window(r.model_id)
+        if r.adaptive_window:
+            window = min(window, int(r.adaptive_window))
+        return window
 
     def _context_window(self, r: _Role) -> int:
         """策略窗口：取「当前模型、角色下限、全局下限、模型池」中的最小值。
@@ -437,6 +503,10 @@ class DaemonManager:
 
     def _hint_threshold(self, r: _Role) -> int:
         return max(1, int(self._context_window(r) * config.CONTEXT_HINT_RATIO))
+
+    def _hard_threshold(self, r: _Role) -> int:
+        """单轮内主动换会话的硬阈值。"""
+        return _hard_limit_for(self._context_window(r))
 
     def _context_hint(self, r: _Role, task_id: str | None) -> str:
         """给角色的会话决策提示：只在切换任务或上下文占用较高时出现。"""
@@ -476,6 +546,9 @@ class DaemonManager:
             lines.append("- 任务已切换；若与本任务不相关，建议先重置会话。")
         if high:
             lines.append("- 上下文占用较高；若新任务与旧上下文关系不大，建议先重置会话。")
+            lines.append(
+                "- 重置前先用 `anvil memory append \"关键结论/口径/证据路径\"` 写入长期记忆；"
+                "Anvil 在换会话前也会自动保存一份任务知识快照。")
         cmd = (f"anvil self reset-context --task {task_id} --reason \"...\""
                if task_id else "anvil self reset-context --reason \"...\"")
         lines.append(
@@ -535,8 +608,8 @@ class DaemonManager:
                     continue
                 if not line.startswith("{"):
                     self._log(r.role, line)  # claude 的警告行（如 unrecognized_model）
-                    if "Prompt is too long" in line:
-                        self._reset_for_cic(r)
+                    if _is_context_overflow(line):
+                        self._begin_context_overflow(r, "api_error")
                         break
                     continue
                 try:
@@ -552,8 +625,11 @@ class DaemonManager:
                     if model:
                         r.model_id = str(model)
                 elif etype == "result":
-                    if "Prompt is too long" in line:
-                        self._reset_for_cic(r)
+                    # 只认错误结果里的文本；正常 result 是 agent 的最终回答，
+                    # 里面可能出现 “prompt is too long” 等字样（例如正在分析本 bug）。
+                    result_text = str(ev.get("result") or ev.get("error") or "")
+                    if ev.get("is_error") and _is_context_overflow(result_text):
+                        self._begin_context_overflow(r, "api_error")
                         break
                     self._on_turn_result(r, ev)
                 elif etype == "assistant":
@@ -588,6 +664,19 @@ class DaemonManager:
                             pass
                     if old_model and r.model_id and r.model_id != old_model:
                         self._on_model_switch(r, old_model, r.model_id)
+                    # 结构化 API 错误（synthetic assistant 消息）也要识别，避免只依赖
+                    # 原始文本；同时检查单轮硬阈值——一次唤醒可能连续跑几百次工具调用，
+                    # CLI 的自动压缩来不及介入。
+                    if ev.get("isApiErrorMessage") or msg.get("model") == "<synthetic>":
+                        blocks = msg.get("content") or []
+                        err_text = "".join(
+                            b.get("text", "") for b in blocks if isinstance(b, dict))
+                        if _is_context_overflow(err_text):
+                            self._begin_context_overflow(r, "api_error")
+                            break
+                    if r.current_run_id and int(r.context_tokens or 0) >= self._hard_threshold(r):
+                        self._begin_context_overflow(r, "threshold")
+                        break
         except Exception:  # noqa: BLE001 —— 解码/管道异常不能静默杀死 reader
             self._log(r.role, "[anvil] reader crashed:\n" + traceback.format_exc())
             try:
@@ -610,6 +699,8 @@ class DaemonManager:
             and not self._shutting_down
             and config.RESET_SESSION_ON_FAILURE
         )
+        overflow_run_id: str | None = None
+        overflow_reason: str | None = None
         with r.lock:
             if r.proc is proc:
                 r.proc = None
@@ -618,16 +709,31 @@ class DaemonManager:
                 if auto_reset:
                     r.session_id = None
                     r.context_tokens = 0
-                    r.cic_pending = False
+                    # 崩溃后的重试用 CIC：保留 MEMORY/工作流决策/知识快照，
+                    # 不从一张白纸重新开始。
+                    r.cic_pending = True
+                if r.context_overflow:
+                    overflow_run_id = r.current_run_id
+                    overflow_reason = r.context_overflow_reason or "threshold"
+                    r.context_overflow = False
+                    r.context_overflow_reason = None
         conn = open_conn(self.db_path)
         try:
             note = f"auto reset after exit code {code}" if auto_reset else None
+            if overflow_run_id:
+                note = f"context overflow ({overflow_reason})"
             self._db_upsert(conn, r, status="dead", pid=None, error=note)
             if auto_reset:
                 clear_session(conn, r.role, note or "auto reset after failure")
         finally:
             conn.close()
-        if self.on_exit and not self._shutting_down and not r.suppress_exit:
+        if overflow_run_id and not self._shutting_down and self.on_context_overflow:
+            # 不在 reader 线程里同步跑编排器：投递/拉起新进程会重新获取 r.lock。
+            threading.Thread(
+                target=self._notify_context_overflow,
+                args=(r.role, overflow_run_id, overflow_reason or "threshold"),
+                daemon=True, name=f"anvil-overflow-{r.role}").start()
+        elif self.on_exit and not self._shutting_down and not r.suppress_exit:
             try:
                 self.on_exit(r.role, 0 if code is None else code)
             except Exception:  # noqa: BLE001
@@ -733,13 +839,39 @@ class DaemonManager:
         except Exception:  # noqa: BLE001
             pass
 
-    def _reset_for_cic(self, r: _Role) -> None:
-        """Prompt 过长：本会话已不可用，终止进程并在下次唤醒用 CIC 新会话。"""
+    def _begin_context_overflow(self, r: _Role, reason: str) -> None:
+        """上下文超限（主动阈值或 API 报错）：终止本会话，交给回调换 CIC 新会话。
+
+        幂等：同一轮内只处理一次。等待 reader 线程走正常退出路径，由它调用
+        `on_context_overflow(role, run_id, reason)`，避免在 reader 线程里重入编排器。
+        """
+        if r.context_overflow:
+            return
+        r.context_overflow = True
+        r.context_overflow_reason = reason
+        if reason == "api_error":
+            # API 已明确拒绝：说明真实窗口可能小于模型名推断值。按“最后一次成功
+            # 请求的 95%”收紧，后续会话在更低水位轮换，避免反复撞同一堵墙。
+            measured = int(r.context_tokens or 0)
+            if measured > 0:
+                cap = max(64_000, int(measured * 0.95))
+                r.adaptive_window = min(int(r.adaptive_window or cap), cap)
+                self._log(
+                    r.role,
+                    f"[anvil] adaptive context window → {r.adaptive_window} "
+                    f"(last accepted context {measured})")
+        # 先把任务决策/进度固化成 notes 快照，再丢掉对话上下文。
+        if r.current_task_id:
+            conn = open_conn(self.db_path)
+            try:
+                self._consolidate_context(conn, r, reason)
+            finally:
+                conn.close()
         r.cic_pending = True
         r.suppress_exit = True
         try:
             r.context_tokens = max(int(r.context_tokens or 0),
-                                   self._cic_threshold(r) + 1)
+                                   self._hard_threshold(r) + 1)
         except Exception:  # noqa: BLE001
             pass
         proc = r.proc
@@ -753,21 +885,42 @@ class DaemonManager:
                 proc.terminate()
             except Exception:  # noqa: BLE001
                 pass
-        self._log(r.role, "[anvil] context too long → 将在下次唤醒用 CIC 新会话")
+            # terminate 被忽略时兜底 kill，避免残留进程变成同一角色的第二个实例。
+            try:
+                proc.wait(timeout=2)
+            except Exception:  # noqa: BLE001
+                try:
+                    proc.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+        self._log(r.role, f"[anvil] context overflow ({reason}) → 将用 CIC 新会话重投当前 run")
+
+    def _consolidate_context(self, conn, r: _Role, trigger: str) -> None:
+        """上下文清理前固化任务知识；失败只记日志，不阻断换会话。"""
+        try:
+            from . import memory as memory_service
+            snap = memory_service.consolidate_context(
+                conn, r.role, r.current_task_id, trigger, r.current_run_id)
+            if snap:
+                self._log(r.role,
+                          f"[anvil] knowledge snapshot saved: {snap.get('path')}")
+        except Exception:  # noqa: BLE001
+            self._log(r.role, "[anvil] knowledge snapshot failed:\n"
+                              + traceback.format_exc())
+
+    def _notify_context_overflow(self, role: str, run_id: str, reason: str) -> None:
+        try:
+            self.on_context_overflow(role, run_id, reason)  # type: ignore[misc]
+        except Exception:  # noqa: BLE001 —— 回调失败不能杀死 daemon
+            self._log(role, "[anvil] on_context_overflow failed:\n" + traceback.format_exc())
 
     def _on_turn_result(self, r: _Role, ev: dict) -> None:
         conn = open_conn(self.db_path)
         try:
             r.last_active = time.time()
-            usage = extract_usage(ev)
-            try:
-                tokens = sum(int(usage.get(k) or 0) for k in (
-                    "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
-                if tokens:
-                    r.context_tokens = tokens
-
-            except (TypeError, ValueError):
-                pass
+            # 注意：result.usage 是会话累计消耗（含历史所有 API 调用的 cache read），
+            # 不是当前上下文大小。上下文只认 assistant 事件的单次请求 usage；
+            # 用 result 覆盖会让 whoami/CIC 阈值全部失真（实测被放大到 1.5M–3M）。
             cost = ev.get("total_cost_usd")
             if cost:
                 try:
@@ -782,7 +935,24 @@ class DaemonManager:
                     from . import runs as runs_service
                     runs_service.set_status(conn, r.current_run_id, "suspended")
             with r.lock:
-                self._flush_next_locked(conn, r)
+                # 轮次边界是唯一安全的“换会话”时机：上下文已过高水位且没有排队消息时，
+                # 释放进程，下一次唤醒由 _spawn 用 CIC 新建会话。否则一条大上下文会被
+                # 后续消息继续 --resume，直到单轮内撞上 API 硬上限。
+                if (not r.queue and r.proc is not None
+                        and int(r.context_tokens or 0) >= self._cic_threshold(r)):
+                    self._consolidate_context(conn, r, "context-high")
+                    r.cic_pending = True
+                    r.suppress_exit = True
+                    self._log(
+                        r.role,
+                        f"[anvil] context {r.context_tokens} >= CIC threshold "
+                        f"{self._cic_threshold(r)} at turn end → release session")
+                    self._kill_locked(r, graceful=True)
+                    r.current_run_id = None
+                    r.current_task_id = None
+                    r.current_log_path = None
+                else:
+                    self._flush_next_locked(conn, r)
         finally:
             conn.close()
 
@@ -824,19 +994,66 @@ class DaemonManager:
             conn.close()
 
     def _build_cic(self, conn, role: str, task_id: str | None) -> str:
-        """Constructed Initial Context（简化 3 块）：MEMORY 头 / 最近消息 / 最近动作。
+        """Constructed Initial Context：长期知识 + 任务决策 + 最近消息/动作。
 
         三条负规则：不宣布重置、不列未决问题清单、超过 2 小时的内容只给指针。
+        知识来源是持久化的，而不是旧对话：MEMORY.md 尾部、FTS 命中、工作流
+        步骤摘要/反馈、最近一次上下文快照；即使上下文被清空也能恢复判断依据。
         """
+        from . import memory as memory_service  # 惰性导入避免循环
+
         blocks: list[str] = []
-        mem_path = Path(config.AGENTS_DIR) / role / "MEMORY.md"
-        try:
-            mem = mem_path.read_text(encoding="utf-8")[:4000].strip()
-        except OSError:
-            mem = ""
+        mem = memory_service.read_memory_file(role, 4000).strip()
         if mem:
-            blocks.append("## 记忆（MEMORY.md 头部，无需重读全文）\n" + mem)
+            blocks.append("## 记忆（MEMORY.md 尾部，无需重读全文）\n" + mem)
+
         if task_id:
+            task = conn.execute(
+                "SELECT title, tags_json FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if task is not None:
+                tags = [str(t) for t in jloads(task["tags_json"], [])]
+                query = " ".join([str(task["title"] or ""), *tags]).strip()
+                hits = memory_service.search_memory(conn, role, query, limit=5) if query else []
+                # 知识快照单独成块，避免在“相关记忆”里重复出现
+                hits = [h for h in hits
+                        if not str(h.get("content") or "").startswith("# 任务知识快照")]
+                if hits:
+                    blocks.append("## 相关记忆（按任务检索）\n" + "\n".join(
+                        f"- {str(h['content'])[:400]}" for h in hits))
+
+            wf = conn.execute(
+                "SELECT id FROM workflows WHERE task_id=? ORDER BY created_at DESC LIMIT 1",
+                (task_id,)).fetchone()
+            if wf is not None:
+                counts = conn.execute(
+                    "SELECT status, COUNT(*) AS n FROM workflow_steps "
+                    "WHERE workflow_id=? GROUP BY status", (wf["id"],)).fetchall()
+                steps = conn.execute(
+                    "SELECT step_id, title, role_slug, status, summary, feedback "
+                    "FROM workflow_steps WHERE workflow_id=? "
+                    "ORDER BY updated_at DESC, step_id DESC LIMIT 30", (wf["id"],)).fetchall()
+                if steps:
+                    lines = []
+                    if counts:
+                        lines.append("- 总览：" + "，".join(
+                            f"{c['status']} {c['n']}" for c in counts))
+                    for s in reversed(steps):
+                        line = (f"- [{s['status']}] {s['step_id']} {s['title']}"
+                                f"（{s['role_slug']}）")
+                        if s["summary"]:
+                            line += f"：{str(s['summary'])[:160]}"
+                        if s["feedback"]:
+                            line += f"；反馈：{str(s['feedback'])[:160]}"
+                        lines.append(line)
+                    blocks.append("## 工作流进度与决策\n" + "\n".join(lines))
+
+            snap = conn.execute(
+                "SELECT content FROM notes WHERE role_slug=? AND path LIKE ? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (role, f"knowledge/{task_id}/%")).fetchone()
+            if snap is not None:
+                blocks.append("## 最近知识快照（自动整理）\n" + str(snap["content"])[:4000])
+
             rows = conn.execute(
                 "SELECT id, role_slug, kind, payload_json FROM activities "
                 "WHERE task_id=? AND kind IN ('comment','mention','step') "
@@ -861,7 +1078,7 @@ class DaemonManager:
             if acts:
                 blocks.append("## 最近动作\n" + "\n".join(
                     f"- {a['role_slug'] or 'system'}: {a['action']}" for a in reversed(acts)))
-        return "\n\n".join(blocks)
+        return "\n\n".join(blocks)[:32000]
 
     def _db_upsert(self, conn, r: _Role, status: str, pid: int | None = -1,
                    error: str | None = None) -> None:

@@ -569,6 +569,13 @@ def process_exit_node(state: dict, config) -> dict:
         # 依据 run 自身状态，而非 task 状态：已终态/已提交（评审流接管）/挂起（suspended）则不动。
         if run["status"] in ("completed", "failed", "abandoned", "submitted", "reviewing", "suspended"):
             return {}
+        # 上下文溢出由 daemon 回调自动换会话重投；monitor 可能在同一时刻泵 process_exit，
+        # 这里必须让路，否则会把待重投的 run 判死（或与重投竞态）。
+        rs = conn.execute(
+            "SELECT last_error FROM role_sessions WHERE role_slug=?",
+            (run["role_slug"],)).fetchone()
+        if rs and str(rs["last_error"] or "").startswith("context overflow"):
+            return {}
         # 挂起：若该角色最后 @提及了某个角色（等待响应），则保持 running，等 @回来再 resume。
         if _waiting_for_reply(conn, run.get("task_id"), run["role_slug"]):
             return {}
@@ -621,6 +628,15 @@ def _waiting_for_reply(conn: sqlite3.Connection, task_id: str | None, role_slug:
     if not task_id:
         return False
     tl = tasks_service.timeline(conn, task_id)
-    # 只看该角色自己发出的 @提及；系统/工作流通知（role=workflow）不算等待响应。
-    mentions = [e for e in tl if e["kind"] == "mention" and e["role"] == role_slug]
-    return bool(mentions)
+    # 只看该角色自己发出的最后一条 @提及；系统/工作流通知（role=workflow）不算等待响应。
+    own = [i for i, e in enumerate(tl)
+           if e["kind"] == "mention" and e["role"] == role_slug]
+    if not own:
+        return False
+    # 对方已经 @ 回来 = 不再等待。只看「最后一次自己 @」之后的回复；
+    # 历史上有过 @ 不代表现在仍在等（否则任何一次 mention 都会让 run 永久 running）。
+    last = own[-1]
+    return not any(
+        e["kind"] == "mention" and e["role"] != role_slug
+        and (e.get("payload") or {}).get("target") == role_slug
+        for e in tl[last + 1:])

@@ -160,8 +160,38 @@ anvil init --with-roles
   anvil self reset-context --task $ANVIL_TASK_ID --reason "任务切换/上下文过高"
   ```
 
+- **单轮硬保护**：一次唤醒可能连续跑几百次工具调用（实测 1 小时 714 次），CLI 的自动压缩
+  只在轮次边界生效。Anvil 在 assistant 实测上下文达到窗口的 `ANVIL_CONTEXT_HARD_RESET_RATIO`
+  （默认 0.9）时主动终止会话，并自动用 CIC 新会话重投当前 run。主动水位轮换不计入失败
+  预算；真正的 API 溢出会按最后成功上下文自适应收紧窗口后重试，超过
+  `ANVIL_CONTEXT_RESET_MAX_RETRIES` 次则交给步骤自动恢复队列（不 @human）。因此不会再以
+  `prompt is too long` 的形式失败。
+- **长期知识（按角色隔离）**：换会话/重置前，Anvil 会把当前任务的工作流步骤摘要、最近结论与
+  交接自动写成 `notes/knowledge/<task-id>/<时间>-<触发>.md`，并写入 FTS 索引。新会话的 CIC 会
+  注入本角色 `MEMORY.md` 尾部、按任务检索到的相关记忆、工作流决策和最近知识快照；角色也可用
+  `anvil memory append "关键结论..."` 主动沉淀长期知识。`MEMORY.md`、`notes/`、知识快照与
+  FTS 检索都按 `role_slug` 严格隔离；跨角色共享只通过人工批准的 lessons（`anvil lesson
+  propose`）这一显式通道。
+- 常驻进程已死但 run 仍卡在 `running` 时，调度器在 `ANVIL_RUN_DEAD_GRACE_SECONDS`
+  （默认 60 秒）后强制转为 `suspended`，并标记下一次唤醒使用全新 CIC 会话；
+  步骤看门狗随后续跑。
+- **自动恢复（不需要人类在场）**：进程崩溃、超时、上下文溢出、步骤停滞等技术性失败
+  会进入自动恢复队列：重置会话 → 指数退避（默认 2 分钟起，上限 30 分钟）→ 重新拉起
+  步骤，默认最多 10 次；耗尽后步骤标记失败并留一条非阻塞评论，不产生需要人类回复的
+  `@human`。评审、gate、审批等 HITL 确认点仍必须自然人处理。
+- 调度器每 5 秒做一轮健康检查：`created` 重投、`projecting` 卡住重投、死进程回收、
+  挂起步骤续跑、失败 run 自动重排队；这些都不依赖人工。
+- **等待状态不会被打断**：
+  - 等其它角色（run=`suspended`）：5 秒 tick 只续租和做健康检查；对方仍有活跃 run
+    或正忙时不唤醒等待方；对方空闲/失联超过 `ANVIL_STEP_NUDGE_SECONDS` 才唤醒等待方
+    检查 inbox/重新询问。
+  - 等 human（run=`suspended`）：`_waiting_for_human` 命中后不自动重试，human 回复后
+    由 mention 端点唤醒。
+  - 等模型/工具返回（run=`running`、进程 busy）：5 秒 tick 只做 liveness 检查；
+    超过 run 级 timeout（默认 3600 秒）才重置会话并进入自动恢复。
+  - 等待期间任务/角色租约会自动续租，不会因为 30 分钟没 heartbeat 被判失联。
 - 用 `anvil whoami --json` 查看 `context_tokens`、窗口、`model_pool_windows`、
-  `context_fit` 等指标。
+  `context_fit`、`hard_limit_tokens` 等指标。
 - **删除 vs 取消**：删除任务会回收该任务的常驻进程/会话；取消（`closed`）保留进程/会话，`reopen` 可继续。
 
 > 窗口解析优先级、阈值公式、模型切换与同族后缀处理等实现细节见
@@ -225,6 +255,15 @@ anvil action prepare --kind task.cancel --task $ANVIL_TASK_ID --reason "..."
 | `ANVIL_CIC_THRESHOLD_TOKENS` | `0` | 冷唤醒阈值；`0`=按模型窗口自动，`>0`=绝对覆盖 |
 | `ANVIL_CIC_RESET_RATIO` | `0.8` | 自动 CIC 阈值占模型窗口比例 |
 | `ANVIL_CONTEXT_HINT_RATIO` | `0.5` | 上下文提示阈值占模型窗口比例 |
+| `ANVIL_CONTEXT_HARD_RESET_RATIO` | `0.9` | 单轮内上下文达到窗口比例时主动换会话；`0`=关闭 |
+| `ANVIL_CONTEXT_OUTPUT_RESERVE` | `32000` | 硬阈值预留的响应额度（API 上限为 input+max_tokens） |
+| `ANVIL_CONTEXT_RESET_MAX_RETRIES` | `3` | 同一 run 因上下文溢出自动换会话的最大次数 |
+| `ANVIL_RUN_DEAD_GRACE_SECONDS` | `60` | 常驻进程死亡后，卡在 running 的 run 回收宽限期 |
+| `ANVIL_RUN_PHASE_STALL_SECONDS` | `60` | run 卡在 `projecting` 时重新投递的宽限期 |
+| `ANVIL_AUTO_RECOVER` | `1` | 技术性失败是否自动退避重试（不 @human）；`0`=关闭 |
+| `ANVIL_AUTO_RECOVER_MAX_ATTEMPTS` | `10` | 单步骤自动恢复次数上限 |
+| `ANVIL_AUTO_RECOVER_BACKOFF_SECONDS` | `120` | 自动恢复首次退避秒数（之后指数增长） |
+| `ANVIL_AUTO_RECOVER_MAX_BACKOFF_SECONDS` | `1800` | 自动恢复退避上限（秒） |
 | `ANVIL_DEFAULT_CONTEXT_WINDOW` | `200000` | 无法识别模型时的默认窗口 |
 | `ANVIL_MODEL_CONTEXT_WINDOWS` | `{}` | 模型 id → 窗口 JSON，如 `{"deepseek-flash[1m]":1000000}` |
 | `ANVIL_CONTEXT_WINDOW_FLOOR` | `0` | 全局保守窗口下限 |

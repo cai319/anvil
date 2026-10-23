@@ -53,6 +53,7 @@ def get_me(conn=Depends(get_db), auth: Auth = Depends(get_auth)):
             "context_safe_fit": bool(st.get("context_safe_fit", True)),
             "model_pool_windows": st.get("model_pool_windows") or [],
             "cic_threshold_tokens": cic_threshold,
+            "hard_limit_tokens": int(st.get("hard_limit_tokens") or window),
             "hint_tokens": int(st.get("hint_tokens") or int(window * config.CONTEXT_HINT_RATIO)),
             "hint_ratio": config.CONTEXT_HINT_RATIO,
         },

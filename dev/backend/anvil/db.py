@@ -98,7 +98,9 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     contract         TEXT,                          -- 契约/不变量（contract-first）
     failure_reason   TEXT,                          -- 失败归因（spec/contract/test/env/agent）
     last_nudge_at    TEXT,                          -- 停滞看门狗：上次唤醒时间
-    nudge_count      INTEGER NOT NULL DEFAULT 0,    -- 停滞唤醒次数（超过上限判失败）
+    nudge_count      INTEGER NOT NULL DEFAULT 0,    -- 停滞唤醒次数（超过上限交给自动恢复）
+    recovery_count   INTEGER NOT NULL DEFAULT 0,    -- 自动恢复重试次数（跨 run 累计）
+    next_retry_at    TEXT,                          -- 自动恢复的下次可调度时间（指数退避）
     kind             TEXT NOT NULL DEFAULT 'task',   -- task | decision | plan_slices
     on_reject_json   TEXT NOT NULL DEFAULT '[]',     -- decision 驳回时需重做的步骤
     max_rework       INTEGER NOT NULL DEFAULT 2,
@@ -534,7 +536,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE role_sessions ADD COLUMN model_id TEXT")
     except sqlite3.OperationalError:
         pass
-    for col in ("last_nudge_at TEXT", "nudge_count INTEGER NOT NULL DEFAULT 0"):
+    for col in ("last_nudge_at TEXT", "nudge_count INTEGER NOT NULL DEFAULT 0",
+                "recovery_count INTEGER NOT NULL DEFAULT 0", "next_retry_at TEXT"):
         try:
             conn.execute(f"ALTER TABLE workflow_steps ADD COLUMN {col}")
         except sqlite3.OperationalError:
@@ -559,7 +562,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
     # 迁移：P0 可靠性——run 级超时 / 失败分类；P1-0——任务规划字段 / 草案关联任务
-    for col in ("timeout_seconds INTEGER", "failure_class TEXT"):
+    for col in ("timeout_seconds INTEGER", "failure_class TEXT",
+                "context_reset_count INTEGER NOT NULL DEFAULT 0"):
         try:
             conn.execute(f"ALTER TABLE runs ADD COLUMN {col}")
         except sqlite3.OperationalError:

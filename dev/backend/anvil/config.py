@@ -85,6 +85,22 @@ for _k, _v in _model_windows_raw.items():
         MODEL_CONTEXT_WINDOWS[str(_k)] = _n
 # 唤醒时向角色提示“上下文将满”的比例；达到该比例时角色可自行决定是否 reset-context。
 CONTEXT_HINT_RATIO = float(_env("ANVIL_CONTEXT_HINT_RATIO", "0.5"))
+# 单轮工具循环内的硬保护：assistant 实测上下文达到该比例时，Anvil 主动终止本次会话，
+# 下次唤醒用 CIC 新会话重投当前 run（0=关闭）。之所以需要它，是因为一次唤醒可以连续
+# 跑几百次工具调用（实测 1 小时 714 次），模型/CLI 的自动压缩只在轮次边界生效，
+# 期间上下文会一路涨到 API 的“prompt is too long”。
+CONTEXT_HARD_RESET_RATIO = float(_env("ANVIL_CONTEXT_HARD_RESET_RATIO", "0.9"))
+# 给单次响应预留的 output 额度；API 的上下文上限是 input+max_tokens，
+# 只按窗口算会留下正好一个 max_tokens 的溢出空间。
+CONTEXT_OUTPUT_RESERVE_TOKENS = int(_env("ANVIL_CONTEXT_OUTPUT_RESERVE", "32000"))
+# 同一 run 因上下文溢出自动换会话的最大次数；超过则交给步骤自动恢复队列
+# （指数退避重排队，不 @human）。主动水位轮换不计入此预算。
+CONTEXT_RESET_MAX_RETRIES = int(_env("ANVIL_CONTEXT_RESET_MAX_RETRIES", "3"))
+# 常驻进程已死亡但 run 仍卡在 running 的宽限期（秒）后强制转为 suspended，
+# 让步骤看门狗可以续跑/判失败，避免永久占用该角色。
+RUN_DEAD_GRACE_SECONDS = float(_env("ANVIL_RUN_DEAD_GRACE_SECONDS", "60"))
+# run 卡在 projecting 的看门狗：编排器在 project→spawn 之间崩溃时，定期重新投递。
+RUN_PHASE_STALL_SECONDS = float(_env("ANVIL_RUN_PHASE_STALL_SECONDS", "60"))
 
 # 数据库日常备份：启动/调度器每天做一次 SQLite 在线备份，保留最近 N 天。
 BACKUP_ENABLED = _env("ANVIL_BACKUP", "1") != "0"
@@ -94,9 +110,17 @@ BACKUP_KEEP_DAYS = int(_env("ANVIL_BACKUP_KEEP_DAYS", "7"))
 CLEANER_ENABLED = _env("ANVIL_CLEANER", "1") != "0"
 CLEANER_MAX_BYTES = int(_env("ANVIL_CLEANER_MAX_BYTES", "12000"))
 
-# 工作流步骤停滞看门狗：步骤 run 挂起且无活动超过阈值 → 唤醒角色续跑；超过次数判失败并通知人。
+# 工作流步骤停滞看门狗：步骤 run 挂起且无活动超过阈值 → 唤醒角色续跑；超过次数后交给自动恢复。
 STEP_NUDGE_SECONDS = float(_env("ANVIL_STEP_NUDGE_SECONDS", "600"))
 STEP_MAX_NUDGES = int(_env("ANVIL_STEP_MAX_NUDGES", "3"))
+
+# 自动可靠性恢复：进程崩溃/超时/上下文溢出/步骤停滞等技术性失败，先按指数退避自动
+# 重排队重试，不 @human（人类可能不在场）；超过预算才判失败并留非阻塞通知。
+# 人工确认点（评审/gate/审批）不受影响，仍走 HITL。
+AUTO_RECOVER_ENABLED = _env("ANVIL_AUTO_RECOVER", "1") != "0"
+AUTO_RECOVER_MAX_ATTEMPTS = int(_env("ANVIL_AUTO_RECOVER_MAX_ATTEMPTS", "10"))
+AUTO_RECOVER_BACKOFF_SECONDS = float(_env("ANVIL_AUTO_RECOVER_BACKOFF_SECONDS", "120"))
+AUTO_RECOVER_MAX_BACKOFF_SECONDS = float(_env("ANVIL_AUTO_RECOVER_MAX_BACKOFF_SECONDS", "1800"))
 
 # Agent 自行扩展团队（Raft 风格）：继承创建者 runtime；受每日配额与总角色数限制。
 AGENT_ROLE_EXPAND_DAILY = int(_env("ANVIL_AGENT_ROLE_EXPAND_DAILY", "3"))

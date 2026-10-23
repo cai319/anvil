@@ -127,6 +127,62 @@ def mark_spawned(conn: sqlite3.Connection, run_id: str, native_session_id: str,
     conn.commit()
 
 
+def reset_run_for_redelivery(conn: sqlite3.Connection, run_id: str, *,
+                             reason: str = "context rotation") -> str:
+    """主动换会话（非错误）：清 run 的会话标记并重新投递，不消耗失败预算。
+
+    与 `register_context_overflow` 的区别：这是正常上下文管理（达到水位主动换新），
+    不应计入“溢出重试次数”，也不会因此判失败/通知人类。
+    """
+    row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+    if row is None or row["status"] in ("completed", "failed", "abandoned"):
+        return "skip"
+    conn.execute("UPDATE runs SET native_session_id=NULL WHERE id=?", (run_id,))
+    conn.commit()
+    set_status(conn, run_id, "created")
+    conn.execute(
+        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (row["role_slug"], row["task_id"], "session.context_rotation",
+         jdumps({"run_id": run_id, "reason": reason}), now_iso()),
+    )
+    conn.commit()
+    return "retry"
+
+
+def register_context_overflow(conn: sqlite3.Connection, run_id: str, *,
+                              max_retries: int, reason: str = "") -> str:
+    """上下文溢出后的 run 处置：清会话回 created 重投，或超限判失败。
+
+    返回 `retry` / `failed` / `skip`（run 不存在或已终态）。调用方在 `retry` 时
+    泵 `wake`，`spawn` 会因 `cic_pending`/高水位走新会话 + CIC。
+    """
+    row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+    if row is None or row["status"] in ("completed", "failed", "abandoned"):
+        return "skip"
+    attempt = int(row["context_reset_count"] or 0) + 1
+    conn.execute(
+        "UPDATE runs SET context_reset_count=?, native_session_id=NULL WHERE id=?",
+        (attempt, run_id),
+    )
+    conn.commit()
+    outcome = "retry" if attempt <= max(0, int(max_retries)) else "failed"
+    if outcome == "retry":
+        set_status(conn, run_id, "created")
+    else:
+        set_status(conn, run_id, "failed", ended_at=now_iso(),
+                   failure_class="context_overflow")
+    conn.execute(
+        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (row["role_slug"], row["task_id"], "session.context_overflow",
+         jdumps({"run_id": run_id, "reason": reason, "attempt": attempt,
+                 "outcome": outcome}), now_iso()),
+    )
+    conn.commit()
+    return outcome
+
+
 def suspend_active(conn: sqlite3.Connection) -> int:
     """优雅停机：活跃 run（running/projecting）终止子进程并转 suspended（可 @mention 唤醒续跑）。
 

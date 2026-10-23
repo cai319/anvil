@@ -169,6 +169,44 @@ def test_process_exit_waiting_for_human_keeps_running(env):
     assert open_run(env, run["id"])["status"] == "running"
 
 
+def test_process_exit_after_reply_fails_instead_of_sticking(env):
+    """曾 @ 过别人但对方已 @ 回来：进程退出不能再保持 running（否则永久卡住）。"""
+    from anvil.db import open_conn
+    from anvil.services import tasks as tasks_service
+
+    run = seed_task_run(env, "T-REPLIED")
+    env["orch"].pump(env["db_path"], run["id"], "wake", {})
+    conn = open_conn(env["db_path"])
+    tasks_service.mention(conn, "T-REPLIED", "dev", "reviewer", "请确认")
+    tasks_service.mention(conn, "T-REPLIED", "reviewer", "dev", "已确认")
+    conn.close()
+
+    env["fake"].alive = False
+    env["fake"].exit_code = 1
+    env["orch"].pump(env["db_path"], run["id"], "process_exit", {"exit_code": 1})
+    assert open_run(env, run["id"])["status"] == "failed"
+
+
+def test_process_exit_defers_to_context_overflow_recovery(env):
+    """monitor 与溢出回调竞态时，process_exit 不能把待重投的 run 判死。"""
+    from anvil.db import open_conn
+
+    run = seed_task_run(env, "T-CX")
+    env["orch"].pump(env["db_path"], run["id"], "wake", {})
+    conn = open_conn(env["db_path"])
+    conn.execute(
+        "INSERT OR REPLACE INTO role_sessions "
+        "(role_slug, session_id, status, updated_at, last_error) VALUES (?,?,?,?,?)",
+        ("dev", "sid", "dead", "2026-01-01T00:00:00+00:00",
+         "context overflow (threshold)"))
+    conn.commit()
+    conn.close()
+
+    env["fake"].alive = False
+    env["orch"].pump(env["db_path"], run["id"], "process_exit", {"exit_code": 1})
+    assert open_run(env, run["id"])["status"] == "running"
+
+
 def test_run_log_and_snapshot_traceable(env):
     """run 应带日志文件 + 可解析的配置快照 + 生命周期时间线（session 追溯）。"""
     from anvil.db import open_conn

@@ -5,7 +5,7 @@ owner 口径：成本「不限制」→ 成本闸门是软闸门（未设阈值 
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .. import config
@@ -144,6 +144,10 @@ def tick(conn: sqlite3.Connection, force: bool = False, dispatch: bool = True,
         ).fetchall()
     for r in rows:
         tid = r["id"]
+        # 等待模型响应/等待其它角色/HITL 等待都是“活着”，续租而不是回收。
+        if _run_liveness(conn, tid):
+            _renew_lease(conn, now, tid)
+            continue
         conn.execute(
             "UPDATE tasks SET status='todo', assignee=NULL, claimed_at=NULL, lease_expires_at=NULL, updated_at=? WHERE id=?",
             (now, tid),
@@ -165,6 +169,10 @@ def tick(conn: sqlite3.Connection, force: bool = False, dispatch: bool = True,
         (now,),
     ).fetchall()
     for c in expired_claims:
+        # 角色仍在跑（或处于挂起等待）→ 续租，不能把活跃会话判成失联。
+        if _run_liveness(conn, c["task_id"], c["role_slug"]):
+            _renew_lease(conn, now, c["task_id"], c["role_slug"])
+            continue
         conn.execute(
             "UPDATE task_role_claims SET status='released', lease_expires_at=NULL, updated_at=? "
             "WHERE task_id=? AND role_slug=?", (now, c["task_id"], c["role_slug"])
@@ -247,6 +255,72 @@ def tick(conn: sqlite3.Connection, force: bool = False, dispatch: bool = True,
                 starved += 1
     conn.commit()
     return {"reclaimed": len(rows), "woken": woken, "starved": starved, "reminders_fired": fired}
+
+
+# 与 tasks.LEASE_SECONDS 保持一致；只用于续租，避免跨模块循环导入。
+LEASE_RENEW_SECONDS = 1800
+
+
+def _run_liveness(conn: sqlite3.Connection, task_id: str,
+                  role_slug: str | None = None) -> bool:
+    """该任务/角色是否仍有“活着”的非终态 run，租约到期时据此续租而不是回收。
+
+    - created/projecting/submitted/reviewing/suspended：控制面或 HITL 等待，续租；
+    - running：只有会话进程仍存活才续租（死进程交给 monitor/reaper）；
+    - 没有非终态 run：不续租，按原逻辑回收。
+    """
+    q = ("SELECT id, status, native_session_id FROM runs WHERE task_id=? "
+         "AND status NOT IN ('completed','failed','abandoned')")
+    params: list = [task_id]
+    if role_slug:
+        q += " AND role_slug=?"
+        params.append(role_slug)
+    from ..platform import factory  # 惰性导入避免循环
+
+    try:
+        pm = factory.get_platform()[0]
+    except Exception:  # noqa: BLE001
+        pm = None
+    for r in conn.execute(q, params).fetchall():
+        status = r["status"]
+        if status in ("created", "projecting", "suspended", "submitted", "reviewing"):
+            return True
+        if status != "running":
+            continue
+        sid = (r["native_session_id"] or "")
+        if sid.startswith("rs:"):
+            try:
+                from . import daemon as daemon_service
+                mgr = daemon_service.get_manager()
+                if mgr is not None and getattr(mgr, "enabled", False):
+                    st = mgr.status(sid[3:])
+                    if st.get("alive"):
+                        return True
+            except Exception:  # noqa: BLE001
+                pass
+        elif sid and pm is not None:
+            try:
+                if pm.probe(sid).alive:
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+    return False
+
+
+def _renew_lease(conn: sqlite3.Connection, now: str, task_id: str,
+                 role_slug: str | None = None) -> None:
+    lease = (datetime.now(timezone.utc)
+             + timedelta(seconds=LEASE_RENEW_SECONDS)).isoformat()
+    if role_slug:
+        conn.execute(
+            "UPDATE task_role_claims SET lease_expires_at=?, updated_at=? "
+            "WHERE task_id=? AND role_slug=?", (lease, now, task_id, role_slug))
+        return
+    conn.execute("UPDATE tasks SET lease_expires_at=?, updated_at=? WHERE id=?",
+                 (lease, now, task_id))
+    conn.execute(
+        "UPDATE task_role_claims SET lease_expires_at=?, updated_at=? "
+        "WHERE task_id=? AND status='working'", (lease, now, task_id))
 
 
 def _terminate_runs(conn: sqlite3.Connection, task_id: str, role_slug: str | None = None) -> None:

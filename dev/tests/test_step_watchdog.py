@@ -55,12 +55,81 @@ def test_nudge_suspended_step(env):
     assert row["nudge_count"] == 1
 
 
-def test_nudge_limit_fails_step(env):
+def test_nudge_skips_step_waiting_for_human(env):
+    """合法的 HITL 等待不自动重试；human 回复后由 mention 端点唤醒。"""
+    from anvil.services import tasks as tasks_service
+
+    conn, sched, orch, wid = env
+    tasks_service.mention(conn, "T1", "dev", "human", "请确认审计口径")
+    conn.commit()
+    sched._nudge_stalled(conn)
+    assert orch.pumped == []
+
+
+def test_nudge_resumes_after_human_replied(env):
+    from anvil.services import tasks as tasks_service
+
+    conn, sched, orch, wid = env
+    tasks_service.mention(conn, "T1", "dev", "human", "请确认审计口径")
+    tasks_service.comment(conn, "T1", "human", "同意，按 strict 口径")
+    conn.commit()
+    sched._nudge_stalled(conn)
+    assert orch.pumped == [("R1", "resume")]
+
+
+def test_nudge_skips_step_waiting_for_busy_role(env):
+    """等待另一个角色响应，且对方正在运行 → 不打断等待。"""
+    from anvil.services import tasks as tasks_service
+
+    conn, sched, orch, wid = env
+    tasks_service.mention(conn, "T1", "dev", "tester", "请复核 S2")
+    conn.execute(
+        "INSERT INTO runs (id, role_slug, task_id, status, started_at) "
+        "VALUES ('R-T', 'tester', 'T1', 'running', '2026-01-01T00:00:00')")
+    conn.commit()
+    sched._nudge_stalled(conn)
+    assert orch.pumped == []
+
+
+def test_nudge_resumes_when_target_role_is_idle(env):
+    """对方不在运行（已空闲/失联）→ 等待方仍会被唤醒检查，避免永久等不到回复。"""
+    from anvil.services import tasks as tasks_service
+
+    conn, sched, orch, wid = env
+    tasks_service.mention(conn, "T1", "dev", "tester", "请复核 S2")
+    conn.commit()
+    sched._nudge_stalled(conn)
+    assert orch.pumped == [("R1", "resume")]
+
+
+def test_nudge_limit_requeues_for_auto_recovery(env):
+    """唤醒次数用完不 @human，而是进入自动恢复队列（指数退避后重跑）。"""
     conn, sched, orch, wid = env
     conn.execute("UPDATE workflow_steps SET nudge_count=3 WHERE workflow_id=?", (wid,))
+    conn.commit()
+    sched._nudge_stalled(conn)
+    row = conn.execute(
+        "SELECT status, failure_reason, recovery_count, next_retry_at "
+        "FROM workflow_steps WHERE workflow_id=?", (wid,)).fetchone()
+    assert row["status"] == "pending"
+    assert row["failure_reason"] == "environment"
+    assert row["recovery_count"] == 1
+    assert row["next_retry_at"]
+    assert conn.execute(
+        "SELECT 1 FROM activities WHERE task_id='T1' AND kind='mention'").fetchone() is None
+
+
+def test_nudge_limit_exhausted_fails_without_human(env, monkeypatch):
+    monkeypatch.setattr(config, "AUTO_RECOVER_MAX_ATTEMPTS", 1)
+    conn, sched, orch, wid = env
+    conn.execute(
+        "UPDATE workflow_steps SET nudge_count=3, recovery_count=1 "
+        "WHERE workflow_id=?", (wid,))
     conn.commit()
     sched._nudge_stalled(conn)
     row = conn.execute("SELECT status, failure_reason FROM workflow_steps WHERE workflow_id=?",
                        (wid,)).fetchone()
     assert row["status"] == "failed"
     assert row["failure_reason"] == "environment"
+    assert conn.execute(
+        "SELECT 1 FROM activities WHERE task_id='T1' AND kind='mention'").fetchone() is None

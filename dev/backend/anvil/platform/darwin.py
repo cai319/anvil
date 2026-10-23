@@ -19,16 +19,19 @@ from .base import CredentialStore, ProbeResult, ProcessManager, SpawnResult
 _procs: dict[str, subprocess.Popen] = {}
 
 # 不泄漏给子进程的编排器会话变量（保留 ANTHROPIC_* 等运行时后端配置）。
-_SESSION_ENV_PREFIXES = ("CLAUDE_CODE_",)
-_SESSION_ENV_KEYS = {"CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ATTENDED"}
+# 不能按 `CLAUDE_CODE_` 前缀整片剥离：该命名空间也承载自动压缩窗口、effort、
+# 子代理模型等配置，剥离后会改变角色进程的上下文行为。
+_SESSION_ENV_KEYS = {
+    "CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_ENTRYPOINT",
+}
 
 
 def _clean_env(extra: dict[str, str]) -> dict[str, str]:
     """子进程环境：继承 os.environ 但去掉编排器自身的会话变量，再叠加运行时 env。"""
-    merged = {
-        k: v for k, v in os.environ.items()
-        if not k.startswith(_SESSION_ENV_PREFIXES) and k not in _SESSION_ENV_KEYS
-    }
+    merged = {k: v for k, v in os.environ.items() if k not in _SESSION_ENV_KEYS}
     merged.update(extra)
     return merged
 

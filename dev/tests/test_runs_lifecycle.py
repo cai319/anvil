@@ -27,6 +27,62 @@ def _mk_run(conn: sqlite3.Connection, rid="R1", role="qa-role", task="T1",
     conn.commit()
 
 
+def test_register_context_overflow_missing_run(conn):
+    assert runs_service.register_context_overflow(conn, "NOPE", max_retries=1) == "skip"
+
+
+def test_handle_context_overflow_pumps_wake_on_retry(tmp_path):
+    """main 的溢出回调：retry 时重新 wake 当前 run；超限后不再唤醒。"""
+    from anvil.main import _handle_context_overflow
+
+    db_path = str(tmp_path / "w.db")
+    conn = connect(db_path)
+    _mk_run(conn, rid="R1", status="running", sid="rs:qa-role")
+    conn.close()
+
+    class _Orch:
+        def __init__(self):
+            self.pumped = []
+
+        def pump(self, db_path, run_id, event, payload):
+            self.pumped.append((run_id, event))
+
+    orch = _Orch()
+    assert _handle_context_overflow(db_path, orch, "R1", "api_error", 1) == "retry"
+    assert orch.pumped == [("R1", "wake")]
+    assert _handle_context_overflow(db_path, orch, "R1", "api_error", 1) == "failed"
+    assert orch.pumped == [("R1", "wake")]  # 超限后不再自动重投
+
+
+def test_handle_context_overflow_threshold_does_not_consume_budget(tmp_path):
+    """主动水位轮换是正常上下文管理，重复多次也不计入溢出失败预算。"""
+    from anvil.main import _handle_context_overflow
+
+    db_path = str(tmp_path / "w2.db")
+    conn = connect(db_path)
+    _mk_run(conn, rid="R1", status="running", sid="rs:qa-role")
+    conn.close()
+
+    class _Orch:
+        def __init__(self):
+            self.pumped = []
+
+        def pump(self, db_path, run_id, event, payload):
+            self.pumped.append((run_id, event))
+
+    orch = _Orch()
+    for _ in range(5):
+        assert _handle_context_overflow(db_path, orch, "R1", "threshold", 1) == "retry"
+    conn = connect(db_path)
+    try:
+        r = runs_service.get_run(conn, "R1")
+        assert r["status"] == "created"
+        assert r["context_reset_count"] == 0
+    finally:
+        conn.close()
+    assert len(orch.pumped) == 5
+
+
 def test_mark_spawned_resets_started_at_and_stores_timeout(conn):
     _mk_run(conn, started="2026-01-01T00:00:00+00:00")
     runs_service.mark_spawned(conn, "R1", native_session_id="pg:4242", timeout_seconds=3600)
@@ -47,6 +103,28 @@ def test_set_status_records_failure_class(conn):
     # 后续状态迁移不清空 failure_class
     runs_service.set_status(conn, "R1", "failed")
     assert runs_service.get_run(conn, "R1")["failure_class"] == "platform_timeout"
+
+
+def test_register_context_overflow_retries_then_fails(conn):
+    """上下文溢出：第一次清会话回 created 自动重投；超过上限判失败并保留归因。"""
+    _mk_run(conn, rid="R1", status="running", sid="rs:qa-role")
+    assert runs_service.register_context_overflow(conn, "R1", max_retries=1,
+                                                  reason="threshold") == "retry"
+    r = runs_service.get_run(conn, "R1")
+    assert r["status"] == "created"
+    assert r["native_session_id"] is None
+    assert r["context_reset_count"] == 1
+
+    assert runs_service.register_context_overflow(conn, "R1", max_retries=1,
+                                                  reason="threshold") == "failed"
+    r2 = runs_service.get_run(conn, "R1")
+    assert r2["status"] == "failed"
+    assert r2["failure_class"] == "context_overflow"
+    assert r2["context_reset_count"] == 2
+    assert r2["ended_at"]
+
+    # 终态 run 不再重试
+    assert runs_service.register_context_overflow(conn, "R1", max_retries=1) == "skip"
 
 
 def test_suspend_active_marks_running_suspended(conn, monkeypatch):

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
+from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
 
 RUN_ACTIVE = ("created", "projecting", "running")
@@ -1088,6 +1090,15 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
     if feedback:
         feedback_block = f"\n## 上次决策/评审反馈（必须处理）\n{feedback}\n"
 
+    failure_reason = (step.get("failure_reason") or "").strip()
+    recovery_block = ""
+    if int(step.get("recovery_count") or 0) > 0 and failure_reason:
+        recovery_block = (
+            f"\n## 自动恢复重跑（第 {step['recovery_count']} 次）\n"
+            f"上次失败原因：{failure_reason}\n"
+            "先确认该原因是否已消除；环境/进程类问题可直接继续，"
+            "任务本身的问题请在 comment 中说明并调整方案。\n")
+
     slice_key = str(step.get("slice_key") or "").strip()
     if slice_key:
         source = str(step.get("source_step_id") or "").strip()
@@ -1149,7 +1160,7 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
             "如果项目为空或没有可审计范围，可提交空 slices 并在 rationale 中说明。\n"
             "不要调用 `anvil step submit` / `anvil task submit` / `anvil task claim`。\n"
         )
-        return base + loop_block + feedback_block
+        return base + loop_block + feedback_block + recovery_block
 
     if step.get("kind") == "decision":
         targets: list[str] = []
@@ -1200,6 +1211,7 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
             f"重做次数：{step.get('rework_count', 0)} / {step.get('max_rework', 0)}\n"
             f"可打回的目标步骤（on_reject）：\n{target_block}\n"
             + feedback_block
+            + recovery_block
             + "\n完成后执行：\n"
             f"- 通过：`anvil step decide {workflow['id']} {step['step_id']} "
             "--approve --feedback \"结论\"`\n"
@@ -1212,6 +1224,7 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
         base
         + loop_block
         + feedback_block
+        + recovery_block
         + f"\n完成后必须执行：`anvil step submit {workflow['id']} {step['step_id']} "
           "--summary \"完成摘要\"`。\n"
         "不要调用 `anvil task submit` / `anvil task claim`。\n"
@@ -1251,9 +1264,21 @@ def advance(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
     by_id = {s["step_id"]: s for s in steps}
     task = conn.execute("SELECT * FROM tasks WHERE id=?", (wf["task_id"],)).fetchone()
     started: list[str] = []
+    now_dt = datetime.now(timezone.utc)
     for s in steps:
         if s["status"] != "pending":
             continue
+        # 自动恢复的指数退避：未到 next_retry_at 前不重新拉起。
+        retry_at = s.get("next_retry_at")
+        if retry_at:
+            try:
+                when = datetime.fromisoformat(retry_at)
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                if when > now_dt:
+                    continue
+            except (ValueError, TypeError):
+                pass
         if any(by_id.get(d, {}).get("status") not in STEP_DONE for d in s["depends_on"]):
             continue
         role = s["role_slug"]
@@ -1278,7 +1303,7 @@ def advance(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
         now = now_iso()
         conn.execute(
             "UPDATE workflow_steps SET status='running', run_id=?, started_at=?, ended_at=NULL, "
-            "updated_at=? WHERE workflow_id=? AND step_id=?",
+            "next_retry_at=NULL, updated_at=? WHERE workflow_id=? AND step_id=?",
             (run_id, now, now, wid, s["step_id"]),
         )
         _step_activity(
@@ -1409,8 +1434,9 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
             target = by_id.get(tid) or {}
             conn.execute(
                 "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, "
-                "ended_at=NULL, summary=NULL, failure_reason=NULL, feedback=?, updated_at=? "
-                "WHERE workflow_id=? AND step_id=?",
+                "ended_at=NULL, summary=NULL, failure_reason=NULL, feedback=?, "
+                "recovery_count=0, next_retry_at=NULL, nudge_count=0, last_nudge_at=NULL, "
+                "updated_at=? WHERE workflow_id=? AND step_id=?",
                 (note, now, wid, tid))
             target_role = target.get("role_slug") or ""
             if target_role:
@@ -1482,39 +1508,77 @@ def retry_step(conn: sqlite3.Connection, wid: str, step_id: str) -> dict:
         if expanded:
             raise ConflictError(
                 "slice plan already expanded; create or re-dispatch the workflow to re-slice")
-    extra = ", rework_count=0" if step and step.get("kind") == "decision" else ""
     conn.execute(
         "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, ended_at=NULL, "
-        f"summary=NULL{extra}, updated_at=? WHERE workflow_id=? AND step_id=?",
+        "summary=NULL, recovery_count=0, next_retry_at=NULL, nudge_count=0, last_nudge_at=NULL, "
+        "updated_at=? WHERE workflow_id=? AND step_id=?",
         (now, wid, step_id))
+    if step and step.get("kind") == "decision":
+        conn.execute(
+            "UPDATE workflow_steps SET rework_count=0 WHERE workflow_id=? AND step_id=?",
+            (wid, step_id))
     conn.commit()
     return get_workflow(conn, wid)  # type: ignore[return-value]
 
 
+def _retry_backoff_seconds(attempt: int) -> float:
+    """指数退避：base, 2×base, 4×base… 上限 max。"""
+    base = max(1.0, float(config.AUTO_RECOVER_BACKOFF_SECONDS))
+    cap = max(base, float(config.AUTO_RECOVER_MAX_BACKOFF_SECONDS))
+    return min(cap, base * (2 ** max(0, int(attempt) - 1)))
+
+
 def fail_step(conn: sqlite3.Connection, wid: str, step_id: str, reason: str,
               category: str = "agent_error") -> None:
-    """run 失败/失联时标记步骤失败并通知人类。"""
+    """run 失败/失联：先指数退避自动重试，不 @human；预算耗尽才判失败并留非阻塞通知。
+
+    业界实践（Kubernetes restart backoff / Temporal activity retry / GitHub Actions
+    rerun）都是“有限次重试 + 指数退避 + 非阻塞告警”，而不是把恢复挂在人工在场。
+    评审、gate、审批等 HITL 确认点不在此路径，仍必须自然人处理。
+    """
     wf = get_workflow(conn, wid)
     if wf is None:
         return
     step = next((s for s in wf["steps"] if s["step_id"] == step_id), None)
     if step is None or step["status"] != "running":
         return
+    now = now_iso()
+    recovery = int(step.get("recovery_count") or 0) + 1
+    max_attempts = max(1, int(config.AUTO_RECOVER_MAX_ATTEMPTS))
+    if config.AUTO_RECOVER_ENABLED and recovery <= max_attempts:
+        delay = _retry_backoff_seconds(recovery)
+        next_at = (datetime.now(timezone.utc)
+                   + timedelta(seconds=delay)).isoformat()
+        conn.execute(
+            "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, "
+            "ended_at=NULL, summary=?, failure_reason=?, recovery_count=?, next_retry_at=?, "
+            "nudge_count=0, last_nudge_at=NULL, updated_at=? "
+            "WHERE workflow_id=? AND step_id=?",
+            (reason, category, recovery, next_at, now, wid, step_id))
+        _step_activity(conn, wf["task_id"], step["role_slug"], step, "retrying", reason,
+                       extra={"failure_reason": category, "attempt": recovery,
+                              "retry_at": next_at, "backoff_seconds": int(delay)})
+        conn.commit()
+        return
     conn.execute(
         "UPDATE workflow_steps SET status='failed', summary=?, failure_reason=?, "
-        "ended_at=?, updated_at=? WHERE workflow_id=? AND step_id=?",
-        (reason, category, now_iso(), now_iso(), wid, step_id))
+        "recovery_count=?, next_retry_at=NULL, ended_at=?, updated_at=? "
+        "WHERE workflow_id=? AND step_id=?",
+        (reason, category, recovery, now, now, wid, step_id))
     _step_activity(conn, wf["task_id"], step["role_slug"], step, "failed", reason,
-                   extra={"failure_reason": category})
+                   extra={"failure_reason": category, "attempt": recovery})
+    # 非阻塞通知：写 comment 而不是 @human。human 回来后在任务时间线能看到；
+    # 但系统不等待人工确认才能继续（依赖此步骤的其它步骤仍按依赖规则等待）。
     conn.execute(
         "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
         "VALUES (?,?,?,?,?)",
-        (wf["task_id"], "workflow", "mention",
-         jdumps({"target": "human",
-                 "message": f"工作流步骤「{step['title']}」（{step['role_slug']}）执行失败：{reason}。"
-                            "可在任务详情重试该步骤。",
-                 "event": "step_failed", "workflow_id": wid, "step_id": step_id}),
-         now_iso()),
+        (wf["task_id"], "workflow", "comment",
+         jdumps({"body": f"工作流步骤「{step['title']}」（{step['role_slug']}）"
+                          f"自动恢复 {recovery - 1} 次后仍失败：{reason}。"
+                          "已保留现场，可在任务详情重试该步骤。",
+                 "event": "step_failed", "workflow_id": wid, "step_id": step_id,
+                 "auto_recovered": recovery - 1}),
+         now),
     )
     conn.commit()
 

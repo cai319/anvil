@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 import sys
 import time
@@ -13,7 +14,8 @@ from anvil.db import connect, open_conn
 
 pytest.importorskip("anvil.graph")
 from anvil.services import runs as runs_service  # noqa: E402
-from anvil.services.daemon import DaemonManager, frame_user_message  # noqa: E402
+from anvil.services import tasks as tasks_service  # noqa: E402
+from anvil.services.daemon import DaemonManager, _clean_env, frame_user_message  # noqa: E402
 
 FAKE_RUNTIME = '''
 import json, os, sys, time
@@ -23,23 +25,49 @@ with open(os.environ["FAKE_ARGV_LOG"], "a") as f:
     f.write(mode + " " + sid + "\\n")
 init_model = os.environ.get("FAKE_MODEL", "fake-1m")
 switch_model = os.environ.get("FAKE_SWITCH_MODEL", "")
+result_usage = os.environ.get("FAKE_RESULT_USAGE", "")
+context_tokens = int(os.environ.get("FAKE_CONTEXT_TOKENS", "0"))
+context_error = os.environ.get("FAKE_CONTEXT_ERROR", "")
+result_text = os.environ.get("FAKE_RESULT_TEXT", "OK")
+warn_line = os.environ.get("FAKE_WARN_LINE", "")
 print(json.dumps({"type": "system", "subtype": "init", "session_id": sid,
                   "model": init_model}), flush=True)
+if warn_line:
+    print(warn_line, flush=True)
 turn = 0
 for line in sys.stdin:
     turn += 1
     time.sleep(0.2)
     model = switch_model if (switch_model and turn >= 2) else init_model
+    usage = {"input_tokens": 10, "output_tokens": 2}
+    if context_tokens:
+        usage = {"input_tokens": 1, "cache_read_input_tokens": context_tokens - 1,
+                 "output_tokens": 2}
     print(json.dumps({"type": "assistant", "message": {
         "model": model,
         "content": [
             {"type": "text", "text": "working"},
             {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}],
-        "usage": {"input_tokens": 10, "output_tokens": 2}}}), flush=True)
+        "usage": usage}}), flush=True)
+    if context_error == "plain":
+        print("Prompt is too long", flush=True)
+        continue
+    if context_error == "synthetic":
+        print(json.dumps({"type": "assistant", "isApiErrorMessage": True, "message": {
+            "model": "<synthetic>",
+            "content": [{"type": "text", "text": "Prompt is too long"}]}}), flush=True)
+        continue
+    if context_error == "result":
+        print(json.dumps({"type": "result", "subtype": "error", "is_error": True,
+                          "result": "Prompt is too long"}), flush=True)
+        continue
     print(json.dumps({"type": "user", "message": {"content": [
         {"type": "tool_result", "content": "file.txt"}]}}), flush=True)
-    print(json.dumps({"type": "result", "subtype": "success", "result": "OK",
-                      "total_cost_usd": 0.01}), flush=True)
+    result = {"type": "result", "subtype": "success", "result": result_text,
+              "total_cost_usd": 0.01}
+    if result_usage:
+        result["usage"] = json.loads(result_usage)
+    print(json.dumps(result), flush=True)
 '''
 
 
@@ -47,6 +75,21 @@ def test_frame_format():
     assert frame_user_message("hi") == (
         '{"type": "user", "message": {"role": "user", "content": '
         '[{"type": "text", "text": "hi"}]}}\n')
+
+
+def test_clean_env_drops_session_identity_but_keeps_cli_config(monkeypatch):
+    """只屏蔽编排器会话身份；CLAUDE_CODE_* 配置项（自动压缩窗口等）必须传给角色。"""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-session")
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_TOKEN", "parent-token")
+    monkeypatch.setenv("CLAUDE_CODE_CHILD_SESSION", "1")
+    monkeypatch.setenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "786432")
+    monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "max")
+    env = _clean_env({})
+    assert "CLAUDE_CODE_SESSION_ID" not in env
+    assert "CLAUDE_CODE_MESSAGING_TOKEN" not in env
+    assert "CLAUDE_CODE_CHILD_SESSION" not in env
+    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "786432"
+    assert env["CLAUDE_CODE_EFFORT_LEVEL"] == "max"
 
 
 @pytest.fixture
@@ -99,6 +142,132 @@ def _deliver(mgr, conn, fake, log, run_id, text="hello", task_id=None, extra_env
         "task_id": task_id,
     }
     return mgr.ensure_and_deliver(conn, "qa-role", **args)
+
+
+def test_result_usage_does_not_overwrite_context_size(env):
+    """result.usage 是会话累计消耗，不是当前上下文大小；不能覆盖 assistant 实测值。"""
+    conn, mgr, fake, log = env
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "first", extra_env={
+        "FAKE_RESULT_USAGE": json.dumps({
+            "input_tokens": 5_000_000,
+            "cache_read_input_tokens": 9_000_000,
+        }),
+    })
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    assert mgr.status("qa-role")["context_tokens"] == 10
+
+
+def test_hard_context_threshold_rotates_before_api_error(env):
+    """单轮工具循环内上下文接近窗口时，主动换新会话，而不是等 API 报错。"""
+    conn, mgr, fake, log = env
+    seen: list[tuple] = []
+    mgr.on_context_overflow = lambda role, run_id, reason: seen.append((role, run_id, reason))
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "first",
+             extra_env={"FAKE_CONTEXT_TOKENS": "950000"})
+    assert _wait(lambda: seen), "应触发上下文硬阈值回调"
+    assert seen[0][0] == "qa-role"
+    assert seen[0][1] == run["id"]
+    assert seen[0][2] == "threshold"
+    assert _wait(lambda: mgr.status("qa-role")["alive"] is False)
+    assert mgr._role("qa-role").cic_pending is True
+
+
+@pytest.mark.parametrize("mode", ["plain", "synthetic", "result"])
+def test_context_overflow_error_forms_trigger_recovery(env, mode):
+    """各 CLI 输出形态（裸文本 / synthetic assistant / result）都要识别为溢出。"""
+    conn, mgr, fake, log = env
+    seen: list[tuple] = []
+    mgr.on_context_overflow = lambda role, run_id, reason: seen.append((role, run_id, reason))
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "first",
+             extra_env={"FAKE_CONTEXT_ERROR": mode})
+    assert _wait(lambda: seen), f"{mode} 形态未触发溢出恢复"
+    assert seen[0][1] == run["id"]
+    assert seen[0][2] == "api_error"
+    assert mgr._role("qa-role").cic_pending is True
+
+
+def test_context_rotation_saves_knowledge_snapshot(env):
+    """换会话前自动把任务决策/进度写入 notes/knowledge，供新会话恢复判断依据。"""
+    conn, mgr, fake, log = env
+    now = "2026-01-01T00:00:00+00:00"
+    conn.execute(
+        "INSERT INTO tasks (id,title,status,created_at,updated_at) "
+        "VALUES ('T-K','OpenSSL audit','in_progress',?,?)", (now, now))
+    conn.execute(
+        "INSERT INTO workflows (id,task_id,definition_json,status,created_at,updated_at) "
+        "VALUES ('W-K','T-K','{}','running',?,?)", (now, now))
+    conn.execute(
+        "INSERT INTO workflow_steps "
+        "(workflow_id,step_id,title,role_slug,status,summary,updated_at) "
+        "VALUES ('W-K','S1','基线核查','qa-role','approved','S1 通过：72 字段一致',?)",
+        (now,))
+    conn.commit()
+    tasks_service.comment(conn, "T-K", "qa-role", "关键结论：strict 口径")
+
+    run = runs_service.create_run(conn, "qa-role", task_id="T-K")
+    _deliver(mgr, conn, fake, log, run["id"], "first", task_id="T-K",
+             extra_env={"FAKE_CONTEXT_TOKENS": "850000"})
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+
+    files = list((config.AGENTS_DIR / "qa-role" / "notes" / "knowledge").glob("**/*.md"))
+    assert files, "高水位换会话前应写入知识快照"
+    body = files[0].read_text(encoding="utf-8")
+    assert "关键结论：strict 口径" in body
+    assert "S1 通过：72 字段一致" in body
+
+
+def test_api_error_adapts_context_window_downward(env):
+    """API 报错说明真实窗口可能更小：按最后成功上下文收紧阈值，避免反复撞墙。"""
+    conn, mgr, fake, log = env
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "first", extra_env={
+        "FAKE_CONTEXT_TOKENS": "850000",
+        "FAKE_CONTEXT_ERROR": "plain",
+    })
+    assert _wait(lambda: mgr._role("qa-role").cic_pending is True)
+    st = mgr.status("qa-role")
+    assert st["active_context_window"] == 807_500
+    assert st["hard_limit_tokens"] < 800_000
+
+
+def test_context_phrases_in_normal_output_do_not_trigger_recovery(env):
+    """警告/最终回答里提到上下文措辞不能误判为溢出（否则正常会话会被反复终止）。"""
+    conn, mgr, fake, log = env
+    seen: list[tuple] = []
+    mgr.on_context_overflow = lambda role, run_id, reason: seen.append((role, run_id, reason))
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "first", extra_env={
+        "FAKE_WARN_LINE": (
+            "Claude Code doesn't recognize the model, so it assumes a context "
+            "window of 1000000 tokens."),
+        "FAKE_RESULT_TEXT": (
+            "分析结论：prompt is too long 是上下文窗口 it assumes 导致的。"),
+    })
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    assert seen == []
+    assert mgr.status("qa-role")["alive"] is True
+
+
+def test_high_context_after_turn_starts_fresh_session_next_wake(env):
+    """轮次结束时已过高水位：主动释放进程，下一次唤醒用 CIC 新会话，不续用大上下文。"""
+    conn, mgr, fake, log = env
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "first",
+             extra_env={"FAKE_CONTEXT_TOKENS": "850000"})
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    assert _wait(lambda: mgr.status("qa-role")["alive"] is False), "高水位应释放进程"
+    assert mgr._role("qa-role").cic_pending is True
+
+    _deliver(mgr, conn, fake, log, run["id"], "second",
+             extra_env={"FAKE_CONTEXT_TOKENS": "850000"})
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    modes = [line.split()[0] for line in log.read_text().splitlines()]
+    sids = [line.split()[1] for line in log.read_text().splitlines()]
+    assert modes == ["new", "new"]
+    assert sids[0] != sids[1]
 
 
 def test_same_process_reused_and_resume_after_exit(env):
@@ -204,6 +373,7 @@ def test_context_hint_only_on_task_switch_or_high_usage(env):
     assert "模型窗口约 200k" in hint
     assert "Anvil 冷唤醒阈值 160k" in hint
     assert "reset-context --task T2" in hint
+    assert "memory append" in hint  # 重置前先固化长期知识
     assert "任务已切换" in hint and "上下文占用较高" in hint
 
     same = mgr._context_hint(r, "T1")

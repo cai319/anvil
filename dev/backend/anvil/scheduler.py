@@ -20,7 +20,8 @@ from .api.events import publish
 from .db import open_conn
 from .platform import factory
 from .services import daemon as daemon_service
-from .services import governance, runs as runs_service, workflow as workflow_service
+from .services import governance, runs as runs_service, tasks as tasks_service
+from .services import workflow as workflow_service
 
 
 def _elapsed_seconds(started_at: str | None) -> float:
@@ -70,6 +71,8 @@ class Scheduler:
             self._advance_workflows(conn)
             self._pump_created(conn)
             self._monitor(conn)
+            self._reap_dead_runs(conn)
+            self._reap_stalled_phases(conn)
             self._reconcile(conn)
         finally:
             conn.close()
@@ -123,7 +126,7 @@ class Scheduler:
                     step_id=step["step_id"], workflow_id=_wid)
 
             workflow_service.advance(conn, wid, starter=starter)
-        # run 失败/失联 → 步骤失败并通知人类
+        # run 失败/失联 → 步骤进入自动恢复队列（指数退避重试，不 @human）
         rows = conn.execute(
             """SELECT s.workflow_id, s.step_id, r.status AS rs, r.failure_class
                  FROM workflow_steps s JOIN runs r ON r.id = s.run_id
@@ -135,8 +138,59 @@ class Scheduler:
             workflow_service.fail_step(conn, r["workflow_id"], r["step_id"], fc, category)
         self._nudge_stalled(conn)
 
+    @staticmethod
+    def _waiting_for_human(conn, task_id: str, role: str) -> bool:
+        """角色最后一条 @ 是 @human 且之后没有人类回复 → 合法 HITL 等待，不自动重试。"""
+        timeline = tasks_service.timeline(conn, task_id)
+        own = [i for i, e in enumerate(timeline)
+               if e["kind"] == "mention" and e["role"] == role]
+        if not own:
+            return False
+        last = own[-1]
+        payload = timeline[last].get("payload") or {}
+        if payload.get("target") != "human":
+            return False
+        return not any(e["role"] == "human" for e in timeline[last + 1:])
+
+    @staticmethod
+    def _waiting_for_busy_role(conn, task_id: str, role: str) -> bool:
+        """角色最后一条 @ 指向另一个角色，且对方仍活跃 → 合法等待，不打断。
+
+        对方有活跃 run（同任务或其它任务）或进程正忙/有排队消息，说明它还在处理；
+        唤醒等待方只会重复 @、浪费一次 turn。对方空闲/失联时才唤醒等待方检查。
+        """
+        timeline = tasks_service.timeline(conn, task_id)
+        own = [i for i, e in enumerate(timeline)
+               if e["kind"] == "mention" and e["role"] == role]
+        if not own:
+            return False
+        last = own[-1]
+        target = (timeline[last].get("payload") or {}).get("target")
+        if not target or target in ("human", role):
+            return False
+        # 对方已经 @ 回来 = 已响应
+        if any(e["kind"] == "mention" and e["role"] == target
+               and (e.get("payload") or {}).get("target") == role
+               for e in timeline[last + 1:]):
+            return False
+        if conn.execute(
+            "SELECT 1 FROM runs WHERE role_slug=? AND status IN (?,?,?) LIMIT 1",
+            (target, *workflow_service.RUN_ACTIVE),
+        ).fetchone():
+            return True
+        mgr = daemon_service.get_manager()
+        if mgr is not None and getattr(mgr, "enabled", False):
+            try:
+                st = mgr.status(target)
+            except Exception:  # noqa: BLE001
+                st = {}
+            if st.get("alive") and (st.get("status") == "busy"
+                                    or int(st.get("queue_len") or 0) > 0):
+                return True
+        return False
+
     def _nudge_stalled(self, conn) -> None:
-        """步骤 run 挂起且长时间无活动 → 唤醒角色续跑；超过上限判失败（防永久卡住）。"""
+        """步骤 run 挂起且长时间无活动 → 唤醒角色续跑；超过上限交给自动恢复（退避重排队）。"""
         now = datetime.now(timezone.utc)
         rows = conn.execute(
             """SELECT s.workflow_id, s.step_id, s.role_slug, s.run_id, s.last_nudge_at,
@@ -154,12 +208,18 @@ class Scheduler:
             if rs is None or rs == "completed":
                 conn.execute(
                     "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, "
-                    "updated_at=? WHERE workflow_id=? AND step_id=?",
+                    "next_retry_at=NULL, updated_at=? WHERE workflow_id=? AND step_id=?",
                     (now.isoformat(), r["workflow_id"], r["step_id"]))
                 conn.commit()
                 continue
             if rs != "suspended":
                 continue  # 仍在运行/投影中
+            # 等待人类决策不是“卡住”：保持挂起，human 回复后由 mention 端点唤醒。
+            if r["task_id"] and self._waiting_for_human(conn, r["task_id"], r["role_slug"]):
+                continue
+            # 等待另一个角色且对方仍在运行：同样不打断。
+            if r["task_id"] and self._waiting_for_busy_role(conn, r["task_id"], r["role_slug"]):
+                continue
             last = r["last_act"] or r["started_at"]
             if not last:
                 continue
@@ -228,7 +288,9 @@ class Scheduler:
                 if st.get("busy_since") and _elapsed_seconds(st["busy_since"]) > timeout:
                     # 超时失败也按“新上下文重试”：终止常驻进程并清 session_id，
                     # 避免下一次唤醒继续 --resume 卡死的上下文。
-                    mgr.reset_session(role)  # type: ignore[union-attr]
+                    # 换新上下文，但注入 CIC（记忆/工作流决策/知识快照），
+                    # 避免自动恢复后的新会话对历史一无所知。
+                    mgr.reset_session(role, cic=True)  # type: ignore[union-attr]
                     self.orchestrator.pump(self.db_path, r["id"], "process_exit",
                                            {"exit_code": 1, "failure_class": "platform_timeout"})
                 continue
@@ -248,6 +310,82 @@ class Scheduler:
                 continue
             if not probe.alive:
                 self.orchestrator.pump(self.db_path, r["id"], "process_exit", {"exit_code": probe.exit_code})
+
+    def _reap_dead_runs(self, conn) -> None:
+        """常驻进程已死但 run 仍 running → 宽限期后转 suspended。
+
+        process_exit 节点在「角色最后 @ 了别人」时会保留 running（等待对方），
+        但如果进程实际已死（崩溃/被外部杀掉/上下文溢出回调未送达），这个 run
+        会永久 running：workflow advance 不会再给该角色派步骤，看门狗也只处理
+        suspended。这里做最后兜底，保证死进程不会永久占住角色。
+        """
+        mgr = daemon_service.get_manager()
+        if mgr is None or not getattr(mgr, "enabled", False):
+            return
+        rows = conn.execute(
+            "SELECT r.id, r.role_slug, rs.updated_at FROM runs r "
+            "JOIN role_sessions rs ON rs.role_slug=r.role_slug "
+            "WHERE r.status='running' AND r.native_session_id LIKE 'rs:%'"
+        ).fetchall()
+        now = datetime.now(timezone.utc)
+        changed = False
+        for row in rows:
+            try:
+                st = mgr.status(row["role_slug"])
+            except Exception:  # noqa: BLE001
+                continue
+            alive = bool(st.get("alive"))
+            # 进程活着但正忙（或在处理排队消息）→ 这个 run 可能就在队列里，不能动。
+            # 活着却空闲且队列为空 → 没有任何人在处理这个 running run，按死进程回收。
+            if alive and (st.get("status") == "busy"
+                          or int(st.get("queue_len") or 0) > 0):
+                continue
+            updated_at = row["updated_at"]
+            if not updated_at:
+                continue
+            try:
+                dead_since = datetime.fromisoformat(updated_at)
+                if dead_since.tzinfo is None:
+                    dead_since = dead_since.replace(tzinfo=timezone.utc)
+                dead_for = (now - dead_since).total_seconds()
+            except (ValueError, TypeError):
+                continue
+            if dead_for < config.RUN_DEAD_GRACE_SECONDS:
+                continue
+            if not alive:
+                # 进程已死：下一次唤醒不要再 --resume 可能损坏的旧上下文。
+                try:
+                    mgr.mark_needs_fresh_context(
+                        row["role_slug"], "run reaped: dead role process")
+                except Exception:  # noqa: BLE001
+                    pass
+            from .services import runs as runs_service
+            runs_service.set_status(conn, row["id"], "suspended")
+            changed = True
+        if changed:
+            conn.commit()
+
+    def _reap_stalled_phases(self, conn) -> None:
+        """run 卡在 projecting（编排器在 project→spawn 之间崩溃）→ 周期自愈。
+
+        created run 每轮由 `_pump_created` 重投；这里只处理 projecting：
+        - 已有 native_session_id：说明进程已拉起，只是状态没写回 → 修正为 running；
+        - 没有会话：重新泵 wake，project/spawn 节点自身幂等。
+        """
+        rows = conn.execute(
+            "SELECT id, native_session_id, started_at FROM runs WHERE status='projecting'"
+        ).fetchall()
+        for row in rows:
+            if _elapsed_seconds(row["started_at"]) < config.RUN_PHASE_STALL_SECONDS:
+                continue
+            if row["native_session_id"]:
+                from .services import runs as runs_service
+                runs_service.set_status(conn, row["id"], "running")
+                continue
+            try:
+                self.orchestrator.pump(self.db_path, row["id"], "wake", {})
+            except Exception:  # noqa: BLE001 —— 下一轮 tick 继续尝试
+                pass
 
     def _reconcile(self, conn) -> None:
         rows = conn.execute(

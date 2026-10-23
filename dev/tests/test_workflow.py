@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from anvil import config
 from anvil.db import connect
 from anvil.services import board as board_service
 from anvil.services import tasks as tasks_service
@@ -127,14 +128,87 @@ def test_contract_flows_to_downstream_prompt(conn):
     assert "所有金额用 Decimal" in prompt
 
 
-def test_fail_step_records_attribution(conn):
+def test_fail_step_auto_requeues_without_human(conn):
+    """技术性失败先自动退避重试，不 @human（人类可能不在场）。"""
     wf = wf_service.create_workflow(conn, "T1", {"steps": [
         {"id": "S1", "title": "x", "role": "dev"}]})
     wf_service.advance(conn, wf["id"], starter=lambda *a: {"id": "r1"})
     wf_service.fail_step(conn, wf["id"], "S1", "platform_timeout", "environment")
     step = next(s for s in wf_service.get_workflow(conn, wf["id"])["steps"] if s["step_id"] == "S1")
-    assert step["status"] == "failed"
+    assert step["status"] == "pending"
     assert step["failure_reason"] == "environment"
+    assert step["recovery_count"] == 1
+    assert step["next_retry_at"]
+    assert conn.execute(
+        "SELECT 1 FROM activities WHERE task_id='T1' AND kind='mention'").fetchone() is None
+
+
+def test_fail_step_exhausted_marks_failed_without_human(conn, monkeypatch):
+    """恢复预算耗尽后判失败，但只留非阻塞 comment，不产生待回复的 @human。"""
+    monkeypatch.setattr(config, "AUTO_RECOVER_MAX_ATTEMPTS", 1)
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    wf_service.advance(conn, wf["id"], starter=lambda *a: {"id": "r1"})
+    conn.execute(
+        "UPDATE workflow_steps SET recovery_count=1 WHERE workflow_id=? AND step_id='S1'",
+        (wf["id"],))
+    conn.commit()
+    wf_service.fail_step(conn, wf["id"], "S1", "platform_timeout", "environment")
+    step = next(s for s in wf_service.get_workflow(conn, wf["id"])["steps"] if s["step_id"] == "S1")
+    assert step["status"] == "failed"
+    assert conn.execute(
+        "SELECT 1 FROM activities WHERE task_id='T1' AND kind='mention'").fetchone() is None
+    row = conn.execute(
+        "SELECT payload_json FROM activities WHERE task_id='T1' AND kind='comment' "
+        "ORDER BY id DESC LIMIT 1").fetchone()
+    assert row is not None and "step_failed" in row["payload_json"]
+
+
+def test_advance_respects_retry_backoff(conn):
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    conn.execute(
+        "UPDATE workflow_steps SET next_retry_at='2999-01-01T00:00:00+00:00' "
+        "WHERE workflow_id=? AND step_id='S1'", (wf["id"],))
+    conn.commit()
+    started = []
+    wf_service.advance(conn, wf["id"], starter=lambda *a: started.append(a) or {"id": "r1"})
+    assert started == []
+    conn.execute(
+        "UPDATE workflow_steps SET next_retry_at='2000-01-01T00:00:00+00:00' "
+        "WHERE workflow_id=? AND step_id='S1'", (wf["id"],))
+    conn.commit()
+    wf_service.advance(conn, wf["id"], starter=lambda *a: started.append(a) or {"id": "r1"})
+    assert len(started) == 1
+
+
+def test_retry_prompt_includes_recovery_reason(conn):
+    """自动恢复重跑时，步骤提示要带上次失败原因，避免 agent 重复踩坑。"""
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    conn.execute(
+        "UPDATE workflow_steps SET recovery_count=2, failure_reason='platform_timeout' "
+        "WHERE workflow_id=? AND step_id='S1'", (wf["id"],))
+    conn.commit()
+    step = next(s for s in wf_service.get_workflow(conn, wf["id"])["steps"]
+                if s["step_id"] == "S1")
+    prompt = wf_service.step_prompt(wf_service.get_workflow(conn, wf["id"]), step,
+                                    {"title": "t", "description": "d"})
+    assert "自动恢复" in prompt and "platform_timeout" in prompt
+
+
+def test_human_retry_resets_recovery_budget(conn):
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    conn.execute(
+        "UPDATE workflow_steps SET recovery_count=5, next_retry_at='2999-01-01T00:00:00+00:00' "
+        "WHERE workflow_id=? AND step_id='S1'", (wf["id"],))
+    conn.commit()
+    wf_service.retry_step(conn, wf["id"], "S1")
+    step = next(s for s in wf_service.get_workflow(conn, wf["id"])["steps"] if s["step_id"] == "S1")
+    assert step["status"] == "pending"
+    assert step["recovery_count"] == 0
+    assert step["next_retry_at"] is None
 
 
 # ---- 切片闭环：scope → execute[...] → verify → fix → verify2 → decide ----

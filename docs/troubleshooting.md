@@ -198,4 +198,103 @@ reader 遇到解码/管道异常时会记录完整 traceback 到 `role-session.l
 > 注意：后端必须从带有 `ANTHROPIC_*` 环境变量的同一个 shell 启动；双击 exe 不会继承你在
 > 某个终端里临时设置的环境变量。优先使用原生 `claude.exe`（见 Q13）。
 
+### Q17. 角色报 `Prompt is too long` / 上下文超限
+
+**现象**
+
+- `data/agents/<slug>/logs/role-session.log` 出现 `Prompt is too long`、
+  `context overflow (...) → 将用 CIC 新会话重投当前 run`；
+- run 可能短暂停在 `running`，或工作流步骤停住不动。
+
+**原因**
+
+- 一次唤醒是一个很长的工具循环：角色从一条消息开始连续调用工具，实测 1 小时可达 700+
+  次 API 请求；CLI 的自动压缩只在轮次边界生效，单轮内上下文会一路涨到模型窗口上限。
+- API 的上下文上限按 **input + max_tokens** 计算（Claude Code 默认 `max_tokens=32000`），
+  所以“input 还没到 1M”也可能被拒。
+- `result` 事件的 `usage` 是**会话累计消耗**（含历史所有 cache read），不是当前上下文大小；
+  Anvil 只认 assistant 事件的单次请求 usage。旧版本会用累计值覆盖，导致
+  `whoami`/阈值失真（实测被放大到 1.5M–3M）。
+
+**自动处理（当前版本）**
+
+1. assistant 实测上下文达到 `ANVIL_CONTEXT_HARD_RESET_RATIO`（默认 0.9）× 窗口时，
+   Anvil 主动终止该会话，写入知识快照，并用 CIC + 当前 run 的提示自动重投；
+   **主动水位轮换不计入失败预算，不会 @human**。
+2. 轮次结束时上下文已超过 CIC 阈值（默认窗口 80%）：释放进程，下次唤醒新建会话，
+   不再 `--resume` 大上下文。
+3. 真正的 API 溢出（`api_error`）会按“最后一次成功上下文 × 95%”自适应收紧窗口
+   （只调小不调大），然后换新会话重试；同一 run 超过
+   `ANVIL_CONTEXT_RESET_MAX_RETRIES`（默认 3）次后，交给步骤自动恢复队列。
+4. 三种 API 错误形态（裸文本 / synthetic assistant / result）都会识别；回调失败时，
+   调度器在 `ANVIL_RUN_DEAD_GRACE_SECONDS`（默认 60 秒）后把卡在 `running` 的 run
+   转为 `suspended`，并标记下一次唤醒使用全新 CIC 会话。
+
+**自动恢复策略（不依赖人类在场）**
+
+参考 Kubernetes restart backoff / Temporal activity retry / CI rerun 的实践：
+
+1. 技术性失败（`platform_timeout`、`spawn_error`、`agent_exit_*`、
+   `context_overflow`、步骤停滞）由 `fail_step` 自动重排队；
+2. 退避：`ANVIL_AUTO_RECOVER_BACKOFF_SECONDS` 起，逐次 ×2，封顶
+   `ANVIL_AUTO_RECOVER_MAX_BACKOFF_SECONDS`；
+3. 默认最多 `ANVIL_AUTO_RECOVER_MAX_ATTEMPTS`（10）次；耗尽后步骤标记失败，
+   只写一条**非阻塞 comment**，不产生待回复的 `@human`；
+4. 重跑时步骤提示会带“上次失败原因”，帮助 agent 避免重复踩坑；
+5. 人工确认点（评审、gate、审批、决策僵局）不受影响，仍走 HITL；
+   角色最后一条 @ 是 @human 且人类尚未回复时，看门狗不会自动重试/重排队，
+   human 回复后由 mention 端点唤醒。
+
+调度器每轮（默认 5 秒）还会自愈：`created` 重投、`projecting` 卡住重投、死进程回收、
+挂起步骤续跑、失败 run 重排队。可用 `ANVIL_AUTO_RECOVER=0` 关闭自动重试。
+
+**等待状态与 5 秒调度**
+
+| 状态 | 5 秒 tick 的行为 |
+|---|---|
+| 等其它角色（run=`suspended`，对方有活跃 run/正忙） | 不唤醒、不回收；只续租与健康检查 |
+| 等其它角色，对方空闲/失联 | 超过 `ANVIL_STEP_NUDGE_SECONDS`（默认 600s）才 `resume` 等待方检查 inbox/重新询问；3 次后进入自动恢复 |
+| 等 human（最后一条 @ 是 human） | `_waiting_for_human` 命中，不自动重试；human 回复后由 mention 端点唤醒 |
+| 等模型/工具返回（run=`running`，进程 busy） | 只做 liveness 检查；超过 run 级 timeout（默认 3600s）才重置会话并自动恢复 |
+| 进程已死、run 仍 `running` | 60s 宽限期后转 `suspended` + 下次用全新 CIC 会话 |
+| 租约到期（任务/角色 claim） | 有非终态 run 且仍活着 → 自动续租；确认失联才回收 |
+
+> 调度器不会每 5 秒就动一次等待中的角色；它只处理明确异常（死进程、僵尸 run、
+> 卡住的 projecting、到期的退避重试）。等待中的正常会话由事件（mention 回复）唤醒。
+
+**手动处理**
+
+- Run 详情 → **重置会话（新上下文）**，或 `POST /api/v1/runs/<run-id>/session-reset`；
+- 角色详情 →「运行时」→ **重置 Agent 会话**；
+- 检查是否还有僵尸 run（`status='running'` 但角色进程已不在）：重启后端会做启动自愈，
+  调度器也会按宽限期回收。
+
+**调参**
+
+| 变量 | 作用 |
+|---|---|
+| `ANVIL_MODEL_CONTEXT_WINDOWS` | 模型 id → 真实窗口；未识别模型务必显式配置 |
+| `ANVIL_CONTEXT_HARD_RESET_RATIO` | 单轮硬阈值比例；越小越早换会话 |
+| `ANVIL_CONTEXT_OUTPUT_RESERVE` | 预留的 max_tokens；按运行时实际值调整 |
+| `ANVIL_CIC_RESET_RATIO` | 轮次结束时换会话的阈值比例 |
+| `ANVIL_CONTEXT_RESET_MAX_RETRIES` | 单 run 上下文溢出的自动重投次数上限 |
+| `ANVIL_AUTO_RECOVER` | `1` 时技术性失败自动退避重试；`0` 关闭 |
+| `ANVIL_AUTO_RECOVER_MAX_ATTEMPTS` | 单步骤自动恢复次数上限（默认 10） |
+| `ANVIL_AUTO_RECOVER_BACKOFF_SECONDS` | 首次退避秒数（默认 120，之后指数增长） |
+| `ANVIL_AUTO_RECOVER_MAX_BACKOFF_SECONDS` | 退避上限（默认 1800 秒） |
+| `ANVIL_RUN_PHASE_STALL_SECONDS` | run 卡在 `projecting` 的重投宽限期 |
+
+**长期知识不受影响**
+
+- 换会话前 Anvil 会自动把任务的工作流步骤摘要、最近结论与交接写入
+  `data/agents/<slug>/notes/knowledge/`，并建立 FTS 索引；
+- 新会话的 CIC 注入本角色 `MEMORY.md` 尾部、按任务检索的相关记忆、工作流决策与最近快照；
+- 私有记忆按角色隔离：`data/agents/<slug>/MEMORY.md`、`notes/`、`notes/knowledge/` 与 FTS 检索
+  都只属于该角色；跨角色共享只通过人工批准的 lessons 通道；
+- 角色在运行中用 `anvil memory append "关键结论..."` 主动沉淀；每周复盘 reminder 会
+  把散落 notes 合并进 `MEMORY.md`。
+
+> 只有通过 `anvil memory append` / `anvil note write` 写入的内容会进入 FTS 索引；
+> 直接编辑 `MEMORY.md` 仍会被 CIC 直接读取，但直接编辑 `notes/` 不会自动重建索引。
+
 ---

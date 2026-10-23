@@ -55,6 +55,28 @@ def _graph_db_path(db_path: str) -> str:
     return str(p.with_name(p.stem + "-graph.db"))
 
 
+def _handle_context_overflow(db_path: str, orchestrator, run_id: str, reason: str,
+                             max_retries: int) -> str:
+    """上下文溢出后的恢复：retry 时清会话并重新 wake 当前 run；超限则判失败。"""
+    conn = open_conn(db_path)
+    try:
+        if reason == "threshold":
+            # 主动水位轮换：正常上下文管理，不计入失败/溢出重试预算。
+            outcome = runs_service.reset_run_for_redelivery(
+                conn, run_id, reason=reason)
+        else:
+            outcome = runs_service.register_context_overflow(
+                conn, run_id, max_retries=max_retries, reason=reason)
+    finally:
+        conn.close()
+    if outcome == "retry" and orchestrator is not None:
+        try:
+            orchestrator.pump(db_path, run_id, "wake", {})
+        except Exception:  # noqa: BLE001 —— 失败时 scheduler 会拾取 created run
+            pass
+    return outcome
+
+
 def _cleanup_orphans(conn) -> None:
     """清理 task 已删除但遗留的 workflow/steps/runs/sessions。
 
@@ -171,6 +193,15 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                 except Exception:  # noqa: BLE001
                     pass
         role_daemon.on_exit = _on_role_exit
+
+        def _on_role_context_overflow(role: str, run_id: str, reason: str) -> None:
+            """上下文溢出：清会话后用 CIC 新会话自动重投当前 run；超限则判失败。
+
+            daemon 只负责发现并终止会话；run 的恢复动作放在这里，避免反向依赖编排器。
+            """
+            _handle_context_overflow(path, orchestrator, run_id, reason,
+                                     config.CONTEXT_RESET_MAX_RETRIES)
+        role_daemon.on_context_overflow = _on_role_context_overflow
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
