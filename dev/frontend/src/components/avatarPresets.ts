@@ -5,6 +5,7 @@ export const AVATAR_PRESETS = [
 ] as const;
 
 const PRESET_SET = new Set<string>(AVATAR_PRESETS);
+const DEFAULT_PRESET_COUNT = 15;
 
 /** Stable mapping: same slug always gets the same default avatar. */
 export function defaultAvatarFor(slug: string): string {
@@ -13,8 +14,13 @@ export function defaultAvatarFor(slug: string): string {
     h ^= ch.charCodeAt(0);
     h = Math.imul(h, 16777619);
   }
-  const index = (h >>> 0) % AVATAR_PRESETS.length;
+  const index = (h >>> 0) % DEFAULT_PRESET_COUNT;
   return `big-smile:${AVATAR_PRESETS[index]}`;
+}
+
+export function initialFor(name: string, slug: string): string {
+  const chars = Array.from((name || slug).trim());
+  return chars[0]?.toUpperCase() ?? "?";
 }
 
 export type ResolvedAvatar =

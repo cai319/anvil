@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { avatarColor } from "../avatarColor";
-import { resolveAvatar } from "./avatarPresets";
+import { initialFor, resolveAvatar } from "./avatarPresets";
 
 type Props = {
   slug: string;
@@ -19,20 +19,23 @@ export function RoleAvatar({
   size = 28,
   className = "",
 }: Props) {
-  const [failed, setFailed] = useState(false);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
   const resolved = resolveAvatar(avatar, slug);
-
-  useEffect(() => {
-    setFailed(false);
-  }, [avatar, slug]);
+  const failed = resolved.kind === "image" && failedSrc === resolved.src;
 
   if (resolved.kind === "image" && !failed) {
     return (
       <span
         className={`role-avatar role-avatar-image ${className}`}
         style={{ width: size, height: size }}
+        aria-hidden="true"
       >
-        <img src={resolved.src} alt="" onError={() => setFailed(true)} />
+        <img
+          src={resolved.src}
+          alt=""
+          style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "50%" }}
+          onError={() => setFailedSrc(resolved.src)}
+        />
       </span>
     );
   }
@@ -46,8 +49,9 @@ export function RoleAvatar({
         background: color || avatarColor(slug),
         fontSize: Math.max(10, Math.round(size * 0.4)),
       }}
+      aria-hidden="true"
     >
-      {(name || slug).slice(0, 1).toUpperCase()}
+      {initialFor(name, slug)}
     </span>
   );
 }
