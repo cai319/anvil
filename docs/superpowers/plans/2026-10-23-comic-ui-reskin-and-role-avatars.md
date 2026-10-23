@@ -3504,6 +3504,13 @@ git commit -m "refactor(ui): switch to layered comic styles
 Co-Authored-By: Claude Code <noreply@anthropic.com>"
 ```
 
+#### Review hardening（2026-10-24 真实页面审查追加）
+
+- `.field` 默认改为 `--text-on-ink`，只在 `.modal` / `.create-role-panel` / `.roles-detail` / `.task-side` / `.session-head` 内使用纸面墨色；helper 文本同理。修复 Runtimes 深色页面上「默认运行时」标签 1:1 不可见。
+- `.create-role-panel` 补 `color: var(--text-on-paper)`。
+- `.history-table thead th` 补 sticky 表头。
+- ≤1199 隐藏空 `.sidebar-foot` 条。
+
 ---
 
 ### Task 13: Icon 组件与导航图标
