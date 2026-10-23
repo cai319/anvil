@@ -24,7 +24,7 @@ export function RoleAvatar({
 
   useEffect(() => {
     setFailed(false);
-  }, [avatar]);
+  }, [avatar, slug]);
 
   if (resolved.kind === "image" && !failed) {
     return (
