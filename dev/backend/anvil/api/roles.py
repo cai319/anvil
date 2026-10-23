@@ -259,6 +259,17 @@ def update_role(slug: str, body: RoleIn, conn=Depends(get_db),
     return services.roles.get(conn, slug)  # type: ignore[return-value]
 
 
+@router.put("/roles/{slug}/avatar", response_model=RoleOut)
+def update_role_avatar(slug: str, body: dict, conn=Depends(get_db),
+                       auth: Auth = Depends(require_human)):
+    """角色头像独立更新：只改外观，不重存整份角色配置。"""
+    role = services.roles.get(conn, slug)
+    if role is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    avatar = _validate_avatar(body.get("avatar"))
+    return services.roles.update_avatar(conn, slug, avatar)
+
+
 @router.put("/roles/{slug}/runtime", response_model=RoleOut)
 def update_role_runtime(slug: str, body: dict, conn=Depends(get_db),
                         auth: Auth = Depends(require_human)):
@@ -621,6 +632,8 @@ def clone_role(slug: str, conn=Depends(get_db), auth: Auth = Depends(require_hum
         raise HTTPException(status_code=404, detail="role not found")
     from ..util import jloads
     definition = jloads(src["definition_json"], {})
+    if src.get("avatar"):
+        definition["avatar"] = src["avatar"]
     new_slug = f"{slug}-clone"
     return services.roles.create(conn, slug=new_slug, display_name=f"{src['display_name']} (clone)", definition=definition)
 

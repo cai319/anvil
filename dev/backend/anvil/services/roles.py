@@ -377,6 +377,8 @@ def update(conn: sqlite3.Connection, slug: str, **fields) -> dict | None:
     definition = fields.pop("definition", None)
     if definition is not None:
         fields["definition_json"] = jdumps(definition)
+        if "avatar" in definition:
+            fields["avatar"] = definition.get("avatar")
     if not fields:
         return get(conn, slug)
     fields = {**fields, "updated_at": now_iso()}
@@ -388,6 +390,22 @@ def update(conn: sqlite3.Connection, slug: str, **fields) -> dict | None:
         if role:
             _write_profile(slug, role["display_name"], definition)
             _snapshot_version(conn, slug, role["display_name"], definition, source="update")
+    return get(conn, slug)
+
+
+def update_avatar(conn: sqlite3.Connection, slug: str, avatar: str | None) -> dict | None:
+    """只改头像：更新角色列 + definition_json，不产生画像版本快照。"""
+    role = get(conn, slug)
+    if role is None:
+        return None
+    definition = dict(role.get("definition") or {})
+    definition["avatar"] = avatar
+    conn.execute(
+        "UPDATE roles SET avatar=?, definition_json=?, updated_at=? WHERE slug=?",
+        (avatar, jdumps(definition), now_iso(), slug),
+    )
+    conn.commit()
+    _write_profile(slug, role["display_name"], definition)
     return get(conn, slug)
 
 

@@ -136,6 +136,128 @@ async def test_auto_create_role_accepts_initials(client, monkeypatch):
     assert r.json()["avatar"] == "initials"
 
 
+async def test_update_role_avatar(client):
+    await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
+    await client.post(f"{API}/roles", json=role_payload("dev"), headers=human_headers())
+
+    r = await client.put(
+        f"{API}/roles/dev/avatar",
+        json={"avatar": "big-smile:cid"},
+        headers=human_headers(),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["avatar"] == "big-smile:cid"
+
+    got = await client.get(f"{API}/roles/dev")
+    assert got.json()["avatar"] == "big-smile:cid"
+
+
+async def test_avatar_accepts_initials_and_null(client):
+    await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
+    await client.post(f"{API}/roles", json=role_payload("dev"), headers=human_headers())
+
+    r = await client.put(
+        f"{API}/roles/dev/avatar", json={"avatar": "initials"}, headers=human_headers(),
+    )
+    assert r.status_code == 200
+    assert r.json()["avatar"] == "initials"
+
+    r = await client.put(
+        f"{API}/roles/dev/avatar", json={"avatar": None}, headers=human_headers(),
+    )
+    assert r.status_code == 200
+    assert r.json()["avatar"] is None
+
+
+async def test_invalid_avatar_is_rejected(client):
+    await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
+    await client.post(f"{API}/roles", json=role_payload("dev"), headers=human_headers())
+
+    r = await client.put(
+        f"{API}/roles/dev/avatar",
+        json={"avatar": "javascript:alert(1)"},
+        headers=human_headers(),
+    )
+    assert r.status_code == 422
+
+
+async def test_avatar_update_requires_human(client):
+    await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
+    await client.post(f"{API}/roles", json=role_payload("dev"), headers=human_headers())
+
+    r = await client.put(
+        f"{API}/roles/dev/avatar",
+        json={"avatar": "big-smile:ace"},
+        headers=auth_headers(role="developer"),
+    )
+    assert r.status_code == 403
+
+
+async def test_clone_role_preserves_avatar(client):
+    await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
+    await client.post(
+        f"{API}/roles",
+        json=role_payload("dev", avatar="big-smile:ace"),
+        headers=human_headers(),
+    )
+    r = await client.post(f"{API}/roles/dev/clone", headers=human_headers())
+    assert r.status_code == 201, r.text
+    assert r.json()["avatar"] == "big-smile:ace"
+
+    got = await client.get(f"{API}/roles/dev-clone")
+    assert got.json()["avatar"] == "big-smile:ace"
+
+
+async def test_rollback_keeps_avatar_consistent(client):
+    await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
+    await client.post(
+        f"{API}/roles",
+        json=role_payload("dev", avatar="big-smile:ace"),
+        headers=human_headers(),
+    )
+    # 第二次配置更新会生成 version 2；随后头像改为 bee。
+    await client.put(
+        f"{API}/roles/dev",
+        json=role_payload("dev", display_name="Dev 2"),
+        headers=human_headers(),
+    )
+    await client.put(
+        f"{API}/roles/dev/avatar",
+        json={"avatar": "big-smile:bee"},
+        headers=human_headers(),
+    )
+    # 回滚到 version 1 应把 definition 里的 ace 同步回 avatar 列。
+    r = await client.post(f"{API}/roles/dev/rollback/1", headers=human_headers())
+    assert r.status_code == 200, r.text
+    assert r.json()["avatar"] == "big-smile:ace"
+
+    got = await client.get(f"{API}/roles/dev")
+    assert got.json()["avatar"] == "big-smile:ace"
+
+
+async def test_recreate_role_preserves_avatar(client):
+    await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
+    await client.post(
+        f"{API}/roles",
+        json=role_payload("dev", avatar="big-smile:ace"),
+        headers=human_headers(),
+    )
+
+    # 同一个 slug 再次创建、但不带头像：保留原头像。
+    r = await client.post(f"{API}/roles", json=role_payload("dev"), headers=human_headers())
+    assert r.status_code == 201, r.text
+    assert r.json()["avatar"] == "big-smile:ace"
+
+    # 再次创建并显式换头像：更新为新值。
+    r = await client.post(
+        f"{API}/roles",
+        json=role_payload("dev", avatar="big-smile:bee"),
+        headers=human_headers(),
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["avatar"] == "big-smile:bee"
+
+
 def test_legacy_roles_table_gets_avatar_column(tmp_path):
     from anvil.db import connect
 
