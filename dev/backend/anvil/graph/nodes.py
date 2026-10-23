@@ -13,6 +13,7 @@ import json
 import os
 import secrets
 import shutil
+import logging
 import sqlite3
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,8 @@ from ..services import (
     tooling as tooling_service,
 )
 from ..util import jloads, now_iso
+
+logger = logging.getLogger("anvil.nodes")
 from . import render
 
 
@@ -522,6 +525,7 @@ def spawn_node(state: dict, config) -> dict:
                     model_pool=model_pool, context_window_floor=window_floor,
                     runtime_id=runtime_id, workspace_path=ws_path)
             except Exception:  # noqa: BLE001 —— 无法拉起/投递即失败
+                logger.exception("persistent spawn failed for run %s", run_id)
                 runs_service.set_status(conn, run_id, "failed", ended_at=now_iso(),
                                         failure_class="spawn_error")
                 return {}
@@ -541,6 +545,7 @@ def spawn_node(state: dict, config) -> dict:
             else:
                 result = pm.spawn(executable, args, cwd, env)
         except Exception:  # noqa: BLE001 —— 无法拉起子进程即失败，不做静默降级
+            logger.exception("spawn failed for run %s", run_id)
             runs_service.set_status(conn, run_id, "failed", ended_at=now_iso(),
                                     failure_class="spawn_error")
             return {}

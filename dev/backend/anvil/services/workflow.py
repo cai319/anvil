@@ -1313,7 +1313,8 @@ def _advance_locked(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
         now = now_iso()
         conn.execute(
             "UPDATE workflow_steps SET status='running', run_id=?, started_at=?, ended_at=NULL, "
-            "next_retry_at=NULL, updated_at=? WHERE workflow_id=? AND step_id=?",
+            "summary=NULL, failure_reason=NULL, next_retry_at=NULL, updated_at=? "
+            "WHERE workflow_id=? AND step_id=?",
             (run_id, now, now, wid, s["step_id"]),
         )
         _step_activity(
