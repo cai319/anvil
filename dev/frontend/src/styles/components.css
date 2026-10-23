@@ -486,14 +486,12 @@ select { height: 34px; }
 .table-scroll { color-scheme: light; }
 .modal,
 .table-scroll,
-.session-thread,
 .task-side,
 .roles-detail {
   scrollbar-color: rgba(20, 19, 26, 0.28) rgba(239, 228, 210, 0.6);
 }
 .modal::-webkit-scrollbar-thumb,
 .table-scroll::-webkit-scrollbar-thumb,
-.session-thread::-webkit-scrollbar-thumb,
 .task-side::-webkit-scrollbar-thumb,
 .roles-detail::-webkit-scrollbar-thumb {
   background: rgba(20, 19, 26, 0.28);
@@ -1199,3 +1197,64 @@ select { height: 34px; }
   border: var(--stroke) solid var(--ink-line-strong);
   border-radius: var(--radius-sm);
 }
+
+/* ===== Review hardening: paper context / thread / workflow ===== */
+
+/* 线程：只有消息气泡在纸面上；审计/系统事件保持在深色画布上用浅色文字 */
+.thread-meta { color: var(--text-on-ink-muted); }
+.thread-meta strong { color: var(--text-on-ink); }
+.thread-item.is-message .thread-meta { color: var(--text-on-paper-muted); }
+.thread-item.is-message .thread-meta strong { color: var(--text-on-paper); }
+.thread-item.is-human .thread-body { background: transparent; box-shadow: none; }
+.thread-item.is-human.is-message .thread-body { background: var(--yellow); box-shadow: var(--shadow-red); }
+.thread-item.is-human .thread-meta,
+.thread-item.is-human .muted { color: var(--text-on-ink-muted); }
+.thread-item.is-human.is-message .thread-meta,
+.thread-item.is-human.is-message .muted { color: var(--text-on-paper-soft); }
+
+/* 纸面按钮/链接/焦点 */
+button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
+.run-live { color: var(--green-on-paper); }
+.member-row.picked .member-desc,
+.member-row.picked .member-slug { color: var(--text-on-paper-soft); }
+.side-role-summary { opacity: 1; }
+.side-role .role-live-chip { padding: 2px 8px 2px 5px; }
+.activity .act-meta { color: var(--text-on-ink-muted); }
+.kanban-empty { border-color: var(--border-strong); }
+.modal input:not([type="checkbox"]),
+.modal textarea { padding: 6px 9px; border-radius: var(--radius-sm); }
+.card :focus-visible,
+.inbox-item :focus-visible,
+.modal :focus-visible,
+.board :focus-visible,
+.history-table :focus-visible,
+.roles-detail :focus-visible,
+.task-side :focus-visible,
+.session-head :focus-visible,
+.create-role-panel :focus-visible { outline-color: var(--ink-900); }
+.modal input:not([type="checkbox"]):focus,
+.modal textarea:focus { border-color: var(--ink-900); box-shadow: var(--shadow-cyan); }
+
+/* 通用 button:hover 不能压过这些状态 */
+.drawer-mask:hover:not(:disabled) { background: rgba(20, 19, 26, 0.6); }
+.member-row.picked:hover:not(:disabled) { background: var(--yellow); }
+.mention-item.active:hover:not(:disabled) { background: var(--yellow); color: var(--ink-900); }
+.avatar-tile.selected:hover:not(:disabled) { background: var(--paper-3); }
+.wf-slice-row-btn:hover { background: var(--paper-hover); }
+
+/* 工作流：图谱节点/阶段保留内联深色背景，文字改为浅色；纸面行内的内联状态色强制为墨色 */
+.wf-node { color: var(--text-on-ink); }
+.wf-node-title { white-space: normal; }
+.wf-node-id,
+.wf-node-role,
+.wf-flow-phase-role,
+.wf-flow-phase-count,
+.wf-flow-phase-sub { color: var(--text-on-ink-muted); }
+.wf-node-gate { color: var(--yellow); }
+.wf-flow-phase { color: var(--text-on-ink); }
+.wf-flow-arrow,
+.wf-loop-phases { color: var(--text-on-paper-muted); }
+.wf-loop-mark { color: var(--ink-900); }
+.wf-slice-step > span[style],
+.wf-detail .status[style] { color: var(--ink-900) !important; }
+.wf-detail { border-color: var(--ink-900); }
