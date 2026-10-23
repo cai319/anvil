@@ -317,7 +317,15 @@ dd { margin: 0; }
 }
 
 /* 任务会话双栏布局由 app shell 的响应式规则接管 */
-.task-main { min-width: 0; }
+.task-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.task-main > .session-actions,
+.task-main > .session-thread:not(.session-thread-main),
+.task-main > p { flex: none; }
 .task-side {
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -968,12 +976,22 @@ body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 6px var(--panel-w);
   gap: 0;
-  align-items: start;
+  align-items: stretch;
+  height: calc(100dvh - var(--header-h) - (var(--content-pad) * 2) - 200px);
+  min-height: 460px;
 }
 .task-layout.panel-collapsed { grid-template-columns: minmax(0, 1fr); }
 .task-layout.panel-collapsed > .splitter,
 .task-layout.panel-collapsed > .task-side { display: none; }
-.task-main { min-width: 0; }
+.task-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.task-main > .session-actions,
+.task-main > .session-thread:not(.session-thread-main),
+.task-main > p { flex: none; }
 .task-side {
   position: sticky;
   top: 0;
@@ -1024,12 +1042,15 @@ body {
 .icon-btn:hover { color: var(--text); }
 
 /* 会话与输入框 */
-.session-thread {
-  max-height: calc(100dvh - var(--header-h) - (var(--content-pad) * 2) - 280px);
-  min-height: 320px;
+.session-thread-main {
+  flex: 1 1 auto;
+  min-height: 240px;
+  max-height: none;
+  overflow-y: auto;
 }
 .session-compose {
   /* 输入条在线程下方正常占位；线程内部滚动，不再用 sticky 覆盖消息。 */
+  flex: none;
   position: static;
   margin-top: 8px;
   z-index: auto;
@@ -1094,6 +1115,13 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
     position: static;
     max-height: none;
     margin-top: 12px;
+  }
+  .task-layout {
+    height: auto;
+    min-height: 0;
+  }
+  .session-thread-main {
+    max-height: 60vh;
   }
   .kanban-col { min-width: 230px; }
 }

@@ -266,6 +266,22 @@ export function TaskDetail({ id }: { id: string }) {
     if (!el) return;
     pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   };
+  // 线程高度由 flex/视口计算，首帧时可能还没有最终高度；ResizeObserver 在拿到
+  // 真实 clientHeight 后再滚到底，避免打开任务时停在最旧消息。
+  useEffect(() => {
+    if (tab !== "chat") return;
+    const el = threadRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      if (initialScrollRef.current || pinnedRef.current) {
+        el.scrollTop = el.scrollHeight;
+        initialScrollRef.current = false;
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [tab, task?.id]);
+
 
   // 描述被 6 行截断时显示“展开全文”；用实际布局高度判断，避免按字符数误判。
   useEffect(() => {
@@ -820,7 +836,7 @@ export function TaskDetail({ id }: { id: string }) {
             </section>
           )}
 
-          <section className="session-thread" ref={threadRef} onScroll={onThreadScroll}>
+          <section className="session-thread session-thread-main" ref={threadRef} onScroll={onThreadScroll}>
             <div className="thread-head">
               <h2 className="pane-title">会话 · {filteredTimeline.length} 条</h2>
               <div className="thread-head-right">
