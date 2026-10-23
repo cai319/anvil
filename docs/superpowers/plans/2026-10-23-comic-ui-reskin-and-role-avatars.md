@@ -595,6 +595,8 @@ export const AVATAR_PRESETS = [
 ] as const;
 
 const PRESET_SET = new Set<string>(AVATAR_PRESETS);
+// 固定默认映射的取模基数：以后追加新预设不会改变已有角色的默认头像。
+const DEFAULT_PRESET_COUNT = 15;
 
 /** 稳定映射：同一 slug 永远得到同一默认头像。 */
 export function defaultAvatarFor(slug: string): string {
@@ -603,8 +605,14 @@ export function defaultAvatarFor(slug: string): string {
     h ^= ch.charCodeAt(0);
     h = Math.imul(h, 16777619);
   }
-  const index = (h >>> 0) % AVATAR_PRESETS.length;
+  const index = (h >>> 0) % DEFAULT_PRESET_COUNT;
   return `big-smile:${AVATAR_PRESETS[index]}`;
+}
+
+/** 首字母兜底：用 Array.from 避免拆开 emoji/代理对。 */
+export function initialFor(name: string, slug: string): string {
+  const chars = Array.from((name || slug).trim());
+  return chars[0]?.toUpperCase() ?? "?";
 }
 
 export type ResolvedAvatar =
@@ -631,9 +639,9 @@ export function resolveAvatar(
 创建 `dev/frontend/src/components/RoleAvatar.tsx`：
 
 ```tsx
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { avatarColor } from "../avatarColor";
-import { resolveAvatar } from "./avatarPresets";
+import { initialFor, resolveAvatar } from "./avatarPresets";
 
 type Props = {
   slug: string;
@@ -652,20 +660,23 @@ export function RoleAvatar({
   size = 28,
   className = "",
 }: Props) {
-  const [failed, setFailed] = useState(false);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
   const resolved = resolveAvatar(avatar, slug);
-
-  useEffect(() => {
-    setFailed(false);
-  }, [avatar]);
+  const failed = resolved.kind === "image" && failedSrc === resolved.src;
 
   if (resolved.kind === "image" && !failed) {
     return (
       <span
         className={`role-avatar role-avatar-image ${className}`}
         style={{ width: size, height: size }}
+        aria-hidden="true"
       >
-        <img src={resolved.src} alt="" onError={() => setFailed(true)} />
+        <img
+          src={resolved.src}
+          alt=""
+          style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "50%" }}
+          onError={() => setFailedSrc(resolved.src)}
+        />
       </span>
     );
   }
@@ -679,8 +690,9 @@ export function RoleAvatar({
         background: color || avatarColor(slug),
         fontSize: Math.max(10, Math.round(size * 0.4)),
       }}
+      aria-hidden="true"
     >
-      {(name || slug).slice(0, 1).toUpperCase()}
+      {initialFor(name, slug)}
     </span>
   );
 }
@@ -791,7 +803,7 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 
 ```tsx
 import { useEffect, useRef, useState } from "react";
-import { AVATAR_PRESETS, defaultAvatarFor } from "./avatarPresets";
+import { AVATAR_PRESETS, initialFor, resolveAvatar } from "./avatarPresets";
 
 type Props = {
   mode: "inline" | "modal";
@@ -828,9 +840,9 @@ export function AvatarPicker({
     return () => window.removeEventListener("keydown", onKey);
   }, [mode, onClose]);
 
-  const current = draft ?? defaultAvatarFor(slug);
-  const currentPreset = current.startsWith("big-smile:")
-    ? current.slice("big-smile:".length)
+  const resolved = resolveAvatar(draft, slug);
+  const currentPreset = resolved.kind === "image"
+    ? resolved.src.slice("/avatars/big-smile/".length, -".svg".length)
     : null;
 
   const pick = (next: string) => {
@@ -877,7 +889,7 @@ export function AvatarPicker({
         aria-label="使用首字母头像"
         title="使用首字母"
       >
-        <span>{(name || slug).slice(0, 1).toUpperCase()}</span>
+        <span>{initialFor(name, slug)}</span>
       </button>
     </div>
   );
