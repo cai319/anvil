@@ -17,6 +17,7 @@ class Auth:
     session: str
     role: str | None
     task_id: str | None = None  # 绑定的任务；非空时该会话只能操作这一个任务
+    run_id: str | None = None    # 运行级会话绑定的 run；用于 stale-run 围栏
 
 
 # 本地单用户模式下的共享 token。显式设置 ANVIL_AUTH_TOKEN 后只接受该值。
@@ -27,7 +28,7 @@ def _session_row(request: Request, token: str):
     conn = open_conn(request.app.state.db_path)
     try:
         return conn.execute(
-            "SELECT role_slug, task_id, expires_at FROM sessions WHERE token=?",
+            "SELECT role_slug, task_id, run_id, expires_at FROM sessions WHERE token=?",
             (token,),
         ).fetchone()
     finally:
@@ -68,7 +69,8 @@ def get_auth(
         if row is not None:
             if row["expires_at"] and row["expires_at"] < now_iso():
                 raise HTTPException(status_code=401, detail="session expired")
-            return Auth(session=x_anvil_session, role=row["role_slug"], task_id=row["task_id"])
+            return Auth(session=x_anvil_session, role=row["role_slug"],
+                        task_id=row["task_id"], run_id=row["run_id"])
 
     # 测试旁路（仅测试环境用；M2 上真 session 校验时须确保生产关死 ANVIL_TEST_AUTH）。
     test_auth = bool(getattr(request.app.state, "test_auth", False)) or os.environ.get("ANVIL_TEST_AUTH") == "1"

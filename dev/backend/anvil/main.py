@@ -23,11 +23,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import config
 from .api import (
-    actions, agent_inbox, board, events, governance, inbox, knowledge_repos, memory, reminders, roles, runs, runtimes, tasks, templates, tooling, workflow, workspaces,
+    actions, agent_inbox, board, event_log, events, governance, inbox, knowledge_repos, memory, reminders, roles, runs, runtimes, tasks, templates, tooling, workflow, workspaces,
 )
 from .db import connect, open_conn
 from .deps import token_is_valid
 from .services import daemon as daemon_service
+from .services import ledger as ledger_service
 from .services import roles as roles_service
 from .services import runs as runs_service
 from .graph import build_graph, get_checkpointer
@@ -159,6 +160,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         except OSError:
             pass
     _init = connect(path)
+    ledger_service.backfill_once(_init)
     # 历史删除遗留的孤儿 workflow/run：启动时清理，避免调度器继续推进已删除任务。
     _cleanup_orphans(_init)
     # 跨平台/迁移修复：数据库里的角色 home_path 可能来自旧系统（如 macOS → Windows）。
@@ -263,6 +265,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     app.include_router(reminders.router, prefix="/api/v1", tags=["reminders"])
     app.include_router(tooling.router, prefix="/api/v1", tags=["tooling"])
     app.include_router(events.router, prefix="/api/v1", tags=["events"])
+    app.include_router(event_log.router, prefix="/api/v1", tags=["event-log"])
 
     # 前端静态（打包后随 PyInstaller 数据目录，dev 用 frontend/dist build 产物）。
     if config.FRONTEND_DIST.exists():

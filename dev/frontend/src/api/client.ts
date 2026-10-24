@@ -874,6 +874,11 @@ export interface TimelineEvent {
   role: string | null;
   task_id: string | null;
   run_id: string | null;
+  seq?: number | null;
+  workflow_id?: string | null;
+  step_id?: string | null;
+  slice_key?: string | null;
+  execution_no?: number | null;
   payload: Record<string, unknown>;
 }
 

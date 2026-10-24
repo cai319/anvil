@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .. import config
 from ..util import decode_child_output, jdumps, jloads, new_id, now_iso
+from . import ledger
 from . import roles as roles_service
 from . import tasks as tasks_service
 
@@ -102,16 +103,30 @@ def set_status(conn: sqlite3.Connection, run_id: str, status: str, ended_at: str
 
     failure_class 仅在显式传入时更新（不清空语义：终态后再迁移不抹掉失败归因）。
     """
-    prev = conn.execute("SELECT status, task_id, role_slug FROM runs WHERE id=?", (run_id,)).fetchone()
+    prev = conn.execute(
+        "SELECT status, task_id, role_slug, workflow_id, step_id FROM runs WHERE id=?",
+        (run_id,),
+    ).fetchone()
     if failure_class is not None:
         conn.execute("UPDATE runs SET status=?, ended_at=?, failure_class=? WHERE id=?",
                      (status, ended_at, failure_class, run_id))
     else:
         conn.execute("UPDATE runs SET status=?, ended_at=? WHERE id=?", (status, ended_at, run_id))
     if prev and prev["status"] != status:
-        conn.execute(
-            "INSERT INTO activities (task_id, role_slug, run_id, kind, payload_json, created_at) VALUES (?,?,?,?,?,?)",
-            (prev["task_id"], prev["role_slug"], run_id, "run", jdumps({"status": status, "prev": prev["status"]}), now_iso()),
+        execution_no = None
+        if prev["workflow_id"]:
+            wf = conn.execute(
+                "SELECT execution_no FROM workflows WHERE id=?", (prev["workflow_id"],)
+            ).fetchone()
+            execution_no = wf["execution_no"] if wf else None
+        ledger.emit(
+            conn, "run.status_changed", task_id=prev["task_id"],
+            workflow_id=prev["workflow_id"], execution_no=execution_no,
+            step_id=prev["step_id"], run_id=run_id,
+            actor_type="role" if prev["role_slug"] else "system",
+            actor=prev["role_slug"], payload={"status": status, "prev": prev["status"]},
+            mirror_activity=True, activity_kind="run",
+            activity_role=prev["role_slug"],
         )
     conn.commit()
 

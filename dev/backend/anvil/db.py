@@ -288,6 +288,34 @@ CREATE TABLE IF NOT EXISTS activities (
 
 CREATE INDEX IF NOT EXISTS idx_activities_task_id ON activities(task_id, id);
 
+-- 流程语义事件账本（append-only）：状态表仍是权威，events 用于审计/时间线/指标/档案。
+CREATE TABLE IF NOT EXISTS events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              TEXT NOT NULL,
+    event_type      TEXT NOT NULL,
+    schema_version  INTEGER NOT NULL DEFAULT 1,
+    task_id         TEXT,
+    workflow_id     TEXT,
+    execution_no    INTEGER,
+    step_id         TEXT,
+    slice_key       TEXT,
+    run_id          TEXT,
+    actor_type      TEXT NOT NULL DEFAULT 'system',
+    actor           TEXT,
+    causation_id    INTEGER,
+    correlation_id  TEXT,
+    source          TEXT,
+    source_id       INTEGER,
+    payload_json    TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, id);
+CREATE INDEX IF NOT EXISTS idx_events_workflow ON events(workflow_id, id);
+CREATE INDEX IF NOT EXISTS idx_events_step ON events(workflow_id, step_id, id);
+CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type, id);
+CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_source
+    ON events(source, source_id) WHERE source IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS audit (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     role_slug    TEXT,
@@ -739,6 +767,18 @@ def init_schema(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
+    # 迁移：activities 增加全局事件/执行上下文
+    for col in ("event_id INTEGER", "workflow_id TEXT", "step_id TEXT",
+                "slice_key TEXT", "execution_no INTEGER"):
+        try:
+            conn.execute(f"ALTER TABLE activities ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_activities_workflow "
+                     "ON activities(workflow_id, id)")
+    except sqlite3.OperationalError:
+        pass
     # 工作流模板种子（可选）：任务创建/生成工作流时选择的模板及版本
     try:
         conn.execute("ALTER TABLE tasks ADD COLUMN plan_seed_json TEXT")

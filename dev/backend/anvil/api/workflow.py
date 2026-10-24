@@ -57,7 +57,8 @@ def submit_step(wid: str, sid: str, body: dict, conn=Depends(get_db),
     """角色提交当前步骤（anvil step submit）。"""
     _assert_workflow_task(conn, wid, auth)
     try:
-        wf = services.workflow.submit_step(conn, wid, sid, auth.role or "", body.get("summary"))
+        wf = services.workflow.submit_step(
+            conn, wid, sid, auth.role or "", body.get("summary"), auth.run_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ConflictError as exc:
@@ -73,7 +74,8 @@ def decide_step(wid: str, sid: str, body: dict, conn=Depends(get_db),
     _assert_workflow_task(conn, wid, auth)
     try:
         wf = services.workflow.decide_step(
-            conn, wid, sid, auth.role, bool(body.get("approve")), body.get("feedback"))
+            conn, wid, sid, auth.role, bool(body.get("approve")), body.get("feedback"),
+            auth.run_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except PermissionError as exc:
@@ -90,7 +92,8 @@ def plan_step(wid: str, sid: str, body: dict, conn=Depends(get_db),
     """plan_slices 步骤由执行角色提交切片计划（anvil step plan）。"""
     _assert_workflow_task(conn, wid, auth)
     try:
-        wf = services.workflow.apply_slice_plan(conn, wid, sid, auth.role, body)
+        wf = services.workflow.apply_slice_plan(
+            conn, wid, sid, auth.role, body, run_id=auth.run_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except PermissionError as exc:

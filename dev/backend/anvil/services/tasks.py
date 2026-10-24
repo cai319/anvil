@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
-from . import governance, knowledge, knowledge_binding, repo_catalog, workspace
+from . import governance, knowledge, knowledge_binding, ledger, repo_catalog, workspace
 
 LEASE_SECONDS = 1800  # design §5.5 租期 30 分钟
 TERMINAL_TASK_STATUSES = ("done", "closed")
@@ -760,9 +760,11 @@ def add_dep(conn: sqlite3.Connection, tid: str, depends_on: list[str]) -> dict:
 
 
 def comment(conn: sqlite3.Connection, tid: str, role: str, body: str) -> dict:
-    conn.execute(
-        "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) VALUES (?,?,?,?,?)",
-        (tid, role, "comment", jdumps({"body": body}), now_iso()),
+    ledger.emit(
+        conn, "message.comment", task_id=tid,
+        actor_type="human" if role == "human" else "role", actor=role,
+        payload={"body": body}, mirror_activity=True, activity_kind="comment",
+        activity_role=role,
     )
     conn.commit()
     return get(conn, tid)  # type: ignore[return-value]
@@ -770,9 +772,11 @@ def comment(conn: sqlite3.Connection, tid: str, role: str, body: str) -> dict:
 
 def mention(conn: sqlite3.Connection, tid: str, role: str, target: str, message: str) -> dict:
     """向目标（如 `human`）发起 @提及，用于人工确认点（HITL）的通知。"""
-    conn.execute(
-        "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) VALUES (?,?,?,?,?)",
-        (tid, role, "mention", jdumps({"target": target, "message": message}), now_iso()),
+    ledger.emit(
+        conn, "message.mention", task_id=tid,
+        actor_type="human" if role == "human" else "role", actor=role,
+        payload={"target": target, "message": message},
+        mirror_activity=True, activity_kind="mention", activity_role=role,
     )
     conn.commit()
     return get(conn, tid)  # type: ignore[return-value]
@@ -798,12 +802,14 @@ def timeline(conn: sqlite3.Connection, tid: str) -> list[dict]:
     """
     out: list[dict] = []
     for r in conn.execute(
-        "SELECT id, role_slug, task_id, NULL AS run_id, action AS kind, payload_json, created_at "
+        "SELECT id, role_slug, task_id, NULL AS run_id, action AS kind, payload_json, created_at, "
+        "NULL AS event_id, NULL AS workflow_id, NULL AS step_id, NULL AS slice_key, NULL AS execution_no "
         "FROM audit WHERE task_id=? ORDER BY created_at, id", (tid,)
     ).fetchall():
         out.append(_timeline_row("audit", r))
     for r in conn.execute(
-        "SELECT id, role_slug, task_id, run_id, kind, payload_json, created_at "
+        "SELECT id, role_slug, task_id, run_id, kind, payload_json, created_at, "
+        "event_id, workflow_id, step_id, slice_key, execution_no "
         "FROM activities WHERE task_id=? ORDER BY created_at, id", (tid,)
     ).fetchall():
         out.append(_timeline_row("activity", r))
@@ -819,6 +825,11 @@ def _timeline_row(src: str, r) -> dict:
         "role": r["role_slug"],
         "task_id": r["task_id"],
         "run_id": r["run_id"],
+        "seq": r["event_id"],
+        "workflow_id": r["workflow_id"],
+        "step_id": r["step_id"],
+        "slice_key": r["slice_key"],
+        "execution_no": r["execution_no"],
         "payload": jloads(r["payload_json"], {}),
     }
 
@@ -850,9 +861,10 @@ def _assert_channel_member(conn: sqlite3.Connection, t: dict, role: str) -> None
 
 
 def _audit(conn: sqlite3.Connection, role: str | None, task_id: str, action: str, payload: dict | None = None) -> None:
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) VALUES (?,?,?,?,?)",
-        (role, task_id, action, jdumps(payload or {}), now_iso()),
+    ledger.emit(
+        conn, f"audit.{action}", task_id=task_id,
+        actor_type="human" if role == "human" else ("role" if role else "system"),
+        actor=role, payload=payload or {}, mirror_audit=True, audit_action=action,
     )
 
 

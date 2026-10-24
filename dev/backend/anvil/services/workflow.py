@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
+from . import ledger
 
 RUN_ACTIVE = ("created", "projecting", "running")
 STEP_DONE = ("approved", "skipped")
@@ -749,8 +750,19 @@ def _validate_generated_deps(generated: list[dict], known_ids: set[str]) -> None
         visit(sid, [])
 
 
+def _assert_current_run(step: dict, run_id: str | None) -> None:
+    """旧 run 在步骤重派后不能继续提交/决策；run_id 为空时保留测试/旧客户端兼容。"""
+    current = str(step.get("run_id") or "")
+    if run_id and current and str(run_id) != current:
+        raise ConflictError(
+            f"stale_run: step {step.get('step_id')} is bound to run {current}, "
+            f"not {run_id}")
+    if run_id and not current:
+        raise ConflictError(f"stale_run: step {step.get('step_id')} has no active run")
+
+
 def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
-                     role: str | None, plan: dict) -> dict:
+                     role: str | None, plan: dict, run_id: str | None = None) -> dict:
     """运行期角色提交切片计划：校验后按 loop 模板生成每片小闭环。
 
     切片由执行角色基于对项目的实际理解产出；Cindy 只定义工作流骨架与 loop 模板。
@@ -774,6 +786,7 @@ def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
         step = next((s for s in wf["steps"] if s["step_id"] == step_id), None)
         if step is None:
             raise LookupError(step_id)
+        _assert_current_run(step, run_id)
         if step.get("kind") != "plan_slices":
             raise ConflictError(f"step {step_id} is not a plan_slices step")
         if role and role != "human" and role != step["role_slug"]:
@@ -853,8 +866,19 @@ def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
             "ended_at=?, updated_at=? WHERE workflow_id=? AND step_id=?",
             (summary, jdumps(plan), now, now, wid, step_id))
         if step["run_id"]:
+            run_row = conn.execute(
+                "SELECT status FROM runs WHERE id=?", (step["run_id"],)).fetchone()
             conn.execute("UPDATE runs SET status='completed', ended_at=? WHERE id=?",
                          (now, step["run_id"]))
+            ledger.emit(
+                conn, "run.status_changed", task_id=wf["task_id"], workflow_id=wid,
+                execution_no=wf.get("execution_no"), step_id=step_id,
+                run_id=step["run_id"], actor_type="role", actor=step["role_slug"],
+                payload={"status": "completed",
+                         "prev": run_row["status"] if run_row else None},
+                mirror_activity=True, activity_kind="run",
+                activity_role=step["role_slug"],
+            )
         _step_activity(
             conn, wf["task_id"], step["role_slug"], step, "planned", summary,
             extra={"slice_ids": [str(s.get("id")) for s in slices]})
@@ -977,11 +1001,19 @@ def _terminate_running_workflow(conn: sqlite3.Connection, wid: str, reason: str,
         "ended_at=?, updated_at=? WHERE workflow_id=? AND status IN ('pending','rejected')",
         (now, now, wid),
     )
+    wf = conn.execute(
+        "SELECT task_id, execution_no FROM workflows WHERE id=?", (wid,)).fetchone()
     conn.execute(
         "UPDATE workflows SET status='terminated', termination_reason=?, terminated_at=?, "
         "updated_at=? WHERE id=?",
         (reason, now, now, wid),
     )
+    if wf:
+        ledger.emit(
+            conn, "execution.terminated", task_id=wf["task_id"], workflow_id=wid,
+            execution_no=wf["execution_no"], actor_type="human",
+            payload={"reason": reason},
+        )
 
 
 def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
@@ -1048,6 +1080,14 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (wid, task_id, jdumps(definition), "running", created_by, now, now, now,
          template_id, template_version, previous_workflow_id, execution_no),
+    )
+    ledger.emit(
+        conn, "execution.started", task_id=task_id, workflow_id=wid,
+        execution_no=execution_no,
+        actor_type="human" if str(created_by).startswith("human") else "role",
+        actor=created_by,
+        payload={"previous_workflow_id": previous_workflow_id,
+                 "template_id": template_id, "template_version": template_version},
     )
     for sid, role, kind, reviewer, gate, on_reject, max_rework in plan:
         s = raw[sid]
@@ -1336,10 +1376,19 @@ def _step_activity(conn: sqlite3.Connection, task_id: str, role: str | None,
         payload["summary"] = summary
     if extra:
         payload.update(extra)
-    conn.execute(
-        "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (task_id, role or "workflow", "step", jdumps(payload), now_iso()),
+    workflow_id = str(step.get("workflow_id") or "") or None
+    execution_no = None
+    if workflow_id:
+        row = conn.execute(
+            "SELECT execution_no FROM workflows WHERE id=?", (workflow_id,)).fetchone()
+        execution_no = row["execution_no"] if row else None
+    ledger.emit(
+        conn, f"step.{status}", task_id=task_id, workflow_id=workflow_id,
+        execution_no=execution_no, step_id=step.get("step_id"),
+        slice_key=step.get("slice_key"), run_id=step.get("run_id"),
+        actor_type="role" if role else "system", actor=role or "workflow",
+        payload=payload, mirror_activity=True, activity_kind="step",
+        activity_role=role or "workflow",
     )
 
 
@@ -1395,6 +1444,18 @@ def _advance_locked(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
             (role, *RUN_ACTIVE),
         ).fetchone():
             continue
+        if task:
+            from . import governance
+            try:
+                governance.check_claim_allowed(conn, dict(task), role)
+            except ConflictError as exc:
+                ledger.emit(
+                    conn, "dispatch.deferred", task_id=wf["task_id"],
+                    workflow_id=wid, execution_no=wf.get("execution_no"),
+                    step_id=s["step_id"], actor_type="system", actor="scheduler",
+                    payload={"role": role, "reason": str(exc)},
+                )
+                continue
         prompt = step_prompt(wf, s, dict(task) if task else None)
         if starter is not None:
             run = starter(role, wf["task_id"], prompt, s)
@@ -1422,7 +1483,7 @@ def _advance_locked(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
 
 
 def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
-                summary: str | None) -> dict:
+                summary: str | None, run_id: str | None = None) -> dict:
     """角色提交当前步骤（anvil step submit）。gate 步骤进入人工审核。"""
     from . import runs as runs_service
 
@@ -1432,6 +1493,7 @@ def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
     step = next((s for s in wf["steps"] if s["step_id"] == step_id), None)
     if step is None:
         raise LookupError(step_id)
+    _assert_current_run(step, run_id)
     if step["role_slug"] != role:
         raise ConflictError(f"step {step_id} belongs to {step['role_slug']}, not {role}")
     if step["status"] != "running":
@@ -1468,7 +1530,8 @@ def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
 
 
 def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | None,
-                approve: bool, feedback: str | None = None) -> dict:
+                approve: bool, feedback: str | None = None,
+                run_id: str | None = None) -> dict:
     """决策角色 approve/reject 一个 decision 步骤。
 
     reject 时把 on_reject 闭包内的步骤重置为 pending，并把 decision 自身重置为 pending；
@@ -1485,6 +1548,7 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
         step = next((s for s in wf["steps"] if s["step_id"] == step_id), None)
         if step is None:
             raise LookupError(step_id)
+        _assert_current_run(step, run_id)
         if step.get("kind") != "decision":
             raise ConflictError(f"step {step_id} is not a decision step")
         if step["status"] != "running":
@@ -1494,8 +1558,19 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
 
         if step["run_id"]:
             # 直接 UPDATE，避免 runs.set_status 内部 commit 打断 BEGIN IMMEDIATE。
+            run_row = conn.execute(
+                "SELECT status FROM runs WHERE id=?", (step["run_id"],)).fetchone()
             conn.execute("UPDATE runs SET status='completed', ended_at=? WHERE id=?",
                          (now, step["run_id"]))
+            ledger.emit(
+                conn, "run.status_changed", task_id=wf["task_id"], workflow_id=wid,
+                execution_no=wf.get("execution_no"), step_id=step_id,
+                run_id=step["run_id"], actor_type="role", actor=step["role_slug"],
+                payload={"status": "completed",
+                         "prev": run_row["status"] if run_row else None},
+                mirror_activity=True, activity_kind="run",
+                activity_role=step["role_slug"],
+            )
 
         if approve:
             conn.execute(
@@ -1719,6 +1794,11 @@ def _finalize_if_done(conn: sqlite3.Connection, wid: str) -> None:
     conn.execute(
         "UPDATE tasks SET status='in_review', lease_expires_at=NULL, updated_at=? "
         "WHERE id=? AND status IN ('in_progress','todo')", (now, wf["task_id"]))
+    ledger.emit(
+        conn, "execution.finished", task_id=wf["task_id"], workflow_id=wid,
+        execution_no=wf.get("execution_no"), actor_type="system", actor="workflow",
+        payload={"steps": len(wf.get("steps") or [])},
+    )
     from . import roles as roles_service
     sender = roles_service.notification_sender(
         conn, wf["task_id"], wf.get("created_by"))

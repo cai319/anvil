@@ -1212,6 +1212,11 @@ export function TaskDetail({ id }: { id: string }) {
                         {displayRole}
                       </strong>
                       <span className="muted mono">{formatClock(ev.ts)}</span>
+                      {ev.step_id && (
+                        <span className="muted mono" title="执行号 / 步骤">
+                          {ev.execution_no ? `E${ev.execution_no} ` : ""}{ev.step_id}
+                        </span>
+                      )}
                       {d.runStatus && <span className={`status status-${d.runStatus}`}>{RUN_LABEL[d.runStatus]}</span>}
                     </div>
                     <div className="thread-text">
