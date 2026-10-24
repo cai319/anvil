@@ -1,4 +1,4 @@
-"""可复用工作流模板：角色槽位、版本、导入、校验与套用。
+"""可复用工作流模板：Meeple、版本、导入、校验与套用。
 
 模板是人工维护的 definition 草案；发布后的版本不可变。模板不会直接被运行时
 解析：应用时先编译成现有 workflow definition，再走 `validate_definition` /
@@ -27,6 +27,12 @@ TOKEN_RE = re.compile(r"\{\{slot:([A-Za-z0-9_-]+)\}\}")
 MENTION_RE = re.compile(r"@([A-Za-z0-9_-]+)")
 STEP_KINDS = {"task", "decision", "plan_slices"}
 LOOP_PHASES = ("scope", "execute", "verify", "fix", "verify2", "decide")
+LOOP_PHASE_LABELS = {
+    "scope": "范围确认", "execute": "执行", "verify": "验证",
+    "fix": "修复", "verify2": "复验", "decide": "决策",
+}
+ROLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
+ROLE_SLUG_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 STEP_FIELDS = {
     "id", "title", "kind", "role_slot", "reviewer_slot", "depends_on",
     "instructions", "acceptance", "gate", "contract", "on_reject", "max_rework",
@@ -76,6 +82,50 @@ def used_slot_keys(definition: dict) -> set[str]:
     return used
 
 
+def _slot_role_name(slot: dict) -> str:
+    role = str(slot.get("role") or "").strip()
+    if role:
+        return role
+    key = str(slot.get("key") or "")
+    if key.startswith("role_"):
+        return key[5:]
+    suggested = slot.get("suggested_roles") or []
+    if suggested:
+        return str(suggested[0])
+    return key
+
+
+def _slot_binding_context(definition: dict, key: str) -> list[str]:
+    """Cindy 规划时需要的绑定步骤上下文：步骤、依赖、验收。"""
+    steps = _steps(definition)
+    by_id = {str(step.get("id")): step for step in steps}
+    out: list[str] = []
+    for step in steps:
+        if str(step.get("role_slot") or "") != key and str(step.get("reviewer_slot") or "") != key:
+            continue
+        sid = str(step.get("id") or "")
+        title = str(step.get("title") or sid)
+        deps = [
+            f"{dep} · {by_id[str(dep)].get('title') or dep}"
+            for dep in (step.get("depends_on") or []) if str(dep) in by_id
+        ]
+        acceptance = [str(x) for x in (step.get("acceptance") or []) if str(x).strip()]
+        parts = [f"{sid}「{title}」"]
+        if deps:
+            parts.append("依赖：" + "、".join(deps))
+        if acceptance:
+            parts.append(f"验收 {len(acceptance)} 条：" + "；".join(acceptance[:3])
+                         + ("…" if len(acceptance) > 3 else ""))
+        out.append("；".join(parts))
+    loop = definition.get("loop")
+    if isinstance(loop, dict):
+        for phase in LOOP_PHASES:
+            spec = loop.get(phase)
+            if isinstance(spec, dict) and str(spec.get("role_slot") or "") == key:
+                out.append(f"loop.{phase}「{spec.get('title') or LOOP_PHASE_LABELS[phase]}」")
+    return out
+
+
 def _text_slots(value) -> set[str]:
     found: set[str] = set()
     if isinstance(value, str):
@@ -98,26 +148,47 @@ def _shape_issues(definition: dict, layout: dict | None = None) -> list[dict]:
         issues.append(_issue("error", "role_slots", "role_slots 必须是数组"))
         slots_list = []
     if len(slots_list) > MAX_SLOTS:
-        issues.append(_issue("error", "too_many_slots", f"角色槽位最多 {MAX_SLOTS} 个"))
+        issues.append(_issue("error", "too_many_slots", f"Meeple 最多 {MAX_SLOTS} 个"))
     seen_slots: set[str] = set()
     for raw in slots_list:
         if not isinstance(raw, dict):
-            issues.append(_issue("error", "invalid_slot", "角色槽位必须是对象"))
+            issues.append(_issue("error", "invalid_slot", "Meeple 必须是对象"))
             continue
         key = str(raw.get("key") or "")
         if not SLOT_KEY_RE.match(key):
-            issues.append(_issue("error", "invalid_slot_key", f"非法角色槽位 key: {key!r}",
+            issues.append(_issue("error", "invalid_slot_key", f"非法 Meeple ID: {key!r}",
                                  slot_key=key or None))
         elif key in seen_slots:
-            issues.append(_issue("error", "duplicate_slot", f"重复角色槽位: {key}", slot_key=key))
+            issues.append(_issue("error", "duplicate_slot", f"重复 Meeple: {key}", slot_key=key))
         seen_slots.add(key)
         if not str(raw.get("label") or "").strip():
-            issues.append(_issue("error", "slot_label", f"角色槽位 {key} 缺少名称",
+            issues.append(_issue("error", "slot_label", f"Meeple {key} 缺少名称",
                                  slot_key=key))
         suggested = raw.get("suggested_roles")
         if suggested is not None and not isinstance(suggested, list):
-            issues.append(_issue("error", "slot_suggested", f"角色槽位 {key} 的 suggested_roles 必须是数组",
+            issues.append(_issue("error", "slot_suggested", f"Meeple {key} 的 suggested_roles 必须是数组",
                                  slot_key=key))
+        description = raw.get("description")
+        if description is not None and not isinstance(description, str):
+            issues.append(_issue("error", "slot_description",
+                                 f"Meeple {key} 的 description 必须是字符串", slot_key=key))
+        role_name = raw.get("role")
+        if role_name is not None:
+            role_name = str(role_name)
+            if not ROLE_NAME_RE.match(role_name):
+                issues.append(_issue("error", "slot_role",
+                                     f"Meeple {key} 的 role 名必须是 2–32 位小写英文、数字、- 或 _",
+                                     slot_key=key))
+            elif key != f"role_{role_name}":
+                issues.append(_issue("warning", "slot_role_key_mismatch",
+                                     f"Meeple {key} 的 key 与 role 名不一致，建议使用 role_{role_name}",
+                                     slot_key=key))
+        bound = raw.get("bound_role")
+        if bound is not None:
+            bound = str(bound)
+            if not ROLE_SLUG_RE.match(bound):
+                issues.append(_issue("error", "slot_bound_role",
+                                     f"Meeple {key} 的绑定角色 slug 非法", slot_key=key))
     steps = definition.get("steps")
     if not isinstance(steps, list) or not steps:
         issues.append(_issue("error", "no_steps", "模板至少需要一个步骤"))
@@ -143,18 +214,18 @@ def _shape_issues(definition: dict, layout: dict | None = None) -> list[dict]:
             issues.append(_issue("error", "missing_role_slot", f"步骤 {sid} 缺少 role_slot", node_id=sid))
         elif slot not in seen_slots:
             issues.append(_issue("error", "unknown_role_slot",
-                                 f"步骤 {sid} 引用未知槽位 {slot}", node_id=sid, slot_key=slot))
+                                 f"步骤 {sid} 引用未知 Meeple {slot}", node_id=sid, slot_key=slot))
         reviewer = str(raw.get("reviewer_slot") or "")
         if reviewer and reviewer not in seen_slots:
             issues.append(_issue("error", "unknown_reviewer_slot",
-                                 f"步骤 {sid} 引用未知 reviewer 槽位 {reviewer}",
+                                 f"步骤 {sid} 引用未知 reviewer Meeple {reviewer}",
                                  node_id=sid, slot_key=reviewer))
         if raw.get("gate") and not reviewer:
             issues.append(_issue("warning", "gate_without_reviewer",
-                                 f"审核门 {sid} 未设置 reviewer 槽位", node_id=sid))
+                                 f"审核门 {sid} 未设置 reviewer Meeple", node_id=sid))
         if reviewer and reviewer == slot:
             issues.append(_issue("error", "reviewer_role_conflict",
-                                 f"步骤 {sid} 的审核人与执行人不能是同一槽位",
+                                 f"步骤 {sid} 的审核人与执行人不能是同一个 Meeple",
                                  node_id=sid, slot_key=reviewer))
         title = str(raw.get("title") or "")
         if len(title) > 56:
@@ -178,14 +249,14 @@ def _shape_issues(definition: dict, layout: dict | None = None) -> list[dict]:
                                          f"loop.{phase} 缺少 role_slot", slot_key=phase))
                 elif slot not in seen_slots:
                     issues.append(_issue("error", "unknown_loop_slot",
-                                         f"loop.{phase} 引用未知槽位 {slot}",
+                                         f"loop.{phase} 引用未知 Meeple {slot}",
                                          slot_key=slot))
     for raw in definition.get("verification") or []:
         if isinstance(raw, dict) and raw.get("verifier_slot"):
             slot = str(raw["verifier_slot"])
             if slot not in seen_slots:
                 issues.append(_issue("error", "unknown_verifier_slot",
-                                     f"验证矩阵引用未知槽位 {slot}", slot_key=slot))
+                                     f"验证矩阵引用未知 Meeple {slot}", slot_key=slot))
     # 静态可达性：没有根节点 / 从根不可达的步骤通常是 AI 生成或手工编辑遗漏。
     step_deps = {
         str(raw.get("id")): [str(dep) for dep in (raw.get("depends_on") or [])]
@@ -212,7 +283,7 @@ def _shape_issues(definition: dict, layout: dict | None = None) -> list[dict]:
     used = used_slot_keys(definition)
     for key in seen_slots - used:
         issues.append(_issue("warning", "unused_slot",
-                             f"角色槽位 {key} 未被任何步骤或 loop 使用",
+                             f"Meeple {key} 未被任何步骤或 loop 使用",
                              slot_key=key))
     if len(jdumps(definition).encode("utf-8")) > MAX_DEFINITION_BYTES:
         issues.append(_issue("error", "definition_too_large", "模板 definition 超过大小限制"))
@@ -224,7 +295,7 @@ def _shape_issues(definition: dict, layout: dict | None = None) -> list[dict]:
     for key in _text_slots(definition):
         if key not in seen_slots:
             issues.append(_issue("error", "unknown_text_slot",
-                                 f"文本占位符引用未知槽位 {key}", slot_key=key))
+                                 f"文本占位符引用未知 Meeple {key}", slot_key=key))
     return issues
 
 
@@ -308,7 +379,7 @@ def validate_template(conn: sqlite3.Connection, definition: dict,
         if verify2 and verify2 in {slot_of("execute"), slot_of("fix")}:
             issues.append(_issue(
                 "error", "verify2_role_conflict",
-                "loop.verify2 不能与 execute/fix 使用同一个角色槽位", slot_key=verify2))
+                "loop.verify2 不能与 execute/fix 使用同一个 Meeple", slot_key=verify2))
     return issues
 
 
@@ -635,6 +706,20 @@ def _role_ok(role: str) -> bool:
     return bool(role) and role != "human" and not role.startswith("__")
 
 
+def _fill_bound_role_defaults(conn: sqlite3.Connection, definition: dict,
+                              role_mapping: dict[str, str]) -> dict[str, str]:
+    """Meeple 有预绑定角色时，映射缺失的槽位优先使用绑定角色。"""
+    out = dict(role_mapping)
+    for key, slot in _slots(definition).items():
+        if out.get(key) or not slot.get("bound_role"):
+            continue
+        role = str(slot["bound_role"])
+        row = roles_service.get(conn, role)
+        if row and row.get("enabled", True) and not roles_service.is_onboarding(conn, role):
+            out[key] = role
+    return out
+
+
 def validate_mapping(conn: sqlite3.Connection, definition: dict,
                      role_mapping: dict[str, str],
                      task: dict | None = None) -> list[dict]:
@@ -645,10 +730,10 @@ def validate_mapping(conn: sqlite3.Connection, definition: dict,
         role = role_mapping.get(key)
         if not role:
             issues.append(_issue("error", "missing_mapping",
-                                 f"角色槽位 {key} 未映射", slot_key=key))
+                                 f"Meeple {key} 未映射", slot_key=key))
             continue
         if not _role_ok(role):
-            issues.append(_issue("error", "invalid_role", f"槽位 {key} 的角色非法", slot_key=key))
+            issues.append(_issue("error", "invalid_role", f"Meeple {key} 的角色非法", slot_key=key))
             continue
         row = roles_service.get(conn, role)
         if row is None:
@@ -703,6 +788,7 @@ def preview_apply(conn: sqlite3.Connection, task_id: str, tid: str,
     if task is None:
         raise LookupError(task_id)
     template, ver = _published_version(conn, tid, version)
+    role_mapping = _fill_bound_role_defaults(conn, ver["definition"], role_mapping)
     issues = validate_mapping(conn, ver["definition"], role_mapping, task)
     try:
         resolved = compile_definition(ver["definition"], role_mapping)
@@ -748,6 +834,7 @@ def apply_to_task(conn: sqlite3.Connection, task_id: str, tid: str,
     if task.get("status") in ("done", "closed"):
         raise ConflictError("task is terminal")
     template, ver = _published_version(conn, tid, version)
+    role_mapping = _fill_bound_role_defaults(conn, ver["definition"], role_mapping)
     issues = validate_mapping(conn, ver["definition"], role_mapping, task)
     errors = [i for i in issues if i["severity"] == "error"]
     if errors:
@@ -838,15 +925,40 @@ def render_seed_for_prompt(conn: sqlite3.Connection, task: dict) -> str:
         return ""
     definition = ver["definition"]
     slots = _slots(definition)
+    slot_lines: list[str] = []
+    for key, slot in slots.items():
+        role_name = _slot_role_name(slot)
+        parts = [f"  - {key}（{slot.get('label') or key}；role={role_name}）"]
+        if slot.get("bound_role"):
+            bound = str(slot["bound_role"])
+            bound_row = roles_service.get(conn, bound)
+            if bound_row and bound_row.get("enabled", True):
+                parts.append(f"预绑定角色：{bound}（优先使用；可能带定制 skill）")
+            else:
+                parts.append(f"预绑定角色：{bound}（当前不可用，需重新匹配）")
+        if slot.get("description"):
+            parts.append(f"描述：{slot['description']}")
+        context = _slot_binding_context(definition, key)
+        if context:
+            parts.append("绑定步骤上下文：" + "；".join(context))
+        if slot.get("suggested_roles"):
+            parts.append("旧模板建议角色（兼容，仅参考）："
+                         + "、".join(str(x) for x in slot["suggested_roles"]))
+        slot_lines.append(" | ".join(parts))
+    if not slot_lines:
+        slot_lines = ["  -（模板没有 Meeple）"]
     lines = [
         f"- 模板：{seed.get('name') or ver.get('name')}（v{ver['version']}）",
         "- 模板是建议骨架，必须结合任务的实际 Roster、scope 与知识仓库调整；"
         "不要照抄不适合的步骤，也不要虚构角色。",
-        "- 角色槽位：" + "；".join(
-            f"{k}={v.get('label') or k}"
-            + (f"(建议 {', '.join(v.get('suggested_roles') or [])})"
-               if v.get("suggested_roles") else "")
-            for k, v in slots.items()),
+        "- Meeple 是一类角色的代表，不是现成角色。先读取 Roster 中每个角色的 "
+        "description / responsibilities / capabilities，再按 Meeple 的 role 名、描述、"
+        "绑定步骤上下文进行能力匹配；不要只看 Meeple 中文名或旧模板的建议角色。",
+        "- Meeple 契约：",
+        *slot_lines,
+        "- 若 Meeple 有预绑定角色且该角色可用，优先绑定它（可能带定制 skill）；"
+        "否则按 role 名与绑定步骤上下文匹配现有角色；仍无法覆盖时提交 role_suggestion 说明缺失能力，"
+        "等待 human 批准，不要虚构角色或把多个 Meeple 硬塞给同一角色。",
         "- 模板骨架（role_slot 需要你映射为 Roster 中的实际角色）：",
         json.dumps(definition, ensure_ascii=False, indent=2)[:12000],
         "- 最终仍按正常 workflow 草案提交；不要输出 role_slot 字段，必须写实际角色。",
@@ -865,6 +977,8 @@ def import_definition(conn: sqlite3.Connection, definition: dict, *,
     loop = deepcopy(normalized.get("loop")) if isinstance(normalized.get("loop"), dict) else None
     role_to_slot: dict[str, str] = {}
     slot_labels: dict[str, str] = {}
+    slot_descriptions: dict[str, str] = {}
+    slot_roles: dict[str, str] = {}
     slot_suggested: dict[str, list[str]] = {}
     key_to_role: dict[str, str] = {}
     warnings: list[str] = []
@@ -872,20 +986,27 @@ def import_definition(conn: sqlite3.Connection, definition: dict, *,
     def role_of(spec: dict) -> str:
         return str(spec.get("role") or spec.get("role_slug") or "").strip()
 
-    def add_slot(role: str, preferred: str) -> str:
+    def add_slot(role: str, _preferred: str) -> str:
         if role in role_to_slot:
             return role_to_slot[role]
-        key = preferred
+        base = f"role_{re.sub(r'[^A-Za-z0-9_-]', '_', role)}"
+        key = base
         n = 2
         while key in key_to_role and key_to_role[key] != role:
-            key = f"{preferred}_{n}"
+            key = f"{base}_{n}"
             n += 1
         key_to_role[key] = role
         role_to_slot[role] = key
-        role = roles_service.get(conn, role)
-        slot_labels[key] = str((role or {}).get("display_name") or key)
-        slot_suggested[key] = [role_slug] if (role_slug := next(
-            (r for r, s in role_to_slot.items() if s == key), "")) else []
+        role_slug = role
+        role_obj = roles_service.get(conn, role_slug)
+        slot_labels[key] = str((role_obj or {}).get("display_name") or key)
+        profile = (role_obj or {}).get("definition") or {}
+        description = str(profile.get("description") or "").strip()
+        if not description and profile.get("responsibilities"):
+            description = "；".join(str(x) for x in profile["responsibilities"])
+        slot_descriptions[key] = description
+        slot_roles[key] = role_slug
+        slot_suggested[key] = [role_slug]
         return key
 
     loop_slots: dict[str, str] = {}
@@ -977,6 +1098,8 @@ def import_definition(conn: sqlite3.Connection, definition: dict, *,
         "schema_version": 1,
         "role_slots": [
             {"key": key, "label": slot_labels.get(key, key),
+             "role": slot_roles.get(key, ""),
+             "description": slot_descriptions.get(key, ""),
              "suggested_roles": slot_suggested.get(key, [])}
             for key in key_to_role
         ],
@@ -1036,7 +1159,7 @@ def draft_to_editor(conn: sqlite3.Connection, draft_id: str) -> dict:
     if (draft.get("kind") or "tasks") != "workflow":
         raise ConflictError("draft is not a workflow draft")
     task = tasks_service.get(conn, draft.get("source_task")) if draft.get("source_task") else {}
-    # 用临时转换得到槽位映射；不落库。
+    # 用临时转换得到 Meeple 映射；不落库。
     # 转换会创建模板，因此这里复用一个轻量转换：构造模板后立即给出草稿视图，
     # 前端保存草案时通过 PATCH 回到原草案。
     converted = import_definition(

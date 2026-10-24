@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, type Role, type Task, type WorkflowTemplate, type WorkflowTemplateDefinition } from "../api/client";
 import { Icon } from "../components/Icon";
-import { usedSlots } from "../templates/editorModel";
+import { roleNameOf, usedSlots } from "../templates/editorModel";
 
 type Preview = {
   issues?: { severity: string; message: string; slot_key?: string | null }[];
@@ -14,6 +14,7 @@ type Preview = {
     task_terminal?: boolean;
   };
 };
+
 
 export function ApplyTemplateModal({ task, roles, onClose, onApplied }: {
   task: Task;
@@ -51,11 +52,14 @@ export function ApplyTemplateModal({ task, roles, onClose, onApplied }: {
       const next: Record<string, string> = {};
       for (const key of usedSlots(def)) {
         const slot = def.role_slots.find((item) => item.key === key);
+        const bound = slot?.bound_role
+          && roles.some((role) => role.enabled && role.slug === slot.bound_role)
+          ? slot.bound_role : "";
         const suggested = slot?.suggested_roles?.find((slug) =>
           task.assignees.includes(slug));
         const validSuggested = slot?.suggested_roles?.find((slug) =>
           roles.some((role) => role.enabled && role.slug === slug));
-        next[key] = suggested || task.assignees[0] || validSuggested
+        next[key] = bound || suggested || task.assignees[0] || validSuggested
           || roles.find((role) => role.enabled)?.slug || "";
       }
       setMapping(next);
@@ -70,10 +74,10 @@ export function ApplyTemplateModal({ task, roles, onClose, onApplied }: {
   const slots = useMemo(() => {
     const def = template?.published?.definition;
     if (!def) return [];
-    return usedSlots(def).map((key) => ({
-      key,
-      slot: def.role_slots.find((item) => item.key === key),
-    }));
+    return usedSlots(def).map((key) => {
+      const slot = def.role_slots.find((item) => item.key === key);
+      return { key, slot, roleName: slot ? roleNameOf(slot) : "" };
+    });
   }, [template]);
 
   const check = async () => {
@@ -139,15 +143,21 @@ export function ApplyTemplateModal({ task, roles, onClose, onApplied }: {
 
         {slots.length > 0 && (
           <div className="wft-apply-mapping">
-            <h3>角色槽位映射</h3>
-            {slots.map(({ key, slot }) => (
+            <h3>Meeple 映射</h3>
+            {slots.map(({ key, slot, roleName }) => (
               <div className="wft-apply-slot" key={key}>
-                <div>
-                  <strong>{slot?.label || key}</strong>
-                  <span className="muted"> {key}</span>
-                  {slot?.suggested_roles?.length ? (
-                    <span className="muted"> · 建议 {slot.suggested_roles.join(", ")}</span>
-                  ) : null}
+                <div className="wft-apply-slot-info">
+                  <div>
+                    <strong>{slot?.label || key}</strong>
+                    <span className="muted"> role: {roleName}</span>
+                    <span className="muted"> · {key}</span>
+                  </div>
+                  {slot?.bound_role && (
+                    <p className="muted wft-apply-slot-desc">
+                      优先绑定预置角色：{roles.find((role) => role.slug === slot.bound_role)?.display_name
+                        || slot.bound_role}
+                    </p>
+                  )}
                 </div>
                 <select value={mapping[key] || ""} onChange={(e) =>
                   setMapping((prev) => ({ ...prev, [key]: e.target.value }))}>

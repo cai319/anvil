@@ -7,10 +7,22 @@ import type {
 
 export type TemplateLayout = Record<string, { x: number; y: number }>;
 
+export const ROLE_NAME_RE = /^[a-z][a-z0-9_-]{1,31}$/;
+
+export function roleNameOf(slot: TemplateRoleSlot): string {
+  if (slot.role) return slot.role;
+  if (slot.key.startsWith("role_")) return slot.key.slice(5);
+  return slot.suggested_roles?.[0] || slot.key;
+}
+
+export function meepleKey(role: string): string {
+  return `role_${role}`;
+}
+
 export const DEFAULT_SLOTS: TemplateRoleSlot[] = [
-  { key: "executor", label: "执行者", suggested_roles: ["developer"] },
-  { key: "verifier", label: "验证者", suggested_roles: ["tester"] },
-  { key: "decider", label: "决策者", suggested_roles: ["pm"] },
+  { key: "role_executor", label: "执行者", role: "executor", suggested_roles: ["developer"] },
+  { key: "role_verifier", label: "验证者", role: "verifier", suggested_roles: ["tester"] },
+  { key: "role_decider", label: "决策者", role: "decider", suggested_roles: ["pm"] },
 ];
 
 export function blankDefinition(): WorkflowTemplateDefinition {
@@ -81,7 +93,7 @@ export function usedSlots(definition: WorkflowTemplateDefinition): string[] {
   }
   const loop = definition.loop;
   if (loop) {
-    for (const key of ["scope", "execute", "verify", "fix", "verify2", "decide"] as const) {
+    for (const key of LOOP_PHASE_ORDER) {
       const spec = loop[key];
       if (spec?.role_slot) out.add(spec.role_slot);
     }
@@ -89,11 +101,14 @@ export function usedSlots(definition: WorkflowTemplateDefinition): string[] {
   return [...out];
 }
 
+export const LOOP_PHASE_ORDER = ["scope", "execute", "verify", "fix", "verify2", "decide"] as const;
+
 export function addStep(definition: WorkflowTemplateDefinition,
                         kind: TemplateStep["kind"] = "task"): WorkflowTemplateDefinition {
   const next = cloneDefinition(definition);
   if (!next.role_slots.length) {
-    next.role_slots = [{ key: "executor", label: "执行者", suggested_roles: ["developer"] }];
+    next.role_slots = [{ key: "role_executor", label: "执行者", role: "executor",
+      suggested_roles: ["developer"] }];
   }
   const prefix = kind === "decision" ? "D" : kind === "plan_slices" ? "P" : "S";
   let n = 1;
@@ -102,7 +117,7 @@ export function addStep(definition: WorkflowTemplateDefinition,
   next.steps.push({
     id,
     title: kind === "decision" ? "新增决策" : kind === "plan_slices" ? "新增切片计划" : "新增步骤",
-    role_slot: next.role_slots[0]?.key || "executor",
+    role_slot: next.role_slots[0]?.key || "role_executor",
     kind,
     depends_on: [],
     acceptance: [],
@@ -115,7 +130,7 @@ export function addLoop(definition: WorkflowTemplateDefinition): WorkflowTemplat
     throw new Error("模板只能有一个切片计划节点");
   }
   let next = cloneDefinition(definition);
-  // Loop 需要可区分的执行/验证/决策槽位；缺什么补什么，避免默认生成非法模板。
+  // Loop 需要可区分的执行/验证/决策 Meeple；缺什么补什么，避免默认生成非法模板。
   next.role_slots = [...next.role_slots];
   for (const slot of DEFAULT_SLOTS) {
     if (!next.role_slots.some((item) => item.key === slot.key)) {
@@ -123,9 +138,9 @@ export function addLoop(definition: WorkflowTemplateDefinition): WorkflowTemplat
     }
   }
   const slots = next.role_slots;
-  const executor = slots.find((slot) => slot.key === "executor")!.key;
-  const verifier = slots.find((slot) => slot.key === "verifier")!.key;
-  const decider = slots.find((slot) => slot.key === "decider")!.key;
+  const executor = slots.find((slot) => roleNameOf(slot) === "executor")!.key;
+  const verifier = slots.find((slot) => roleNameOf(slot) === "verifier")!.key;
+  const decider = slots.find((slot) => roleNameOf(slot) === "decider")!.key;
   next = addStep(next, "plan_slices");
   const plan = next.steps[next.steps.length - 1];
   plan.title = "项目盘点与切片计划";
@@ -206,26 +221,11 @@ export function hasCycle(definition: WorkflowTemplateDefinition): boolean {
   return (definition.steps || []).some((step) => visit(step.id));
 }
 
-export function nextSlotKey(definition: WorkflowTemplateDefinition, label: string): string {
-  const base = label
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "_")
-    .replace(/^_+|_+$/g, "") || "slot";
-  let key = base;
-  let n = 2;
-  const keys = new Set(definition.role_slots.map((slot) => slot.key));
-  while (keys.has(key)) {
-    key = `${base}_${n}`;
-    n += 1;
-  }
-  return key;
-}
-
 export function defaultLoopFor(stepId: string, slots: TemplateRoleSlot[]): TemplateLoop {
-  const executor = slots.find((slot) => slot.key === "executor")?.key || slots[0]?.key || "executor";
-  const verifier = slots.find((slot) => slot.key === "verifier")?.key || executor;
-  const decider = slots.find((slot) => slot.key === "decider")?.key || executor;
+  const executor = slots.find((slot) => roleNameOf(slot) === "executor")?.key
+    || slots[0]?.key || "role_executor";
+  const verifier = slots.find((slot) => roleNameOf(slot) === "verifier")?.key || executor;
+  const decider = slots.find((slot) => roleNameOf(slot) === "decider")?.key || executor;
   return {
     from: stepId,
     scope: { role_slot: decider, title: "切片范围确认" },
@@ -249,18 +249,19 @@ export function definitionFromConcrete(concrete: Record<string, unknown>): {
   const slots: TemplateRoleSlot[] = [];
   const roleOf = (spec: Record<string, unknown> | undefined) =>
     String(spec?.role || spec?.role_slug || "").trim();
-  const addSlot = (role: string, preferred: string): string => {
+  const addSlot = (role: string, _preferred: string): string => {
     if (!role) return "";
     if (roleToSlot.has(role)) return roleToSlot.get(role)!;
-    let key = preferred;
+    const base = `role_${role.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+    let key = base;
     let n = 2;
     while (keyToRole.has(key) && keyToRole.get(key) !== role) {
-      key = `${preferred}_${n}`;
+      key = `${base}_${n}`;
       n += 1;
     }
     keyToRole.set(key, role);
     roleToSlot.set(role, key);
-    slots.push({ key, label: role, suggested_roles: [role] });
+    slots.push({ key, label: role, role, suggested_roles: [role] });
     return key;
   };
   const loopSlots = new Map<string, string>();
@@ -343,7 +344,7 @@ export function definitionFromConcrete(concrete: Record<string, unknown>): {
 export function compileTemplate(definition: WorkflowTemplateDefinition,
                                 roleMapping: Record<string, string>): Record<string, unknown> {
   const missing = usedSlots(definition).filter((key) => !roleMapping[key]);
-  if (missing.length) throw new Error(`角色槽位未映射：${missing.join("、")}`);
+  if (missing.length) throw new Error(`Meeple未映射：${missing.join("、")}`);
   const compiled = JSON.parse(JSON.stringify(definition)) as Record<string, unknown>;
   delete compiled.role_slots;
   delete compiled.schema_version;
@@ -383,4 +384,36 @@ export function compileTemplate(definition: WorkflowTemplateDefinition,
     return value;
   };
   return substitute(compiled) as Record<string, unknown>;
+}
+
+/** 修改 Meeple 的 role 名时同步所有引用，避免步骤/loop/token 指向旧 key。 */
+export function renameMeepleKey(definition: WorkflowTemplateDefinition,
+                                oldKey: string, newKey: string): WorkflowTemplateDefinition {
+  const next = cloneDefinition(definition);
+  const slot = next.role_slots.find((item) => item.key === oldKey);
+  if (slot) slot.key = newKey;
+  for (const step of next.steps || []) {
+    if (step.role_slot === oldKey) step.role_slot = newKey;
+    if (step.reviewer_slot === oldKey) step.reviewer_slot = newKey;
+  }
+  if (next.loop) {
+    for (const phase of ["scope", "execute", "verify", "fix", "verify2", "decide"] as const) {
+      const spec = next.loop[phase];
+      if (spec?.role_slot === oldKey) spec.role_slot = newKey;
+    }
+  }
+  for (const item of next.verification || []) {
+    if (item.verifier_slot === oldKey) item.verifier_slot = newKey;
+  }
+  const replace = (value: unknown): unknown => {
+    if (typeof value === "string") {
+      return value.replaceAll(`{{slot:${oldKey}}}`, `{{slot:${newKey}}}`);
+    }
+    if (Array.isArray(value)) return value.map(replace);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, replace(v)]));
+    }
+    return value;
+  };
+  return replace(next) as WorkflowTemplateDefinition;
 }

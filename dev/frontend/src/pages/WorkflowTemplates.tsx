@@ -43,8 +43,11 @@ import {
   definitionFromConcrete,
   disconnectStep,
   ensureLayout,
-  nextSlotKey,
+  meepleKey,
   removeStep,
+  renameMeepleKey,
+  roleNameOf,
+  ROLE_NAME_RE,
   type TemplateLayout,
   usedSlots,
 } from "../templates/editorModel";
@@ -708,7 +711,7 @@ export function WorkflowTemplates() {
             onRemoveDependency={removeDependency}
             onDeleteSlot={(key) => {
               if (usedSlots(definition).includes(key)) {
-                setError(`槽位 ${key} 仍被步骤使用，不能删除`);
+                setError(`Meeple ${key} 仍被步骤使用，不能删除`);
                 return;
               }
               changeDefinition({
@@ -716,11 +719,12 @@ export function WorkflowTemplates() {
                 role_slots: definition.role_slots.filter((slot) => slot.key !== key),
               });
             }}
-            onAddSlot={(label) => {
-              const key = nextSlotKey(definition, label);
+            onAddSlot={(label, role) => {
               changeDefinition({
                 ...definition,
-                role_slots: [...definition.role_slots, { key, label }],
+                role_slots: [...definition.role_slots, {
+                  key: meepleKey(role), label, role,
+                }],
               });
             }}
           />
@@ -798,6 +802,55 @@ function EdgeDetails({ definition, edge }: {
   );
 }
 
+function MeepleRoleInput({ definition, slot, onDefinition }: {
+  definition: WorkflowTemplateDefinition;
+  slot: TemplateRoleSlot;
+  onDefinition: (next: WorkflowTemplateDefinition) => void;
+}) {
+  const current = roleNameOf(slot);
+  const [value, setValue] = useState(current);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setValue(current);
+    setError(null);
+  }, [slot.key, current]);
+
+  const commit = () => {
+    const role = value.trim().toLowerCase();
+    if (!ROLE_NAME_RE.test(role)) {
+      setError("role 名需为 2–32 位小写英文、数字、- 或 _");
+      return;
+    }
+    const nextKey = meepleKey(role);
+    if (nextKey !== slot.key && definition.role_slots.some((item) => item.key === nextKey)) {
+      setError("该 role 名已被其他 Meeple 使用");
+      return;
+    }
+    if (nextKey === slot.key && role === current) {
+      setError(null);
+      return;
+    }
+    let next = definition;
+    if (nextKey !== slot.key) next = renameMeepleKey(next, slot.key, nextKey);
+    const target = next.role_slots.find((item) => item.key === nextKey);
+    if (target) target.role = role;
+    onDefinition(next);
+    setError(null);
+  };
+
+  return (
+    <label className="wft-slot-field">
+      <input value={value} aria-label="Role" maxLength={32}
+        placeholder="role 名，如 tester"
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} />
+      {error && <span className="wft-inline-warning">{error}</span>}
+    </label>
+  );
+}
+
 function TemplateInspector({ definition, selectedStep, selectedEdge, selectedLoop, issues, meta, template,
   roles, draftSource, draftMapping, onDraftMapping,
   onMeta, onDefinition, onSelectStep, onDeleteStep, onDeleteEdge,
@@ -822,9 +875,11 @@ function TemplateInspector({ definition, selectedStep, selectedEdge, selectedLoo
   onConnectNodes: (source: string, target: string) => void;
   onRemoveDependency: (source: string, target: string) => void;
   onDeleteSlot: (key: string) => void;
-  onAddSlot: (label: string) => void;
+  onAddSlot: (label: string, role: string) => void;
 }) {
-  const [slotLabelInput, setSlotLabelInput] = useState("");
+  const [meepleLabelInput, setMeepleLabelInput] = useState("");
+  const [meepleRoleInput, setMeepleRoleInput] = useState("");
+  const [meepleError, setMeepleError] = useState<string | null>(null);
   const slots = definition.role_slots || [];
   const used = usedSlots(definition);
   const edgeData = selectedEdge?.data as { kind?: string; source?: string; target?: string } | undefined;
@@ -850,8 +905,8 @@ function TemplateInspector({ definition, selectedStep, selectedEdge, selectedLoo
   };
 
   return (
-    <div className="wft-inspector-body">
-      <section className="wft-panel">
+    <div className={`wft-inspector-body ${selectedStep || selectedEdge ? "has-context" : ""}`}>
+      <section className="wft-panel wft-template-panel">
         <h3>模板信息</h3>
         <div className="field">
           <span>使用方式</span>
@@ -876,7 +931,7 @@ function TemplateInspector({ definition, selectedStep, selectedEdge, selectedLoo
         <section className="wft-panel">
           <h3>草案角色映射</h3>
           <p className="muted wft-panel-note">
-            保存草案时会把槽位编译回具体角色；必须映射到来源任务中的角色。
+            保存草案时会把 Meeple 编译回具体角色；必须映射到来源任务中的角色。
           </p>
           {used.map((key) => {
             const slot = slots.find((item) => item.key === key);
@@ -896,50 +951,89 @@ function TemplateInspector({ definition, selectedStep, selectedEdge, selectedLoo
         </section>
       )}
 
-      <section className="wft-panel">
-        <h3>角色槽位 · {slots.length}</h3>
+      <section className="wft-panel wft-meeple-panel">
+        <h3>Meeple · {slots.length}</h3>
         <div className="wft-slots">
           {slots.map((slot) => (
             <div className="wft-slot" key={slot.key}>
               <div className="wft-slot-head">
                 <strong>{slot.label}</strong>
-                <code>{slot.key}</code>
+                <code title="内部引用 ID；修改 Role 时同步更新">{slot.key}</code>
                 <span className={used.includes(slot.key) ? "wft-slot-used" : "muted"}>
                   {used.includes(slot.key) ? "使用中" : "未使用"}
                 </span>
-                <button className="icon-btn wft-slot-delete" title="删除槽位"
+                <button className="icon-btn wft-slot-delete" title="删除 Meeple"
                   onClick={() => onDeleteSlot(slot.key)}><Icon name="x" size={11} /></button>
               </div>
               <div className="wft-slot-fields">
-                <input value={slot.label} aria-label="槽位名称"
-                  onChange={(e) => {
-                    const next = cloneDefinition(definition);
-                    const target = next.role_slots.find((item) => item.key === slot.key);
-                    if (target) target.label = e.target.value;
-                    onDefinition(next);
-                  }} />
-                <input value={(slot.suggested_roles || []).join(",")} placeholder="建议角色(可选)"
-                  aria-label="建议角色"
-                  onChange={(e) => {
-                    const next = cloneDefinition(definition);
-                    const target = next.role_slots.find((item) => item.key === slot.key);
-                    if (target) target.suggested_roles = e.target.value.split(",").map((x) => x.trim()).filter(Boolean);
-                    onDefinition(next);
-                  }} />
+                <label className="wft-slot-field">
+                  <input value={slot.label} aria-label="Meeple 名称" placeholder="Meeple 名称"
+                    onChange={(e) => {
+                      const next = cloneDefinition(definition);
+                      const target = next.role_slots.find((item) => item.key === slot.key);
+                      if (target) target.label = e.target.value;
+                      onDefinition(next);
+                    }} />
+                </label>
+                <MeepleRoleInput definition={definition} slot={slot}
+                  onDefinition={onDefinition} />
+                <label className="wft-slot-field">
+                  <select value={slot.bound_role || ""}
+                    title="绑定角色（可选）：有绑定时 Cindy 优先使用"
+                    onChange={(e) => {
+                      const next = cloneDefinition(definition);
+                      const target = next.role_slots.find((item) => item.key === slot.key);
+                      if (target) target.bound_role = e.target.value || null;
+                      onDefinition(next);
+                    }}>
+                    <option value="">不绑定（由 Cindy 匹配）</option>
+                    {slot.bound_role && !roles.some(
+                      (role) => role.enabled && role.slug === slot.bound_role,
+                    ) && (
+                      <option value={slot.bound_role}>{slot.bound_role}（不可用）</option>
+                    )}
+                    {roles.filter((role) => role.enabled).map((role) => (
+                      <option key={role.slug} value={role.slug}>
+                        {role.display_name} · {role.slug}
+                      </option>
+                    ))}
+                  </select>
+
+                </label>
               </div>
             </div>
           ))}
         </div>
-        <div className="wft-add-slot">
-          <input value={slotLabelInput} placeholder="新槽位名称，如 执行者"
-            onChange={(e) => setSlotLabelInput(e.target.value)} />
+        <p className="muted wft-panel-note">
+          Meeple 是一类角色的代表。绑定角色优先；未绑定时由 Cindy 按 role 与步骤上下文匹配。
+        </p>
+        <div className="wft-add-meeple">
+          <input value={meepleLabelInput} placeholder="中文名，如 测试工程师"
+            onChange={(e) => setMeepleLabelInput(e.target.value)} />
+          <input value={meepleRoleInput} placeholder="role，如 tester" maxLength={32}
+            onChange={(e) => setMeepleRoleInput(e.target.value)} />
           <button className="small" onClick={() => {
-            const label = slotLabelInput.trim();
-            if (!label) return;
-            onAddSlot(label);
-            setSlotLabelInput("");
+            const label = meepleLabelInput.trim();
+            const role = meepleRoleInput.trim().toLowerCase();
+            if (!label) {
+              setMeepleError("请填写 Meeple 中文名");
+              return;
+            }
+            if (!ROLE_NAME_RE.test(role)) {
+              setMeepleError("role 名需为 2–32 位小写英文、数字、- 或 _");
+              return;
+            }
+            if (slots.some((slot) => slot.key === meepleKey(role))) {
+              setMeepleError(`role_${role} 已存在`);
+              return;
+            }
+            onAddSlot(label, role);
+            setMeepleLabelInput("");
+            setMeepleRoleInput("");
+            setMeepleError(null);
           }}>添加</button>
         </div>
+        {meepleError && <p className="error">{meepleError}</p>}
       </section>
 
       {selectedEdge && (
@@ -1002,7 +1096,7 @@ function TemplateInspector({ definition, selectedStep, selectedEdge, selectedLoo
                 <option value="plan_slices">切片计划</option>
               </select>
             </div>
-            <div className="field"><span>角色槽位</span>
+            <div className="field"><span>Meeple</span>
               <select value={selectedStep.role_slot} onChange={(e) => updateStep({ role_slot: e.target.value })}>
                 {slots.map((slot) => <option key={slot.key} value={slot.key}>{slot.label} · {slot.key}</option>)}
               </select>
@@ -1016,19 +1110,19 @@ function TemplateInspector({ definition, selectedStep, selectedEdge, selectedLoo
           <label className="wft-check"><input type="checkbox" checked={Boolean(selectedStep.gate)}
             onChange={(e) => updateStep({ gate: e.target.checked })} /> 人工审核门</label>
           {selectedStep.gate && (
-            <div className="field"><span>审核人槽位</span>
+            <div className="field"><span>审核人 Meeple</span>
               <select value={selectedStep.reviewer_slot || ""} onChange={(e) => updateStep({ reviewer_slot: e.target.value || null })}>
                 <option value="">未指定</option>
                 {slots.map((slot) => <option key={slot.key} value={slot.key}>{slot.label} · {slot.key}</option>)}
               </select>
             </div>
           )}
-          <div className="field"><span>指令 instructions</span>
-            <textarea rows={7} value={selectedStep.instructions || ""}
+          <div className="field"><span>指令</span>
+            <textarea rows={4} value={selectedStep.instructions || ""}
               onChange={(e) => updateStep({ instructions: e.target.value })} />
           </div>
-          <div className="field"><span>验收标准（每行一条）</span>
-            <textarea rows={4} value={(selectedStep.acceptance || []).join("\n")}
+          <div className="field"><span>验收（每行一条）</span>
+            <textarea rows={3} value={(selectedStep.acceptance || []).join("\n")}
               onChange={(e) => updateStep({ acceptance: e.target.value.split("\n").map((x) => x.trim()).filter(Boolean) })} />
           </div>
           <div className="field"><span>上游依赖</span>
@@ -1128,13 +1222,13 @@ function TemplateInspector({ definition, selectedStep, selectedEdge, selectedLoo
                 <div className="field"><span>标题</span>
                   <input value={spec.title || ""} onChange={(e) => updateLoopPhase(phase, { title: e.target.value })} />
                 </div>
-                <div className="field"><span>角色槽位</span>
+                <div className="field"><span>Meeple</span>
                   <select value={spec.role_slot} onChange={(e) => updateLoopPhase(phase, { role_slot: e.target.value })}>
                     {slots.map((slot) => <option key={slot.key} value={slot.key}>{slot.label} · {slot.key}</option>)}
                   </select>
                 </div>
                 <div className="field"><span>指令</span>
-                  <textarea rows={4} value={spec.instructions || ""}
+                  <textarea rows={3} value={spec.instructions || ""}
                     onChange={(e) => updateLoopPhase(phase, { instructions: e.target.value })} />
                 </div>
                 {phase === "decide" && (

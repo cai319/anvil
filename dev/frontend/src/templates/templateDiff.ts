@@ -23,7 +23,7 @@ function compareField(lines: TemplateDiffLine[], nodeId: string, field: string,
   });
 }
 
-/** 粗略的语义 diff：以步骤/槽位/loop 为主要单位，供人工审阅 AI 原稿与修订。 */
+/** 粗略的语义 diff：以步骤/Meeple/loop 为主要单位，供人工审阅 AI 原稿与修订。 */
 export function diffTemplate(before: WorkflowTemplateDefinition | null | undefined,
                              after: WorkflowTemplateDefinition | null | undefined): TemplateDiffLine[] {
   const lines: TemplateDiffLine[] = [];
@@ -35,11 +35,11 @@ export function diffTemplate(before: WorkflowTemplateDefinition | null | undefin
   const afterSlots = new Map((after.role_slots || []).map((slot) => [slot.key, slot]));
   for (const [key, slot] of afterSlots) {
     const old = beforeSlots.get(key);
-    if (!old) lines.push({ kind: "added", text: `角色槽位 + ${slot.label} (${key})` });
-    else compareField(lines, key, "label", old.label, slot.label, `角色槽位 ${key} 名称`);
+    if (!old) lines.push({ kind: "added", text: `Meeple + ${slot.label} (${key})` });
+    else compareField(lines, key, "label", old.label, slot.label, `Meeple ${key} 名称`);
   }
   for (const [key, slot] of beforeSlots) {
-    if (!afterSlots.has(key)) lines.push({ kind: "removed", text: `角色槽位 − ${slot.label} (${key})` });
+    if (!afterSlots.has(key)) lines.push({ kind: "removed", text: `Meeple − ${slot.label} (${key})` });
   }
   const beforeSteps = new Map((before.steps || []).map((step) => [step.id, step]));
   const afterSteps = new Map((after.steps || []).map((step) => [step.id, step]));

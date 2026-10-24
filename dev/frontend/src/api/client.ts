@@ -718,7 +718,12 @@ export interface WorkflowHistoryItem {
 export interface TemplateRoleSlot {
   key: string;
   label: string;
+  /** 通用英文 role 名，例如 tester；key 应为 role_<role>。 */
+  role?: string;
+  /** 可选：预先创建的角色 slug；套用时优先绑定。 */
+  bound_role?: string | null;
   description?: string;
+  /** 兼容旧模板：不再作为新模板的主要配置方式。 */
   suggested_roles?: string[];
 }
 

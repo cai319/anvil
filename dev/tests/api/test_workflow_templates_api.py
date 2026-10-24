@@ -111,6 +111,40 @@ async def test_template_publish_and_apply(client, seeded):
 
 
 @pytest.mark.asyncio
+async def test_meeple_bound_role_is_used_when_mapping_missing(client, seeded):
+    await client.post(f"{API}/tasks", json=task_payload(
+        id="T-BOUND", assignees=["developer"]), headers=auth_headers())
+    definition = {
+        "schema_version": 1,
+        "role_slots": [{
+            "key": "role_tester", "label": "测试工程师", "role": "tester",
+            "bound_role": "developer",
+        }],
+        "steps": [{
+            "id": "S1", "title": "执行测试", "role_slot": "role_tester",
+            "depends_on": [],
+        }],
+    }
+    created = await client.post(f"{API}/workflow-templates", headers=human_headers(), json={
+        "name": "绑定角色模板", "definition": definition, "use_mode": "manual",
+    })
+    tid = created.json()["id"]
+    assert (await client.put(f"{API}/workflow-templates/{tid}/draft", headers=human_headers(),
+                             json={"definition": definition, "layout": {}, "name": "绑定角色模板",
+                                   "description": "", "use_mode": "manual",
+                                   "base_revision": 1})).status_code == 200
+    assert (await client.post(f"{API}/workflow-templates/{tid}/publish",
+                              headers=human_headers(), json={})).status_code == 200
+    applied = await client.post(f"{API}/tasks/T-BOUND/workflow/from-template",
+                                headers=human_headers(), json={
+        "template_id": tid, "version": 1, "role_mapping": {},
+    })
+    assert applied.status_code == 200, applied.text
+    wf = applied.json()["workflow"]
+    assert wf["steps"][0]["role_slug"] == "developer"
+
+
+@pytest.mark.asyncio
 async def test_running_workflow_draft_requires_restart(client, seeded):
     await client.post(f"{API}/tasks", json=task_payload(
         id="T-BRD", assignees=["developer"]), headers=auth_headers())
@@ -175,7 +209,8 @@ async def test_import_workflow_keeps_loop_and_slots(client, seeded):
     assert imported.status_code == 201, imported.text
     definition = imported.json()["draft"]["definition"]
     assert definition["loop"]["from"] == "P1"
-    assert {slot["key"] for slot in definition["role_slots"]} >= {"executor", "verifier", "decider"}
+    assert {slot["role"] for slot in definition["role_slots"]} >= {"developer", "tester", "pm"}
+    assert all(slot["key"] == f"role_{slot['role']}" for slot in definition["role_slots"])
     assert all("role_slot" in step for step in definition["steps"])
 
 
