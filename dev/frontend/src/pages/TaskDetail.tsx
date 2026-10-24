@@ -31,6 +31,72 @@ const RUN_LABEL: Record<string, string> = {
   suspended: "已挂起",
 };
 
+/** 工作流概览：状态、完成度、步骤状态计数，规则/验证矩阵默认收起。 */
+function WorkflowSummary({ workflow, taskStatus }: {
+  workflow: Workflow;
+  taskStatus: Task["status"];
+}) {
+  const total = workflow.steps.length;
+  const approved = workflow.steps.filter((s) => s.status === "approved").length;
+  const percent = total ? Math.round((approved / total) * 100) : 0;
+  const stateLabel = workflow.status === "done"
+    ? (taskStatus === "done" ? "已完成" : "已完成 · 等待最终评审")
+    : workflow.status === "running" ? "推进中" : "已失败";
+  const counts = (Object.keys(STATUS_META) as WorkflowStep["status"][])
+    .map((status) => ({
+      status,
+      count: workflow.steps.filter((s) => s.status === status).length,
+    }))
+    .filter(({ status, count }) => count > 0 && status !== "approved");
+  const feedbackRules = workflow.definition?.feedback_rules ?? [];
+  const verification = workflow.definition?.verification ?? [];
+
+  return (
+    <div className={`wf-summary is-${workflow.status}`}>
+      <div className="wf-summary-main">
+        <span className="wf-summary-state">{stateLabel}</span>
+        <div className="wf-summary-progress">
+          <span className="wf-summary-bar"><i style={{ width: `${percent}%` }} /></span>
+          <span className="wf-summary-count"><strong>{approved}</strong> / {total} 步完成</span>
+        </div>
+        <div className="wf-summary-pills">
+          {counts.map(({ status, count }) => (
+            <span key={status} className="wf-summary-pill" style={{ color: STATUS_META[status].color }}>
+              <i style={{ background: STATUS_META[status].color }} />
+              {STATUS_META[status].label} {count}
+            </span>
+          ))}
+        </div>
+      </div>
+      {(feedbackRules.length > 0 || verification.length > 0) && (
+        <details className="wf-summary-rules">
+          <summary>
+            <Icon className="wf-summary-chevron" name="chevron-right" size={12} />
+            规则与验证
+            <span className="muted">反馈 {feedbackRules.length} · 验证 {verification.length}</span>
+          </summary>
+          <div className="wf-summary-rules-body">
+            {feedbackRules.length > 0 && (
+              <p className="muted">反馈路径：{feedbackRules.join("；")}</p>
+            )}
+            {verification.length > 0 && (
+              <div className="wf-matrix">
+                <span className="muted">验证矩阵：</span>
+                {verification.map((v, i) => (
+                  <span key={i} className="wf-matrix-cell">
+                    <strong>{v.cell}</strong> · {v.method}
+                    {v.verifier_role ? ` · ${v.verifier_role}` : ""}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
 // 系统伪发送者：workflow 引擎/系统通知不是真实 Agent 角色。
 const SYSTEM_SENDERS: Record<string, string> = {
   workflow: "工作流引擎",
@@ -830,9 +896,39 @@ export function TaskDetail({ id }: { id: string }) {
   return (
     <div className="session task-page">
       <div className="task-sheet">
-      <p className="session-back">
-        <a href="/"><Icon name="chevron-left" /> 任务大厅</a>
-      </p>
+      <div className="task-sheet-top">
+        <p className="session-back">
+          <a href="/"><Icon name="chevron-left" /> 任务大厅</a>
+        </p>
+        <div className="task-sheet-actions">
+          {["todo", "in_progress", "in_review"].includes(task.status) && (
+            <button
+              className="small danger"
+              disabled={busy}
+              onClick={() => {
+                if (!window.confirm(
+                  "人工终止后任务会进入「已终止」状态，可重新打开；确定终止？")) return;
+                act(() => api.cancelTask(id));
+              }}
+            >人工终止任务</button>
+          )}
+          <button
+            className="small danger"
+            disabled={busy}
+            onClick={async () => {
+              if (!window.confirm("删除任务会同时删除它的 runs、评论和依赖，且不可恢复。确定？")) return;
+              setBusy(true);
+              try {
+                await api.deleteTask(id, true);
+                window.location.href = "/";
+              } catch (e) {
+                setError(String(e));
+                setBusy(false);
+              }
+            }}
+          >删除任务</button>
+        </div>
+      </div>
 
       {/* 头部 */}
       <div className="session-head">
@@ -889,7 +985,7 @@ export function TaskDetail({ id }: { id: string }) {
       </div>
       </div>
 
-      <div className={`task-tab-body ${tab === "chat" ? "is-chat" : ""}`}>
+      <div className={`task-tab-body ${tab === "chat" ? "is-chat" : ""} ${tab === "workflow" ? "is-workflow" : ""}`}>
       {tab === "chat" && (
       <div
         className={`task-layout ${panel.collapsed ? "panel-collapsed" : ""}`}
@@ -965,32 +1061,6 @@ export function TaskDetail({ id }: { id: string }) {
             {task.status === "closed" && (
               <button onClick={() => act(() => api.reopenTask(id))} disabled={busy}>重新打开</button>
             )}
-            {["todo", "in_progress", "in_review"].includes(task.status) && (
-              <button
-                className="danger"
-                disabled={busy}
-                onClick={() => {
-                  if (!window.confirm(
-                    "人工终止后任务会进入「已终止」状态，可重新打开；确定终止？")) return;
-                  act(() => api.cancelTask(id));
-                }}
-              >人工终止任务</button>
-            )}
-            <button
-              className="danger"
-              disabled={busy}
-              onClick={async () => {
-                if (!window.confirm("删除任务会同时删除它的 runs、评论和依赖，且不可恢复。确定？")) return;
-                setBusy(true);
-                try {
-                  await api.deleteTask(id, true);
-                  window.location.href = "/";
-                } catch (e) {
-                  setError(String(e));
-                  setBusy(false);
-                }
-              }}
-            >删除任务</button>
           </div>
 
           {dispatchNote && <p className="muted">{dispatchNote}</p>}
@@ -1297,31 +1367,13 @@ export function TaskDetail({ id }: { id: string }) {
       )}
 
       {tab === "workflow" && (
-        <div className="workflow-view">
+        <div className={`workflow-view ${wfView === "graph" ? "is-graph" : "is-list"}`}>
           {!workflow && (
             <p className="muted">还没有工作流。多角色任务派发后，Cindy 会生成步骤状态机并在此展示。</p>
           )}
           {workflow && (
             <>
-              <p className="muted">
-                工作流 {workflow.status === "done" ? "已完成（等待最终评审）"
-                  : workflow.status === "running" ? "推进中" : "已失败"}
-                {" · "}{workflow.steps.filter((s) => s.status === "approved").length}/{workflow.steps.length} 步完成
-              </p>
-              {workflow.definition?.feedback_rules?.length ? (
-                <p className="muted">反馈路径：{workflow.definition.feedback_rules.join("；")}</p>
-              ) : null}
-              {workflow.definition?.verification?.length ? (
-                <div className="wf-matrix">
-                  <span className="muted">验证矩阵：</span>
-                  {workflow.definition.verification.map((v, i) => (
-                    <span key={i} className="wf-matrix-cell">
-                      <strong>{v.cell}</strong> · {v.method}
-                      {v.verifier_role ? ` · ${v.verifier_role}` : ""}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
+              <WorkflowSummary workflow={workflow} taskStatus={task.status} />
               <div className="role-picker" style={{ margin: "4px 0 10px" }}>
                 <button className={`small ${wfView === "graph" ? "primary" : ""}`}
                   onClick={() => setWfView("graph")}>图谱</button>

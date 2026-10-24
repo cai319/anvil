@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, subscribeEvents, type Role, type RoleRuntimeStatus, type Run, type Task } from "../api/client";
 import { navigate } from "../router";
 import { formatClock, formatDateTime, formatRelative, parseTime, useNow } from "../time";
@@ -174,6 +174,28 @@ export function Lobby() {
   const now = useNow(30_000); // 运行时长按系统当前时间刷新
 
   const runtimeByRole = new Map(roleRuntimes.map((rt) => [rt.role_slug, rt]));
+  // 一个角色同一时刻只保留一个实时会话：优先当前上下文任务，其次最近创建的 run。
+  // 已完成任务遗留的 suspended run 仍会留在数据库，但不再重复占据实时面板。
+  const visibleRuns = useMemo(() => {
+    const startedAt = (run: Run) => new Date(run.started_at ?? 0).getTime();
+    const byRole = new Map<string, Run>();
+    for (const run of runs) {
+      const current = byRole.get(run.role_slug);
+      if (!current) {
+        byRole.set(run.role_slug, run);
+        continue;
+      }
+      const contextTask = runtimeByRole.get(run.role_slug)?.context_task_id;
+      const runIsCurrent = Boolean(contextTask && run.task_id === contextTask);
+      const currentIsCurrent = Boolean(contextTask && current.task_id === contextTask);
+      if (runIsCurrent !== currentIsCurrent) {
+        if (runIsCurrent) byRole.set(run.role_slug, run);
+      } else if (startedAt(run) > startedAt(current)) {
+        byRole.set(run.role_slug, run);
+      }
+    }
+    return [...byRole.values()].sort((a, b) => startedAt(b) - startedAt(a));
+  }, [runs, roleRuntimes]);
 
   const refresh = () =>
     Promise.all([
@@ -248,7 +270,7 @@ export function Lobby() {
       <PageHeader
         kicker="MISSION BOARD"
         title="任务大厅"
-        subtitle={`${roles.length} 个角色 · ${runs.length} 个活跃会话`}
+        subtitle={`${roles.length} 个角色 · ${visibleRuns.length} 个活跃会话`}
         actions={
           <>
             {panel.collapsed && (
@@ -398,7 +420,7 @@ export function Lobby() {
         {/* 右栏：实时会话 + 最近活动（历史见 /activity） */}
         <section className="lobby-side" aria-hidden={panel.collapsed || undefined}>
           <div className="pane-head">
-            <h2 className="pane-title">实时会话 · {runs.length}</h2>
+            <h2 className="pane-title">实时会话 · {visibleRuns.length}</h2>
             <button
               type="button"
               className="icon-btn"
@@ -409,10 +431,10 @@ export function Lobby() {
               <Icon name="panel-right" />
             </button>
           </div>
-          {runs.length === 0 && (
+          {visibleRuns.length === 0 && (
             <p className="muted">当前没有活跃会话。角色空闲时进程释放，不是故障。</p>
           )}
-          {runs.map((r) => {
+          {visibleRuns.map((r) => {
             const task = tasks.find((t) => t.id === r.task_id);
             const roleName = roles.find((x) => x.slug === r.role_slug)?.display_name ?? r.role_slug;
             const live = r.status === "running" || r.status === "projecting";
@@ -463,7 +485,7 @@ export function Lobby() {
       {showNew && (
         <NewTaskModal
           roles={roles}
-          roleStatus={Object.fromEntries(runs.map((r) => [r.role_slug, runStatusClass(r.status)]))}
+          roleStatus={Object.fromEntries(visibleRuns.map((r) => [r.role_slug, runStatusClass(r.status)]))}
           onClose={() => setShowNew(false)}
           onCreated={(task) => {
             setShowNew(false);

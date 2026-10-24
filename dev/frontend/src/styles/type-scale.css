@@ -212,6 +212,39 @@ button.small,
   min-height: 0;
   padding: 8px 10px;
 }
+
+/* ── 工作流图谱：画布内使用固定字号，整体由缩放控制 ── */
+.wf-graph .wf-node {
+  overflow: hidden;
+  font-size: 12px;
+}
+.wf-graph .wf-node-top {
+  gap: 5px;
+  font-size: 10.5px;
+  line-height: 1.2;
+}
+.wf-graph .wf-node-id,
+.wf-graph .wf-node-role,
+.wf-graph .wf-loop-current {
+  font-size: 10.5px;
+}
+.wf-graph .wf-node-gate {
+  font-size: 10px;
+}
+.wf-graph .wf-node-title {
+  font-size: 13px;
+  line-height: 1.35;
+  -webkit-line-clamp: 3;
+}
+.wf-graph .wf-node-title.is-medium { font-size: 12.5px; }
+.wf-graph .wf-node-title.is-compact { font-size: 11.5px; }
+.wf-graph .wf-node-role,
+.wf-graph .wf-loop-current {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wf-graph .wf-loop-progress { margin-top: auto; }
 .wf-slice-row-btn {
   min-height: 0;
   padding: 0;
@@ -432,6 +465,22 @@ select { height: var(--control-h); }
 .session-head {
   padding: clamp(12px, 1vw, 20px) clamp(14px, 1.1vw, 22px);
 }
+/* 任务生命周期操作放在任务页顶部，不随会话区滚走。 */
+.task-sheet-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.task-sheet-top .session-back { margin: 0; }
+.task-sheet-actions {
+  display: flex;
+  align-items: center;
+  gap: clamp(6px, 0.5vw, 10px);
+  margin-left: auto;
+}
+.task-main > .session-actions:empty { display: none; }
 .thread-item {
   gap: clamp(8px, 0.8vw, 14px);
   padding: clamp(8px, 0.8vw, 14px) 0;
@@ -980,6 +1029,158 @@ select { height: var(--control-h); }
   height: 100%;
   max-height: none;
 }
+
+/* ── 工作流：桌面端填满页签高度，图谱按剩余高度自适应 ── */
+@media (min-width: 1100px) {
+  .task-tab-body.is-workflow { overflow: hidden; }
+  .task-tab-body.is-workflow > .workflow-view {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .workflow-view.is-graph { overflow: hidden; }
+  .workflow-view.is-list { overflow-y: auto; }
+  .workflow-view.is-graph > .wf-summary,
+  .workflow-view.is-graph > .role-picker { flex: none; }
+  .workflow-view.is-graph > .wf-graph-wrap {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .workflow-view.is-graph .wf-legend,
+  .workflow-view.is-graph .wf-parallel-note { flex: none; }
+  .workflow-view.is-graph .wf-graph-scroll {
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 180px;
+  }
+  .workflow-view.is-graph .wf-detail-anchor {
+    flex: none;
+    max-height: 35vh;
+    overflow-y: auto;
+  }
+}
+
+/* ── 工作流概览：状态、完成度、规则与验证 ───────── */
+.wf-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 12px;
+  padding: clamp(10px, 0.8vw, 14px) clamp(12px, 0.9vw, 16px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-soft);
+}
+.wf-summary-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+.wf-summary-state {
+  flex: none;
+  padding: 3px 10px;
+  border: 1.5px solid currentColor;
+  border-radius: 999px;
+  font-size: var(--fs-meta);
+  font-weight: 700;
+}
+.wf-summary.is-done .wf-summary-state {
+  color: #34d399;
+  background: rgba(52, 211, 153, 0.12);
+}
+.wf-summary.is-running .wf-summary-state {
+  color: #60a5fa;
+  background: rgba(96, 165, 250, 0.12);
+}
+.wf-summary.is-failed .wf-summary-state {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.12);
+}
+.wf-summary-progress {
+  display: flex;
+  flex: 1 1 260px;
+  align-items: center;
+  gap: 10px;
+  min-width: 180px;
+}
+.wf-summary-bar {
+  flex: 1 1 auto;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(127, 127, 127, 0.18);
+}
+.wf-summary-bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #34d399;
+  transition: width 0.25s ease;
+}
+.wf-summary.is-running .wf-summary-bar i { background: #60a5fa; }
+.wf-summary.is-failed .wf-summary-bar i { background: #f87171; }
+.wf-summary-count {
+  flex: none;
+  color: var(--muted);
+  font-size: var(--fs-meta);
+  white-space: nowrap;
+}
+.wf-summary-count strong {
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+.wf-summary-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.wf-summary-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-meta);
+  white-space: nowrap;
+}
+.wf-summary-pill i {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.wf-summary-rules {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.wf-summary-rules > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: var(--fs-meta);
+}
+.wf-summary-rules > summary .muted {
+  font-size: var(--fs-hint);
+  font-weight: 400;
+}
+.wf-summary-chevron {
+  flex: none;
+  transition: transform 0.15s ease;
+}
+.wf-summary-rules[open] > summary .wf-summary-chevron {
+  transform: rotate(90deg);
+}
+.wf-summary-rules-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 6px;
+}
+.wf-summary-rules-body .wf-matrix { margin: 2px 0 0; }
 
 /* ── 提醒：表单固定，提醒表格单独滚动 ───────────── */
 .content-reminders {

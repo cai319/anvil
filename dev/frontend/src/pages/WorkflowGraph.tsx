@@ -18,11 +18,28 @@ import { Icon } from "../components/Icon";
  *   节点上实时显示当前片 / 阶段 / 完成计数，不展开全部步骤。
  */
 
-const NODE_W = 210;
-const NODE_H = 92;
-const GAP_X = 76;
-const GAP_Y = 20;
-const PAD = 24;
+const NODE_W = 240;
+const NODE_H = 112;
+const GAP_X = 64;
+const GAP_Y = 24;
+const PAD_X = 32;
+const PAD_TOP = 88;
+const PAD_BOTTOM = 32;
+const NODE_TITLE_MAX = 56;
+
+function fitNodeTitle(title: string): string {
+  const chars = Array.from(title);
+  return chars.length > NODE_TITLE_MAX
+    ? `${chars.slice(0, NODE_TITLE_MAX).join("")}…`
+    : title;
+}
+
+function nodeTitleClass(title: string): string {
+  const length = Array.from(title).length;
+  if (length > 46) return "is-compact";
+  if (length > 34) return "is-medium";
+  return "";
+}
 
 type VisualNode =
   | { id: string; kind: "step"; step: WorkflowStep; deps: string[] }
@@ -101,25 +118,26 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
   const [zoom, setZoom] = useState<number | null>(null);
   const scale = zoom ?? fitScale;
 
-  // 竖向布局：层 = 行（从上到下），同层节点横向并排（可并行）。
+  // 横向布局：层 = 列（从左到右），同层节点纵向并排（可并行）。
   const { positions, edges, rejectEdges, width, height } = useMemo(() => {
     const layers = computeLayers(visualNodes);
-    const rows: VisualNode[][] = [];
+    const columns: VisualNode[][] = [];
     for (const n of visualNodes) {
       const l = layers.get(n.id) ?? 0;
-      (rows[l] ??= []).push(n);
+      (columns[l] ??= []).push(n);
     }
-    const rowWidths = rows.map((r) => (r ? r.length * (NODE_W + GAP_X) - GAP_X : 0));
-    const maxW = Math.max(NODE_W, ...rowWidths);
+    const columnHeights = columns.map((column) =>
+      column.length * NODE_H + Math.max(0, column.length - 1) * GAP_Y);
+    const maxColumnHeight = Math.max(NODE_H, ...columnHeights);
+    const hasRejectEdge = visualNodes.some((n) =>
+      n.kind === "step" && n.step.kind === "decision" && (n.step.on_reject?.length ?? 0) > 0);
+    const topPad = hasRejectEdge ? PAD_TOP : PAD_BOTTOM;
     const pos = new Map<string, { x: number; y: number }>();
-    rows.forEach((row, li) => {
-      if (!row) return;
-      const rowW = row.length * (NODE_W + GAP_X) - GAP_X;
-      const left = PAD + (maxW - rowW) / 2;
-      row.forEach((n, i) => {
+    columns.forEach((column, li) => {
+      column.forEach((n, i) => {
         pos.set(n.id, {
-          x: left + i * (NODE_W + GAP_X),
-          y: PAD + li * (NODE_H + GAP_Y),
+          x: PAD_X + li * (NODE_W + GAP_X),
+          y: topPad + i * (NODE_H + GAP_Y),
         });
       });
     });
@@ -132,8 +150,8 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
         if (!p1) continue;
         es.push({
           from: dep, to: node.id,
-          x1: p1.x + NODE_W / 2, y1: p1.y + NODE_H,
-          x2: p2.x + NODE_W / 2, y2: p2.y,
+          x1: p1.x + NODE_W, y1: p1.y + NODE_H / 2,
+          x2: p2.x, y2: p2.y + NODE_H / 2,
         });
       }
     }
@@ -153,32 +171,52 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
         const p1 = pos.get(targetId);
         if (!p1) continue;
         rs.push({
-          x1: p2.x + NODE_W / 2, y1: p2.y + NODE_H / 2,
-          x2: p1.x + NODE_W / 2, y2: p1.y + NODE_H / 2,
+          x1: p2.x + NODE_W / 2, y1: p2.y,
+          x2: p1.x + NODE_W / 2, y2: p1.y,
         });
       }
     }
-    const h = rows.length ? rows.length * (NODE_H + GAP_Y) - GAP_Y : NODE_H;
     return {
       positions: pos, edges: es, rejectEdges: rs,
-      width: maxW + PAD * 2, height: h + PAD * 2,
+      width: PAD_X * 2 + columns.length * NODE_W + Math.max(0, columns.length - 1) * GAP_X,
+      height: topPad + maxColumnHeight + PAD_BOTTOM,
     };
   }, [visualNodes, workflow.steps]);
 
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    // 竖向布局：横向填满容器（可放大），纵向自然滚动
+    // 横向布局：按容器高度适配，宽度通过滚轮左右平移。
     const update = () => {
-      const w = Math.max(1, el.clientWidth - 8);
-      const s = w / width;
-      setFitScale(Math.max(0.3, Math.min(2.5, s)));
+      const available = Math.max(1, el.clientHeight - 8);
+      const s = available / height;
+      setFitScale(Math.max(0.55, Math.min(1.5, s)));
     };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [width]);
+  }, [height]);
+
+  // 鼠标纵向滚轮转为图谱横向滚动；触控板横向手势保持原生行为。
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const onWheel = (event: WheelEvent) => {
+      if (el.scrollWidth <= el.clientWidth + 1) return;
+      if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+      const delta = event.deltaMode === 1 ? event.deltaY * 24 : event.deltaY;
+      const max = el.scrollWidth - el.clientWidth;
+      // 到达左右边界后把滚轮还给页面，避免图谱区域把页面滚动“困住”。
+      if ((delta > 0 && el.scrollLeft >= max - 1) || (delta < 0 && el.scrollLeft <= 1)) {
+        return;
+      }
+      event.preventDefault();
+      el.scrollLeft = Math.max(0, Math.min(max, el.scrollLeft + delta));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
 
   // 点击节点后把详情面板滚入视野，避免“点了没反应”的错觉。
   useEffect(() => {
@@ -211,13 +249,13 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
         <span className="wf-legend-item">
           <i style={{ background: "#fb923c" }} /> 虚线 = 决策打回重做
         </span>
-        <span className="muted">· 同一行（层）= 可并行；箭头向下 = 依赖</span>
+        <span className="muted">· 同一列 = 可并行；箭头向右 = 依赖；滚轮 = 左右平移</span>
         <span className="wf-zoom">
           <button className="small" title="缩小" onClick={() => setZoom(Math.max(0.3, scale - 0.15))}><Icon name="minus" /></button>
           <span className="muted">{Math.round(scale * 100)}%</span>
           <button className="small" title="放大" onClick={() => setZoom(Math.min(1.6, scale + 0.15))}><Icon name="plus" /></button>
-          <button className="small" title="横向填满容器（纵向滚动查看全图）"
-            onClick={() => setZoom(null)}>适应宽度</button>
+          <button className="small" title="按容器高度适配（左右滚动查看全图）"
+            onClick={() => setZoom(null)}>适应高度</button>
         </span>
       </div>
 
@@ -235,16 +273,23 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
                 <path d="M 0 0 L 10 5 L 0 10 z" fill="#fb923c" />
               </marker>
             </defs>
-            {edges.map((e, i) => (
-              <path key={i} d={`M ${e.x1} ${e.y1} C ${e.x1} ${e.y1 + 42}, ${e.x2} ${e.y2 - 42}, ${e.x2} ${e.y2}`}
-                fill="none" stroke="#3a435c" strokeWidth="1.5" markerEnd="url(#wf-arrow)" />
-            ))}
-            {rejectEdges.map((e, i) => (
-              <path key={`rework-${i}`}
-                d={`M ${e.x1} ${e.y1} C ${e.x1 + 90} ${e.y1 - 40}, ${e.x2 + 90} ${e.y2 + 40}, ${e.x2} ${e.y2}`}
-                fill="none" stroke="#fb923c" strokeWidth="1.4" strokeDasharray="6 4"
-                markerEnd="url(#wf-arrow-rework)" opacity="0.8" />
-            ))}
+            {edges.map((e, i) => {
+              const bend = Math.max(36, (e.x2 - e.x1) * 0.45);
+              return (
+                <path key={i}
+                  d={`M ${e.x1} ${e.y1} C ${e.x1 + bend} ${e.y1}, ${e.x2 - bend} ${e.y2}, ${e.x2} ${e.y2}`}
+                  fill="none" stroke="#3a435c" strokeWidth="1.5" markerEnd="url(#wf-arrow)" />
+              );
+            })}
+            {rejectEdges.map((e, i) => {
+              const lift = Math.min(72, 34 + Math.abs(e.x1 - e.x2) * 0.12);
+              return (
+                <path key={`rework-${i}`}
+                  d={`M ${e.x1} ${e.y1} C ${e.x1} ${e.y1 - lift}, ${e.x2} ${e.y2 - lift}, ${e.x2} ${e.y2}`}
+                  fill="none" stroke="#fb923c" strokeWidth="1.4" strokeDasharray="6 4"
+                  markerEnd="url(#wf-arrow-rework)" opacity="0.8" />
+              );
+            })}
           </svg>
 
           {visualNodes.map((node) => {
@@ -296,6 +341,7 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
                 style={{ left: p.x, top: p.y, width: NODE_W, height: NODE_H,
                   borderColor: meta.color, background: meta.bg }}
                 onClick={() => setSelected(selected === node.id ? null : node.id)}
+                aria-label={`${s.step_id} ${s.title} · ${meta.label}`}
                 title={`${s.step_id} ${s.title} · ${meta.label}${s.gate ? " · 审核门" : ""}${s.kind === "decision" ? " · 决策" : ""}`}
               >
                 <span className="wf-node-top">
@@ -305,8 +351,10 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
                   {s.kind === "plan_slices" && <span className="wf-node-gate">切片计划</span>}
                   <span className="wf-node-status" style={{ color: meta.color }}>{meta.label}</span>
                 </span>
-                <span className="wf-node-title">{s.title}</span>
-                <span className="wf-node-role">{roleName(s.role_slug)}</span>
+                <span className={`wf-node-title ${nodeTitleClass(s.title)}`} title={s.title}>
+                  {fitNodeTitle(s.title)}
+                </span>
+                <span className="wf-node-role" title={roleName(s.role_slug)}>{roleName(s.role_slug)}</span>
               </button>
             );
           })}
@@ -316,7 +364,7 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
 
       {parallelLayers.length > 0 && (
         <p className="muted wf-parallel-note">
-          可并行阶段：{parallelLayers.map((l) => `第 ${l + 1} 层`).join("、")}（同一行的步骤可同时执行）
+          可并行阶段：{parallelLayers.map((l) => `第 ${l + 1} 列`).join("、")}（同一列的步骤可同时执行）
         </p>
       )}
 
