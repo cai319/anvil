@@ -8,6 +8,8 @@ type Preview = {
   uncovered_assignees?: string[];
   conflicts?: {
     running_workflow?: boolean;
+    running_workflow_id?: string | null;
+    running_execution_no?: number | null;
     pending_drafts?: number;
     task_terminal?: boolean;
   };
@@ -24,7 +26,8 @@ export function ApplyTemplateModal({ task, roles, onClose, onApplied }: {
   const [templateId, setTemplateId] = useState("");
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [preview, setPreview] = useState<Preview | null>(null);
-  const [confirmSupersede, setConfirmSupersede] = useState(false);
+  const [restartRunning, setRestartRunning] = useState(false);
+  const [restartReason, setRestartReason] = useState("");
   const [rejectPending, setRejectPending] = useState(false);
   const [ackUncovered, setAckUncovered] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -57,7 +60,8 @@ export function ApplyTemplateModal({ task, roles, onClose, onApplied }: {
       }
       setMapping(next);
       setPreview(null);
-      setConfirmSupersede(false);
+      setRestartRunning(false);
+      setRestartReason("");
       setRejectPending(false);
       setAckUncovered(false);
     }).catch((e) => setError(String(e)));
@@ -83,7 +87,10 @@ export function ApplyTemplateModal({ task, roles, onClose, onApplied }: {
       });
       setPreview(result as Preview);
       const conflicts = (result as Preview).conflicts;
-      if (conflicts?.running_workflow) setConfirmSupersede(true);
+      if (!conflicts?.running_workflow) {
+        setRestartRunning(false);
+        setRestartReason("");
+      }
       if ((conflicts?.pending_drafts || 0) > 0) setRejectPending(true);
       if (((result as Preview).uncovered_assignees || []).length) setAckUncovered(true);
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
@@ -97,7 +104,8 @@ export function ApplyTemplateModal({ task, roles, onClose, onApplied }: {
         template_id: template.id,
         version: template.published_version,
         role_mapping: mapping,
-        confirm_supersede: confirmSupersede,
+        restart_running: restartRunning,
+        restart_reason: restartReason.trim() || undefined,
         reject_pending_drafts: rejectPending,
         acknowledge_uncovered: ackUncovered,
         mode: "direct",
@@ -166,11 +174,21 @@ export function ApplyTemplateModal({ task, roles, onClose, onApplied }: {
               <div className="muted" key={i}>提示：{issue.message}</div>
             ))}
             {preview.conflicts?.running_workflow && (
-              <label className="wft-check">
-                <input type="checkbox" checked={confirmSupersede}
-                  onChange={(e) => setConfirmSupersede(e.target.checked)} />
-                确认替换当前运行中的 workflow（旧 workflow 会失败/中止）
-              </label>
+              <div className="wft-restart-conflict">
+                <label className="wft-check">
+                  <input type="checkbox" checked={restartRunning}
+                    onChange={(e) => setRestartRunning(e.target.checked)} />
+                  终止第 {preview.conflicts.running_execution_no || 1} 次执行并重新开始
+                </label>
+                <p className="muted wft-panel-note">
+                  旧执行会标记为「已终止」并保留在任务历史中；新执行从第一步开始，不会中途替换。
+                </p>
+                <div className="field">
+                  <span>重新执行原因</span>
+                  <input value={restartReason} onChange={(e) => setRestartReason(e.target.value)}
+                    placeholder="为什么需要终止当前执行？" />
+                </div>
+              </div>
             )}
             {(preview.conflicts?.pending_drafts || 0) > 0 && (
               <label className="wft-check">
@@ -195,8 +213,13 @@ export function ApplyTemplateModal({ task, roles, onClose, onApplied }: {
         <div className="modal-actions">
           <button className="small" onClick={onClose} disabled={busy}>取消</button>
           <button className="small" onClick={check} disabled={busy || !template}>检查冲突</button>
-          <button className="primary small" onClick={apply} disabled={busy || !template || errors.length > 0}
-            title={errors.length ? "请先修复校验错误" : "人类确认后直接创建 workflow"}>
+          <button className="primary small" onClick={apply}
+            disabled={busy || !template || errors.length > 0
+              || Boolean(preview?.conflicts?.running_workflow && !restartRunning)}
+            title={errors.length ? "请先修复校验错误"
+              : preview?.conflicts?.running_workflow && !restartRunning
+                ? "请先确认终止当前执行并重新开始"
+                : "人类确认后直接创建 workflow"}>
             确认套用并启动
           </button>
         </div>

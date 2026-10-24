@@ -70,6 +70,34 @@ async def test_template_publish_and_apply(client, seeded):
     assert wf["template_id"] == tid
     assert wf["template_version"] == 1
     assert wf["steps"][0]["role_slug"] == "developer"
+    assert wf["execution_no"] == 1
+
+    # 运行中的 workflow 不允许被中途替换；human 必须显式确认重新执行。
+    blocked = await client.post(f"{API}/tasks/T-TPL/workflow/from-template",
+                                headers=human_headers(), json={
+        "template_id": tid, "version": 1,
+        "role_mapping": {"executor": "developer"},
+    })
+    assert blocked.status_code == 409, blocked.text
+    assert "workflow replacement is not allowed" in blocked.text
+
+    restarted = await client.post(f"{API}/tasks/T-TPL/workflow/from-template",
+                                  headers=human_headers(), json={
+        "template_id": tid, "version": 1,
+        "role_mapping": {"executor": "developer"},
+        "restart_running": True,
+        "restart_reason": "重新执行测试",
+    })
+    assert restarted.status_code == 200, restarted.text
+    new_wf = restarted.json()["workflow"]
+    assert new_wf["execution_no"] == 2
+    assert new_wf["previous_workflow_id"] == wf["id"]
+    old_wf = await client.get(f"{API}/workflows/{wf['id']}", headers=human_headers())
+    assert old_wf.json()["status"] == "terminated"
+    assert old_wf.json()["steps"][0]["status"] == "skipped"
+    history = await client.get(f"{API}/tasks/T-TPL/workflows", headers=human_headers())
+    assert [x["execution_no"] for x in history.json()] == [2, 1]
+    assert history.json()[1]["status"] == "terminated"
 
     version = await client.get(f"{API}/workflow-templates/{tid}/versions/1",
                                headers=human_headers())
@@ -80,6 +108,38 @@ async def test_template_publish_and_apply(client, seeded):
                                headers=human_headers(), json={"version": 1})
     assert rolled.status_code == 200, rolled.text
     assert rolled.json()["draft_version"] == 2
+
+
+@pytest.mark.asyncio
+async def test_running_workflow_draft_requires_restart(client, seeded):
+    await client.post(f"{API}/tasks", json=task_payload(
+        id="T-BRD", assignees=["developer"]), headers=auth_headers())
+
+    def tree(title: str) -> dict:
+        return {"steps": [{"id": "S1", "title": title, "role": "developer"}]}
+
+    first = await client.post(f"{API}/board/drafts", headers=auth_headers("pm"), json={
+        "goal": "第一版", "source_task": "T-BRD", "kind": "workflow", "tree": tree("first")})
+    approved = await client.post(f"{API}/board/drafts/approve", headers=human_headers(),
+                                 json={"draft_ids": [first.json()["id"]]})
+    assert approved.status_code == 200, approved.text
+    first_wf = (await client.get(f"{API}/tasks/T-BRD/workflow", headers=auth_headers())).json()
+
+    second = await client.post(f"{API}/board/drafts", headers=auth_headers("pm"), json={
+        "goal": "第二版", "source_task": "T-BRD", "kind": "workflow", "tree": tree("second")})
+    blocked = await client.post(f"{API}/board/drafts/approve", headers=human_headers(),
+                                json={"draft_ids": [second.json()["id"]]})
+    assert blocked.status_code == 409, blocked.text
+    restarted = await client.post(f"{API}/board/drafts/approve", headers=human_headers(),
+                                  json={"draft_ids": [second.json()["id"]],
+                                        "restart_running": True,
+                                        "restart_reason": "需求变化"})
+    assert restarted.status_code == 200, restarted.text
+    new_wf = (await client.get(f"{API}/tasks/T-BRD/workflow", headers=auth_headers())).json()
+    assert new_wf["execution_no"] == 2
+    assert new_wf["previous_workflow_id"] == first_wf["id"]
+    old = await client.get(f"{API}/workflows/{first_wf['id']}", headers=human_headers())
+    assert old.json()["status"] == "terminated"
 
 
 @pytest.mark.asyncio

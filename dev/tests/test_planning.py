@@ -1,6 +1,8 @@
 """角色感知规划的基础件：Roster、非破坏性绑定、规划标记、workflow supersede。"""
 from __future__ import annotations
 
+import pytest
+
 from anvil import config
 from anvil.db import connect
 from anvil.graph import nodes
@@ -87,7 +89,7 @@ def test_task_size_block_flags_audit_and_wide_scope():
     assert planning._task_size_block({"title": "普通任务"}) == ""
 
 
-def test_new_workflow_supersedes_old_running(tmp_path):
+def test_running_workflow_cannot_be_replaced(tmp_path):
     conn = connect(str(tmp_path / "t.db"))
     now = now_iso()
     conn.execute(
@@ -101,10 +103,41 @@ def test_new_workflow_supersedes_old_running(tmp_path):
                  (wf1["id"],))
     conn.commit()
 
-    workflow_service.create_workflow(
-        conn, "T1", {"steps": [{"id": "S1", "title": "b", "role": "dev"}]})
+    with pytest.raises(Exception, match="workflow replacement is not allowed"):
+        workflow_service.create_workflow(
+            conn, "T1", {"steps": [{"id": "S1", "title": "b", "role": "dev"}]})
 
     old = workflow_service.get_workflow(conn, wf1["id"])
-    assert old["status"] == "failed"
+    assert old["status"] == "running"
+    assert old["steps"][0]["status"] == "running"
+
+
+def test_restart_running_workflow_keeps_history(tmp_path):
+    conn = connect(str(tmp_path / "t.db"))
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO tasks (id,title,status,created_at,updated_at) VALUES ('T1','t','todo',?,?)",
+        (now, now),
+    )
+    conn.commit()
+    wf1 = workflow_service.create_workflow(
+        conn, "T1", {"steps": [{"id": "S1", "title": "a", "role": "dev"}]})
+    conn.execute("UPDATE workflow_steps SET status='running' WHERE workflow_id=?",
+                 (wf1["id"],))
+    conn.commit()
+
+    wf2 = workflow_service.create_workflow(
+        conn, "T1", {"steps": [{"id": "S1", "title": "b", "role": "dev"}]},
+        restart_running=True, restart_reason="范围变了，重新开始")
+    old = workflow_service.get_workflow(conn, wf1["id"])
+    assert old["status"] == "terminated"
+    assert old["termination_reason"] == "范围变了，重新开始"
+    assert old["terminated_at"]
     assert old["steps"][0]["status"] == "failed"
-    assert old["steps"][0]["failure_reason"] == "superseded"
+    assert old["steps"][0]["failure_reason"] == "terminated"
+    assert wf2["status"] == "running"
+    assert wf2["execution_no"] == 2
+    assert wf2["previous_workflow_id"] == wf1["id"]
+    history = workflow_service.list_for_task(conn, "T1")
+    assert [x["execution_no"] for x in history] == [2, 1]
+    assert history[1]["status"] == "terminated"

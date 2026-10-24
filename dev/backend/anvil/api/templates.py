@@ -242,7 +242,9 @@ def apply_template(task_id: str, body: dict, request: Request,
         result = template_service.apply_to_task(
             conn, task_id, str(body.get("template_id") or ""),
             body.get("version"), body.get("role_mapping") or {},
-            confirm_supersede=bool(body.get("confirm_supersede")),
+            restart_running=bool(body.get("restart_running")),
+            restart_reason=body.get("restart_reason"),
+            restart_note=body.get("restart_note"),
             reject_pending_drafts=bool(body.get("reject_pending_drafts")),
             acknowledge_uncovered=bool(body.get("acknowledge_uncovered")),
             mode=str(body.get("mode") or "direct"),
@@ -255,6 +257,8 @@ def apply_template(task_id: str, body: dict, request: Request,
     _audit(conn, request, "workflow.apply_template", {
         "task_id": task_id, "template_id": body.get("template_id"),
         "version": body.get("version"), "role_mapping": body.get("role_mapping"),
+        "restart_running": bool(body.get("restart_running")),
+        "restart_reason": body.get("restart_reason"),
     })
     return result
 

@@ -139,6 +139,15 @@ def _drafts(conn: sqlite3.Connection) -> list[dict]:
                 "SELECT knowledge_repos_locked FROM tasks WHERE id=?",
                 (r["source_task"],)).fetchone()
             meta["binding_locked"] = bool(row and row["knowledge_repos_locked"])
+            running = conn.execute(
+                "SELECT id, execution_no FROM workflows "
+                "WHERE task_id=? AND status='running' "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (r["source_task"],),
+            ).fetchone()
+            meta["running_workflow"] = bool(running)
+            meta["running_workflow_id"] = running["id"] if running else None
+            meta["running_execution_no"] = running["execution_no"] if running else None
         if kind == "role_suggestion":
             roles = tree.get("suggested_roles") or tree.get("roles") or []
             missing = tree.get("missing_capabilities") or []

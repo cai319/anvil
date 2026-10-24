@@ -19,6 +19,12 @@ def get_task_workflow(tid: str, conn=Depends(get_db)):
     return wf
 
 
+@router.get("/tasks/{tid}/workflows")
+def list_task_workflows(tid: str, conn=Depends(get_db)):
+    """任务的执行历史；旧执行保留为 terminated，不覆盖。"""
+    return services.workflow.list_for_task(conn, tid)
+
+
 @router.get("/workflows/{wid}")
 def get_workflow(wid: str, conn=Depends(get_db)):
     wf = services.workflow.get_workflow(conn, wid)

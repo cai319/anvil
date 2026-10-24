@@ -283,7 +283,9 @@ def _approve_role_suggestion(conn: sqlite3.Connection, draft: dict,
     return None, warning
 
 
-def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human") -> dict:
+def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
+            *, restart_running: bool = False, restart_reason: str | None = None,
+            restart_note: str | None = None) -> dict:
     landed: list[str] = []
     replans: list[dict] = []
     warnings: list[str] = []
@@ -295,6 +297,15 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human") -
         if kind == "workflow":
             if not draft.get("source_task"):
                 raise ConflictError("workflow draft missing source_task")
+            running = conn.execute(
+                "SELECT id FROM workflows WHERE task_id=? AND status='running' "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (draft["source_task"],),
+            ).fetchone()
+            if running and not restart_running:
+                raise ConflictError(
+                    "task already has a running workflow; workflow replacement is not allowed. "
+                    "Confirm restart_running to terminate the current execution and restart.")
             from . import knowledge_binding
             from . import workflow as workflow_service
             try:
@@ -302,13 +313,16 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human") -
             except Exception as exc:  # noqa: BLE001 —— 绑定失败不阻断审批
                 warnings.append(f"{did}: knowledge repos not applied ({exc})")
             workflow_service.create_workflow(
-                conn, draft["source_task"], draft["tree"], created_by=draft["created_by"])
+                conn, draft["source_task"], draft["tree"], created_by=draft["created_by"],
+                restart_running=restart_running, restart_reason=restart_reason,
+                restart_note=restart_note)
             n = len((draft.get("tree") or {}).get("steps") or []) or 1
+            action = "终止旧执行并重新开始" if running else "开始执行"
             conn.execute(
                 "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
                 "VALUES (?,?,?,?,?)",
                 (draft["source_task"], "human", "comment",
-                 jdumps({"body": f"已批准工作流（{n} 个步骤），执行引擎开始推进。"}),
+                 jdumps({"body": f"已批准工作流（{n} 个步骤），{action}。"}),
                  now_iso()),
             )
             conn.execute("UPDATE board_drafts SET status='approved', decided_at=? WHERE id=?",

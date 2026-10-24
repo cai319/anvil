@@ -68,6 +68,24 @@ export function Inbox() {
   const shown = tab === "all" ? items : items.filter((i) => i.kind === tab);
   const countOf = (k: Tab) => (k === "all" ? items.length : items.filter((i) => i.kind === k).length);
 
+  const approveDraftItem = (it: InboxItem, raw: string) => {
+    const meta = it.meta;
+    if (meta?.draft_kind === "workflow" && meta.running_workflow) {
+      if (!window.confirm(
+        `任务当前有第 ${meta.running_execution_no || 1} 次执行正在运行。\n`
+        + "批准后将终止当前执行并从头重新开始，旧执行会保留为历史，但不会中途替换。确定继续？",
+      )) return;
+      const reason = window.prompt("请输入重新执行的原因（可留空）：", "");
+      if (reason === null) return;
+      act(it.id, () => api.approveDraft([raw], {
+        restart_running: true,
+        restart_reason: reason.trim() || undefined,
+      }));
+      return;
+    }
+    act(it.id, () => api.approveDraft([raw]));
+  };
+
   const renderActions = (it: InboxItem) => {
     const disabled = busyId !== null;
     const raw = it.id.split(":", 2)[1]; // review:T -> T；draft:D -> D；lesson:L -> L；proposal:P -> P
@@ -91,8 +109,9 @@ export function Inbox() {
         return (
           <>
             <button className="primary small" disabled={disabled}
-              onClick={() => act(it.id, () => api.approveDraft([raw]))}>
-              {isRoleSuggestion ? "批准并创建角色" : "批准落板"}
+              onClick={() => approveDraftItem(it, raw)}>
+              {isRoleSuggestion ? "批准并创建角色"
+                : it.meta?.running_workflow ? "终止并重新执行" : "批准落板"}
             </button>
             <button className="small danger" disabled={disabled}
               onClick={() => act(it.id, () => api.rejectDraftById(raw))}>驳回</button>

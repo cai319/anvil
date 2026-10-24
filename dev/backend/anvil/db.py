@@ -101,11 +101,15 @@ CREATE TABLE IF NOT EXISTS workflows (
     id              TEXT PRIMARY KEY,
     task_id         TEXT NOT NULL,
     definition_json TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'running',  -- running|done|failed
+    status          TEXT NOT NULL DEFAULT 'running',  -- running|done|failed|terminated
     created_by      TEXT,
     created_at      TEXT NOT NULL,
     approved_at     TEXT,
-    updated_at      TEXT NOT NULL
+    updated_at      TEXT NOT NULL,
+    termination_reason TEXT,
+    terminated_at   TEXT,
+    previous_workflow_id TEXT,
+    execution_no    INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS workflow_steps (
@@ -741,7 +745,10 @@ def init_schema(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
     # 模板落 workflow 后的来源追踪
-    for col in ("template_id TEXT", "template_version INTEGER"):
+    for col in ("template_id TEXT", "template_version INTEGER",
+                "termination_reason TEXT", "terminated_at TEXT",
+                "previous_workflow_id TEXT",
+                "execution_no INTEGER NOT NULL DEFAULT 1"):
         try:
             conn.execute(f"ALTER TABLE workflows ADD COLUMN {col}")
         except sqlite3.OperationalError:

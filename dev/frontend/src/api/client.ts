@@ -215,6 +215,8 @@ export const api = {
     authFetch(`${BASE}/runs?task_id=${encodeURIComponent(taskId)}`).then((r) => json<Run[]>(r)),
   getTaskWorkflow: (taskId: string): Promise<Workflow> =>
     authFetch(`${BASE}/tasks/${taskId}/workflow`).then((r) => json<Workflow>(r)),
+  listTaskWorkflows: (taskId: string): Promise<WorkflowHistoryItem[]> =>
+    authFetch(`${BASE}/tasks/${taskId}/workflows`).then((r) => json<WorkflowHistoryItem[]>(r)),
   reviewWorkflowStep: (wid: string, sid: string, approve: boolean, feedback?: string): Promise<Workflow> =>
     req("POST", `/workflows/${wid}/steps/${sid}/review`, { approve, feedback }).then((r) => json<Workflow>(r)),
   retryWorkflowStep: (wid: string, sid: string): Promise<Workflow> =>
@@ -240,10 +242,13 @@ export const api = {
     authFetch(`${BASE}/inbox`).then((r) => json<{ count: number; items: InboxItem[] }>(r)),
   rejectDraftById: (id: string, feedback?: string): Promise<unknown> =>
     req("POST", "/board/drafts/reject", { draft_id: id, feedback }).then((r) => json(r)),
-  approveDraft: (draftIds: string[]): Promise<{
+  approveDraft: (draftIds: string[], options: {
+    restart_running?: boolean; restart_reason?: string; restart_note?: string;
+  } = {}): Promise<{
     landed: string[]; replans?: unknown[]; warnings?: string[]; runs?: Run[];
   }> =>
-    req("POST", "/board/drafts/approve", { draft_ids: draftIds }).then((r) => json(r)),
+    req("POST", "/board/drafts/approve", { draft_ids: draftIds, ...options })
+      .then((r) => json(r)),
   assignRoles: (id: string, roles: string[]): Promise<Task> =>
     req("POST", `/tasks/${id}/assign`, { roles }).then((r) => json<Task>(r)),
   assignTask: (id: string, assignee: string): Promise<Task> =>
@@ -387,8 +392,10 @@ export const api = {
     authFetch(`${BASE}/board/templates`).then((r) => json(r)),
   listDrafts: (sourceTask?: string): Promise<BoardDraft[]> =>
     req("GET", `/board/drafts${sourceTask ? `?source_task=${sourceTask}` : ""}`).then((r) => json<BoardDraft[]>(r)),
-  approveDrafts: (ids: string[]): Promise<Record<string, unknown>> =>
-    req("POST", "/board/drafts/approve", { draft_ids: ids }).then((r) => json(r)),
+  approveDrafts: (ids: string[], options: {
+    restart_running?: boolean; restart_reason?: string; restart_note?: string;
+  } = {}): Promise<Record<string, unknown>> =>
+    req("POST", "/board/drafts/approve", { draft_ids: ids, ...options }).then((r) => json(r)),
   rejectDraft: (id: string): Promise<Record<string, unknown>> =>
     req("POST", "/board/drafts/reject", { draft_id: id }).then((r) => json(r)),
   getDraft: (id: string): Promise<BoardDraft> =>
@@ -631,6 +638,9 @@ export interface InboxDraftMeta {
   tags?: string[];
   knowledge_repos?: { repo: string; reason?: string | null }[];
   binding_locked?: boolean;
+  running_workflow?: boolean;
+  running_workflow_id?: string | null;
+  running_execution_no?: number | null;
 }
 
 export interface InboxItem {
@@ -674,7 +684,7 @@ export interface WorkflowStep {
 export interface Workflow {
   id: string;
   task_id: string;
-  status: "running" | "done" | "failed";
+  status: "running" | "done" | "failed" | "terminated";
   definition: {
     feedback_rules?: string[];
     verification?: { cell: string; method: string; verifier_role?: string }[];
@@ -682,6 +692,27 @@ export interface Workflow {
   steps: WorkflowStep[];
   created_at: string;
   updated_at: string;
+  execution_no?: number;
+  previous_workflow_id?: string | null;
+  termination_reason?: string | null;
+  terminated_at?: string | null;
+}
+
+export interface WorkflowHistoryItem {
+  id: string;
+  task_id: string;
+  status: Workflow["status"];
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  termination_reason: string | null;
+  terminated_at: string | null;
+  previous_workflow_id: string | null;
+  execution_no: number;
+  template_id: string | null;
+  template_version: number | null;
+  step_count: number;
+  approved_count: number | null;
 }
 
 export interface TemplateRoleSlot {

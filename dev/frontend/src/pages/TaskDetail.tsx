@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Task, type TimelineEvent, type Workflow, type WorkflowStep, type WorkflowTemplate } from "../api/client";
+import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Task, type TimelineEvent, type Workflow, type WorkflowHistoryItem, type WorkflowStep, type WorkflowTemplate } from "../api/client";
 import { RoleSessions } from "./RoleSessions";
 import { ApplyTemplateModal } from "./ApplyTemplateModal";
 import { WorkflowGraph } from "./WorkflowGraph";
 import { roleStatusFromWorkflow } from "../workflowStatus";
-import { formatClock } from "../time";
+import { formatClock, formatDateTime } from "../time";
 import { roleLiveDot, roleLiveState, stateClassForDot } from "../roleLive";
 import { useRoleRuntimes } from "../useRoleRuntimes";
 import { usePanelLayout } from "../usePanelLayout";
@@ -42,7 +42,8 @@ function WorkflowSummary({ workflow, taskStatus }: {
   const percent = total ? Math.round((approved / total) * 100) : 0;
   const stateLabel = workflow.status === "done"
     ? (taskStatus === "done" ? "已完成" : "已完成 · 等待最终评审")
-    : workflow.status === "running" ? "推进中" : "已失败";
+    : workflow.status === "running" ? "推进中"
+      : workflow.status === "terminated" ? "已终止 · 历史执行" : "已失败";
   const counts = (Object.keys(STATUS_META) as WorkflowStep["status"][])
     .map((status) => ({
       status,
@@ -406,6 +407,7 @@ export function TaskDetail({ id }: { id: string }) {
   const initialScrollRef = useRef(true);   // 刚打开任务/切回会话时强制滚到底
   const autoScrollingRef = useRef(false);  // 程序化滚动期间忽略 onScroll 的“用户滚动”判定
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
+  const [workflowHistory, setWorkflowHistory] = useState<WorkflowHistoryItem[]>([]);
   const [children, setChildren] = useState<Task[]>([]);
   const [wfView, setWfView] = useState<"graph" | "list">("graph");
   const [showApplyTemplate, setShowApplyTemplate] = useState(false);
@@ -415,8 +417,10 @@ export function TaskDetail({ id }: { id: string }) {
   const { slugs: liveSlugs, runtimes: roleRuntimes } = useRoleRuntimes(task);
   const panel = usePanelLayout({ storageKey: "task" });
 
-  const refreshWorkflow = () =>
+  const refreshWorkflow = () => {
     api.getTaskWorkflow(id).then(setWorkflow).catch(() => setWorkflow(null));
+    api.listTaskWorkflows(id).then(setWorkflowHistory).catch(() => setWorkflowHistory([]));
+  };
 
   const refreshChildren = () =>
     api.listTaskChildren(id).then(setChildren).catch(() => []);
@@ -1423,6 +1427,32 @@ export function TaskDetail({ id }: { id: string }) {
           {workflow && (
             <>
               <WorkflowSummary workflow={workflow} taskStatus={task.status} />
+              {workflowHistory.length > 1 && (
+                <details className="wf-history">
+                  <summary>
+                    执行历史 · {workflowHistory.length} 次
+                    <span className="muted">旧执行保留，不会被新执行覆盖</span>
+                  </summary>
+                  <div className="wf-history-list">
+                    {workflowHistory.map((item) => (
+                      <div key={item.id} className={`wf-history-row is-${item.status}`}>
+                        <span className="wf-history-no">第 {item.execution_no} 次</span>
+                        <span className={`status status-${item.status === "done" ? "done" : item.status === "running" ? "in_progress" : "closed"}`}>
+                          {item.status === "done" ? "已完成" : item.status === "running" ? "执行中"
+                            : item.status === "terminated" ? "已终止" : "失败"}
+                        </span>
+                        <span className="muted">{formatDateTime(item.created_at)}</span>
+                        <span className="muted">
+                          {item.approved_count || 0}/{item.step_count} 步完成
+                        </span>
+                        {item.termination_reason && (
+                          <span className="wf-history-reason">原因：{item.termination_reason}</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
               <div className="role-picker" style={{ margin: "4px 0 10px" }}>
                 <button className={`small ${wfView === "graph" ? "primary" : ""}`}
                   onClick={() => setWfView("graph")}>图谱</button>

@@ -111,7 +111,12 @@ def approve_drafts(body: dict, request: Request, conn=Depends(get_db),
                    auth: Auth = Depends(require_human)):
     draft_ids = body.get("draft_ids", [])
     try:
-        result = services.board.approve(conn, draft_ids)
+        result = services.board.approve(
+            conn, draft_ids,
+            restart_running=bool(body.get("restart_running")),
+            restart_reason=body.get("restart_reason"),
+            restart_note=body.get("restart_note"),
+        )
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     seen_tasks: set[str] = set()
@@ -125,6 +130,8 @@ def approve_drafts(body: dict, request: Request, conn=Depends(get_db),
                 "draft_ids": draft_ids,
                 "landed": result.get("landed", []),
                 "human_decision": True,
+                "restart_running": bool(body.get("restart_running")),
+                "restart_reason": body.get("restart_reason"),
             })
     return result
 

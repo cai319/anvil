@@ -954,14 +954,50 @@ def validate_definition(conn: sqlite3.Connection, definition: dict) -> None:
     _validate_loop(conn, definition, raw)
 
 
+def _terminate_running_workflow(conn: sqlite3.Connection, wid: str, reason: str,
+                                now: str) -> None:
+    """终止一次执行但保留其 workflow/step/run 历史。"""
+    from . import runs as runs_service
+    for st in conn.execute(
+        "SELECT run_id FROM workflow_steps WHERE workflow_id=? "
+        "AND status IN ('running','submitted')", (wid,)
+    ).fetchall():
+        if st["run_id"]:
+            try:
+                runs_service.set_status(conn, st["run_id"], "abandoned", ended_at=now)
+            except Exception:  # noqa: BLE001
+                pass
+    conn.execute(
+        "UPDATE workflow_steps SET status='failed', failure_reason='terminated', "
+        "ended_at=?, updated_at=? WHERE workflow_id=? AND status IN ('running','submitted')",
+        (now, now, wid),
+    )
+    conn.execute(
+        "UPDATE workflow_steps SET status='skipped', failure_reason='terminated', "
+        "ended_at=?, updated_at=? WHERE workflow_id=? AND status IN ('pending','rejected')",
+        (now, now, wid),
+    )
+    conn.execute(
+        "UPDATE workflows SET status='terminated', termination_reason=?, terminated_at=?, "
+        "updated_at=? WHERE id=?",
+        (reason, now, now, wid),
+    )
+
+
 def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
                     created_by: str = "agent:cindy",
-                    *, enforce_role_coverage: bool = True) -> dict:
+                    *, enforce_role_coverage: bool = True,
+                    restart_running: bool = False,
+                    restart_reason: str | None = None,
+                    restart_note: str | None = None) -> dict:
     """落板 workflow（Cindy 草案批准后调用）：创建步骤并把任务置为进行中。
 
     decision 步骤（kind=decision）由决策角色评审后 approve/reject；reject 时把
     on_reject 目标及其到 decision 之间的下游闭包一起重置为 pending。
     `enforce_role_coverage=False` 仅供 human 明确确认“模板未覆盖任务角色”后使用。
+
+    运行中的 workflow 不允许被中途替换。需要换流程时，human 显式确认
+    `restart_running=True`：旧执行被标记为 terminated 并保留历史，新执行从第一步重新开始。
     """
     definition = normalize_definition(conn, definition)
     steps = definition.get("steps") or definition.get("children") or []
@@ -981,33 +1017,37 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
 
     wid = new_id()
     now = now_iso()
-    # 同一 task 只保留一个 running workflow：新草案批准时 supersede 旧 workflow。
-    from . import runs as runs_service
-    for old in conn.execute(
-        "SELECT id FROM workflows WHERE task_id=? AND status='running'", (task_id,)
-    ).fetchall():
-        for st in conn.execute(
-            "SELECT run_id FROM workflow_steps WHERE workflow_id=? "
-            "AND status IN ('running','submitted')", (old["id"],)
-        ).fetchall():
-            if st["run_id"]:
-                try:
-                    runs_service.set_status(conn, st["run_id"], "abandoned", ended_at=now)
-                except Exception:  # noqa: BLE001
-                    pass
-        conn.execute(
-            "UPDATE workflow_steps SET status='failed', failure_reason='superseded', "
-            "ended_at=?, updated_at=? WHERE workflow_id=? AND status IN ('running','submitted')",
-            (now, now, old["id"]),
-        )
-        conn.execute("UPDATE workflows SET status='failed', updated_at=? WHERE id=?",
-                     (now, old["id"]))
+    running = conn.execute(
+        "SELECT id, execution_no FROM workflows WHERE task_id=? AND status='running' "
+        "ORDER BY created_at DESC, rowid DESC", (task_id,)
+    ).fetchall()
+    if running and not restart_running:
+        raise ConflictError(
+            "task already has a running workflow; workflow replacement is not allowed. "
+            "Terminate the current execution and restart the task instead.")
+    previous_workflow_id = None
+    if running:
+        previous_workflow_id = running[0]["id"]
+        reason = (restart_reason or "").strip() or "人工确认终止当前执行并重新开始"
+        for old in running:
+            _terminate_running_workflow(conn, old["id"], reason, now)
+    else:
+        latest = conn.execute(
+            "SELECT id FROM workflows WHERE task_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        previous_workflow_id = latest["id"] if latest else None
+    execution_no = conn.execute(
+        "SELECT COALESCE(MAX(execution_no), 0) + 1 AS n FROM workflows WHERE task_id=?",
+        (task_id,),
+    ).fetchone()["n"]
     conn.execute(
         "INSERT INTO workflows (id, task_id, definition_json, status, created_by, "
-        "created_at, approved_at, updated_at, template_id, template_version) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "created_at, approved_at, updated_at, template_id, template_version, "
+        "previous_workflow_id, execution_no) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (wid, task_id, jdumps(definition), "running", created_by, now, now, now,
-         template_id, template_version),
+         template_id, template_version, previous_workflow_id, execution_no),
     )
     for sid, role, kind, reviewer, gate, on_reject, max_rework in plan:
         s = raw[sid]
@@ -1026,6 +1066,28 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
         "UPDATE tasks SET status='in_progress', assignee=NULL, lease_expires_at=NULL, "
         "claimed_at=NULL, updated_at=? WHERE id=? AND status IN ('todo','in_progress')",
         (now, task_id))
+    if running:
+        note = (restart_note or "").strip()
+        body = (
+            f"已终止第 {running[0]['execution_no']} 次执行并重新开始第 {execution_no} 次执行。"
+            f"原因：{(restart_reason or '').strip() or '人工确认重新执行'}。"
+            "旧执行与产物保留在任务历史中。"
+        )
+        if note:
+            body += f" 保留/沿用说明：{note}"
+        conn.execute(
+            "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
+            "VALUES (?,?,?,?,?)",
+            (task_id, "human", "comment", jdumps({
+                "body": body,
+                "event": "workflow_restarted",
+                "previous_workflow_id": previous_workflow_id,
+                "workflow_id": wid,
+                "execution_no": execution_no,
+                "reason": (restart_reason or "").strip() or "人工确认重新执行",
+                "previous_execution_no": running[0]["execution_no"],
+            }), now),
+        )
     conn.commit()
     return get_workflow(conn, wid)  # type: ignore[return-value]
 
@@ -1042,10 +1104,29 @@ def get_workflow(conn: sqlite3.Connection, wid: str) -> dict | None:
 
 def get_for_task(conn: sqlite3.Connection, task_id: str) -> dict | None:
     r = conn.execute(
-        "SELECT id FROM workflows WHERE task_id=? ORDER BY created_at DESC LIMIT 1",
+        "SELECT id FROM workflows WHERE task_id=? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
         (task_id,),
     ).fetchone()
     return get_workflow(conn, r["id"]) if r else None
+
+
+def list_for_task(conn: sqlite3.Connection, task_id: str) -> list[dict]:
+    """任务的执行历史（含已终止的旧执行），新到旧排序。"""
+    rows = conn.execute(
+        """SELECT w.id, w.task_id, w.status, w.created_by, w.created_at, w.updated_at,
+                  w.termination_reason, w.terminated_at, w.previous_workflow_id,
+                  w.execution_no, w.template_id, w.template_version,
+                  COUNT(s.step_id) AS step_count,
+                  SUM(CASE WHEN s.status='approved' THEN 1 ELSE 0 END) AS approved_count
+             FROM workflows w
+             LEFT JOIN workflow_steps s ON s.workflow_id = w.id
+            WHERE w.task_id=?
+            GROUP BY w.id
+            ORDER BY w.execution_no DESC, w.created_at DESC""",
+        (task_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def _steps(conn: sqlite3.Connection, wid: str) -> list[dict]:

@@ -219,7 +219,9 @@ def _workflow_summary(wf: dict) -> str:
     slice_steps = len(steps) - len(static)
     if slice_steps:
         lines.append(f"- 已展开切片步骤：{slice_steps} 个（按 loop 模板生成，未逐条列出）")
-    lines.append("- 如需调整，请提交新的 workflow 草案；批准后可 supersede 旧 workflow。")
+    lines.append(
+        "- 如需调整，请提交新的 workflow 草案；人工批准后会终止当前执行并重新开始，"
+        "不会中途替换正在运行的 workflow。")
     return "\n".join(lines)
 
 

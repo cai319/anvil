@@ -726,6 +726,8 @@ def preview_apply(conn: sqlite3.Connection, task_id: str, tid: str,
         ],
         "conflicts": {
             "running_workflow": bool(workflow and workflow.get("status") == "running"),
+            "running_workflow_id": workflow.get("id") if workflow and workflow.get("status") == "running" else None,
+            "running_execution_no": workflow.get("execution_no") if workflow and workflow.get("status") == "running" else None,
             "pending_drafts": pending,
             "task_terminal": task.get("status") in ("done", "closed"),
         },
@@ -734,7 +736,9 @@ def preview_apply(conn: sqlite3.Connection, task_id: str, tid: str,
 
 def apply_to_task(conn: sqlite3.Connection, task_id: str, tid: str,
                   version: int | None, role_mapping: dict[str, str],
-                  *, confirm_supersede: bool = False,
+                  *, restart_running: bool = False,
+                  restart_reason: str | None = None,
+                  restart_note: str | None = None,
                   reject_pending_drafts: bool = False,
                   acknowledge_uncovered: bool = False,
                   mode: str = "direct", actor: str = "human") -> dict:
@@ -753,8 +757,10 @@ def apply_to_task(conn: sqlite3.Connection, task_id: str, tid: str,
     if uncovered and not acknowledge_uncovered:
         raise ConflictError("uncovered task roles: " + ", ".join(uncovered))
     workflow = workflow_service.get_for_task(conn, task_id)
-    if workflow and workflow.get("status") == "running" and not confirm_supersede:
-        raise ConflictError("task already has a running workflow; confirm_supersede required")
+    if workflow and workflow.get("status") == "running" and not restart_running:
+        raise ConflictError(
+            "task already has a running workflow; workflow replacement is not allowed. "
+            "Confirm restart_running to terminate the current execution and restart from step 1.")
     pending = _pending_draft_count(conn, task_id)
     if pending and mode == "direct" and not reject_pending_drafts:
         raise ConflictError("task has pending workflow drafts; reject_pending_drafts required")
@@ -784,7 +790,9 @@ def apply_to_task(conn: sqlite3.Connection, task_id: str, tid: str,
         return {"mode": "draft", "draft": draft}
     wf = workflow_service.create_workflow(
         conn, task_id, resolved, created_by=f"human:{actor}",
-        enforce_role_coverage=not acknowledge_uncovered)
+        enforce_role_coverage=not acknowledge_uncovered,
+        restart_running=restart_running, restart_reason=restart_reason,
+        restart_note=restart_note)
     conn.execute(
         "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
         "VALUES (?,?,?,?,?)",
