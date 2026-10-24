@@ -33,6 +33,33 @@ def list_drafts(workspace_id: str | None = None, source_task: str | None = None,
     return services.board.list_drafts(conn, workspace_id, source_task=source_task)
 
 
+@router.get("/board/drafts/{did}")
+def get_draft(did: str, conn=Depends(get_db)):
+    draft = services.board.get_draft(conn, did)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="draft not found")
+    return draft
+
+
+@router.patch("/board/drafts/{did}")
+def update_draft(did: str, body: dict, request: Request, conn=Depends(get_db),
+                 auth: Auth = Depends(require_human)):
+    tree = body.get("tree")
+    if not isinstance(tree, dict):
+        raise HTTPException(status_code=422, detail="tree is required")
+    try:
+        result = services.board.update_draft(
+            conn, did, tree, goal=body.get("goal"),
+            workspace_id=body.get("workspace_id"), by="human")
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    _audit_human_decision(conn, (result or {}).get("source_task"),
+                          "board.draft.update", request, {"draft_id": did})
+    return result
+
+
 @router.post("/board/drafts", status_code=201)
 def create_draft(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """agent（planner）或人提交工作流草案（P1-0 计划先行）。

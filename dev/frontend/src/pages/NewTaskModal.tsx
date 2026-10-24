@@ -1,5 +1,5 @@
-import { useRef, useState } from "react";
-import { api, isOnboardingRole, type Role, type Task } from "../api/client";
+import { useEffect, useRef, useState } from "react";
+import { api, isOnboardingRole, type Role, type Task, type WorkflowTemplate } from "../api/client";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
 
@@ -13,11 +13,20 @@ export function NewTaskModal({ roles, roleStatus, onClose, onCreated }: {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
+  const [seeds, setSeeds] = useState<WorkflowTemplate[]>([]);
+  const [seedId, setSeedId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const composingRef = useRef(false);
 
   const candidates = roles.filter((r) => !isOnboardingRole(r));
+
+  useEffect(() => {
+    api.listWorkflowTemplates(undefined, "active").then((list) => {
+      setSeeds(list.filter((item) => item.published_version
+        && (item.use_mode === "seed" || item.use_mode === "both")));
+    }).catch(() => setSeeds([]));
+  }, []);
 
   const toggle = (slug: string) =>
     setSelected((prev) => prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug]);
@@ -27,9 +36,15 @@ export function NewTaskModal({ roles, roleStatus, onClose, onCreated }: {
     setBusy(true);
     setError(null);
     try {
+      const seed = seeds.find((item) => item.id === seedId);
       const task = await api.createTask(title.trim(), {
         description: description.trim() || undefined,
         assignees: selected.length ? selected : undefined,
+        plan_seed: seed?.published_version ? {
+          template_id: seed.id,
+          version: seed.published_version,
+          name: seed.name,
+        } : undefined,
       });
       onCreated(task);
     } catch (e) {
@@ -70,6 +85,21 @@ export function NewTaskModal({ roles, roleStatus, onClose, onCreated }: {
           <span>任务描述</span>
           <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={4}
             placeholder="目标、验收标准、约束…（角色会读到这段描述）" />
+        </label>
+
+        <label className="field">
+          <span>工作流模板种子（可选）</span>
+          <select value={seedId} onChange={(e) => setSeedId(e.target.value)}>
+            <option value="">不使用模板，由 Cindy 自由规划</option>
+            {seeds.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name} · v{item.published_version}
+              </option>
+            ))}
+          </select>
+          <small className="muted">
+            模板只作为 Cindy 的规划骨架；Cindy 会结合任务和角色调整，最终草案仍需你审批。
+          </small>
         </label>
 
         <div className="field">

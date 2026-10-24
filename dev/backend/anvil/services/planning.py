@@ -265,6 +265,13 @@ def start_planner_run(conn: sqlite3.Connection, db_path: str, orchestrator,
     knowledge_block = _task_knowledge_block(conn, task)
     if knowledge_block:
         prompt += "\n\n## 任务知识与仓库上下文\n" + knowledge_block
+    try:
+        from . import templates as template_service
+        seed_block = template_service.render_seed_for_prompt(conn, task)
+    except Exception:  # noqa: BLE001 —— 模板种子失败不应阻断规划
+        seed_block = ""
+    if seed_block:
+        prompt += "\n\n## 工作流模板种子（建议骨架，需结合任务调整）\n" + seed_block
     if extra_constraint.strip():
         prompt += "\n\n## 规划约束（必须遵守）\n" + extra_constraint.strip()
     try:

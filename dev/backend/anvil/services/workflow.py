@@ -955,11 +955,13 @@ def validate_definition(conn: sqlite3.Connection, definition: dict) -> None:
 
 
 def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
-                    created_by: str = "agent:cindy") -> dict:
+                    created_by: str = "agent:cindy",
+                    *, enforce_role_coverage: bool = True) -> dict:
     """落板 workflow（Cindy 草案批准后调用）：创建步骤并把任务置为进行中。
 
     decision 步骤（kind=decision）由决策角色评审后 approve/reject；reject 时把
     on_reject 目标及其到 decision 之间的下游闭包一起重置为 pending。
+    `enforce_role_coverage=False` 仅供 human 明确确认“模板未覆盖任务角色”后使用。
     """
     definition = normalize_definition(conn, definition)
     steps = definition.get("steps") or definition.get("children") or []
@@ -969,7 +971,13 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
     # ---- 预校验：id/依赖/环/decision 元数据 ----
     raw, plan = _plan_steps(conn, steps)
     _validate_loop(conn, definition, raw)
-    validate_role_coverage(conn, task_id, definition)
+    if enforce_role_coverage:
+        validate_role_coverage(conn, task_id, definition)
+
+    template_block = definition.get("template") if isinstance(definition.get("template"), dict) else {}
+    seed_block = definition.get("template_seed") if isinstance(definition.get("template_seed"), dict) else {}
+    template_id = template_block.get("id") or seed_block.get("template_id")
+    template_version = template_block.get("version") or seed_block.get("version")
 
     wid = new_id()
     now = now_iso()
@@ -996,8 +1004,10 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
                      (now, old["id"]))
     conn.execute(
         "INSERT INTO workflows (id, task_id, definition_json, status, created_by, "
-        "created_at, approved_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
-        (wid, task_id, jdumps(definition), "running", created_by, now, now, now),
+        "created_at, approved_at, updated_at, template_id, template_version) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (wid, task_id, jdumps(definition), "running", created_by, now, now, now,
+         template_id, template_version),
     )
     for sid, role, kind, reviewer, gate, on_reject, max_rework in plan:
         s = raw[sid]

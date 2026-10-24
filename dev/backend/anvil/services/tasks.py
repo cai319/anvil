@@ -86,6 +86,7 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
            acceptance: list[str] | None = None, assignee: str | None = None,
            assignees: list[str] | None = None,
            plan_first: bool = False, planner: str | None = None,
+           plan_seed: dict | None = None,
            created_by: str | None = None, parent_id: str | None = None,
            depends_on: list[str] | None = None,
            knowledge_repos: list | None = None,
@@ -106,12 +107,13 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
     conn.execute(
         """INSERT INTO tasks (id, title, type, status, priority, tags_json, repo, workspace_id,
                               base_branch, scope_paths_json, description, acceptance_json,
-                              assignee, plan_first, planner, created_by, parent_id,
+                              assignee, plan_first, planner, plan_seed_json, created_by, parent_id,
                               created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (tid, title, type, "todo", priority, jdumps(tags), repo, workspace_id, base_branch,
          jdumps(scope_paths or []), description, jdumps(acceptance or []),
-         assignee, int(plan_first), planner, created_by, parent_id, now, now),
+         assignee, int(plan_first), planner, jdumps(plan_seed) if plan_seed else None,
+         created_by, parent_id, now, now),
     )
     for d in (depends_on or []):
         conn.execute("INSERT OR IGNORE INTO task_deps (task_id, depends_on) VALUES (?,?)", (tid, d))
@@ -956,4 +958,5 @@ def _row(r) -> dict:
     d["tags"] = jloads(d.pop("tags_json"), [])
     d["scope_paths"] = jloads(d.pop("scope_paths_json"), [])
     d["acceptance"] = jloads(d.pop("acceptance_json"), [])
+    d["plan_seed"] = jloads(d.pop("plan_seed_json", None), None)
     return d

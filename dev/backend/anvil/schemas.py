@@ -129,6 +129,7 @@ class TaskIn(BaseModel):
     assignees: list[str] = Field(default_factory=list)
     plan_first: bool = False
     planner: str | None = None
+    plan_seed: dict[str, Any] | None = None
     created_by: str | None = None
     parent_id: str | None = None
     depends_on: list[str] = Field(default_factory=list)
@@ -167,6 +168,7 @@ class TaskOut(BaseModel):
     assignees: list[str] = Field(default_factory=list)
     plan_first: bool = False
     planner: str | None = None
+    plan_seed: dict[str, Any] | None = None
     role_claims: list[dict[str, Any]] = Field(default_factory=list)
     lease_expires_at: str | None = None
     claimed_at: str | None = None

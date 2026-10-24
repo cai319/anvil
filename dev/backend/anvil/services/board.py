@@ -78,7 +78,8 @@ def decompose(conn: sqlite3.Connection, goal: str, workspace_id: str | None = No
 
 def create_draft(conn: sqlite3.Connection, goal: str, tree: dict,
                  created_by: str = "orchestrator", workspace_id: str | None = None,
-                 source_task: str | None = None, kind: str = "tasks") -> dict:
+                 source_task: str | None = None, kind: str = "tasks",
+                 enforce_role_coverage: bool = True) -> dict:
     """agent（planner）或人创建工作流草案（P1-0 计划先行）。
 
     tree 节点字段：id/title/type/role/depends_on/acceptance/scope_paths/description；
@@ -100,12 +101,57 @@ def create_draft(conn: sqlite3.Connection, goal: str, tree: dict,
         from . import workflow as workflow_service
         tree = workflow_service.normalize_definition(conn, tree)
         workflow_service.validate_definition(conn, tree)
-        workflow_service.validate_role_coverage(conn, source_task, tree)
+        if enforce_role_coverage:
+            workflow_service.validate_role_coverage(conn, source_task, tree)
+        # 把任务的规划种子附着到草案，批准后写进 workflow provenance。
+        if source_task:
+            try:
+                seed_row = conn.execute(
+                    "SELECT plan_seed_json FROM tasks WHERE id=?", (source_task,)).fetchone()
+                seed = jloads(seed_row["plan_seed_json"]) if seed_row else None
+                if isinstance(seed, dict) and seed.get("template_id") and "template_seed" not in tree:
+                    tree = dict(tree)
+                    tree["template_seed"] = seed
+            except (sqlite3.Error, TypeError):
+                pass
     did = new_id()
     conn.execute(
         "INSERT INTO board_drafts (id, workspace_id, goal, tree_json, status, created_by, created_at, source_task, kind) "
         "VALUES (?,?,?,?,?,?,?,?,?)",
         (did, workspace_id, goal, jdumps(tree), "pending", created_by, now_iso(), source_task, kind),
+    )
+    conn.commit()
+    return get_draft(conn, did)  # type: ignore[return-value]
+
+
+def update_draft(conn: sqlite3.Connection, did: str, tree: dict,
+                 goal: str | None = None, workspace_id: str | None = None,
+                 by: str = "human") -> dict:
+    """人工编辑 pending workflow 草案；仍然保持 pending，等待原 HITL 审批。"""
+    draft = get_draft(conn, did)
+    if draft is None:
+        raise LookupError(did)
+    if draft.get("status") != "pending":
+        raise ConflictError(f"draft {did} is {draft.get('status')}, expected pending")
+    if (draft.get("kind") or "tasks") != "workflow":
+        raise ConflictError("only pending workflow drafts can be edited")
+    source_task = draft.get("source_task")
+    if not source_task:
+        raise ConflictError("workflow draft missing source_task")
+    from . import workflow as workflow_service
+    tree = workflow_service.normalize_definition(conn, tree)
+    workflow_service.validate_definition(conn, tree)
+    workflow_service.validate_role_coverage(conn, source_task, tree)
+    conn.execute(
+        "UPDATE board_drafts SET goal=COALESCE(?, goal), workspace_id=COALESCE(?, workspace_id), "
+        "tree_json=? WHERE id=?",
+        (goal, workspace_id, jdumps(tree), did),
+    )
+    conn.execute(
+        "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (source_task, by, "comment",
+         jdumps({"body": "人工在模板工作台更新了工作流草案，等待审批。"}), now_iso()),
     )
     conn.commit()
     return get_draft(conn, did)  # type: ignore[return-value]

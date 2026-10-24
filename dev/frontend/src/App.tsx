@@ -7,6 +7,7 @@ import { ActivityHistory } from "./pages/ActivityHistory";
 import { AgentSessions } from "./pages/AgentSessions";
 import { Channels } from "./pages/Channels";
 import { Decompose } from "./pages/Decompose";
+import { WorkflowTemplates } from "./pages/WorkflowTemplates";
 import { Governance } from "./pages/Governance";
 import { Inbox } from "./pages/Inbox";
 import { Knowledge } from "./pages/Knowledge";
@@ -23,6 +24,7 @@ type Route =
   | { page: "inbox" }
   | { page: "activity" }
   | { page: "decompose" }
+  | { page: "templates" }
   | { page: "channels" }
   | { page: "roles" }
   | { page: "runtimes" }
@@ -40,7 +42,7 @@ const NAV_GROUPS = [
     items: [
       { href: "/inbox", label: "收件箱", icon: "inbox" },
       { href: "/", label: "任务大厅", icon: "dashboard" },
-      { href: "/decompose", label: "目标拆解", icon: "git-branch" },
+      { href: "/templates", label: "工作流模板", icon: "git-branch" },
       { href: "/channels", label: "频道", icon: "hash" },
     ],
   },
@@ -70,6 +72,7 @@ const PAGE_TITLE: Record<Route["page"], string> = {
   inbox: "收件箱",
   activity: "活动历史",
   decompose: "目标拆解",
+  templates: "工作流模板",
   channels: "频道",
   roles: "角色工坊",
   runtimes: "运行时",
@@ -96,6 +99,7 @@ function parseRoute(path: string): Route {
   if (path.startsWith("/inbox")) return { page: "inbox" };
   if (path.startsWith("/activity")) return { page: "activity" };
   if (path.startsWith("/decompose")) return { page: "decompose" };
+  if (path.startsWith("/templates")) return { page: "templates" };
   if (path.startsWith("/channels")) return { page: "channels" };
   if (path.startsWith("/roles")) return { page: "roles" };
   if (path.startsWith("/runtimes")) return { page: "runtimes" };
@@ -306,7 +310,7 @@ export default function App() {
           <TopStatus />
         </header>
 
-        <main className={`content ${route.page === "task" ? "content-task" : route.page === "roles" ? "content-roles" : route.page === "lobby" ? "content-lobby" : route.page === "tooling" ? "content-tooling" : route.page === "governance" ? "content-governance" : route.page === "reminders" ? "content-reminders" : route.page === "knowledge" ? "content-knowledge" : ""}`}>
+        <main className={`content ${route.page === "task" ? "content-task" : route.page === "roles" ? "content-roles" : route.page === "lobby" ? "content-lobby" : route.page === "tooling" ? "content-tooling" : route.page === "governance" ? "content-governance" : route.page === "reminders" ? "content-reminders" : route.page === "knowledge" ? "content-knowledge" : route.page === "templates" ? "content-templates" : ""}`}>
           {route.page === "inbox" ? (
             <Inbox key={`inbox-${pageKey}`} />
           ) : route.page === "activity" ? (
@@ -319,6 +323,8 @@ export default function App() {
             <RunSession key={`run-${route.id}-${pageKey}`} id={route.id} />
           ) : route.page === "decompose" ? (
             <Decompose key={`decompose-${pageKey}`} />
+          ) : route.page === "templates" ? (
+            <WorkflowTemplates key={`templates-${pageKey}`} />
           ) : route.page === "channels" ? (
             <Channels key={`channels-${pageKey}`} />
           ) : route.page === "roles" ? (

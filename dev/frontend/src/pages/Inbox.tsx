@@ -96,6 +96,11 @@ export function Inbox() {
             </button>
             <button className="small danger" disabled={disabled}
               onClick={() => act(it.id, () => api.rejectDraftById(raw))}>驳回</button>
+            {it.meta?.draft_kind === "workflow" && (
+              <a className="small" href={`/templates?draft=${encodeURIComponent(raw)}`}>
+                在模板工作台编辑
+              </a>
+            )}
             {it.task_id && <a className="small" href={`/tasks/${it.task_id}`}>看任务</a>}
           </>
         );

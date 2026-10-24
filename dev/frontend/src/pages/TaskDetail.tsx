@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Task, type TimelineEvent, type Workflow, type WorkflowStep } from "../api/client";
+import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Task, type TimelineEvent, type Workflow, type WorkflowStep, type WorkflowTemplate } from "../api/client";
 import { RoleSessions } from "./RoleSessions";
+import { ApplyTemplateModal } from "./ApplyTemplateModal";
 import { WorkflowGraph } from "./WorkflowGraph";
 import { roleStatusFromWorkflow } from "../workflowStatus";
 import { formatClock } from "../time";
@@ -407,6 +408,9 @@ export function TaskDetail({ id }: { id: string }) {
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [children, setChildren] = useState<Task[]>([]);
   const [wfView, setWfView] = useState<"graph" | "list">("graph");
+  const [showApplyTemplate, setShowApplyTemplate] = useState(false);
+  const [seedTemplates, setSeedTemplates] = useState<WorkflowTemplate[]>([]);
+  const [seedId, setSeedId] = useState("");
   const [busy, setBusy] = useState(false);
   const { slugs: liveSlugs, runtimes: roleRuntimes } = useRoleRuntimes(task);
   const panel = usePanelLayout({ storageKey: "task" });
@@ -462,6 +466,10 @@ export function TaskDetail({ id }: { id: string }) {
     refreshWorkflow();
     refreshChildren();
     api.listRoles().then(setRoles).catch(() => {});
+    api.listWorkflowTemplates(undefined, "active").then((list) => {
+      setSeedTemplates(list.filter((item) => item.published_version
+        && (item.use_mode === "seed" || item.use_mode === "both")));
+    }).catch(() => setSeedTemplates([]));
     const refreshDrafts = () => api.listDrafts(id).then(setDrafts).catch(() => {});
     refreshDrafts();
     return subscribeEvents((ev) => {
@@ -473,6 +481,10 @@ export function TaskDetail({ id }: { id: string }) {
       }
     });
   }, [id, gone]);
+
+  useEffect(() => {
+    setSeedId(task?.plan_seed?.template_id || seedTemplates[0]?.id || "");
+  }, [task?.plan_seed?.template_id, seedTemplates]);
 
   // 打开任务、切回「会话」或切换筛选时，默认显示最后一条消息。
   useEffect(() => {
@@ -1115,6 +1127,11 @@ export function TaskDetail({ id }: { id: string }) {
                     <div className="muted">反馈路径：{d.tree.feedback_rules.join("；")}</div>
                   ) : null}
                   <div className="card-actions">
+                    {d.kind === "workflow" && (
+                      <a className="small button-like" href={`/templates?draft=${encodeURIComponent(d.id)}`}>
+                        在模板工作台编辑
+                      </a>
+                    )}
                     <button
                       className="primary small"
                       disabled={busy}
@@ -1122,7 +1139,7 @@ export function TaskDetail({ id }: { id: string }) {
                         await api.approveDraft([d.id]);
                         await api.listDrafts(id).then(setDrafts).catch(() => {});
                       })}
-                    >批准并落板（子任务按依赖自动派发）</button>
+                    >{d.kind === "workflow" ? "批准并启动工作流" : "批准并落板（子任务按依赖自动派发）"}</button>
                   </div>
                 </div>
               ))}
@@ -1368,8 +1385,40 @@ export function TaskDetail({ id }: { id: string }) {
 
       {tab === "workflow" && (
         <div className={`workflow-view ${wfView === "graph" ? "is-graph" : "is-list"}`}>
+          <div className="wf-template-actions">
+            <button className="small" disabled={busy || task.status === "done" || task.status === "closed"}
+              onClick={() => setShowApplyTemplate(true)}>套用模板</button>
+            {workflow && (
+              <button className="small" disabled={busy}
+                onClick={async () => {
+                  setBusy(true); setError(null);
+                  try {
+                    await api.importWorkflowTemplate("workflow", workflow.id, task.title);
+                    window.location.href = "/templates";
+                  } catch (e) { setError(String(e)); setBusy(false); }
+                }}>保存为模板</button>
+            )}
+            <span className="wf-template-actions-divider" />
+            <span className="muted">规划种子：{task.plan_seed?.name || "无"}</span>
+            <select value={seedId} onChange={(e) => setSeedId(e.target.value)} disabled={!seedTemplates.length}>
+              {seedTemplates.length === 0 && <option value="">暂无可用模板</option>}
+              {seedTemplates.map((item) => (
+                <option key={item.id} value={item.id}>{item.name} · v{item.published_version}</option>
+              ))}
+            </select>
+            <button className="small" disabled={busy || !seedId}
+              onClick={() => act(async () => {
+                const item = seedTemplates.find((t) => t.id === seedId);
+                if (!item?.published_version) return;
+                await api.setPlanSeed(id, item.id, item.published_version);
+              })}>设为种子</button>
+            {task.plan_seed && (
+              <button className="small" disabled={busy}
+                onClick={() => act(() => api.clearPlanSeed(id))}>清除种子</button>
+            )}
+          </div>
           {!workflow && (
-            <p className="muted">还没有工作流。多角色任务派发后，Cindy 会生成步骤状态机并在此展示。</p>
+            <p className="muted">还没有工作流。多角色任务派发后，Cindy 会生成步骤状态机并在此展示；也可以直接套用已发布模板。</p>
           )}
           {workflow && (
             <>
@@ -1441,6 +1490,18 @@ export function TaskDetail({ id }: { id: string }) {
 
       {tab === "runtime" && <RoleSessions task={task} roles={roles} workflow={workflow} />}
       </div>
+      {showApplyTemplate && (
+        <ApplyTemplateModal
+          task={task}
+          roles={roles}
+          onClose={() => setShowApplyTemplate(false)}
+          onApplied={async (applied) => {
+            setShowApplyTemplate(false);
+            setWorkflow(applied as unknown as Workflow);
+            await refreshWorkflow();
+          }}
+        />
+      )}
     </div>
   );
 }

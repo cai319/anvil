@@ -382,6 +382,48 @@ CREATE TABLE IF NOT EXISTS board_drafts (
     decided_at   TEXT
 );
 
+-- 可复用工作流模板：模板行保存元数据；definition/layout 放在版本行。
+CREATE TABLE IF NOT EXISTS workflow_templates (
+    id                 TEXT PRIMARY KEY,
+    name               TEXT NOT NULL,
+    description        TEXT NOT NULL DEFAULT '',
+    tags_json          TEXT NOT NULL DEFAULT '[]',
+    use_mode           TEXT NOT NULL DEFAULT 'both',    -- seed|manual|both
+    status             TEXT NOT NULL DEFAULT 'active',  -- active|archived
+    source_kind        TEXT NOT NULL DEFAULT 'manual', -- manual|import_workflow|import_draft|import_sop
+    source_ref_json    TEXT NOT NULL DEFAULT '{}',
+    draft_version      INTEGER,
+    published_version  INTEGER,
+    created_by         TEXT,
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_templates_status
+    ON workflow_templates(status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS workflow_template_versions (
+    template_id        TEXT NOT NULL,
+    version            INTEGER NOT NULL,
+    state              TEXT NOT NULL DEFAULT 'draft', -- draft|published
+    name               TEXT NOT NULL,
+    description        TEXT NOT NULL DEFAULT '',
+    tags_json          TEXT NOT NULL DEFAULT '[]',
+    definition_json    TEXT NOT NULL,
+    origin_definition_json TEXT,
+    layout_json        TEXT NOT NULL DEFAULT '{}',
+    validation_json    TEXT NOT NULL DEFAULT '[]',
+    definition_hash    TEXT NOT NULL DEFAULT '',
+    revision           INTEGER NOT NULL DEFAULT 1,
+    based_on_version   INTEGER,
+    provenance_json    TEXT NOT NULL DEFAULT '{}',
+    created_by         TEXT,
+    created_at         TEXT NOT NULL,
+    published_at       TEXT,
+    PRIMARY KEY (template_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_template_versions_state
+    ON workflow_template_versions(template_id, state, version DESC);
+
 -- 频道（工作区即频道，§B）
 CREATE TABLE IF NOT EXISTS workspaces (
     id          TEXT PRIMARY KEY,
@@ -693,8 +735,35 @@ def init_schema(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
+    # 工作流模板种子（可选）：任务创建/生成工作流时选择的模板及版本
+    try:
+        conn.execute("ALTER TABLE tasks ADD COLUMN plan_seed_json TEXT")
+    except sqlite3.OperationalError:
+        pass
+    # 模板落 workflow 后的来源追踪
+    for col in ("template_id TEXT", "template_version INTEGER"):
+        try:
+            conn.execute(f"ALTER TABLE workflows ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    try:
+        conn.execute(
+            "ALTER TABLE workflow_templates ADD COLUMN use_mode TEXT NOT NULL DEFAULT 'both'")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute(
+            "ALTER TABLE workflow_template_versions ADD COLUMN origin_definition_json TEXT")
+    except sqlite3.OperationalError:
+        pass
     try:
         conn.execute("ALTER TABLE board_drafts ADD COLUMN source_task TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_workflows_template "
+            "ON workflows(template_id, template_version)")
     except sqlite3.OperationalError:
         pass
     # 迁移：知识库元数据（scope/task/kind/tags/repo/confidence/updated_at/source/hash）

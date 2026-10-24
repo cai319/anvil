@@ -47,6 +47,13 @@ export interface Task {
   assignees: string[];
   plan_first: boolean;
   planner: string | null;
+  plan_seed?: {
+    template_id: string;
+    version: number;
+    name?: string;
+    set_by?: string;
+    set_at?: string;
+  } | null;
   role_claims: {
     role_slug: string;
     status: "pending" | "working" | "submitted" | "released" | "approved";
@@ -170,6 +177,7 @@ export const api = {
   getTask: (id: string): Promise<Task> => authFetch(`${BASE}/tasks/${id}`).then((r) => json<Task>(r)),
   createTask: (title: string, opts?: {
     description?: string; assignees?: string[]; plan_first?: boolean; planner?: string;
+    plan_seed?: { template_id: string; version: number; name?: string } | null;
     tags?: string[]; repo?: string | null; workspace_id?: string | null;
     base_branch?: string | null; knowledge_repos?: (string | { repo: string; reason?: string })[];
   }): Promise<Task> =>
@@ -383,6 +391,58 @@ export const api = {
     req("POST", "/board/drafts/approve", { draft_ids: ids }).then((r) => json(r)),
   rejectDraft: (id: string): Promise<Record<string, unknown>> =>
     req("POST", "/board/drafts/reject", { draft_id: id }).then((r) => json(r)),
+  getDraft: (id: string): Promise<BoardDraft> =>
+    authFetch(`${BASE}/board/drafts/${id}`).then((r) => json<BoardDraft>(r)),
+  updateDraft: (id: string, body: Record<string, unknown>): Promise<BoardDraft> =>
+    req("PATCH", `/board/drafts/${id}`, body).then((r) => json<BoardDraft>(r)),
+
+  // workflow templates
+  listWorkflowTemplates: (q?: string, status?: string): Promise<WorkflowTemplate[]> => {
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (status) params.set("status", status);
+    const qs = params.toString();
+    return authFetch(`${BASE}/workflow-templates${qs ? `?${qs}` : ""}`)
+      .then((r) => json<WorkflowTemplate[]>(r));
+  },
+  getWorkflowTemplate: (id: string): Promise<WorkflowTemplate> =>
+    authFetch(`${BASE}/workflow-templates/${id}`).then((r) => json<WorkflowTemplate>(r)),
+  createWorkflowTemplate: (body: Record<string, unknown>): Promise<WorkflowTemplate> =>
+    req("POST", "/workflow-templates", body).then((r) => json<WorkflowTemplate>(r)),
+  saveWorkflowTemplateDraft: (id: string, body: Record<string, unknown>): Promise<WorkflowTemplate> =>
+    req("PUT", `/workflow-templates/${id}/draft`, body).then((r) => json<WorkflowTemplate>(r)),
+  validateWorkflowTemplate: (id: string, body: Record<string, unknown> = {}): Promise<{ issues: TemplateValidationIssue[] }> =>
+    req("POST", `/workflow-templates/${id}/validate`, body).then((r) => json(r)),
+  publishWorkflowTemplate: (id: string, changeNote?: string): Promise<WorkflowTemplate> =>
+    req("POST", `/workflow-templates/${id}/publish`, { change_note: changeNote }).then((r) => json<WorkflowTemplate>(r)),
+  archiveWorkflowTemplate: (id: string): Promise<WorkflowTemplate> =>
+    req("POST", `/workflow-templates/${id}/archive`, {}).then((r) => json<WorkflowTemplate>(r)),
+  getWorkflowTemplateVersion: (id: string, version: number): Promise<WorkflowTemplateVersion> =>
+    authFetch(`${BASE}/workflow-templates/${id}/versions/${version}`)
+      .then((r) => json<WorkflowTemplateVersion>(r)),
+  rollbackWorkflowTemplate: (id: string, version: number): Promise<WorkflowTemplate> =>
+    req("POST", `/workflow-templates/${id}/rollback`, { version }).then((r) => json<WorkflowTemplate>(r)),
+  duplicateWorkflowTemplate: (id: string, name?: string): Promise<WorkflowTemplate> =>
+    req("POST", `/workflow-templates/${id}/duplicate`, { name }).then((r) => json<WorkflowTemplate>(r)),
+  listTemplateImportSources: (): Promise<{
+    workflows: { id: string; task_id: string; task_title: string; status: string }[];
+    drafts: { id: string; source_task: string | null; task_title?: string | null; goal: string; created_at: string }[];
+    sops: { name: string; steps: string[] }[];
+  }> => authFetch(`${BASE}/workflow-templates/import-sources`).then((r) => json(r)),
+  importWorkflowTemplate: (sourceKind: "workflow" | "draft", sourceId: string, name?: string): Promise<WorkflowTemplate> =>
+    req("POST", "/workflow-templates/import", {
+      source_kind: sourceKind, source_id: sourceId, name,
+    }).then((r) => json<WorkflowTemplate>(r)),
+  previewApplyTemplate: (id: string, body: Record<string, unknown>): Promise<Record<string, unknown>> =>
+    req("POST", `/workflow-templates/${id}/preview-apply`, body).then((r) => json(r)),
+  applyTemplateToTask: (taskId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> =>
+    req("POST", `/tasks/${taskId}/workflow/from-template`, body).then((r) => json(r)),
+  setPlanSeed: (taskId: string, templateId: string, version: number): Promise<Record<string, unknown>> =>
+    req("POST", `/tasks/${taskId}/plan-seed`, { template_id: templateId, version }).then((r) => json(r)),
+  clearPlanSeed: (taskId: string): Promise<void> =>
+    req("DELETE", `/tasks/${taskId}/plan-seed`).then((r) => {
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    }),
 
   // channels (workspaces)
   listChannels: (): Promise<Channel[]> => authFetch(`${BASE}/workspaces`).then((r) => json<Channel[]>(r)),
@@ -622,6 +682,103 @@ export interface Workflow {
   steps: WorkflowStep[];
   created_at: string;
   updated_at: string;
+}
+
+export interface TemplateRoleSlot {
+  key: string;
+  label: string;
+  description?: string;
+  suggested_roles?: string[];
+}
+
+export interface TemplateStep {
+  id: string;
+  title: string;
+  role_slot: string;
+  kind?: "task" | "decision" | "plan_slices";
+  depends_on?: string[];
+  instructions?: string;
+  acceptance?: string[];
+  gate?: boolean;
+  reviewer_slot?: string | null;
+  contract?: string | null;
+  on_reject?: string[];
+  max_rework?: number;
+}
+
+export interface TemplateLoopPhase {
+  role_slot: string;
+  title?: string;
+  instructions?: string;
+  acceptance?: string[];
+  max_rework?: number;
+}
+
+export interface TemplateLoop {
+  from: string;
+  scope?: TemplateLoopPhase;
+  execute?: TemplateLoopPhase;
+  verify?: TemplateLoopPhase;
+  fix?: TemplateLoopPhase;
+  verify2?: TemplateLoopPhase;
+  decide?: TemplateLoopPhase;
+}
+
+export interface WorkflowTemplateDefinition {
+  schema_version?: number;
+  role_slots: TemplateRoleSlot[];
+  steps: TemplateStep[];
+  loop?: TemplateLoop | null;
+  feedback_rules?: string[];
+  verification?: { cell: string; method: string; verifier_slot?: string }[];
+}
+
+export interface TemplateValidationIssue {
+  severity: "error" | "warning";
+  code: string;
+  message: string;
+  node_id?: string | null;
+  slot_key?: string | null;
+}
+
+export interface WorkflowTemplateVersion {
+  template_id: string;
+  version: number;
+  state: "draft" | "published";
+  name: string;
+  description: string;
+  tags: string[];
+  definition: WorkflowTemplateDefinition;
+  origin_definition?: WorkflowTemplateDefinition | null;
+  layout: Record<string, { x: number; y: number }>;
+  validation: TemplateValidationIssue[];
+  revision: number;
+  based_on_version?: number | null;
+  created_at: string;
+  published_at?: string | null;
+}
+
+export interface WorkflowTemplate {
+  id: string;
+  name: string;
+  description: string;
+  tags: string[];
+  use_mode: "seed" | "manual" | "both";
+  status: "active" | "archived";
+  source_kind: string;
+  source_ref: Record<string, unknown>;
+  draft_version?: number | null;
+  published_version?: number | null;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+  has_draft?: boolean;
+  has_published?: boolean;
+  usage_count?: number;
+  draft?: WorkflowTemplateVersion | null;
+  published?: WorkflowTemplateVersion | null;
+  versions?: { version: number; state: string; revision: number; created_at: string; published_at?: string | null }[];
+  warnings?: string[];
 }
 
 export interface BoardDraft {

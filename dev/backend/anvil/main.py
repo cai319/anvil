@@ -23,7 +23,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import config
 from .api import (
-    actions, agent_inbox, board, events, governance, inbox, knowledge_repos, memory, reminders, roles, runs, runtimes, tasks, tooling, workflow, workspaces,
+    actions, agent_inbox, board, events, governance, inbox, knowledge_repos, memory, reminders, roles, runs, runtimes, tasks, templates, tooling, workflow, workspaces,
 )
 from .db import connect, open_conn
 from .deps import token_is_valid
@@ -259,6 +259,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     app.include_router(governance.router, prefix="/api/v1", tags=["governance"])
     app.include_router(runs.router, prefix="/api/v1", tags=["runs"])
     app.include_router(board.router, prefix="/api/v1", tags=["board"])
+    app.include_router(templates.router, prefix="/api/v1", tags=["workflow-templates"])
     app.include_router(reminders.router, prefix="/api/v1", tags=["reminders"])
     app.include_router(tooling.router, prefix="/api/v1", tags=["tooling"])
     app.include_router(events.router, prefix="/api/v1", tags=["events"])

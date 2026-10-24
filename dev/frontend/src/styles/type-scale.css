@@ -1515,3 +1515,583 @@ select { height: var(--control-h); }
   }
   .governance-table-scroll { max-height: 55vh; }
 }
+
+/* ── 工作流模板工作台 ───────────────────────────── */
+.content-templates {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.templates-page {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+.templates-page > .page-header { flex: none; }
+.templates-studio {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: 280px minmax(0, 1fr) 360px;
+  gap: 12px;
+  min-height: 0;
+}
+.wft-library,
+.wft-inspector {
+  min-height: 0;
+  padding: 10px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.wft-library-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.wft-library-head input { width: 100%; min-width: 0; }
+.wft-library-head button { white-space: nowrap; }
+.wft-template-list { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.wft-template-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  padding: 8px 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  white-space: normal;
+  cursor: pointer;
+}
+.wft-template-item:hover { background: rgba(127, 127, 127, 0.08); }
+.wft-template-item.active {
+  border-color: var(--accent-strong);
+  background: rgba(96, 165, 250, 0.12);
+}
+.wft-template-name {
+  display: -webkit-box;
+  overflow: hidden;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.wft-template-meta {
+  overflow: hidden;
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--fs-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wft-template-desc {
+  display: -webkit-box;
+  overflow: hidden;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  font-size: var(--fs-hint);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.wft-template-desc:empty { display: none; }
+
+.wft-canvas-wrap {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.wft-toolbar {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 6px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.wft-toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.wft-toolbar-row + .wft-toolbar-row {
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.wft-toolbar button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.wft-toolbar-main .wft-name { min-width: 0; }
+.wft-toolbar-tools { gap: 4px; }
+.wft-toolbar-tools button.small {
+  padding-inline: clamp(7px, 0.5vw, 11px);
+}
+.wft-name {
+  flex: 1 1 180px;
+  min-width: 120px;
+  max-width: 320px;
+}
+
+/* 模板工作台的输入文字与按钮/面板标题同级，避免输入框字号反超标题。 */
+.templates-page input:not([type="checkbox"]):not([type="radio"]),
+.templates-page select,
+.templates-page textarea {
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}
+.wft-dirty {
+  color: var(--muted);
+  font-size: var(--fs-meta);
+  white-space: nowrap;
+}
+.wft-toolbar-spacer { flex: 1 1 auto; }
+.wft-canvas {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-soft);
+}
+.wft-canvas .react-flow { width: 100%; height: 100%; }
+.wft-canvas-empty {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  margin: 0;
+}
+.wft-canvas .react-flow__controls {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.wft-canvas .react-flow__controls button {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+.wft-canvas .react-flow__minimap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.wft-node {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 240px;
+  min-height: 112px;
+  padding: 9px 11px;
+  overflow: hidden;
+  border: 2px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  color: var(--text);
+}
+.wft-node.selected { border-color: var(--accent-strong); box-shadow: var(--shadow-yellow); }
+.wft-node-top {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  line-height: 1.2;
+}
+.wft-node-id { color: var(--muted); }
+.wft-node-kind,
+.wft-node-gate {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--paper-2);
+  color: var(--text-on-paper);
+  font-size: 9.5px;
+  font-weight: 800;
+}
+.wft-node-gate { background: var(--yellow); }
+.wft-node-title {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.wft-node-role {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wft-node-loop {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent-strong);
+  font-size: 10px;
+  font-weight: 700;
+}
+.wft-node .react-flow__handle {
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--surface);
+  background: var(--accent-strong);
+}
+
+.wft-inspector-body { display: flex; flex-direction: column; gap: 9px; }
+.wft-panel {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(127, 127, 127, 0.05);
+}
+.wft-panel h3 {
+  margin: 0 0 8px;
+  font-size: var(--fs-sm);
+}
+.wft-panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.wft-panel-title h3 { margin: 0; }
+.wft-panel .field { margin-bottom: 8px; }
+.wft-panel .field:last-child { margin-bottom: 0; }
+.wft-panel .field > span { color: var(--muted); font-size: var(--fs-hint); }
+.wft-panel textarea { min-height: 60px; resize: vertical; }
+.wft-field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.wft-panel-note { font-size: var(--fs-hint); }
+.wft-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 5px 0;
+  color: var(--text);
+  font-size: var(--fs-meta);
+}
+.wft-check input { width: 15px; height: 15px; min-height: 0; }
+.wft-check-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.wft-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.wft-chip {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--paper-2);
+  color: var(--text-on-paper);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.wft-slots { display: flex; flex-direction: column; gap: 7px; }
+.wft-slot {
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+.wft-slot-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.wft-slot-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.wft-slot-head code { color: var(--muted); font-size: 9.5px; }
+.wft-slot-used { color: var(--green); font-size: 9.5px; }
+.wft-slot-delete { margin-left: auto; }
+.wft-slot-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-top: 5px;
+}
+.wft-slot-fields input { min-width: 0; }
+.wft-add-slot { display: flex; gap: 5px; margin-top: 7px; }
+.wft-add-slot input { flex: 1; min-width: 0; }
+.wft-loop-phase {
+  border-top: 1px solid var(--border);
+  padding: 6px 0;
+}
+.wft-loop-phase > summary {
+  cursor: pointer;
+  font-size: var(--fs-meta);
+  font-weight: 700;
+}
+.wft-loop-phase .field { margin-top: 6px; }
+.wft-issues { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.wft-issue {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  color: var(--text);
+  font-size: var(--fs-meta);
+  line-height: 1.35;
+  cursor: pointer;
+}
+.wft-issue > span { flex: none; font-weight: 800; }
+.wft-issue.error > span { color: var(--red); }
+.wft-issue.warning > span { color: var(--yellow); }
+.wft-inline-warning { color: var(--yellow); font-size: var(--fs-meta); }
+.wft-import-modal { width: min(720px, 92vw); }
+.wft-import-heading { margin: 14px 0 6px; font-size: var(--fs-sm); }
+.wft-import-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-meta);
+}
+.wft-import-row > span:first-child {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wft-import-note { margin-top: 12px; font-size: var(--fs-hint); }
+
+@media (max-width: 1279px) {
+  .templates-studio { grid-template-columns: 230px minmax(0, 1fr) 320px; }
+}
+@media (max-width: 1099px) {
+  .content-templates { display: block; overflow-y: auto; }
+  .templates-page { display: block; }
+  .templates-studio { display: flex; flex-direction: column; min-height: auto; }
+  .wft-library, .wft-inspector { max-height: 360px; }
+  .wft-canvas { min-height: 520px; }
+}
+
+/* ── 工作流模板操作与套用弹窗 ───────────────────── */
+.wf-template-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 10px;
+}
+.wf-template-actions select { max-width: 260px; }
+.wf-template-actions-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 3px;
+  background: var(--border);
+}
+.wft-apply-modal { width: min(700px, 92vw); }
+.wft-apply-modal .field { margin: 10px 0; }
+.wft-apply-mapping {
+  margin: 10px 0;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+.wft-apply-mapping h3 { margin: 0 0 7px; font-size: var(--fs-sm); }
+.wft-apply-slot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 0;
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-meta);
+}
+.wft-apply-preview {
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  font-size: var(--fs-meta);
+}
+.wft-apply-preview .error { margin-bottom: 5px; }
+.wft-notice {
+  margin: 6px 2px 0;
+  color: var(--yellow);
+  font-size: var(--fs-meta);
+}
+
+/* ── 模板版本 / 语义 Diff ───────────────────────── */
+.wft-version-modal { width: min(820px, 94vw); }
+.wft-version-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 4px 0 12px;
+}
+.wft-version-list { display: flex; flex-direction: column; gap: 5px; }
+.wft-version-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font-size: var(--fs-meta);
+}
+.wft-version-row > button { margin-left: 0; }
+.wft-diff { margin-top: 8px; }
+.wft-diff-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.wft-diff ul { margin: 0; padding: 0; list-style: none; max-height: 52vh; overflow: auto; }
+.wft-diff li {
+  padding: 4px 7px;
+  border-left: 3px solid var(--border);
+  font-size: var(--fs-meta);
+  line-height: 1.4;
+}
+.wft-diff li.added { border-left-color: var(--green); background: rgba(52, 211, 153, 0.08); }
+.wft-diff li.removed { border-left-color: var(--red); background: rgba(248, 113, 113, 0.08); }
+.wft-diff li.changed { border-left-color: var(--yellow); background: rgba(251, 191, 36, 0.08); }
+.wft-node.has-error { border-color: var(--red); }
+.wft-node.has-warning:not(.has-error) { border-color: var(--yellow); }
+
+.wft-canvas-hint {
+  flex: none;
+  margin: 4px 2px 0;
+  color: var(--muted);
+  font-size: var(--fs-hint);
+}
+.wft-node .react-flow__handle {
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--surface);
+  background: var(--accent-strong);
+}
+.wft-node .react-flow__handle:hover {
+  transform: scale(1.25);
+}
+.wft-canvas .react-flow__edge-interaction {
+  stroke-width: 18;
+}
+.wft-canvas .react-flow__edge.selected .react-flow__edge-path {
+  stroke: var(--accent-strong) !important;
+  stroke-width: 3 !important;
+}
+.wft-edge-details {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 4px 0 8px;
+  font-size: var(--fs-meta);
+}
+.wft-edge-kind {
+  align-self: flex-start;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--paper-2);
+  color: var(--text-on-paper);
+  font-size: 10px;
+  font-weight: 800;
+}
+.wft-edge-kind.reject {
+  background: var(--yellow);
+}
+
+.wft-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.wft-chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.wft-chip-x:hover { background: rgba(0, 0, 0, .18); }
+.wft-edge-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.wft-canvas .react-flow__edge { cursor: pointer; }
+.wft-canvas .react-flow__edge:hover .react-flow__edge-path { stroke: var(--accent-strong); }
+/* React Flow 会为每条边都渲染改接端点；未选中时必须不可见且不拦截点击。 */
+.wft-canvas .react-flow__edgeupdater {
+  opacity: 0;
+  pointer-events: none;
+}
+.wft-canvas .react-flow__edge.selected .react-flow__edgeupdater {
+  opacity: 1;
+  pointer-events: all;
+  fill: var(--accent-strong);
+  stroke: var(--surface);
+  stroke-width: 2;
+}
+.wft-canvas .react-flow__edge.selected .react-flow__edge-interaction {
+  fill: none;
+}
+.wft-reject-edge-label {
+  position: absolute;
+  padding: 1px 5px;
+  border: 1px solid rgba(251, 146, 60, .55);
+  border-radius: 4px;
+  background: var(--surface);
+  color: #fb923c;
+  font-size: 10px;
+  font-weight: 700;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.wft-check.is-disabled {
+  opacity: .58;
+  cursor: not-allowed;
+}
+.wft-check-reason {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.wft-check-list .wft-check > span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
