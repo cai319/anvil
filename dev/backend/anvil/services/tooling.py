@@ -18,6 +18,7 @@ import yaml  # type: ignore
 
 from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
+from ..version import VERSION
 
 
 # ---- skills ---------------------------------------------------------------
@@ -119,15 +120,17 @@ def skill_compat(conn: sqlite3.Connection, sid: str) -> dict:
 
 def create_mcp_server(conn: sqlite3.Connection, *, name: str, transport: str = "stdio",
                       command: str | None = None, args: list[str] | None = None,
-                      env: dict[str, str] | None = None, url: str | None = None) -> dict:
+                      env: dict[str, str] | None = None, url: str | None = None,
+                      description: str = "", runtime: str | None = None) -> dict:
     mid = new_id()
     now = now_iso()
     try:
         conn.execute(
-            "INSERT INTO mcp_servers (id, name, transport, command, args_json, env_json, url, "
-            "tools_json, enabled, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (mid, name, transport, command, jdumps(args or []), jdumps(env or {}),
-             url, "[]", 1, now, now),
+            "INSERT INTO mcp_servers (id, name, description, runtime, transport, command, "
+            "args_json, env_json, url, tools_json, enabled, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (mid, name, description, runtime, transport, command, jdumps(args or []),
+             jdumps(env or {}), url, "[]", 1, now, now),
         )
     except sqlite3.IntegrityError as exc:
         raise ConflictError(f"mcp server {name} already exists") from exc
@@ -158,7 +161,7 @@ def update_mcp_server(conn: sqlite3.Connection, mid: str, **fields) -> dict | No
     if server is None:
         return None
     allowed: dict = {}
-    for k in ("name", "transport", "command", "url"):
+    for k in ("name", "description", "runtime", "transport", "command", "url"):
         if k in fields and fields[k] is not None:
             allowed[k] = fields[k]
     if "args" in fields and fields["args"] is not None:
@@ -258,7 +261,7 @@ def probe_mcp_server(conn: sqlite3.Connection, mid: str, timeout: float = 8.0) -
             "params": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "anvil", "version": "0.1.0"},
+                "clientInfo": {"name": "anvil", "version": VERSION},
             },
         })
         init = await_id(1, deadline)
@@ -297,12 +300,15 @@ def probe_mcp_server(conn: sqlite3.Connection, mid: str, timeout: float = 8.0) -
                 pass
 
 
-def mcp_config_for(conn: sqlite3.Connection, names: list[str]) -> dict[str, dict]:
+def mcp_config_for(conn: sqlite3.Connection, names: list[str],
+                   runtime: str | None = None) -> dict[str, dict]:
     """把 DB 中登记的 MCP server 转成运行时配置文件里的 mcpServers 结构。"""
     out: dict[str, dict] = {}
     for name in names:
         server = get_mcp_server(conn, name)
         if not server or not server["enabled"]:
+            continue
+        if runtime and server.get("runtime") and server["runtime"] != runtime:
             continue
         if server["transport"] == "stdio":
             cfg = {"command": server["command"], "args": server["args"]}

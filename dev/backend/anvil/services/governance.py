@@ -533,8 +533,13 @@ def role_can_write(conn: sqlite3.Connection, role: str | None, repo: str | None)
     if not repos:
         return True
     for r in repos:
-        if r.get("name") == repo:
-            return r.get("access") != "read"
+        if isinstance(r, dict):
+            name = r.get("name") or r.get("repo") or r.get("slug")
+            access = r.get("access")
+        else:
+            name, access = str(r), None
+        if name == repo:
+            return access != "read"
     return False
 
 

@@ -180,7 +180,7 @@ export function Runtimes() {
         }
       />
       <div className="toolbar">
-        <label className="field" style={{ marginBottom: 0, minWidth: 320 }}>
+        <label className="field default-runtime-field" style={{ marginBottom: 0 }}>
           <span>默认运行时（无角色参与的 AI 调用使用）</span>
           <select
             value={defaultId ?? ""}
@@ -223,7 +223,7 @@ export function Runtimes() {
               <td>
                 <span className={`status status-${r.status}`}>{STATUS_LABEL[r.status] ?? r.status}</span>
                 {r.last_probe_log && (
-                  <div className="muted" style={{ fontSize: 12, marginTop: 4, maxWidth: 420, whiteSpace: "normal" }}>
+                  <div className="muted hint" style={{ marginTop: 4, maxWidth: 420, whiteSpace: "normal" }}>
                     {r.last_probe_log}
                   </div>
                 )}

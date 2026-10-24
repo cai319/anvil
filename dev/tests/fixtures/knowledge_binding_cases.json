@@ -1,0 +1,33 @@
+[
+  {
+    "id": "openssl-asan",
+    "title": "OpenSSL 4.0.1 ASan 误报复现",
+    "description": "核实堆缓冲区溢出报告，判断是否为 ASan 误报",
+    "tags": ["openssl", "asan"],
+    "repo": "openssl-4.0.1",
+    "expected": ["openssl-4.0.1"]
+  },
+  {
+    "id": "gomoku-rule",
+    "title": "五子棋胜负判断与禁手规则",
+    "description": "实现棋盘胜负检测和禁手判定",
+    "tags": ["a11y", "responsive"],
+    "expected": ["gomoku"]
+  },
+  {
+    "id": "network-audit",
+    "title": "网络协议安全审计",
+    "description": "审计 TLS 握手、证书校验与密码套件降级",
+    "tags": ["security", "tls", "audit"],
+    "repo": "audit-network-security",
+    "expected": ["audit-network-security", "openssl-4.0.1"]
+  },
+  {
+    "id": "no-tags",
+    "title": "整理知识库中关于 OpenSSL 的经验",
+    "description": "按主题归档，不预设标签",
+    "tags": [],
+    "expected": [],
+    "expect_needs_cindy": true
+  }
+]

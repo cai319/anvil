@@ -136,6 +136,21 @@ MAX_ROLES = int(_env("ANVIL_MAX_ROLES", "20"))
 # 自动派发（默认关）：todo 任务是否由调度器自动 wake 第一个角色。关闭时派发完全由「指派并执行」手动决定。
 AUTO_DISPATCH = _env("ANVIL_AUTO_DISPATCH", "0") == "1"
 
+# 任务 → 知识 repo 自动绑定（2026-10-24）。
+# 执行仓库仍是单值 tasks.repo；这里是多值 knowledge repos，仅影响 lessons/notes 检索。
+KNOWLEDGE_REPOS_ENABLED = _env("ANVIL_KNOWLEDGE_REPOS", "1") != "0"
+KNOWLEDGE_BINDING_MODE = _env("ANVIL_KNOWLEDGE_BINDING_MODE", "auto")  # off|suggest|auto
+KNOWLEDGE_BINDING_HIGH = float(_env("ANVIL_KNOWLEDGE_BINDING_HIGH", "0.62"))
+KNOWLEDGE_BINDING_SUGGEST = float(_env("ANVIL_KNOWLEDGE_BINDING_SUGGEST", "0.38"))
+KNOWLEDGE_BINDING_MAX_REPOS = int(_env("ANVIL_KNOWLEDGE_BINDING_MAX_REPOS", "3"))
+KNOWLEDGE_BINDING_GAP = float(_env("ANVIL_KNOWLEDGE_BINDING_GAP", "0.15"))
+KNOWLEDGE_CATALOG_TTL = float(_env("ANVIL_KNOWLEDGE_CATALOG_TTL", "30"))
+KNOWLEDGE_CATALOG_MAX_REPOS = int(_env("ANVIL_KNOWLEDGE_CATALOG_MAX_REPOS", "200"))
+# tagless：无 tags 的任务走 Cindy；always：所有新任务都走；off：只做确定性匹配。
+KNOWLEDGE_CINDY_MODE = _env("ANVIL_KNOWLEDGE_CINDY_MODE", "tagless")
+# 无任务上下文（reminder/直聊）的知识范围：all（现状）或 shared。
+KNOWLEDGE_TASKLESS_SCOPE = _env("ANVIL_KNOWLEDGE_TASKLESS_SCOPE", "all")
+
 # Runtime definitions (design §2.6 存储分层)：
 #   - 内置（随包分发）：backend/anvil/runtimes/*.yaml
 #   - 用户自定义/覆盖：%APPDATA%/Anvil/runtimes/（macOS 用 ~/.config/Anvil/runtimes/）

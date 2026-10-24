@@ -90,6 +90,10 @@ def create_draft(conn: sqlite3.Connection, goal: str, tree: dict,
         raise ConflictError(f"unsupported draft kind: {kind}")
     if kind in ("workflow", "role_suggestion") and not source_task:
         raise ConflictError(f"{kind} draft requires source_task")
+    from . import knowledge_binding
+    # agent 草案严格校验 repo 名（防止 Cindy 编造）；人工草案允许安全的新名字。
+    knowledge_binding.normalize_draft_tree(
+        conn, tree, strict=not str(created_by).startswith("human"))
     if kind == "workflow":
         # 把 Cindy 的 slices 确定性展开成每片闭环，并在草案阶段就拦下
         # 「大型多角色但无决策点」的串行工作流，让 planner 当场修正。
@@ -245,7 +249,12 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human") -
         if kind == "workflow":
             if not draft.get("source_task"):
                 raise ConflictError("workflow draft missing source_task")
+            from . import knowledge_binding
             from . import workflow as workflow_service
+            try:
+                knowledge_binding.apply_cindy_draft(conn, draft["source_task"], draft["tree"])
+            except Exception as exc:  # noqa: BLE001 —— 绑定失败不阻断审批
+                warnings.append(f"{did}: knowledge repos not applied ({exc})")
             workflow_service.create_workflow(
                 conn, draft["source_task"], draft["tree"], created_by=draft["created_by"])
             n = len((draft.get("tree") or {}).get("steps") or []) or 1
@@ -271,8 +280,9 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human") -
         if kind != "tasks":
             raise ConflictError(f"unsupported draft kind: {kind}")
         # 兼容旧 tasks 草案：子任务落在其父任务之下
-        _land_tree(conn, draft["tree"], parent_id=draft.get("source_task"),
-                   workspace_id=draft.get("workspace_id"))
+        root = draft.get("tree") or {}
+        _land_tree(conn, root, parent_id=draft.get("source_task"),
+                   workspace_id=draft.get("workspace_id"), defaults=root)
         if draft.get("source_task"):
             conn.execute(
                 "UPDATE tasks SET status='in_progress', updated_at=? WHERE id=? AND status='todo'",
@@ -290,6 +300,11 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human") -
                      (now_iso(), did))
         landed.append(did)
     conn.commit()
+    try:
+        from . import repo_catalog
+        repo_catalog.invalidate_catalog()
+    except Exception:  # noqa: BLE001
+        pass
     return {"landed": landed, "replans": replans, "warnings": warnings}
 
 
@@ -341,10 +356,21 @@ def reject(conn: sqlite3.Connection, draft_id: str, by: str = "human",
 
 
 def _land_tree(conn: sqlite3.Connection, node: dict, parent_id: str | None,
-               workspace_id: str | None, feedback_rules: list[str] | None = None) -> None:
+               workspace_id: str | None, feedback_rules: list[str] | None = None,
+               defaults: dict | None = None) -> None:
+    from . import knowledge as knowledge_service
+    from . import knowledge_binding
+
     now = now_iso()
+    defaults = defaults if defaults is not None else node
     if feedback_rules is None:
         feedback_rules = node.get("feedback_rules") or []
+    parent = conn.execute(
+        "SELECT tags_json, repo, base_branch FROM tasks WHERE id=?",
+        (parent_id,)).fetchone() if parent_id else None
+    parent_tags = jloads(parent["tags_json"], []) if parent else []
+    parent_repo = parent["repo"] if parent else None
+    parent_base = parent["base_branch"] if parent else None
     children = node.get("children") or []
     # 有 children 的节点是容器（epic），只落地 children（流水线步骤）；叶子节点落地自身。
     for child in (children if children else [node]):
@@ -352,13 +378,20 @@ def _land_tree(conn: sqlite3.Connection, node: dict, parent_id: str | None,
         desc = child.get("description") or ""
         if feedback_rules:
             desc = (desc + "\n\n" if desc else "") + "反馈路径：\n" + "\n".join(f"- {r}" for r in feedback_rules)
+        raw_tags = child["tags"] if "tags" in child else defaults.get("tags")
+        if raw_tags is None:
+            raw_tags = parent_tags
+        tags = knowledge_service.normalize_tags(raw_tags or [])
+        repo = child.get("repo") or defaults.get("repo") or parent_repo
+        base_branch = child.get("base_branch") or defaults.get("base_branch") or parent_base
         conn.execute(
             "INSERT INTO tasks (id, title, type, status, parent_id, workspace_id, description, "
-            "scope_paths_json, acceptance_json, created_by, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "scope_paths_json, acceptance_json, tags_json, repo, base_branch, created_by, "
+            "created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (tid, child.get("title", ""), child.get("type"), "todo", parent_id, workspace_id,
              desc or None, jdumps(child.get("scope_paths") or []), jdumps(child.get("acceptance") or []),
-             "orchestrator", now, now),
+             jdumps(tags), repo, base_branch, "orchestrator", now, now),
         )
         for dep in child.get("depends_on", []):
             conn.execute("INSERT OR IGNORE INTO task_deps (task_id, depends_on) VALUES (?,?)", (tid, dep))
@@ -367,6 +400,25 @@ def _land_tree(conn: sqlite3.Connection, node: dict, parent_id: str | None,
                 "INSERT OR IGNORE INTO task_assignees (task_id, role_slug, joined_at) VALUES (?,?,?)",
                 (tid, child["role"], now),
             )
+        try:
+            if "knowledge_repos" in child or "knowledge_repos" in defaults:
+                selection = child["knowledge_repos"] if "knowledge_repos" in child else defaults.get("knowledge_repos")
+                knowledge_binding.apply_cindy_draft(conn, tid, {
+                    "tags": tags,
+                    "knowledge_repos": selection or [],
+                }, commit=False)
+            else:
+                knowledge_binding.auto_bind(conn, {
+                    "id": tid, "title": child.get("title", ""), "description": desc,
+                    "tags": tags, "repo": repo, "workspace_id": workspace_id,
+                    "parent_id": parent_id,
+                }, commit=False)
+        except Exception:  # noqa: BLE001 —— 绑定失败不能阻断落板
+            pass
+        child_defaults = dict(defaults)
+        for key in ("tags", "knowledge_repos", "repo", "base_branch"):
+            if key in child:
+                child_defaults[key] = child[key]
         for grandchild in child.get("children", []):
             _land_tree(conn, grandchild, parent_id=tid, workspace_id=workspace_id,
-                       feedback_rules=feedback_rules)
+                       feedback_rules=feedback_rules, defaults=child_defaults)

@@ -18,8 +18,8 @@ from anvil.services import tasks as tasks_service  # noqa: E402
 def conn(tmp_path):
     c = connect(str(tmp_path / "p.db"))
     now = now_iso()
-    c.execute("INSERT INTO tasks (id,title,description,status,created_at,updated_at) "
-              "VALUES ('T1','跳棋','实现跳棋','in_progress',?,?)", (now, now))
+    c.execute("INSERT INTO tasks (id,title,description,status,repo,created_at,updated_at) "
+              "VALUES ('T1','跳棋','实现跳棋','in_progress','openssl',?,?)", (now, now))
     c.commit()
     yield c
     c.close()

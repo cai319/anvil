@@ -18,8 +18,16 @@ from pathlib import Path
 from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
 from . import knowledge as knowledge_service
+from . import knowledge_binding, repo_catalog
 
 LESSON_CAP = 80
+
+
+def _invalidate_repo_catalog() -> None:
+    try:
+        repo_catalog.invalidate_catalog()
+    except Exception:  # noqa: BLE001 —— 缓存失效失败不影响知识写入
+        pass
 
 
 # ---- MEMORY.md / notes ----------------------------------------------------
@@ -121,6 +129,7 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
             "source, content_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             values)
     conn.commit()
+    _invalidate_repo_catalog()
     row = conn.execute(
         "SELECT id, created_at FROM notes WHERE role_slug=? AND path=?",
         (role, clean_path)).fetchone()
@@ -193,10 +202,16 @@ def search_memory(conn: sqlite3.Connection, role: str, q: str,
 
     note_hits: list[dict] = []
     effective_scope = scope or ("auto" if task_id else "role")
+    repos = None
+    if task_id:
+        task_row = conn.execute("SELECT repo FROM tasks WHERE id=?", (task_id,)).fetchone()
+        repos = knowledge_service.scope_repos(
+            conn, task_id, task_row["repo"] if task_row else None)
     try:
         hits = knowledge_service.search_knowledge(
             conn, role, q, task_id=task_id,
             scope=effective_scope if effective_scope in ("auto", "role", "task") else "role",
+            repo_scope="bound_or_shared", repos=repos,
             limit=limit, include_snapshots=include_task_snapshots)
         note_hits = [{
             "role_slug": role, "content": h["content"], "score": h["score"],
@@ -331,13 +346,18 @@ def context_for_task(conn: sqlite3.Connection, role: str, task: dict | None,
     task_id = task_id or task.get("id")
     title = task.get("title") or ""
     tags = task.get("tags") or []
+    scope = knowledge_binding.retrieval_scope(
+        conn, task if task.get("id") else None)
+    repos = scope.get("repos")
     query = " ".join([title, *[str(t) for t in tags]]).strip()
     task_hits = knowledge_service.search_knowledge(
         conn, role, query, task_id=task_id, scope="auto",
-        limit=6, snippet_chars=800, repo_scope="same_or_shared") if query else []
+        limit=6, snippet_chars=800, repo_scope="bound_or_shared",
+        repos=repos) if query else []
     role_hits = knowledge_service.search_knowledge(
         conn, role, query, task_id=None, scope="role",
-        limit=6, snippet_chars=800, repo_scope="same_or_shared") if query else []
+        limit=6, snippet_chars=800, repo_scope="bound_or_shared",
+        repos=repos) if query else []
     merged: list[dict] = []
     seen: set[str] = set()
     for hit in [*task_hits, *role_hits]:
@@ -349,7 +369,7 @@ def context_for_task(conn: sqlite3.Connection, role: str, task: dict | None,
             break
     notes_text = knowledge_service.format_hits(
         merged, max_item_chars=800, max_total_chars=4000)
-    lessons = shared_lessons(conn, tags, repo=task.get("repo"), limit=8)
+    lessons = shared_lessons(conn, tags, repo=task.get("repo"), repos=repos, limit=8)
     lesson_lines: list[str] = []
     used = 0
     for lesson in lessons:
@@ -364,6 +384,8 @@ def context_for_task(conn: sqlite3.Connection, role: str, task: dict | None,
         "snapshot": "",
         "notes": [notes_text] if notes_text else [],
         "lessons": lesson_lines,
+        "knowledge_repos": repos or [],
+        "retrieval_scope": scope.get("mode"),
     }
 
 
@@ -371,14 +393,17 @@ def context_for_task(conn: sqlite3.Connection, role: str, task: dict | None,
 
 
 def create_lesson(conn: sqlite3.Connection, content: str, tags: list[str],
-                  repo: str = "shared", source_task: str | None = None) -> dict:
+                  repo: str = "shared", source_task: str | None = None,
+                  source_role: str | None = None) -> dict:
     lid = new_id()
     conn.execute(
-        "INSERT INTO lessons (id, content, tags_json, source_task, repo, status, created_at) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (lid, content, jdumps(tags), source_task, repo or "shared", "pending", now_iso()),
+        "INSERT INTO lessons (id, content, tags_json, source_task, source_role, repo, "
+        "status, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        (lid, content, jdumps(tags), source_task, source_role, repo or "shared",
+         "pending", now_iso()),
     )
     conn.commit()
+    _invalidate_repo_catalog()
     return get_lesson(conn, lid)  # type: ignore[return-value]
 
 
@@ -422,6 +447,7 @@ def update_lesson(conn: sqlite3.Connection, lid: str, *, content: str | None = N
         cols = ", ".join(f"{k}=?" for k in fields)
         conn.execute(f"UPDATE lessons SET {cols} WHERE id=?", (*fields.values(), lid))
         conn.commit()
+        _invalidate_repo_catalog()
     return get_lesson(conn, lid)
 
 
@@ -444,6 +470,7 @@ def approve_lesson(conn: sqlite3.Connection, lid: str) -> dict | None:
     )
     _append_lesson_file(repo, row["content"], jloads(row["tags_json"], []), row["source_task"])
     conn.commit()
+    _invalidate_repo_catalog()
     return get_lesson(conn, lid)
 
 
@@ -453,26 +480,36 @@ def reject_lesson(conn: sqlite3.Connection, lid: str) -> dict | None:
         return None
     conn.execute("UPDATE lessons SET status='rejected' WHERE id=?", (lid,))
     conn.commit()
+    _invalidate_repo_catalog()
     return get_lesson(conn, lid)
 
 
 def delete_lesson(conn: sqlite3.Connection, lid: str) -> bool:
     cur = conn.execute("DELETE FROM lessons WHERE id=?", (lid,))
     conn.commit()
+    _invalidate_repo_catalog()
     return cur.rowcount > 0
 
 
 def shared_lessons(conn: sqlite3.Connection, tags: list[str] | None = None,
-                   limit: int = 20, *, repo: str | None = None) -> list[dict]:
-    """按任务标签/repo 筛选已批准的共享经验；无标签时取最近批准的。"""
+                   limit: int = 20, *, repo: str | None = None,
+                   repos: list[str] | tuple[str, ...] | None = None) -> list[dict]:
+    """按任务标签/repo 筛选已批准的共享经验；无标签时取最近批准的。
+
+    repos 是任务的知识检索范围（绑定仓库 + 执行仓库 + shared）。
+    """
     rows = conn.execute(
         "SELECT * FROM lessons WHERE status='approved' "
         "ORDER BY COALESCE(approved_at, created_at) DESC"
     ).fetchall()
     wanted = {str(t).lower() for t in (tags or [])}
+    allowed = {str(x) for x in repos} if repos is not None else None
     out: list[dict] = []
     for r in rows:
-        if repo and (r["repo"] or "shared") not in (repo, "shared"):
+        item_repo = r["repo"] or "shared"
+        if repo and item_repo not in (repo, "shared"):
+            continue
+        if allowed is not None and item_repo != "shared" and item_repo not in allowed:
             continue
         item_tags = {str(t).lower() for t in jloads(r["tags_json"], [])}
         if wanted and item_tags and not (wanted & item_tags):

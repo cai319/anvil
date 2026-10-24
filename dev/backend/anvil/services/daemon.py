@@ -1505,11 +1505,21 @@ class DaemonManager:
             # 不是当前上下文大小。上下文只认 assistant 事件的单次请求 usage；
             # 用 result 覆盖会让 whoami/CIC 阈值全部失真（实测被放大到 1.5M–3M）。
             # 一轮结束仍未 submit → run 进入 suspended（等待下一条消息）
+            reminder_row = None
             if run_id:
+                reminder_row = conn.execute(
+                    "SELECT was_alive FROM reminder_wakes WHERE run_id=?",
+                    (run_id,),
+                ).fetchone()
                 row = conn.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
                 if row and row["status"] == "running":
                     from . import runs as runs_service
-                    runs_service.set_status(conn, run_id, "suspended")
+                    if reminder_row is not None:
+                        # 知识管理/定时提醒是一次性工作：本轮结束即完成，不再作为
+                        # suspended 活跃会话等待下一条消息。
+                        runs_service.set_status(conn, run_id, "completed", ended_at=now_iso())
+                    else:
+                        runs_service.set_status(conn, run_id, "suspended")
             with r.lock:
                 if proc is not None and r.proc is not proc:
                     return
@@ -1549,8 +1559,28 @@ class DaemonManager:
                     self._db_upsert(conn, r, status="idle")
                 else:
                     self._flush_next_locked(conn, r)
+                self._release_reminder_process(conn, r, run_id, reminder_row)
         finally:
             conn.close()
+
+    def _release_reminder_process(self, conn, r: _Role, run_id: str | None,
+                                  reminder_row) -> None:
+        """提醒结束后回收临时进程。
+
+        触发前角色没有进程（was_alive=0）且没有新的当前任务/排队消息时，立即停止
+        进程；触发前已在干活、或已有排队任务的角色保持不动，继续原来的工作。
+        """
+        if not run_id or reminder_row is None:
+            return
+        conn.execute("DELETE FROM reminder_wakes WHERE run_id=?", (run_id,))
+        conn.commit()
+        if reminder_row["was_alive"]:
+            return
+        if (r.proc is None or r.busy or r.switching or r.queue
+                or r.current_task_id):
+            return
+        self._slot_persist(r, status="idle", conn=conn)
+        self._kill_locked(r, graceful=True)
 
     def _idle_loop(self) -> None:
         while not self._stop.wait(30):
@@ -1609,6 +1639,8 @@ class DaemonManager:
                 "SELECT id,title,status,tags_json,repo,scope_paths_json FROM tasks "
                 "WHERE id=?", (task_id,)).fetchone()
         tags = [str(t) for t in jloads(task["tags_json"], [])] if task else []
+        repos = knowledge_service.scope_repos(
+            conn, task_id, task["repo"] if task else None)
         blocks: list[dict] = []
 
         if task is not None:
@@ -1618,6 +1650,8 @@ class DaemonManager:
                 header += "\n- 标签：" + "、".join(tags)
             if task["repo"]:
                 header += f"\n- 仓库：{task['repo']}"
+            if repos:
+                header += "\n- 知识仓库：" + "、".join(repos)
             blocks.append({
                 "priority": 5, "order": 5, "cap": 500, "min": 120, "text": header})
 
@@ -1632,7 +1666,8 @@ class DaemonManager:
                               str(task["repo"] or "")]).strip()
             hits = knowledge_service.search_knowledge(
                 conn, role, query, task_id=task_id, scope="auto",
-                limit=5, snippet_chars=600, repo_scope="same_or_shared") if query else []
+                limit=5, snippet_chars=600, repo_scope="bound_or_shared",
+                repos=repos) if query else []
             hit_text = knowledge_service.format_hits(
                 hits, max_item_chars=600, max_total_chars=4000)
             if hit_text:
@@ -1673,7 +1708,8 @@ class DaemonManager:
             # 无任务（reminder/直聊）：只取 role-scoped 的最近知识，不碰 task scope。
             hits = knowledge_service.search_knowledge(
                 conn, role, "", task_id=None, scope="role",
-                limit=5, snippet_chars=300, repo_scope="any")
+                limit=5, snippet_chars=300, repo_scope="bound_or_shared",
+                repos=repos)
             hit_text = knowledge_service.format_hits(
                 hits, max_item_chars=400, max_total_chars=1800)
             if hit_text:
@@ -1683,7 +1719,8 @@ class DaemonManager:
                 })
 
         lessons = memory_service.shared_lessons(
-            conn, tags, limit=8, repo=(task["repo"] if task else None))
+            conn, tags, limit=8, repo=(task["repo"] if task else None),
+            repos=repos)
         if lessons:
             lesson_lines = [f"- {str(x.get('content') or '')[:500]}" for x in lessons]
             blocks.append({

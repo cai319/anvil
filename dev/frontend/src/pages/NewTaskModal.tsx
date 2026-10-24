@@ -1,11 +1,12 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { api, isOnboardingRole, type Role, type Task } from "../api/client";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
 
 /** 新建任务弹窗（参考 multica/raft：名称 + 描述 + 可滚动角色多选）。 */
-export function NewTaskModal({ roles, onClose, onCreated }: {
+export function NewTaskModal({ roles, roleStatus, onClose, onCreated }: {
   roles: Role[];
+  roleStatus?: Record<string, string>;
   onClose: () => void;
   onCreated: (task: Task) => void;
 }) {
@@ -14,6 +15,7 @@ export function NewTaskModal({ roles, onClose, onCreated }: {
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const composingRef = useRef(false);
 
   const candidates = roles.filter((r) => !isOnboardingRole(r));
 
@@ -46,9 +48,22 @@ export function NewTaskModal({ roles, onClose, onCreated }: {
 
         <label className="field">
           <span>任务名称</span>
-          <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)}
+          <input
+            autoFocus
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
             placeholder="例如：开发一个五子棋 Web 程序"
-            onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && submit()} />
+            onCompositionStart={() => { composingRef.current = true; }}
+            onCompositionEnd={() => { composingRef.current = false; }}
+            onKeyDown={(e) => {
+              // 中文输入法用 Enter 上屏英文/候选词时，不能触发创建任务。
+              if (e.nativeEvent.isComposing || composingRef.current || e.keyCode === 229) return;
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                submit();
+              }
+            }}
+          />
         </label>
 
         <label className="field">
@@ -78,6 +93,7 @@ export function NewTaskModal({ roles, onClose, onCreated }: {
                     avatar={r.avatar}
                     color={r.avatar_color}
                     size={30}
+                    status={roleStatus?.[r.slug] ?? "idle"}
                   />
                   <span className="member-main">
                     <span className="member-line">
@@ -95,6 +111,7 @@ export function NewTaskModal({ roles, onClose, onCreated }: {
           </div>
           <small className="muted">
             多角色任务派发时，会先由规划助理 Cindy 分析并设计工作流，草案经你批准后按依赖执行。
+            任务创建后还会按标签自动关联知识仓库；没有标签时由 Cindy 识别，关联结果可在任务详情查看和修改。
           </small>
         </div>
 

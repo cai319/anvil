@@ -44,12 +44,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     id               TEXT PRIMARY KEY,
     title            TEXT NOT NULL,
     type             TEXT,
-    status           TEXT NOT NULL DEFAULT 'todo',  -- todo|in_progress|in_review|done|closed
+    status           TEXT NOT NULL DEFAULT 'todo',  -- todo|in_progress|in_review|done|closed(人工终止)
     priority         TEXT,
     tags_json        TEXT NOT NULL DEFAULT '[]',
     repo             TEXT,
     base_branch      TEXT,
     scope_paths_json TEXT NOT NULL DEFAULT '[]',
+    knowledge_repos_locked INTEGER NOT NULL DEFAULT 0,
     description      TEXT,
     acceptance_json  TEXT NOT NULL DEFAULT '[]',
     assignee         TEXT,
@@ -76,6 +77,23 @@ CREATE TABLE IF NOT EXISTS task_assignees (
     joined_at TEXT NOT NULL,
     PRIMARY KEY (task_id, role_slug)
 );
+
+-- 任务的知识检索范围（与单值 tasks.repo 执行仓库分离）。
+CREATE TABLE IF NOT EXISTS task_knowledge_repos (
+    task_id           TEXT NOT NULL,
+    repo              TEXT NOT NULL,
+    source            TEXT NOT NULL DEFAULT 'auto',     -- auto|cindy|human|inherited|agent
+    status            TEXT NOT NULL DEFAULT 'applied',  -- applied|suggested|dismissed
+    confidence        REAL NOT NULL DEFAULT 0,
+    score             REAL NOT NULL DEFAULT 0,
+    matched_tags_json TEXT NOT NULL DEFAULT '[]',
+    reason            TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    PRIMARY KEY (task_id, repo)
+);
+CREATE INDEX IF NOT EXISTS idx_task_knowledge_repos_repo
+    ON task_knowledge_repos(repo, status);
 
 -- 工作流（Cindy 生成，属于一个高层 Task）：步骤状态机，步骤不是独立 task 行。
 -- 跨角色可并行；同一角色的多个步骤由引擎串行调度。
@@ -195,11 +213,21 @@ CREATE TABLE IF NOT EXISTS reminders (
     created_at     TEXT NOT NULL
 );
 
+-- reminder 唤醒记录：用于知识管理/定时提醒结束后回收“临时拉起”的角色进程。
+-- was_alive=1 表示触发前角色进程已存在；这类角色不回收，继续原来的工作。
+CREATE TABLE IF NOT EXISTS reminder_wakes (
+    run_id     TEXT PRIMARY KEY,
+    role_slug  TEXT NOT NULL,
+    was_alive  INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS lessons (
     id          TEXT PRIMARY KEY,
     content     TEXT NOT NULL,
     tags_json   TEXT NOT NULL DEFAULT '[]',
     source_task TEXT,
+    source_role TEXT,                             -- 提出者：角色 slug / human / NULL（旧数据）
     repo        TEXT NOT NULL DEFAULT 'shared',  -- 归属共享仓库（shared = 全局经验）
     last_hit_at TEXT,
     status      TEXT NOT NULL DEFAULT 'pending',  -- pending|approved|rejected
@@ -395,13 +423,15 @@ CREATE TABLE IF NOT EXISTS skill_versions (
 -- MCP server 注册表（M3）：支持 stdio / http；tools_json 为最近一次握商缓存。
 CREATE TABLE IF NOT EXISTS mcp_servers (
     id         TEXT PRIMARY KEY,
-    name       TEXT NOT NULL UNIQUE,
-    transport  TEXT NOT NULL DEFAULT 'stdio',  -- stdio|http|sse
-    command    TEXT,
-    args_json  TEXT NOT NULL DEFAULT '[]',
-    env_json   TEXT NOT NULL DEFAULT '{}',
-    url        TEXT,
-    tools_json TEXT NOT NULL DEFAULT '[]',
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    runtime     TEXT,
+    transport   TEXT NOT NULL DEFAULT 'stdio',  -- stdio|http|sse
+    command     TEXT,
+    args_json   TEXT NOT NULL DEFAULT '[]',
+    env_json    TEXT NOT NULL DEFAULT '{}',
+    url         TEXT,
+    tools_json  TEXT NOT NULL DEFAULT '[]',
     enabled    INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -488,6 +518,20 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tasks ADD COLUMN workspace_id TEXT")
     except sqlite3.OperationalError:
         pass
+    # 迁移：知识 repo 绑定的人工锁定标记
+    try:
+        conn.execute("ALTER TABLE tasks ADD COLUMN knowledge_repos_locked INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    # 迁移：MCP server 简介 + 归属运行时（导入目录/压缩包时保留）
+    try:
+        conn.execute("ALTER TABLE mcp_servers ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE mcp_servers ADD COLUMN runtime TEXT")
+    except sqlite3.OperationalError:
+        pass
     # 迁移：roles 补 avatar 列（角色头像预设；NULL = 按 slug 自动匹配）
     try:
         conn.execute("ALTER TABLE roles ADD COLUMN avatar TEXT")
@@ -504,8 +548,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE runs ADD COLUMN prompt TEXT")
     except sqlite3.OperationalError:
         pass
-    # 迁移：lessons 补 repo / approved_at 列（M4 升格审批）
-    for col in ("repo TEXT NOT NULL DEFAULT 'shared'", "approved_at TEXT"):
+    # 迁移：lessons 补 repo / approved_at / source_role 列（M4 升格审批）
+    for col in ("repo TEXT NOT NULL DEFAULT 'shared'", "approved_at TEXT",
+                "source_role TEXT"):
         try:
             conn.execute(f"ALTER TABLE lessons ADD COLUMN {col}")
         except sqlite3.OperationalError:
@@ -676,6 +721,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_notes_role_scope_updated "
         "ON notes(role_slug, scope, updated_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_notes_role_repo ON notes(role_slug, repo)",
+        "CREATE INDEX IF NOT EXISTS idx_notes_repo_scope ON notes(repo, scope)",
+        "CREATE INDEX IF NOT EXISTS idx_lessons_repo_status ON lessons(repo, status)",
+        "CREATE INDEX IF NOT EXISTS idx_tasks_repo ON tasks(repo)",
     ):
         try:
             conn.execute(stmt)

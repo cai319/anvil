@@ -126,6 +126,10 @@ PLANNING_PROTOCOL = (
     "`anvil self reset-context --task $ANVIL_TASK_ID --reason \"...\"`，让运行时用新会话重投本任务。\n"
     "第二步：评估 Roster（已绑定角色）是否足够。逐项对照任务要求与每个角色的能力/职责/运行时/写权限，"
     "列出缺口。**只能使用 Roster 中的角色执行步骤，绝不虚构未绑定角色。**\n"
+    "  · **生成 tags 与知识仓库**：草案根级写 `tags`（2-6 个；任务当前没有 tags 时必须生成）和 "
+    "`knowledge_repos`（最多 3 个，只能从下方「知识仓库目录」选择，禁止填写 shared；"
+    "每项写成 {\"repo\":\"<名称>\",\"reason\":\"<命中依据>\"}）。无把握就留空数组，"
+    "系统会回退到执行 repo + shared；绝不能编造目录里不存在的仓库名。\n"
     "  A. 角色足够：设计**工作流**。先判断任务规模再选格式：\n"
     "  · 小型/单角色任务：可直接用 flat steps，按依赖排列即可。\n"
     "  · 大型任务、需要任务拆分（如大型项目代码审计、重构、迁移）：**不要由你预先切片**。"
@@ -178,7 +182,9 @@ PLANNING_PROTOCOL = (
     "  然后把工作流写入 JSON 文件并执行 "
     "`anvil board draft --task $ANVIL_TASK_ID --goal \"<目标一句话>\" --kind workflow --tree-file <workflow.json>`。\n"
     "  大型任务用 `plan_slices + loop` 格式（服务端在运行时展开切片）：\n"
-    "  {\"feedback_rules\":[...],\"verification\":[...],"
+    "  {\"tags\":[\"security\",\"openssl\"],"
+    "\"knowledge_repos\":[{\"repo\":\"openssl-4.0.1\",\"reason\":\"命中 openssl/asan 标签\"}],"
+    "\"feedback_rules\":[...],\"verification\":[...],"
     "\"steps\":[{\"id\":\"S1\",\"title\":\"项目盘点与切片计划\",\"role\":\"<项目负责人>\","
     "\"kind\":\"plan_slices\",\"instructions\":\"盘点项目并产出切片计划...\","
     "\"acceptance\":[\"切片范围清晰、可独立闭环、覆盖主要风险面\"]},"
@@ -195,7 +201,8 @@ PLANNING_PROTOCOL = (
     "`anvil step plan <工作流ID> <切片计划步骤ID> --file slices.json`；"
     "切片 JSON 由该角色生成，字段：id/title/scope_paths/objective/instructions/acceptance/"
     "execute_steps；不得包含角色字段或 loop 阶段覆盖。\n"
-    "  · 小任务也可直接用 flat steps：{\"steps\":[{\"id\":\"S1\",\"title\":...,\"role\":...,"
+    "  · 小任务也可直接用 flat steps：{\"tags\":[...],\"knowledge_repos\":[...],"
+    "\"steps\":[{\"id\":\"S1\",\"title\":...,\"role\":...,"
     "\"instructions\":...,\"depends_on\":[],\"acceptance\":[...]}]}。"
     "flat steps 的可选字段：gate（仅关键里程碑）、reviewer（gate 步骤必填且必须≠执行角色）、"
     "contract（实现类步骤必须写不变量/接口承诺/失败模式）。\n"
@@ -259,6 +266,7 @@ def project_instruction(target: Path, instruction_md: str, task: dict,
                         workflow: str = "direct_execute", memory: str = "",
                         snapshot: str = "", notes: list[str] | None = None,
                         lessons: list[str] | None = None,
+                        knowledge_repos: list[str] | None = None,
                         prompt: str = "", protocol: str | None = None) -> None:
     """把 system prompt + 职责 + 工作流指令 + instruction + 记忆 + 任务 + 协议写入 target。
 
@@ -270,6 +278,7 @@ def project_instruction(target: Path, instruction_md: str, task: dict,
     responsibilities = responsibilities or []
     notes = notes or []
     lessons = lessons or []
+    knowledge_repos = [r for r in (knowledge_repos or []) if r]
     duties = "\n".join(f"- {r}" for r in responsibilities)
     wf = workflow_instruction(workflow)
     task_title = task.get("title") or ("定时提醒" if prompt else "")
@@ -281,6 +290,7 @@ def project_instruction(target: Path, instruction_md: str, task: dict,
             f"## 职责\n{duties}" if duties else "",
             wf.strip() if wf else "",
             f"## 记忆\n{memory.strip()}" if memory.strip() else "",
+            "## 知识仓库（检索范围）\n" + "、".join(knowledge_repos) if knowledge_repos else "",
             "## 相关笔记\n" + "\n".join(f"- {n.strip()}" for n in notes) if notes else "",
             "## 共享经验\n" + "\n".join(f"- {l.strip()}" for l in lessons) if lessons else "",
             f"## 任务：{task_title}",

@@ -1,6 +1,7 @@
 """Task CRUD + manual assignment + agent-side state transitions + 治理闸门（M2）。
 
-状态机：todo → in_progress → in_review → done/closed。
+状态机：todo → in_progress → in_review → done（成功终态）；
+非终态 todo/in_progress/in_review → closed（人工终止）；closed → todo（重新打开）。
 认领原子（BEGIN IMMEDIATE + 条件 UPDATE + rowcount）；治理闸门（冻结/Token 预算/并发）见
 `services.governance`；关键转换写审计日志。
 """
@@ -15,9 +16,29 @@ from pathlib import Path
 
 from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
-from . import governance, workspace
+from . import governance, knowledge, knowledge_binding, repo_catalog, workspace
 
 LEASE_SECONDS = 1800  # design §5.5 租期 30 分钟
+TERMINAL_TASK_STATUSES = ("done", "closed")
+NON_TERMINAL_TASK_STATUSES = ("todo", "in_progress", "in_review")
+
+
+def _assert_can_terminate(t: dict) -> None:
+    if t["status"] not in NON_TERMINAL_TASK_STATUSES:
+        raise ConflictError(
+            f"task {t['id']} is {t['status']}; only todo/in_progress/in_review "
+            "can be manually terminated")
+
+
+def _assert_can_reopen(t: dict) -> None:
+    if t["status"] != "closed":
+        raise ConflictError(
+            f"task {t['id']} is {t['status']}; only a terminated task can be reopened")
+
+
+def _assert_not_terminal(t: dict, action: str) -> None:
+    if t["status"] in TERMINAL_TASK_STATUSES:
+        raise ConflictError(f"task {t['id']} is {t['status']}; cannot {action}")
 
 # P2#6 预留：M1 用内置 deny 清单；M2 三交集 = scope_paths ∩ role access ∩ .anvilignore。
 # deny 清单独立成常量，便于 M2 换成加载 .anvilignore + 角色 access。
@@ -66,12 +87,15 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
            assignees: list[str] | None = None,
            plan_first: bool = False, planner: str | None = None,
            created_by: str | None = None, parent_id: str | None = None,
-           depends_on: list[str] | None = None) -> dict:
+           depends_on: list[str] | None = None,
+           knowledge_repos: list | None = None,
+           knowledge_repos_source: str = "human") -> dict:
     tid = id or new_id()
     if str(tid).startswith("__"):
         # `__global__` 是角色上下文槽的保留 key，不能与真实任务 id 冲突。
         raise ConflictError(f"task id {tid!r} is reserved")
     now = now_iso()
+    tags = knowledge.normalize_tags(tags or [])
     _assert_assignable(conn, assignees or [])
     if parent_id:
         # 子任务继承父任务的仓库/频道/基线，保证 worktree 与 diff 校验可用
@@ -85,7 +109,7 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
                               assignee, plan_first, planner, created_by, parent_id,
                               created_at, updated_at)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (tid, title, type, "todo", priority, jdumps(tags or []), repo, workspace_id, base_branch,
+        (tid, title, type, "todo", priority, jdumps(tags), repo, workspace_id, base_branch,
          jdumps(scope_paths or []), description, jdumps(acceptance or []),
          assignee, int(plan_first), planner, created_by, parent_id, now, now),
     )
@@ -94,7 +118,18 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
     for a in (assignees or []):
         conn.execute("INSERT OR IGNORE INTO task_assignees (task_id, role_slug, joined_at) VALUES (?,?,?)", (tid, a, now))
     _init_role_claims(conn, tid, list(assignees or []), now)
+    # 显式指定是人工决策：落库并加锁，后续 auto/Cindy 不再覆盖。
+    if knowledge_repos:
+        knowledge_binding.set_manual(
+            conn, tid, knowledge_repos, source=knowledge_repos_source or "human",
+            lock=True, commit=False)
+    else:
+        knowledge_binding.auto_bind(conn, {
+            "id": tid, "title": title, "description": description, "tags": tags,
+            "repo": repo, "workspace_id": workspace_id, "parent_id": parent_id,
+        }, commit=False)
     conn.commit()
+    repo_catalog.invalidate_catalog()
     return get(conn, tid)  # type: ignore[return-value]
 
 
@@ -117,6 +152,7 @@ def get(conn: sqlite3.Connection, tid: str) -> dict | None:
     d["assignees"] = [x["role_slug"] for x in conn.execute(
         "SELECT role_slug FROM task_assignees WHERE task_id=? ORDER BY joined_at", (tid,))]
     d["role_claims"] = _role_claims(conn, tid)
+    knowledge_binding.attach_bindings(conn, [d])
     return d
 
 
@@ -181,14 +217,33 @@ def list_all(conn: sqlite3.Connection, status: str | None = None, assignee: str 
     if clauses:
         q += " WHERE " + " AND ".join(clauses)
     q += " ORDER BY created_at DESC"
-    return [_with_deps(conn, _row(r)) for r in conn.execute(q, params)]
+    tasks = [_with_deps(conn, _row(r)) for r in conn.execute(q, params)]
+    return knowledge_binding.attach_bindings(conn, tasks)
 
 
 def update(conn: sqlite3.Connection, tid: str, **fields) -> dict | None:
-    if get(conn, tid) is None:
+    task = get(conn, tid)
+    if task is None:
         return None
     now = now_iso()
     json_cols = {"tags": "tags_json", "scope_paths": "scope_paths_json", "acceptance": "acceptance_json"}
+    if "tags" in fields and fields["tags"] is not None:
+        fields["tags"] = knowledge.normalize_tags(fields["tags"])
+    if "status" in fields and fields["status"] is not None:
+        target = getattr(fields["status"], "value", fields["status"])
+        target = str(target)
+        current = task["status"]
+        if target == current:
+            fields.pop("status")
+        elif current in TERMINAL_TASK_STATUSES:
+            raise ConflictError(
+                f"task {tid} is {current}; terminal tasks cannot change status")
+        elif target in TERMINAL_TASK_STATUSES:
+            raise ConflictError(
+                f"task {tid} cannot be set to {target} via PATCH; "
+                "use review to complete or the terminate/reopen endpoints")
+        else:
+            fields["status"] = target
     assign = {}
     for k, v in fields.items():
         if v is None or v == "":
@@ -199,6 +254,11 @@ def update(conn: sqlite3.Connection, tid: str, **fields) -> dict | None:
     cols = ", ".join(f"{c}=?" for c in assign)
     conn.execute(f"UPDATE tasks SET {cols} WHERE id=?", (*assign.values(), tid))
     conn.commit()
+    if "tags" in fields:
+        repo_catalog.invalidate_catalog()
+        task = get(conn, tid)
+        if task is not None and not task.get("knowledge_repos_locked"):
+            knowledge_binding.auto_bind(conn, task)
     return get(conn, tid)
 
 
@@ -307,6 +367,7 @@ def unclaim(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict
     t = get(conn, tid)
     if t is None:
         raise LookupError(tid)
+    _assert_not_terminal(t, "unclaim")
     now = now_iso()
     if t["assignees"] and role:
         conn.execute(
@@ -440,7 +501,11 @@ def review(conn: sqlite3.Connection, tid: str, approve: bool, role: str | None =
     if t["status"] != "in_review":
         raise ConflictError(f"task {tid} is {t['status']}, expected in_review")
     new_status = "done" if approve else "in_progress"
-    conn.execute("UPDATE tasks SET status=?, updated_at=? WHERE id=?", (new_status, now_iso(), tid))
+    lease = None if approve else t.get("lease_expires_at")
+    conn.execute(
+        "UPDATE tasks SET status=?, lease_expires_at=?, updated_at=? WHERE id=?",
+        (new_status, lease, now_iso(), tid),
+    )
     if t["assignees"]:
         if approve:
             conn.execute(
@@ -461,14 +526,16 @@ def review(conn: sqlite3.Connection, tid: str, approve: bool, role: str | None =
 
 
 def cancel(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
-    """取消任务（design §10 tasks/{id}/cancel）：终态 closed，保留审计。
+    """人工终止任务（design §10 tasks/{id}/cancel）：终态 closed，保留审计。
 
-    刻意不终止 run / 常驻角色进程：cancel 可通过 reopen 恢复，保留会话上下文
+    仅允许从非终态进入；done 是成功终态，closed 已是终止态，均拒绝。
+    刻意不终止 run / 常驻角色进程：closed 可通过 reopen 恢复，保留会话上下文
     以便续跑；只有物理删除（delete）才回收进程。
     """
     t = get(conn, tid)
     if t is None:
         raise LookupError(tid)
+    _assert_can_terminate(t)
     conn.execute(
         "UPDATE tasks SET status='closed', lease_expires_at=NULL, updated_at=? WHERE id=?",
         (now_iso(), tid),
@@ -483,10 +550,11 @@ def cancel(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
 
 
 def reopen(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
-    """重新打开任务：回到 todo，清空认领信息。"""
+    """重新打开已人工终止的任务：closed → todo，清空认领信息。"""
     t = get(conn, tid)
     if t is None:
         raise LookupError(tid)
+    _assert_can_reopen(t)
     conn.execute(
         "UPDATE tasks SET status='todo', assignee=NULL, claimed_at=NULL, "
         "lease_expires_at=NULL, updated_at=? WHERE id=?",
@@ -646,6 +714,7 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
     conn.execute("DELETE FROM runs WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM task_deps WHERE task_id=? OR depends_on=?", (tid, tid))
     conn.execute("DELETE FROM task_assignees WHERE task_id=?", (tid,))
+    conn.execute("DELETE FROM task_knowledge_repos WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM task_role_claims WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM activities WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM sessions WHERE task_id=?", (tid,))

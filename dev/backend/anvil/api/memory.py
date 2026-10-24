@@ -209,7 +209,8 @@ def _knowledge_task(conn, auth: Auth, role: str, task_id: str | None,
 def search_knowledge(
     q: str = "", task_id: str | None = None, scope: str = "auto",
     kind: str | None = None, tags: str | None = None,
-    repo: str | None = None, module: str | None = None,
+    repo: str | None = None, repos: str | None = None,
+    module: str | None = None,
     include_snapshots: bool = False, include_unclassified: bool = False,
     limit: int = 8, role: str | None = None,
     conn=Depends(get_db), auth: Auth = Depends(get_auth),
@@ -222,10 +223,19 @@ def search_knowledge(
         raise HTTPException(status_code=422, detail="scope=task requires task_id")
     kinds = tuple(x.strip() for x in (kind or "").split(",") if x.strip()) or None
     tag_list = tuple(x.strip() for x in (tags or "").split(",") if x.strip()) or None
+    scope_repos: list[str] | None = None
+    if repos:
+        scope_repos = [x.strip() for x in repos.split(",") if x.strip()]
+    elif task_id and not repo:
+        task_row = services.tasks.get(conn, task_id) or {}
+        scope_repos = services.knowledge.scope_repos(
+            conn, task_id, task_row.get("repo"))
     try:
         hits = services.knowledge.search_knowledge(
             conn, role_slug, q, task_id=task_id, scope=scope,
             kinds=kinds, tags=tag_list, repo=repo, module=module,
+            repo_scope="bound_or_shared" if scope_repos else "any",
+            repos=scope_repos,
             include_snapshots=include_snapshots,
             include_unclassified=include_unclassified, limit=limit)
     except ValueError as exc:
@@ -338,7 +348,8 @@ def list_lessons(status: str | None = None, repo: str | None = None,
 def propose_lesson(body: LessonIn, conn=Depends(get_db),
                    auth: Auth = Depends(get_auth)):
     return services.memory.create_lesson(
-        conn, body.content, body.tags, repo=body.repo or "shared", source_task=body.source_task,
+        conn, body.content, body.tags, repo=body.repo or "shared",
+        source_task=body.source_task, source_role=auth.role,
     )
 
 

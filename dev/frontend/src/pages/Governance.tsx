@@ -95,7 +95,7 @@ export function Governance() {
   };
 
   return (
-    <div>
+    <div className="governance-page">
       <PageHeader kicker="GOVERNANCE" title="治理" />
       {error && <p className="error">{error}</p>}
       <div className="toolbar">
@@ -113,7 +113,7 @@ export function Governance() {
         )}
       </div>
 
-      <section>
+      <section className="governance-limits">
         <h2>闸门上限</h2>
         <div className="toolbar">
           <label>系统并发
@@ -142,50 +142,60 @@ export function Governance() {
         </div>
       </section>
 
-      <section>
-        <h2>Token 消耗分解 · 总 {fmt(tokens?.total_tokens ?? 0)} tokens</h2>
-        <div className="table-scroll">
-        <table className="board">
-          <thead>
-            <tr><th>角色</th><th>输入</th><th>输出</th><th>总量</th></tr>
-          </thead>
-          <tbody>
-            {(tokens?.by_role ?? []).length === 0 && (
-              <tr><td colSpan={4} className="muted">暂无 token 记录。</td></tr>
-            )}
-            {(tokens?.by_role ?? []).map((r) => (
-              <tr key={r.role}>
-                <td>{r.role}</td>
-                <td className="mono">{fmt(r.input_tokens)}</td>
-                <td className="mono">{fmt(r.output_tokens)}</td>
-                <td className="mono">{fmt(r.total_tokens)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        </div>
-      </section>
+      <div className="governance-panels">
+        <section className="governance-panel">
+          <div className="governance-panel-head">
+            <h2>Token 消耗分解</h2>
+            <span className="muted">总 {fmt(tokens?.total_tokens ?? 0)} tokens</span>
+          </div>
+          <div className="table-scroll governance-table-scroll">
+            <table className="board">
+              <thead>
+                <tr><th>角色</th><th>输入</th><th>输出</th><th>总量</th></tr>
+              </thead>
+              <tbody>
+                {(tokens?.by_role ?? []).length === 0 && (
+                  <tr><td colSpan={4} className="muted">暂无 token 记录。</td></tr>
+                )}
+                {(tokens?.by_role ?? []).map((r) => (
+                  <tr key={r.role}>
+                    <td>{r.role}</td>
+                    <td className="mono">{fmt(r.input_tokens)}</td>
+                    <td className="mono">{fmt(r.output_tokens)}</td>
+                    <td className="mono">{fmt(r.total_tokens)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
 
-      <h2>审计日志</h2>
-      <div className="table-scroll">
-      <table className="board">
-        <thead>
-          <tr><th>时间</th><th>角色</th><th>任务</th><th>动作</th></tr>
-        </thead>
-        <tbody>
-          {audit.length === 0 && (
-            <tr><td colSpan={4} className="muted">暂无审计记录 —— 有认领/提交/评审等操作后这里会显示。</td></tr>
-          )}
-          {audit.map((a, i) => (
-            <tr key={i}>
-              <td className="mono">{formatDateTime(a.created_at)}</td>
-              <td>{a.role_slug ?? "—"}</td>
-              <td>{a.task_id ?? "—"}</td>
-              <td>{a.action}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+        <section className="governance-panel">
+          <div className="governance-panel-head">
+            <h2>审计日志</h2>
+            <span className="muted">{audit.length} 条</span>
+          </div>
+          <div className="table-scroll governance-table-scroll">
+            <table className="board">
+              <thead>
+                <tr><th>时间</th><th>角色</th><th>任务</th><th>动作</th></tr>
+              </thead>
+              <tbody>
+                {audit.length === 0 && (
+                  <tr><td colSpan={4} className="muted">暂无审计记录 —— 有认领/提交/评审等操作后这里会显示。</td></tr>
+                )}
+                {audit.map((a, i) => (
+                  <tr key={i}>
+                    <td className="mono">{formatDateTime(a.created_at)}</td>
+                    <td>{a.role_slug ?? "—"}</td>
+                    <td>{a.task_id ?? "—"}</td>
+                    <td>{a.action}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
     </div>
   );

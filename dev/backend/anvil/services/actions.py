@@ -1,8 +1,8 @@
 """Action Cards：Agent 准备操作、自然人批准后以人的身份执行。
 
 白名单动作：
-- task.cancel：取消任务（closed）
-- task.reopen：重新打开任务（todo）
+- task.cancel：人工终止任务（closed），仅接受非终态任务
+- task.reopen：重新打开已终止任务（closed → todo）
 危险/管理操作先 prepare，避免 Agent 直接改世界。
 """
 from __future__ import annotations
@@ -12,7 +12,7 @@ import sqlite3
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
 
 KIND_LABEL = {
-    "task.cancel": "取消任务",
+    "task.cancel": "人工终止任务",
     "task.reopen": "重新打开任务",
 }
 ALLOWED = set(KIND_LABEL)
@@ -24,8 +24,14 @@ def create(conn: sqlite3.Connection, role: str, kind: str, task_id: str | None,
         raise ConflictError(f"action kind {kind} is not allowed")
     if not task_id:
         raise ConflictError("task_id is required")
-    if conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone() is None:
+    task = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if task is None:
         raise LookupError(task_id)
+    status = task["status"]
+    if kind == "task.cancel" and status in ("done", "closed"):
+        raise ConflictError(f"task {task_id} is {status}; cannot be manually terminated")
+    if kind == "task.reopen" and status != "closed":
+        raise ConflictError(f"task {task_id} is {status}; only a terminated task can be reopened")
     cid = new_id()
     conn.execute(
         "INSERT INTO action_cards (id, role_slug, task_id, kind, payload_json, reason, "

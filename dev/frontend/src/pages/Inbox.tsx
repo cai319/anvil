@@ -175,14 +175,33 @@ export function Inbox() {
               {KIND_LABEL[it.kind]}
             </span>
             <strong>{it.title}</strong>
-            <span className="muted mono" style={{ fontSize: 11 }}>{formatDateTime(it.created_at)}</span>
+            <span className="muted mono">{formatDateTime(it.created_at)}</span>
           </div>
           <div className="muted" style={{ margin: "4px 0 8px" }}>{it.detail}</div>
           {it.meta?.draft_kind === "role_suggestion" && (it.meta.suggested_roles?.length ?? 0) > 0 && (
-            <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+            <div className="muted" style={{ marginBottom: 8 }}>
               建议角色：
               {it.meta.suggested_roles!.map((r) => `${r.display_name || r.slug}（${r.slug}）`).join("、")}
               {it.meta.assessment ? ` · ${it.meta.assessment}` : ""}
+            </div>
+          )}
+          {it.kind === "draft" && it.meta?.draft_kind !== "role_suggestion" && (
+            <div className="repo-draft-meta">
+              {(it.meta?.tags?.length ?? 0) > 0 && (
+                <span className="muted">标签：{it.meta!.tags!.join("、")}</span>
+              )}
+              {(it.meta?.knowledge_repos?.length ?? 0) > 0 && (
+                <span className="repo-chips">
+                  {it.meta!.knowledge_repos!.map((r) => (
+                    <span key={r.repo} className="repo-chip repo-applied"
+                      title={r.reason ?? undefined}>
+                      <span className="repo-chip-name">{r.repo}</span>
+                      <span className="repo-chip-meta">Cindy</span>
+                    </span>
+                  ))}
+                </span>
+              )}
+              {it.meta?.binding_locked && <span className="repo-lock">已人工固定</span>}
             </div>
           )}
           <div className="card-actions" style={{ gap: 6 }}>{renderActions(it)}</div>

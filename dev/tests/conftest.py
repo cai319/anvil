@@ -14,6 +14,8 @@ import httpx
 import pytest
 
 os.environ.setdefault("ANVIL_TEST_AUTH", "1")
+# 默认关闭知识 repo 绑定，避免测试扫描真实 data/repos；特性测试显式开启并改 REPOS_DIR。
+os.environ.setdefault("ANVIL_KNOWLEDGE_BINDING_MODE", "off")
 
 # 后端 M1 落地前跳过；落地后移除这行 importorskip 即可。
 app_factory = pytest.importorskip(

@@ -37,10 +37,14 @@ async def test_agent_prepares_human_executes(client, seeded):
 
 
 async def test_reject_action_does_not_execute(client, seeded):
+    # reopen 只能针对已终止任务；先人工终止。
+    closed = await client.post(f"{API}/tasks/T-ACT/cancel", headers=human_headers())
+    assert closed.json()["status"] == "closed"
     r = await client.post(f"{API}/action-cards", headers=auth_headers("pm"), json={
         "kind": "task.reopen", "task_id": "T-ACT", "reason": "再开一下"})
+    assert r.status_code == 201, r.text
     cid = r.json()["id"]
     r = await client.post(f"{API}/action-cards/{cid}/reject", headers=human_headers())
     assert r.status_code == 200 and r.json()["status"] == "rejected"
     task = (await client.get(f"{API}/tasks/T-ACT", headers=auth_headers())).json()
-    assert task["status"] == "todo"
+    assert task["status"] == "closed"

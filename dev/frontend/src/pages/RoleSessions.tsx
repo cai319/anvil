@@ -12,7 +12,7 @@ import { Icon } from "../components/Icon";
 /** 任务详情「子任务」页签：每个参与角色当前的会话状态 + 执行日志 + 历史上下文。 */
 
 const RUN_LABEL: Record<string, string> = {
-  created: "已创建", projecting: "投影中", running: "运行中", submitted: "已提交",
+  created: "已创建", projecting: "准备中", running: "运行中", submitted: "已提交",
   reviewing: "评审中", completed: "已完成", failed: "失败", abandoned: "已放弃", suspended: "等待唤醒",
 };
 
@@ -210,6 +210,7 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
                 avatar={roleFor(slug)?.avatar}
                 color={roleFor(slug)?.avatar_color}
                 size={28}
+                status={dot.cls}
               />
               <span className="rs-name">
                 {roleName(slug)}

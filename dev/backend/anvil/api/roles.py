@@ -226,6 +226,12 @@ def list_roles(conn=Depends(get_db)):
     return services.roles.list_all(conn)
 
 
+@router.get("/roles/runtime")
+def list_role_runtimes(conn=Depends(get_db)):
+    """所有角色的运行时状态；任务大厅据此判断角色忙在哪张任务卡上。"""
+    return [role_runtime(role["slug"], conn) for role in services.roles.list_all(conn)]
+
+
 @router.get("/roles/{slug}", response_model=RoleOut)
 def get_role(slug: str, conn=Depends(get_db)):
     role = services.roles.get(conn, slug)

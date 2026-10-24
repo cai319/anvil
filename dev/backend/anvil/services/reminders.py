@@ -160,12 +160,40 @@ def _condition_met(conn: sqlite3.Connection, condition: str) -> bool:
     return bool(row and row["status"] in ("done", "closed"))
 
 
-def fire_due_reminders(conn: sqlite3.Connection, now: datetime | None = None) -> int:
-    """触发所有到期 reminder，返回触发数量。由治理 tick 每轮调用。"""
+def create_reminder_run(conn: sqlite3.Connection, role_slug: str, prompt: str) -> dict:
+    """创建 reminder run，并记录触发前角色是否已有进程。
+
+    reminder 结束后，daemon 只回收 was_alive=0 的临时进程；原本在干活的角色
+    继续处理自己的任务队列（知识管理不抢占、也不终止原有工作）。
+    """
+    from . import daemon as daemon_service  # 惰性导入避免循环
     from . import runs as runs_service  # 惰性导入避免循环
 
+    was_alive = False
+    mgr = daemon_service.get_manager()
+    if mgr is not None:
+        try:
+            was_alive = bool(mgr.status(role_slug).get("alive"))
+        except Exception:  # noqa: BLE001 —— 状态查询失败不影响提醒本身
+            was_alive = False
+
+    run = runs_service.create_run(conn, role_slug, None, prompt=prompt)
+    conn.execute(
+        "INSERT OR REPLACE INTO reminder_wakes (run_id, role_slug, was_alive, created_at) "
+        "VALUES (?,?,?,?)",
+        (run["id"], role_slug, 1 if was_alive else 0, now_iso()),
+    )
+    conn.commit()
+    return run
+
+
+def fire_due_reminders(conn: sqlite3.Connection, now: datetime | None = None) -> int:
+    """触发所有到期 reminder，返回触发数量。由治理 tick 每轮调用。"""
     now_dt = now or datetime.now().astimezone()
     now_iso_str = now_dt.isoformat()
+    # 清理异常中断（未走到 turn result）的历史唤醒记录，避免表无限增长。
+    conn.execute("DELETE FROM reminder_wakes WHERE created_at < ?",
+                 ((now_dt - timedelta(days=7)).isoformat(),))
     fired = 0
     rows = conn.execute("SELECT * FROM reminders WHERE status='pending'").fetchall()
     for r in rows:
@@ -187,7 +215,7 @@ def fire_due_reminders(conn: sqlite3.Connection, now: datetime | None = None) ->
                 "SELECT 1 FROM roles WHERE slug=? AND enabled=1", (role,)).fetchone() is None:
             conn.execute("UPDATE reminders SET status='error' WHERE id=?", (r["id"],))
             continue
-        runs_service.create_run(conn, role, None, prompt=r["prompt"] or "定时提醒")
+        create_reminder_run(conn, role, r["prompt"] or "定时提醒")
         conn.execute(
             "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) VALUES (?,?,?,?,?)",
             (role, None, "reminder", jdumps({"reminder_id": r["id"], "prompt": r["prompt"]}), now_iso()),

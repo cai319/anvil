@@ -65,6 +65,11 @@ def _norm_tags(values) -> list[str]:
     return out
 
 
+def normalize_tags(values) -> list[str]:
+    """公开的 tag 归一化入口；任务/lesson/Cindy draft 共用同一套规则。"""
+    return _norm_tags(values)
+
+
 def normalize_note_path(path: str) -> str:
     """校验并规范化 notes 相对路径；拒绝绝对路径/穿越/空路径。"""
     raw = str(path or "").replace("\\", "/").strip()
@@ -209,6 +214,11 @@ def _tokens(text: str) -> list[str]:
     return list(dict.fromkeys(t for t in terms if t))[:32]
 
 
+def tokenize_for_match(text: str) -> list[str]:
+    """用于 repo profile / 任务文本匹配的稳定小写 token。"""
+    return list(dict.fromkeys(t.lower() for t in _tokens(text) if t))
+
+
 def _fts_query(terms: list[str]) -> str:
     usable = [t for t in terms if len(t) >= 3]
     return " OR ".join('"' + t.replace('"', '""') + '"' for t in usable)
@@ -230,7 +240,8 @@ def _base_where(role: str, task_id: str | None, scope: str,
                 kinds: tuple[str, ...] | None, tags: tuple[str, ...] | None,
                 repo: str | None, module: str | None,
                 include_snapshots: bool, include_unclassified: bool,
-                repo_scope: str = "any", task_repo: str | None = None):
+                repo_scope: str = "any", task_repo: str | None = None,
+                repos: tuple[str, ...] | list[str] | None = None):
     clauses = ["n.role_slug=?"]
     params: list = [role]
     if task_id is None:
@@ -265,6 +276,12 @@ def _base_where(role: str, task_id: str | None, scope: str,
     if repo:
         clauses.append("n.repo=?")
         params.append(repo)
+    elif repos:
+        values = list(dict.fromkeys(str(r) for r in repos if r))
+        if values:
+            clauses.append(
+                "(n.repo IS NULL OR n.repo IN (" + ",".join("?" * len(values)) + "))")
+            params.extend(values)
     elif repo_scope == "same_or_shared" and task_repo:
         clauses.append("(n.repo IS NULL OR n.repo=? OR n.repo='shared')")
         params.append(task_repo)
@@ -327,6 +344,40 @@ def _parse_ts(value: str | None) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+def _bound_repos(conn, task_id: str | None) -> list[str]:
+    if not task_id:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT repo FROM task_knowledge_repos WHERE task_id=? AND status='applied' "
+            "ORDER BY score DESC", (task_id,)).fetchall()
+    except sqlite3.Error:
+        return []
+    return [str(r["repo"]) for r in rows if r["repo"]]
+
+
+def scope_repos(conn, task_id: str | None, task_repo: str | None) -> list[str] | None:
+    """任务的知识检索范围；无任务默认不过滤，可配置只看 shared。"""
+    if not task_id:
+        if (getattr(config, "KNOWLEDGE_REPOS_ENABLED", True)
+                and str(getattr(config, "KNOWLEDGE_BINDING_MODE", "auto")).lower() != "off"
+                and str(getattr(config, "KNOWLEDGE_TASKLESS_SCOPE", "all")).lower() == "shared"):
+            return ["shared"]
+        return None
+    if not task_repo:
+        row = conn.execute("SELECT repo FROM tasks WHERE id=?", (task_id,)).fetchone()
+        task_repo = row["repo"] if row else None
+    if (not getattr(config, "KNOWLEDGE_REPOS_ENABLED", True)
+            or str(getattr(config, "KNOWLEDGE_BINDING_MODE", "auto")).lower() == "off"):
+        return [task_repo, "shared"] if task_repo else None
+    bound = _bound_repos(conn, task_id)
+    if bound:
+        return list(dict.fromkeys([*bound, *([task_repo] if task_repo else []), "shared"]))
+    if task_repo:
+        return [task_repo, "shared"]
+    return ["shared"]
+
+
 def _task_context(conn, task_id: str | None) -> dict:
     if not task_id:
         return {}
@@ -345,6 +396,7 @@ def _task_context(conn, task_id: str | None) -> dict:
         "title": str(row["title"] or ""), "tags": tags,
         "repo": row["repo"], "type": row["type"],
         "scope_paths": scope_paths, "modules": modules,
+        "bound_repos": _bound_repos(conn, task_id),
     }
 
 
@@ -358,13 +410,26 @@ def _rank(candidates: list[dict], task_ctx: dict, limit: int,
     task_tags = {str(t).lower() for t in task_ctx.get("tags") or []}
     task_modules = {m.lower() for m in task_ctx.get("modules") or set()}
     repo = (task_ctx.get("repo") or "").lower()
+    bound_repos = {str(x).lower() for x in task_ctx.get("bound_repos") or []}
     now = datetime.now(timezone.utc)
     for c in candidates:
         r_lex = (c["_lex"] - lo) / span if span > 0 else 0.5
         note_tags = {str(t).lower() for t in c.get("tags") or []}
         tag_hits = len(note_tags & task_tags)
         r_tag = tag_hits / max(1, len(task_tags)) if task_tags else 0.0
-        r_repo = 1.0 if repo and (c.get("repo") or "").lower() == repo else 0.0
+        owner_repo = (c.get("repo") or "").lower()
+        if bound_repos:
+            # 多 repo：执行仓库优先，绑定的知识仓库次之，shared 再次之。
+            if repo and owner_repo == repo:
+                r_repo = 1.0
+            elif owner_repo and owner_repo in bound_repos:
+                r_repo = 0.85
+            elif owner_repo == "shared":
+                r_repo = 0.5
+            else:
+                r_repo = 0.0
+        else:
+            r_repo = 1.0 if repo and owner_repo == repo else 0.0
         module_tokens = set()
         if c.get("module"):
             module_tokens.update(str(c["module"]).lower().split("/"))
@@ -493,6 +558,7 @@ def search_knowledge(conn: sqlite3.Connection, role_slug: str, query: str, *,
                      include_task_snapshots: bool | None = None,
                      include_unclassified: bool = False,
                      repo_scope: str = "any",
+                     repos: tuple[str, ...] | list[str] | None = None,
                      limit: int = 8,
                      snippet_chars: int = 400) -> list[dict]:
     """检索角色知识；任务隔离在 SQL 与后置过滤两层执行。
@@ -508,7 +574,7 @@ def search_knowledge(conn: sqlite3.Connection, role_slug: str, query: str, *,
     task_repo = task_ctx.get("repo")
     where, params = _base_where(
         role_slug, task_id, scope, kinds, tags, repo, module,
-        include_snapshots, include_unclassified, repo_scope, task_repo)
+        include_snapshots, include_unclassified, repo_scope, task_repo, repos)
     if where is None:
         return []
     terms = _tokens(query)
@@ -673,6 +739,7 @@ def step_knowledge_hint(conn: sqlite3.Connection, role_slug: str,
                         for k, v in sorted(idx["role_counts"].items()) if v)
     task_counts = " / ".join(f"{labels.get(k, k)} {v}"
                              for k, v in sorted(idx["task_counts"].items()) if v)
+    repos = scope_repos(conn, task_id, (task or {}).get("repo"))
     if compact:
         # 普通/回复/规划 run 只给一行入口，避免和 CIC 的完整检索块重复。
         summary = "；".join(
@@ -680,7 +747,8 @@ def step_knowledge_hint(conn: sqlite3.Connection, role_slug: str,
                 f"角色 {idx['total_role']} 条（{counts}）" if counts else "",
                 f"当前任务 {idx['total_task']} 条（{task_counts}）" if task_counts else "",
             ) if part) or "暂无可复用笔记"
-        return (f"知识库：{summary}。需要时执行 `anvil knowledge search "
+        scope_hint = f"知识范围：{'、'.join(repos)}。" if repos else ""
+        return (f"知识库：{summary}。{scope_hint}需要时执行 `anvil knowledge search "
                 f"\"<关键词>\" --task $ANVIL_TASK_ID --limit 5`；"
                 f"详情用 `anvil knowledge show <id>`。")[:max_chars]
 
@@ -689,8 +757,8 @@ def step_knowledge_hint(conn: sqlite3.Connection, role_slug: str,
                       *[str(t) for t in task_ctx.get("tags") or []]]).strip()
     hits = search_knowledge(
         conn, role_slug, query, task_id=task_id, scope="auto",
-        limit=3, snippet_chars=120,
-        repo_scope="same_or_shared") if query else []
+        limit=3, snippet_chars=120, repo_scope="bound_or_shared",
+        repos=repos) if query else []
     lines = ["## 可用知识（按需检索）"]
     if counts:
         lines.append(f"- 角色知识库：{idx['total_role']} 条（{counts}）")

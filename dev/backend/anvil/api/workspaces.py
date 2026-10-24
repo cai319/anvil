@@ -38,6 +38,25 @@ def get_workspace(ws_id: str, conn=Depends(get_db)):
     return channel
 
 
+@router.patch("/workspaces/{ws_id}")
+def update_workspace(ws_id: str, body: dict, conn=Depends(get_db),
+                     auth: Auth = Depends(require_human)):
+    name = body.get("name")
+    if name is not None and not str(name).strip():
+        raise HTTPException(status_code=422, detail="name cannot be empty")
+    channel = services.workspace.update_channel(
+        conn, ws_id,
+        name=str(name).strip() if name is not None else None,
+        repo=body.get("repo"),
+        description=body.get("description"),
+        update_repo="repo" in body,
+        update_description="description" in body,
+    )
+    if channel is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    return channel
+
+
 @router.delete("/workspaces/{ws_id}", status_code=204)
 def delete_workspace(ws_id: str, conn=Depends(get_db),
                      auth: Auth = Depends(require_human)):

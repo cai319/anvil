@@ -1,5 +1,32 @@
 const BASE = "/api/v1";
 
+export interface KnowledgeRepoBinding {
+  repo: string;
+  source: "auto" | "cindy" | "human" | "inherited" | "agent";
+  status: "applied" | "suggested" | "dismissed";
+  confidence: number;
+  score: number;
+  matched_tags: string[];
+  reason: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface KnowledgeRepoProfile {
+  repo: string;
+  key: string;
+  description?: string;
+  top_tags?: string[];
+  counts?: Record<string, number>;
+  aliases?: string[];
+}
+
+export interface KnowledgeRepoScope {
+  mode: "multi" | "legacy" | "shared" | "any";
+  repos: string[] | null;
+  repo: string | null;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -7,6 +34,12 @@ export interface Task {
   status: "todo" | "in_progress" | "in_review" | "done" | "closed";
   priority: unknown;
   tags: string[];
+  repo: string | null;
+  workspace_id?: string | null;
+  base_branch?: string | null;
+  knowledge_repos?: KnowledgeRepoBinding[];
+  knowledge_binding_locked?: boolean;
+  knowledge_binding_state?: "applied" | "suggested" | "needs_cindy" | "fallback" | "locked" | "off";
   scope_paths: string[];
   description: string | null;
   acceptance: string[];
@@ -137,8 +170,37 @@ export const api = {
   getTask: (id: string): Promise<Task> => authFetch(`${BASE}/tasks/${id}`).then((r) => json<Task>(r)),
   createTask: (title: string, opts?: {
     description?: string; assignees?: string[]; plan_first?: boolean; planner?: string;
+    tags?: string[]; repo?: string | null; workspace_id?: string | null;
+    base_branch?: string | null; knowledge_repos?: (string | { repo: string; reason?: string })[];
   }): Promise<Task> =>
     req("POST", "/tasks", { title, scope_paths: ["**"], ...opts }).then((r) => json<Task>(r)),
+  patchTask: (id: string, patch: {
+    knowledge_repos?: (string | { repo: string; reason?: string })[];
+    tags?: string[];
+  }): Promise<Task> =>
+    req("PATCH", `/tasks/${id}`, patch).then((r) => json<Task>(r)),
+  getTaskKnowledgeRepos: (id: string): Promise<{
+    task_id: string;
+    locked: boolean;
+    state: Task["knowledge_binding_state"] | null;
+    repos: KnowledgeRepoBinding[];
+    scope: KnowledgeRepoScope;
+  }> => authFetch(`${BASE}/tasks/${id}/knowledge-repos`).then((r) => json(r)),
+  reautoTaskKnowledgeRepos: (id: string): Promise<{
+    task_id: string; locked: boolean; state: string | null;
+    repos: KnowledgeRepoBinding[]; scope: KnowledgeRepoScope;
+  }> => req("POST", `/tasks/${id}/knowledge-repos/auto`).then((r) => json(r)),
+  acceptTaskKnowledgeRepo: (id: string, repo: string): Promise<unknown> =>
+    req("POST", `/tasks/${id}/knowledge-repos/${encodeURIComponent(repo)}/accept`).then((r) => json(r)),
+  dismissTaskKnowledgeRepo: (id: string, repo: string): Promise<unknown> =>
+    req("POST", `/tasks/${id}/knowledge-repos/${encodeURIComponent(repo)}/dismiss`).then((r) => json(r)),
+  listKnowledgeRepos: (): Promise<{ repos: KnowledgeRepoProfile[]; total: number; enabled: boolean }> =>
+    authFetch(`${BASE}/knowledge/repos`).then((r) => json(r)),
+  suggestKnowledgeRepos: (body: {
+    title: string; description?: string; tags?: string[]; repo?: string | null;
+    workspace_id?: string | null; task_id?: string | null; limit?: number;
+  }): Promise<{ candidates: (KnowledgeRepoProfile & { score: number; confidence: number; reason: string })[] }> =>
+    req("POST", "/knowledge/repos/suggest", body).then((r) => json(r)),
   listTaskChildren: (parentId: string): Promise<Task[]> =>
     authFetch(`${BASE}/tasks?parent_id=${encodeURIComponent(parentId)}`).then((r) => json<Task[]>(r)),
   listTaskRuns: (taskId: string): Promise<Run[]> =>
@@ -235,8 +297,14 @@ export const api = {
   getRole: (slug: string): Promise<Role> => authFetch(`${BASE}/roles/${slug}`).then((r) => json<Role>(r)),
   getEffectiveConfig: (slug: string): Promise<Record<string, unknown>> =>
     authFetch(`${BASE}/roles/${slug}/effective-config`).then((r) => json(r)),
-  getRuntimeCatalog: (id: string): Promise<{ runtime: string; skills: { name: string; description: string }[]; mcp_servers: { name: string }[] }> =>
-    authFetch(`${BASE}/runtimes/${id}/catalog`).then((r) => json(r)),
+  getRuntimeCatalog: (id: string): Promise<{
+    runtime: string;
+    skills: { name: string; description: string }[];
+    mcp_servers: {
+      name: string; description?: string; transport?: string;
+      hint?: string; tool_count?: number;
+    }[];
+  }> => authFetch(`${BASE}/runtimes/${id}/catalog`).then((r) => json(r)),
   getRoleCatalog: (slug: string): Promise<{ skills: string[]; mcp: string[] }> =>
     authFetch(`${BASE}/roles/${slug}/catalog`).then((r) => json(r)),
   updateRoleCatalog: (slug: string, skills: string[], mcp: string[]): Promise<{ skills: string[]; mcp: string[] }> =>
@@ -265,6 +333,8 @@ export const api = {
     req("PUT", `/roles/${slug}/runtime`, { id: runtimeId }).then((r) => json<Role>(r)),
   getRoleRuntime: (slug: string): Promise<RoleRuntimeStatus> =>
     authFetch(`${BASE}/roles/${slug}/runtime`).then((r) => json<RoleRuntimeStatus>(r)),
+  listRoleRuntimes: (): Promise<RoleRuntimeStatus[]> =>
+    authFetch(`${BASE}/roles/runtime`).then((r) => json<RoleRuntimeStatus[]>(r)),
   resetRoleSession: (slug: string): Promise<{ slug: string; reset: string }> =>
     req("POST", `/roles/${slug}/session-reset`, {}).then((r) => json(r)),
   deleteRole: (slug: string): Promise<void> => {
@@ -318,6 +388,10 @@ export const api = {
   listChannels: (): Promise<Channel[]> => authFetch(`${BASE}/workspaces`).then((r) => json<Channel[]>(r)),
   createChannel: (name: string): Promise<Channel> =>
     req("POST", "/workspaces", { name }).then((r) => json<Channel>(r)),
+  updateChannel: (id: string, patch: {
+    name?: string; repo?: string | null; description?: string | null;
+  }): Promise<Channel> =>
+    req("PATCH", `/workspaces/${id}`, patch).then((r) => json<Channel>(r)),
   listMembers: (wsId: string): Promise<Member[]> =>
     authFetch(`${BASE}/workspaces/${wsId}/members`).then((r) => json<Member[]>(r)),
   addMember: (wsId: string, roleSlug: string, access: string): Promise<Member[]> =>
@@ -370,6 +444,28 @@ export const api = {
     req("POST", `/proposals/${id}/reject`, {}).then((r) => json(r)),
 
   // skills / MCP / presets
+  importSkillsBundle: (
+    runtime: string, files: File[], paths: string[], overwrite: boolean,
+  ): Promise<{ runtime: string; imported: unknown[]; skipped: unknown[] }> => {
+    const form = new FormData();
+    files.forEach((file) => form.append("files", file, file.name));
+    form.append("paths", JSON.stringify(paths));
+    form.append("runtime", runtime);
+    form.append("overwrite", String(overwrite));
+    return authFetch(`${BASE}/tooling/import/skills`, { method: "POST", body: form })
+      .then((r) => json(r));
+  },
+  importMcpBundle: (
+    runtime: string, files: File[], paths: string[], overwrite: boolean,
+  ): Promise<{ runtime: string; imported: unknown[]; skipped: unknown[] }> => {
+    const form = new FormData();
+    files.forEach((file) => form.append("files", file, file.name));
+    form.append("paths", JSON.stringify(paths));
+    form.append("runtime", runtime);
+    form.append("overwrite", String(overwrite));
+    return authFetch(`${BASE}/tooling/import/mcp`, { method: "POST", body: form })
+      .then((r) => json(r));
+  },
   listSkills: (): Promise<Skill[]> => authFetch(`${BASE}/skills`).then((r) => json(r)),
   createSkill: (body: Record<string, unknown>): Promise<Skill> =>
     req("POST", "/skills", body).then((r) => json(r)),
@@ -472,6 +568,9 @@ export interface InboxDraftMeta {
   missing_capabilities?: string[];
   suggested_roles?: { slug: string; display_name?: string; description?: string }[];
   step_count?: number;
+  tags?: string[];
+  knowledge_repos?: { repo: string; reason?: string | null }[];
+  binding_locked?: boolean;
 }
 
 export interface InboxItem {
@@ -534,6 +633,8 @@ export interface BoardDraft {
   source_task: string | null;
   tree: {
     leader?: string;
+    tags?: string[];
+    knowledge_repos?: (string | { repo: string; reason?: string })[];
     feedback_rules?: string[];
     verification?: { cell: string; method: string; verifier_role?: string }[];
     assessment?: string;
@@ -566,6 +667,8 @@ export interface BoardDraft {
       depends_on?: string[];
       acceptance?: string[];
       scope_paths?: string[];
+      tags?: string[];
+      knowledge_repos?: (string | { repo: string; reason?: string })[];
     }[];
   };
   created_at: string;
@@ -599,6 +702,7 @@ export interface Lesson {
   content: string;
   tags: string[];
   source_task: string | null;
+  source_role: string | null;
   repo: string;
   status: "pending" | "approved" | "rejected";
   created_at: string;
@@ -629,6 +733,7 @@ export interface Skill {
 export interface McpServer {
   id: string;
   name: string;
+  description?: string | null;
   transport: string;
   command: string | null;
   args: string[];

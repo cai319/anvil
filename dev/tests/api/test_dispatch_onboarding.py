@@ -4,6 +4,8 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip("anvil.main")
+from anvil import config  # noqa: E402
+from anvil.services import repo_catalog  # noqa: E402
 from tests.conftest import (  # noqa: E402
     API, auth_headers, human_headers, role_payload, runtime_payload, task_payload,
 )
@@ -56,6 +58,22 @@ async def test_single_role_dispatch_is_direct(client, seeded):
     assert [x["role_slug"] for x in body["runs"]] == ["developer"]
 
 
+@pytest.mark.asyncio
+async def test_single_role_tagless_dispatch_plans_with_cindy(client, seeded, monkeypatch):
+    monkeypatch.setattr(config, "KNOWLEDGE_BINDING_MODE", "auto")
+    monkeypatch.setattr(config, "KNOWLEDGE_CINDY_MODE", "tagless")
+    repo_catalog.invalidate_catalog()
+    r = await client.post("/api/v1/tasks", headers=auth_headers(), json=task_payload(
+        id="T-TAGLESS", assignees=["developer"], tags=[], repo=None))
+    assert r.status_code == 201, r.text
+    r = await client.post("/api/v1/tasks/T-TAGLESS/dispatch", headers=human_headers())
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["mode"] == "planning"
+    assert body["planner"] == "cindy"
+
+
+@pytest.mark.asyncio
 async def test_dispatch_returns_pending_review_when_draft_exists(client, seeded):
     await _create_task(client, "T-DRAFT", ["pm", "developer"])
     draft = await client.post("/api/v1/board/drafts", headers=auth_headers("pm"), json={

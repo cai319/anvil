@@ -1,3 +1,5 @@
+@layer legacy {
+
 .app-shell {
   display: grid;
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
@@ -43,6 +45,19 @@
   transform: rotate(-2deg);
   box-shadow: 2px 2px 0 var(--red);
 }
+.brand-version {
+  padding: 2px 7px;
+  border: 1px solid var(--ink-line-strong);
+  border-radius: 999px;
+  background: var(--ink-700);
+  color: var(--text-on-ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.app-shell.sidebar-collapsed .brand-version { display: none; }
 .app-shell.sidebar-collapsed .brand .dot {
   display: block;
   width: 12px;
@@ -236,14 +251,46 @@
   top: 0;
 }
 
+/* 任务详情：整页填满可用高度；页面本身不滚动，会话流/任务档案各自滚动。 */
+.content-task {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.task-page {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+.task-page > .task-sheet { flex: none; }
+.task-tab-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+.task-tab-body.is-chat { overflow: hidden; }
+.task-tab-body:not(.is-chat) > * { flex: 0 0 auto; }
+.task-tab-body.is-chat > .task-layout {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+.task-page .task-side {
+  height: 100%;
+  max-height: none;
+  min-height: 0;
+}
+
 /* 任务详情 */
 .task-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 6px var(--panel-w);
   gap: 0;
   align-items: stretch;
-  height: calc(100dvh - var(--header-h) - (var(--content-pad) * 2) - 200px);
-  min-height: 460px;
+  min-height: 0;
 }
 .task-layout.panel-collapsed { grid-template-columns: minmax(0, 1fr); }
 .task-layout.panel-collapsed > .splitter,
@@ -255,8 +302,14 @@
   min-height: 0;
 }
 .task-main > .session-actions,
-.task-main > .session-thread:not(.session-thread-main),
 .task-main > p { flex: none; }
+/* 待审批草案等辅助区不抢会话高度；内容多时在卡片区内滚动。 */
+.task-main > .session-thread:not(.session-thread-main) {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: min(30vh, 300px);
+  overflow-y: auto;
+}
 .task-side {
   position: sticky;
   top: 0;
@@ -337,7 +390,8 @@ dd { margin: 0; }
   .sidebar .nav-text,
   .sidebar .nav-label,
   .sidebar .nav-badge,
-  .sidebar .brand-name { display: none; }
+  .sidebar .brand-name,
+  .sidebar .brand-version { display: none; }
   .sidebar .nav-item { justify-content: center; padding: 0; }
   .sidebar .brand { justify-content: center; padding: 0; }
   .sidebar .brand .dot {
@@ -365,9 +419,16 @@ dd { margin: 0; }
     max-height: none;
     margin-top: 12px;
   }
-  .task-layout { height: auto; min-height: 0; }
+  .task-layout,
+  .task-tab-body.is-chat > .task-layout { height: auto; min-height: 0; }
   .session-thread-main { max-height: 60vh; }
   .kanban-col { min-width: 230px; }
+  /* 窄屏任务详情恢复整页滚动：会话流与任务档案上下堆叠。 */
+  .content-task { display: block; overflow-y: auto; }
+  .task-page { display: block; min-height: 0; }
+  .task-tab-body,
+  .task-tab-body.is-chat { display: block; overflow: visible; min-height: 0; }
+  .task-page .task-side { height: auto; }
 }
 
 @media (max-width: 899px) {
@@ -389,7 +450,8 @@ dd { margin: 0; }
   .app-shell .nav-text,
   .app-shell .nav-label,
   .app-shell .nav-badge,
-  .app-shell .brand-name { display: initial !important; }
+  .app-shell .brand-name,
+  .app-shell .brand-version { display: initial !important; }
   .app-shell .nav-item {
     justify-content: flex-start !important;
     padding: 0 9px !important;
@@ -423,4 +485,6 @@ dd { margin: 0; }
 }
 @media (max-width: 899px) {
   .app-shell .sidebar .brand { padding: 0 8px 12px !important; }
+}
+
 }

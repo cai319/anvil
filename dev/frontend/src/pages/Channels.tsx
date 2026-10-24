@@ -9,13 +9,21 @@ export function Channels() {
   const [name, setName] = useState("");
   const [roleSlug, setRoleSlug] = useState("");
   const [access, setAccess] = useState("write");
+  const [channelRepo, setChannelRepo] = useState("");
+  const [channelDesc, setChannelDesc] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const refreshChannels = () => api.listChannels().then(setChannels).catch((e) => setError(String(e)));
+  const selectedChannel = channels.find((c) => c.id === selected) ?? null;
 
   useEffect(() => {
     refreshChannels();
   }, []);
+
+  useEffect(() => {
+    setChannelRepo(selectedChannel?.repo ?? "");
+    setChannelDesc(selectedChannel?.description ?? "");
+  }, [selected, selectedChannel?.repo, selectedChannel?.description]);
 
   useEffect(() => {
     if (!selected) return;
@@ -39,6 +47,19 @@ export function Channels() {
     try {
       setMembers(await api.addMember(selected, roleSlug.trim(), access));
       setRoleSlug("");
+      await refreshChannels();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const saveChannel = async () => {
+    if (!selected) return;
+    try {
+      await api.updateChannel(selected, {
+        repo: channelRepo.trim() || null,
+        description: channelDesc.trim() || null,
+      });
       await refreshChannels();
     } catch (e) {
       setError(String(e));
@@ -91,6 +112,21 @@ export function Channels() {
             <p className="muted">选择左侧频道管理成员。</p>
           ) : (
             <>
+              <h2>频道信息</h2>
+              <div className="channel-meta-form">
+                <label>
+                  执行 repo
+                  <input value={channelRepo} onChange={(e) => setChannelRepo(e.target.value)}
+                    placeholder="仓库名（用于 worktree/分支；同时参与知识匹配）" />
+                </label>
+                <label>
+                  描述
+                  <textarea value={channelDesc} onChange={(e) => setChannelDesc(e.target.value)}
+                    rows={3} placeholder="这个频道/仓库负责什么、涉及哪些技术领域" />
+                </label>
+                <button type="button" onClick={saveChannel}>保存频道信息</button>
+              </div>
+
               <h2>成员</h2>
               <div className="toolbar">
                 <input value={roleSlug} onChange={(e) => setRoleSlug(e.target.value)} placeholder="角色 slug" />

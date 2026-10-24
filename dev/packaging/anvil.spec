@@ -22,6 +22,9 @@ UVICORN_HIDDEN = [
     "uvicorn.protocols.websockets.auto",
     "uvicorn.lifespan",
     "uvicorn.lifespan.on",
+    # FastAPI multipart 解析用于工具目录/压缩包导入。
+    "python_multipart",
+    "python_multipart.multipart",
 ]
 
 # ---- anvil CLI ---------------------------------------------------------

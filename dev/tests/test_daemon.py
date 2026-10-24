@@ -982,3 +982,47 @@ def test_cancel_active_task_continues_with_queued_other_task(env):
         c.close()
     assert ta["id"] not in keys  # 已删除任务不能被切回时重新写回
     assert tb["id"] in keys
+
+
+def test_reminder_run_releases_temp_process(env):
+    """知识管理提醒临时拉起的进程：本轮结束立即回收，run 标为 completed。"""
+    conn, mgr, fake, log = env
+    run = runs_service.create_run(conn, "qa-role", task_id=None, prompt="daily review")
+    conn.execute(
+        "INSERT INTO reminder_wakes (run_id, role_slug, was_alive, created_at) "
+        "VALUES (?,?,?,?)",
+        (run["id"], "qa-role", 0, "2026-10-24T09:00:00+08:00"),
+    )
+    conn.commit()
+    _deliver(mgr, conn, fake, log, run["id"], "daily review")
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "completed")
+    assert _wait(lambda: mgr.status("qa-role")["alive"] is False)
+    assert mgr.status("qa-role")["current_run_id"] is None
+    check = open_conn(mgr.db_path)
+    try:
+        left = check.execute(
+            "SELECT COUNT(*) FROM reminder_wakes WHERE run_id=?", (run["id"],)
+        ).fetchone()[0]
+    finally:
+        check.close()
+    assert left == 0
+
+
+def test_reminder_run_keeps_already_running_process(env):
+    """触发前已在干活的角色：提醒结束不杀进程，继续原来的工作。"""
+    conn, mgr, fake, log = env
+    warm = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, warm["id"], "warm")
+    assert _wait(lambda: _run_status(mgr.db_path, warm["id"]) == "suspended")
+    assert mgr.status("qa-role")["alive"] is True
+
+    run = runs_service.create_run(conn, "qa-role", task_id=None, prompt="daily review")
+    conn.execute(
+        "INSERT INTO reminder_wakes (run_id, role_slug, was_alive, created_at) "
+        "VALUES (?,?,?,?)",
+        (run["id"], "qa-role", 1, "2026-10-24T09:00:00+08:00"),
+    )
+    conn.commit()
+    _deliver(mgr, conn, fake, log, run["id"], "daily review")
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "completed")
+    assert mgr.status("qa-role")["alive"] is True

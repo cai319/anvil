@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, isOnboardingRole, type Role, type Runtime } from "../api/client";
 import { AvatarPicker } from "../components/AvatarPicker";
+import { Icon } from "../components/Icon";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { formatDateTime } from "../time";
 import { PageHeader } from "../components/ui";
@@ -31,7 +32,13 @@ export function Roles() {
   const [displayName, setDisplayName] = useState("");
   const [autoBrief, setAutoBrief] = useState("");
   const [autoBusy, setAutoBusy] = useState(false);
-  const [catalog, setCatalog] = useState<{ skills: { name: string; description: string }[]; mcp_servers: { name: string }[] } | null>(null);
+  const [catalog, setCatalog] = useState<{
+    skills: { name: string; description: string }[];
+    mcp_servers: {
+      name: string; description?: string; hint?: string;
+      transport?: string; tool_count?: number;
+    }[];
+  } | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [selSkills, setSelSkills] = useState<string[]>([]);
   const [selMcp, setSelMcp] = useState<string[]>([]);
@@ -40,6 +47,7 @@ export function Roles() {
   const [genResult, setGenResult] = useState<{ working_mode?: string; skill_description?: string } | null>(null);
   const [genBusy, setGenBusy] = useState(false);
   const [newAvatar, setNewAvatar] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
   const [avatarOpen, setAvatarOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [homeFiles, setHomeFiles] = useState<string[]>([]);
@@ -53,7 +61,17 @@ export function Roles() {
   const [roleRuntimeId, setRoleRuntimeId] = useState("");
   const generateSeq = useRef(0);
 
-  const refresh = () => api.listRoles().then(setRoles).catch((e) => setError(String(e)));
+  const refresh = () => api.listRoles().then((items) => {
+    // Cindy（内置 onboarding 助理）始终置顶；其余角色保持接口返回顺序。
+    const ordered = [...items].sort(
+      (a, b) => Number(isOnboardingRole(b)) - Number(isOnboardingRole(a)));
+    setRoles(ordered);
+    setSelected((prev) => {
+      // 默认选中列表第一个角色；刷新后保留当前选择（角色被删除时回退到第一个）。
+      if (prev && ordered.some((r) => r.slug === prev)) return prev;
+      return ordered[0]?.slug ?? null;
+    });
+  }).catch((e) => setError(String(e)));
 
   useEffect(() => {
     refresh();
@@ -168,6 +186,8 @@ export function Roles() {
       await refresh();
       setSelected(r.slug);
       setTab("basic");
+      setCreateOpen(false);
+      setError(null);
     } catch (e) {
       setError(String(e));
     }
@@ -187,6 +207,8 @@ export function Roles() {
       await refresh();
       setSelected(r.slug);
       setTab("basic");
+      setCreateOpen(false);
+      setError(null);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -214,15 +236,15 @@ export function Roles() {
     }
   };
 
-  const clearCatalog = async () => {
-    if (!selected) return;
+  const selectAllCatalog = () => {
+    if (!catalog) return;
+    setSelSkills(catalog.skills.map((s) => s.name));
+    setSelMcp(catalog.mcp_servers.map((m) => m.name));
+  };
+
+  const clearCatalog = () => {
     setSelSkills([]);
     setSelMcp([]);
-    try {
-      await api.updateRoleCatalog(selected, [], []);
-    } catch (e) {
-      setError(String(e));
-    }
   };
 
   const saveRuntime = async () => {
@@ -283,18 +305,42 @@ export function Roles() {
   };
 
   const projection = (config?.projection ?? {}) as Record<string, any>;
+  const currentRuntime = typeof projection.runtime === "string"
+    ? projection.runtime
+    : projection.runtime?.id ?? "—";
   const current = roles.find((r) => r.slug === selected);
   const slugInvalid = slug.length > 0 && !SLUG_RE.test(slug);
 
   return (
-    <div className="roles">
+    <div className="roles roles-page">
       <PageHeader
         kicker="CREW WORKSHOP"
         title="角色工坊"
         subtitle={`${roles.length} 个角色`}
+        actions={(
+          <button type="button" className="primary" onClick={() => setCreateOpen(true)}>
+            <Icon name="plus" /> 新建角色
+          </button>
+        )}
       />
-      {error && <p className="error">{error}</p>}
+      {error && !createOpen && <p className="error">{error}</p>}
 
+      {createOpen && (
+        <div
+          className="modal-overlay"
+          onMouseDown={(e) => e.target === e.currentTarget && setCreateOpen(false)}
+        >
+          <div className="modal create-role-modal" role="dialog" aria-modal="true" aria-label="新建角色">
+            <div className="modal-head">
+              <h2>新建角色</h2>
+              <button
+                type="button"
+                className="modal-close"
+                onClick={() => setCreateOpen(false)}
+                aria-label="关闭"
+              ><Icon name="x" size={12} /></button>
+            </div>
+            {error && <p className="error">{error}</p>}
       <section className="create-role-panel">
         <div className="toolbar">
           <input
@@ -327,9 +373,6 @@ export function Roles() {
               <option key={r.id} value={r.id}>{r.display_name} · {r.status}</option>
             ))}
           </select>
-          <button onClick={create} disabled={!slug || !displayName || !runtimeId || slugInvalid}>
-            新建角色
-          </button>
         </div>
         <p className={slugInvalid ? "error role-slug-hint" : "muted role-slug-hint"}>
           {slugInvalid ? SLUG_HINT : "slug：小写字母、数字、-、_，2–64 位；不支持中文/大写/空格。"}
@@ -338,7 +381,10 @@ export function Roles() {
           <input
             value={autoBrief}
             onChange={(e) => setAutoBrief(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && autoCreate()}
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+              if (e.key === "Enter") autoCreate();
+            }}
             placeholder="一句话描述角色，AI 生成能力与定位后创建：如「负责后端 API、数据库迁移和性能优化」"
             style={{ flex: 1 }}
           />
@@ -362,11 +408,25 @@ export function Roles() {
           value={newAvatar}
           onChange={setNewAvatar}
         />
+        <div className="role-create-footer">
+          <button type="button" onClick={() => setCreateOpen(false)}>取消</button>
+          <button
+            type="button"
+            className="primary"
+            onClick={create}
+            disabled={!slug || !displayName || !runtimeId || slugInvalid}
+          >
+            创建角色
+          </button>
+        </div>
       </section>
+          </div>
+        </div>
+      )}
 
       <div className="roles-layout">
-        <ul className="roles-list">
-          {roles.length === 0 && <li className="muted">暂无角色，先在右侧新建。</li>}
+        <ul className="roles-list role-cards">
+          {roles.length === 0 && <li className="muted">暂无角色，点击右上角「新建角色」创建。</li>}
           {roles.map((r) => (
             <li key={r.slug} className={selected === r.slug ? "active" : ""}>
               <a
@@ -379,18 +439,27 @@ export function Roles() {
                   name={r.display_name}
                   avatar={r.avatar}
                   color={r.avatar_color}
-                  size={28}
+                  size={40}
                 />
                 <span className="role-list-text">
-                  {r.display_name} <small>({r.slug})</small>
-                  {isOnboardingRole(r) && <span className="badge badge-in_progress" title="默认助理，不可删除">默认助理</span>}
-                  {!isOnboardingRole(r) && !SLUG_RE.test(r.slug) && (
-                    <span className="badge wf-gate" title="slug 含中文/非法字符，建议删除并重建">slug 不合规</span>
-                  )}
+                  <span className="role-list-name">{r.display_name}</span>
+                  <span className="role-list-sub">
+                    <span className="role-list-slug">{r.slug}</span>
+                    {isOnboardingRole(r) && <span className="badge badge-in_progress" title="默认助理，不可删除">默认助理</span>}
+                    {!isOnboardingRole(r) && !SLUG_RE.test(r.slug) && (
+                      <span className="badge wf-gate" title="slug 含中文/非法字符，建议删除并重建">slug 不合规</span>
+                    )}
+                  </span>
                 </span>
               </a>
               {!isOnboardingRole(r) && (
-                <button onClick={() => remove(r)} className="danger">删</button>
+                <button
+                  type="button"
+                  onClick={() => remove(r)}
+                  className="danger role-delete-btn"
+                  aria-label={`删除角色 ${r.display_name}`}
+                  title={`删除 ${r.display_name}`}
+                >删</button>
               )}
             </li>
           ))}
@@ -398,7 +467,11 @@ export function Roles() {
 
         <div className="roles-detail">
           {!current ? (
-            <p className="muted">选择左侧角色查看详情。</p>
+            <p className="muted">
+              {roles.length === 0
+                ? "暂无角色，点击右上角「新建角色」创建。"
+                : "选择左侧角色查看详情。"}
+            </p>
           ) : (
             <>
               <div className="role-detail-head">
@@ -421,9 +494,6 @@ export function Roles() {
                   <h2>{current.display_name}</h2>
                   <span className="mono">{current.slug}</span>
                 </div>
-                <button type="button" className="small" onClick={() => setAvatarOpen(true)}>
-                  更换头像
-                </button>
               </div>
               <div className="tabs">
                 {TABS.map((t) => (
@@ -433,52 +503,86 @@ export function Roles() {
                 ))}
               </div>
 
+              <div className="role-detail-body">
               {tab === "basic" && (
-                <div>
-                  <dl>
-                    <dt>slug</dt><dd>{current.slug}</dd>
-                    <dt>显示名</dt><dd>{current.display_name}</dd>
-                    <dt>头像</dt>
-                    <dd>
-                      <button type="button" className="small" onClick={() => setAvatarOpen(true)}>
-                        更换头像
-                      </button>
-                    </dd>
-                    <dt>home</dt><dd className="mono">{current.home_path}</dd>
-                    <dt>启用</dt><dd>{current.enabled ? "是" : "否"}</dd>
-                  </dl>
+                <div className="role-basic">
+                  <section className="role-info-card">
+                    <div className="role-info-grid">
+                      <div className="role-info-item">
+                        <span>Slug</span>
+                        <code>{current.slug}</code>
+                      </div>
+                      <div className="role-info-item">
+                        <span>显示名</span>
+                        <strong>{current.display_name}</strong>
+                      </div>
+                      <div className="role-info-item">
+                        <span>状态</span>
+                        <strong className={current.enabled ? "role-state on" : "role-state off"}>
+                          {current.enabled ? "已启用" : "已停用"}
+                        </strong>
+                      </div>
+                      <div className="role-info-item role-info-wide">
+                        <span>工作目录</span>
+                        <code title={current.home_path}>{current.home_path}</code>
+                      </div>
+                    </div>
+                  </section>
 
-                  <h3>执行指标</h3>
-                  {metrics ? (
-                    <dl>
-                      <dt>运行次数</dt><dd>{metrics.runs}</dd>
-                      <dt>任务</dt><dd>{metrics.tasks_done} done / {metrics.tasks_total} 总</dd>
-                      <dt>Token</dt><dd>{metrics.total_tokens.toLocaleString()}</dd>
-                    </dl>
-                  ) : <p className="muted">加载中…</p>}
+                  <section className="role-detail-section">
+                    <div className="role-section-head">
+                      <h3>执行指标</h3>
+                    </div>
+                    {metrics ? (
+                      <div className="role-metrics">
+                        <div className="role-metric">
+                          <span>运行次数</span>
+                          <strong>{metrics.runs}</strong>
+                        </div>
+                        <div className="role-metric">
+                          <span>完成任务</span>
+                          <strong>{metrics.tasks_done}<small> / {metrics.tasks_total}</small></strong>
+                        </div>
+                        <div className="role-metric">
+                          <span>累计 Token</span>
+                          <strong>{metrics.total_tokens.toLocaleString()}</strong>
+                        </div>
+                      </div>
+                    ) : <p className="muted">加载中…</p>}
+                  </section>
 
-                  <h3>配置版本</h3>
-                  <ul className="drafts">
-                    {versions.length === 0 && <li className="muted">暂无版本记录。</li>}
-                    {versions.map((v) => (
-                      <li key={v.version}>
-                        v{v.version} · {v.source} · <span className="muted mono">{formatDateTime(v.created_at)}</span>{" "}
-                        <button
-                          className="small"
-                          onClick={async () => {
-                            try {
-                              await api.rollbackRole(current.slug, v.version);
-                              await refresh();
-                              const c = await api.getEffectiveConfig(current.slug);
-                              setConfig(c);
-                            } catch (e) {
-                              setError(String(e));
-                            }
-                          }}
-                        >回滚到此版</button>
-                      </li>
-                    ))}
-                  </ul>
+                  <section className="role-detail-section">
+                    <div className="role-section-head">
+                      <h3>配置版本</h3>
+                      <span className="muted">{versions.length} 个</span>
+                    </div>
+                    {versions.length === 0 ? (
+                      <p className="muted">暂无版本记录。</p>
+                    ) : (
+                      <ul className="role-version-list">
+                        {versions.map((v) => (
+                          <li key={v.version}>
+                            <span className="role-version-no">v{v.version}</span>
+                            <span className="role-version-source">{v.source}</span>
+                            <span className="muted mono">{formatDateTime(v.created_at)}</span>
+                            <button
+                              className="small role-version-btn"
+                              onClick={async () => {
+                                try {
+                                  await api.rollbackRole(current.slug, v.version);
+                                  await refresh();
+                                  const c = await api.getEffectiveConfig(current.slug);
+                                  setConfig(c);
+                                } catch (e) {
+                                  setError(String(e));
+                                }
+                              }}
+                            >回滚</button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </section>
                 </div>
               )}
               {tab === "instruction" && (
@@ -604,18 +708,38 @@ export function Roles() {
                 </div>
               )}
               {tab === "permissions" && (
-                <dl>
-                  <dt>home</dt><dd className="mono">{projection.workspace?.home ?? "—"}</dd>
-                  <dt>repos</dt><dd>{JSON.stringify(projection.workspace?.repos ?? [])}</dd>
-                </dl>
+                <section className="role-info-card">
+                  <div className="role-info-grid">
+                    <div className="role-info-item role-info-wide">
+                      <span>工作目录</span>
+                      <code>{projection.workspace?.home ?? "—"}</code>
+                    </div>
+                    <div className="role-info-item role-info-wide">
+                      <span>可写仓库</span>
+                      <code>
+                        {Array.isArray(projection.workspace?.repos)
+                          ? projection.workspace.repos
+                              .map((r: any) => typeof r === "string"
+                                ? r
+                                : `${r.name ?? r.repo ?? r.slug ?? ""}${r.access ? `（${r.access}）` : ""}`)
+                              .filter(Boolean)
+                              .join("、") || "—"
+                          : "—"}
+                      </code>
+                    </div>
+                  </div>
+                </section>
               )}
               {tab === "catalog" && (
                 <div>
+                  <div className="catalog-summary">
+                    <span>技能 <strong>{selSkills.length}</strong> / {catalog?.skills.length ?? 0}</span>
+                    <span>MCP <strong>{selMcp.length}</strong> / {catalog?.mcp_servers.length ?? 0}</span>
+                    {roleRuntimeId && <span className="muted">来源：{roleRuntimeId}</span>}
+                  </div>
                   <p className="muted">
                     默认全部不勾选；选择按角色独立保存，互不影响。
-                    {roleRuntimeId
-                      ? <> 可用项来自运行时 <strong>{roleRuntimeId}</strong>。</>
-                      : " 请先在「运行时」tab 绑定运行时。"}
+                    {!roleRuntimeId && " 请先在「运行时」tab 绑定运行时。"}
                   </p>
                   {catalogLoading ? (
                     <p className="muted">加载中…</p>
@@ -623,29 +747,89 @@ export function Roles() {
                     <p className="muted">请先在「运行时」tab 绑定运行时，或该运行时没有可用的 skill/MCP 目录。</p>
                   ) : (
                     <>
-                      <h3>技能（skill）</h3>
-                      {catalog.skills.length === 0 && <p className="muted">该运行时无可用技能。</p>}
-                      <div className="catalog-list">
-                        {catalog.skills.map((s) => (
-                          <label key={s.name} className="role-check">
-                            <input type="checkbox" checked={selSkills.includes(s.name)} onChange={() => toggleSel(selSkills, s.name, setSelSkills)} />
-                            <span>{s.name}</span>
-                            {s.description && <small className="muted">— {s.description}</small>}
-                          </label>
-                        ))}
-                      </div>
-                      <h3>MCP 服务器</h3>
-                      {catalog.mcp_servers.length === 0 && <p className="muted">该运行时无 MCP 服务器。</p>}
-                      <div className="catalog-list">
-                        {catalog.mcp_servers.map((m) => (
-                          <label key={m.name} className="role-check">
-                            <input type="checkbox" checked={selMcp.includes(m.name)} onChange={() => toggleSel(selMcp, m.name, setSelMcp)} />
-                            <span>{m.name}</span>
-                          </label>
-                        ))}
-                      </div>
-                      <div className="toolbar">
-                        <button onClick={clearCatalog}>全部不选并保存</button>
+                      <section className="catalog-section">
+                        <div className="catalog-section-head">
+                          <div>
+                            <h3>技能</h3>
+                            <span className="muted">Skill · {catalog.skills.length} 项</span>
+                          </div>
+                          <span className="catalog-selected">{selSkills.length} 已选</span>
+                        </div>
+                        {catalog.skills.length === 0 ? (
+                          <p className="muted">该运行时无可用技能。</p>
+                        ) : (
+                          <div className="catalog-grid">
+                            {catalog.skills.map((s) => {
+                              const desc = (s.description || "")
+                                .replace(/^[\s|>·—–_-]+|[\s|>·—–_-]+$/g, "");
+                              return (
+                                <label
+                                  key={s.name}
+                                  className={`catalog-card ${selSkills.includes(s.name) ? "selected" : ""}`}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={selSkills.includes(s.name)}
+                                    onChange={() => toggleSel(selSkills, s.name, setSelSkills)}
+                                  />
+                                  <span className="catalog-card-body">
+                                    <span className="catalog-card-name">{s.name}</span>
+                                    {desc && (
+                                      <span className="catalog-card-desc" title={s.description ?? undefined}>
+                                        {desc}
+                                      </span>
+                                    )}
+                                  </span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </section>
+
+                      <section className="catalog-section">
+                        <div className="catalog-section-head">
+                          <div>
+                            <h3>MCP 服务器</h3>
+                            <span className="muted">Model Context Protocol · {catalog.mcp_servers.length} 项</span>
+                          </div>
+                          <span className="catalog-selected">{selMcp.length} 已选</span>
+                        </div>
+                        {catalog.mcp_servers.length === 0 ? (
+                          <p className="muted">该运行时无 MCP 服务器。</p>
+                        ) : (
+                          <div className="catalog-grid catalog-grid-mcp">
+                            {catalog.mcp_servers.map((m) => (
+                              <label
+                                key={m.name}
+                                className={`catalog-card catalog-card-mcp ${selMcp.includes(m.name) ? "selected" : ""}`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={selMcp.includes(m.name)}
+                                  onChange={() => toggleSel(selMcp, m.name, setSelMcp)}
+                                />
+                                <span className="catalog-card-body">
+                                  <span className="catalog-card-head">
+                                    <span className="catalog-card-name">{m.name}</span>
+                                    <span className="catalog-card-tag">MCP</span>
+                                  </span>
+                                  <span className="catalog-card-desc" title={m.description || undefined}>
+                                    {m.description || m.hint || ""}
+                                  </span>
+                                </span>
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </section>
+
+                      <div className="toolbar catalog-actions">
+                        <span className="muted">
+                          已选 {selSkills.length} 个技能 · {selMcp.length} 个 MCP
+                        </span>
+                        <button onClick={selectAllCatalog}>全选</button>
+                        <button onClick={clearCatalog}>全部不选</button>
                         <button className="primary" onClick={saveCatalog}>保存选择</button>
                       </div>
                     </>
@@ -668,9 +852,14 @@ export function Roles() {
                     </select>
                     <button className="primary" onClick={saveRuntime} disabled={!roleRuntimeId}>保存绑定</button>
                   </div>
-                  <dl>
-                    <dt>当前</dt><dd>{JSON.stringify(projection.runtime ?? {})}</dd>
-                  </dl>
+                  <section className="role-info-card">
+                    <div className="role-info-grid">
+                      <div className="role-info-item">
+                        <span>当前运行时</span>
+                        <code>{currentRuntime}</code>
+                      </div>
+                    </div>
+                  </section>
 
                   <h3 style={{ marginTop: 16 }}>会话上下文</h3>
                   <p className="muted">
@@ -694,6 +883,7 @@ export function Roles() {
                   </div>
                 </div>
               )}
+              </div>
             </>
           )}
         </div>

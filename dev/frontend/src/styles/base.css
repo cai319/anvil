@@ -1,3 +1,5 @@
+@layer legacy {
+
 *,
 *::before,
 *::after {
@@ -73,12 +75,12 @@ h1 {
 }
 
 h2 {
-  font-size: 17px;
+  font-size: var(--fs-h2);
   font-weight: 850;
 }
 
 h3 {
-  font-size: 13px;
+  font-size: var(--fs-sm);
   font-weight: 800;
 }
 
@@ -118,4 +120,6 @@ h3 {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
 }

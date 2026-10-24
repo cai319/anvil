@@ -41,9 +41,10 @@ npm run dev
 ```
 
 状态机口径（SE v1.0 修正后）：任务五态 `todo/in_progress/in_review/done/closed`；
+`done` 是评审通过后的成功终态；`closed` 表示人工终止，非终态可终止，已终止可重新打开回 `todo`。
 `runs` 运行生命周期八态（`created/projecting/running/submitted/reviewing/completed/failed/abandoned`）是另一概念。
 
 ## 当前实现状态
 
 详见 `implementation-status.md`（各里程碑的已实现 / 未实现清单）。当前自动化测试：
-**122 passed + 21 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行）。
+**455 passed + 26 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行）。

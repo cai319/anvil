@@ -106,3 +106,7 @@ catalog:
   skills_dir: "~/.claude/skills"
   mcp_config: "~/.claude.json"
   mcp_pointer: "mcpServers"
+  # MCP 卡片固定的展示介绍；未列出的 server 回退为 type + command。
+  mcp_descriptions:
+    codegraph: "代码智能与知识图谱：索引代码库，查询符号、调用链和影响面。"
+    macro-registry: "C/C++ 宏注册表：构建宏数据库，检索、展开宏并进行安全检查。"

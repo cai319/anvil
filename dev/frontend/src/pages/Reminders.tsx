@@ -69,7 +69,7 @@ export function Reminders() {
   };
 
   return (
-    <div>
+    <div className="reminders-page">
       <PageHeader kicker="REMINDERS" title="提醒" />
       {error && <p className="error">{error}</p>}
 
@@ -97,15 +97,27 @@ export function Reminders() {
         <input
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && create()}
+          onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+            if (e.key === "Enter") create();
+          }}
           placeholder="到期时注入给角色的提示"
           style={{ flex: 1 }}
         />
         <button className="primary" onClick={create} disabled={!roleSlug || !prompt.trim()}>添加提醒</button>
       </div>
 
-      <div className="table-scroll">
-      <table className="board">
+      <div className="table-scroll reminders-table-scroll">
+      <table className="board reminders-table">
+        <colgroup>
+          <col style={{ width: "9%" }} />
+          <col style={{ width: "6%" }} />
+          <col style={{ width: "14%" }} />
+          <col />
+          <col style={{ width: "16%" }} />
+          <col style={{ width: "8%" }} />
+          <col style={{ width: "15%" }} />
+        </colgroup>
         <thead>
           <tr><th>角色</th><th>类型</th><th>表达式 / 条件</th><th>提示</th><th>下次触发</th><th>状态</th><th>操作</th></tr>
         </thead>
@@ -117,8 +129,8 @@ export function Reminders() {
             <tr key={r.id}>
               <td>{r.role_slug ?? "—"}</td>
               <td>{KIND_LABEL[r.kind] ?? r.kind}</td>
-              <td className="mono">{r.kind === "cron" ? r.cron_expr : r.kind === "at" ? r.fire_at : r.when_condition}</td>
-              <td>{r.prompt ?? "—"}</td>
+              <td className="mono reminder-long">{r.kind === "cron" ? r.cron_expr : r.kind === "at" ? r.fire_at : r.when_condition}</td>
+              <td className="reminder-long">{r.prompt ?? "—"}</td>
               <td className="mono muted">{formatDateTime(r.next_fire_at) || "—"}</td>
               <td>{STATUS_LABEL[r.status] ?? r.status}</td>
               <td>

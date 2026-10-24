@@ -6,7 +6,7 @@ import { Icon } from "../components/Icon";
 
 const RUN_LABEL: Record<string, string> = {
   created: "已创建",
-  projecting: "投影中",
+  projecting: "准备中",
   running: "运行中",
   submitted: "已提交",
   reviewing: "评审中",
@@ -66,6 +66,7 @@ export function AgentSessions({ slug }: { slug: string }) {
             avatar={role.avatar}
             color={role.avatar_color}
             size={34}
+            status={active ? "green" : "gray"}
           />
           <h1>{role.display_name}</h1>
           <span className={`status-light ${active ? "running" : "idle"}`} title={active ? "运行中" : "空闲"} />

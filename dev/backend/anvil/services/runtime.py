@@ -511,11 +511,52 @@ def _skill_description(skill_dir: Path) -> str:
     return ""
 
 
+def _mcp_command_hint(cfg: dict) -> str:
+    """不泄漏 env，只展示可读的启动方式。"""
+    command = str(cfg.get("command") or "").strip()
+    args = [str(a) for a in (cfg.get("args") or [])]
+    if command:
+        base = Path(command).name
+        if base.lower() in {
+            "python", "python3", "node", "npx", "uv", "uvx", "bun", "deno", "sh", "bash",
+        }:
+            script = next(
+                (Path(a).name for a in args if a and not a.startswith("-")), "")
+            return f"{base} {script}".strip()
+        tail = [a for a in args if a and not a.startswith("-")][:2]
+        return " ".join([base, *tail])
+    url = str(cfg.get("url") or "").strip()
+    if url:
+        try:
+            from urllib.parse import urlparse
+            host = urlparse(url).hostname or ""
+        except Exception:  # noqa: BLE001
+            host = ""
+        return host or "remote"
+    return ""
+
+
+def _mcp_catalog_entry(name: str, cfg: dict | None,
+                       description: str | None = None) -> dict:
+    cfg = cfg if isinstance(cfg, dict) else {}
+    transport = str(cfg.get("type") or cfg.get("transport") or "stdio")
+    hint = _mcp_command_hint(cfg)
+    configured = (description or cfg.get("description") or "").strip()
+    return {
+        "name": name,
+        "description": configured,
+        "transport": transport,
+        "hint": hint,
+    }
+
+
 def catalog(conn: sqlite3.Connection, rid: str) -> dict:
     """发现某运行时自身的默认 skill 列表与 MCP server 列表（供角色勾选加载）。
 
     依据运行时 YAML 的 `catalog` 段：`skills_dir`（扫描每个子目录为一个 skill）、
     `mcp_config` + `mcp_pointer`（读 JSON 配置里的 mcpServers 键）。
+    MCP 介绍固定取自 `catalog.mcp_descriptions`（或 server 条目自带的
+    `description`），缺失时回退为绑定运行时的传输方式与启动命令。
     """
     definition = load_definitions().get(rid) or {}
     cat = definition.get("catalog") or {}
@@ -530,13 +571,54 @@ def catalog(conn: sqlite3.Connection, rid: str) -> dict:
     mcp_servers: list[dict] = []
     mcp_config = _expand(str(cat.get("mcp_config", "")))
     mcp_pointer = str(cat.get("mcp_pointer", "mcpServers"))
+    descriptions = cat.get("mcp_descriptions") or {}
+    if not isinstance(descriptions, dict):
+        descriptions = {}
     if mcp_config and os.path.isfile(mcp_config):
         try:
             with open(mcp_config, encoding="utf-8") as f:
                 data = json.load(f)
             servers = data.get(mcp_pointer) or {}
-            mcp_servers = [{"name": k} for k in sorted(servers.keys())]
+            if isinstance(servers, dict):
+                for name, cfg in sorted(servers.items(), key=lambda item: str(item[0])):
+                    mcp_servers.append(_mcp_catalog_entry(
+                        str(name), cfg, descriptions.get(str(name))))
         except Exception:  # noqa: BLE001
-            pass
+            mcp_servers = []
 
+    # Anvil 导入的 skill / MCP 也属于该运行时的可用目录。
+    try:
+        from . import tooling as tooling_service
+        seen_skills = {s["name"] for s in skills}
+        for item in tooling_service.list_skills(conn, runtime=rid):
+            if item["name"] not in seen_skills:
+                skills.append({
+                    "name": item["name"],
+                    "description": item.get("description") or "Anvil 导入的 skill",
+                })
+        index = {s["name"]: i for i, s in enumerate(mcp_servers)}
+        for item in tooling_service.list_mcp_servers(conn):
+            if not item.get("enabled"):
+                continue
+            if item.get("runtime") and item["runtime"] != rid:
+                continue
+            cfg = {
+                "type": item["transport"], "command": item.get("command"),
+                "args": item.get("args") or [], "env": item.get("env") or {},
+                "url": item.get("url"),
+            }
+            entry = _mcp_catalog_entry(
+                item["name"], cfg,
+                descriptions.get(item["name"]) or item.get("description") or "",
+            )
+            # 导入/更新的 registry 条目优先于运行时原始配置。
+            if item["name"] in index:
+                mcp_servers[index[item["name"]]] = entry
+            else:
+                index[item["name"]] = len(mcp_servers)
+                mcp_servers.append(entry)
+    except Exception:  # noqa: BLE001 —— registry 不可用时仍返回运行时自身目录
+        pass
+    skills.sort(key=lambda item: item["name"])
+    mcp_servers.sort(key=lambda item: item["name"])
     return {"runtime": rid, "skills": skills, "mcp_servers": mcp_servers}

@@ -202,6 +202,14 @@ def task_cmd(
     to: str = typer.Option(None, "--to", help="@提及的目标角色"),
     type_: str = typer.Option(None, "--type", help="任务类型"),
     tag: str = typer.Option(None, "--tag", help="按标签过滤 list"),
+    tags: str = typer.Option(None, "--tags", help="create 的标签（逗号分隔）"),
+    repo: str = typer.Option(None, "--repo", help="create 的执行仓库（单值）"),
+    workspace: str = typer.Option(None, "--workspace", help="create 的频道/workspace id"),
+    base_branch: str = typer.Option(None, "--base-branch", help="create 的基线分支"),
+    plan_first: bool = typer.Option(False, "--plan-first", help="创建后先由 planner 规划"),
+    planner: str = typer.Option(None, "--planner", help="create 的 planner 角色"),
+    knowledge_repos: str = typer.Option(
+        None, "--knowledge-repos", help="create 的知识仓库（逗号分隔；人工指定会加锁）"),
     parent: str = typer.Option(None, "--parent", help="父任务 id"),
     title: str = typer.Option(None, "--title", help="任务标题（create 用）"),
     description: str = typer.Option(None, "--description", help="任务描述（create 用）"),
@@ -238,6 +246,21 @@ def task_cmd(
             p["description"] = description
         if parent:
             p["parent_id"] = parent
+        if tags:
+            p["tags"] = [x.strip() for x in tags.split(",") if x.strip()]
+        if repo:
+            p["repo"] = repo.strip()
+        if workspace:
+            p["workspace_id"] = workspace.strip()
+        if base_branch:
+            p["base_branch"] = base_branch.strip()
+        if plan_first:
+            p["plan_first"] = True
+        if planner:
+            p["planner"] = planner.strip()
+        if knowledge_repos:
+            p["knowledge_repos"] = [
+                x.strip() for x in knowledge_repos.split(",") if x.strip()]
         if assignee:
             p["assignee"] = assignee.strip()
         if assignees:
@@ -370,6 +393,7 @@ def knowledge_cmd(
     kind: str = typer.Option(None, "--kind", help="逗号分隔 kind"),
     tags: str = typer.Option(None, "--tags", help="逗号分隔标签"),
     repo: str = typer.Option(None, "--repo"),
+    repos: str = typer.Option(None, "--repos", help="限定知识仓库（逗号分隔）"),
     module: str = typer.Option(None, "--module"),
     include_snapshots: bool = typer.Option(False, "--include-snapshots"),
     include_unclassified: bool = typer.Option(False, "--include-unclassified"),
@@ -381,7 +405,7 @@ def knowledge_cmd(
     prune: bool = typer.Option(False, "--prune"),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    """anvil knowledge <search|show|index|reindex> ..."""
+    """anvil knowledge <search|show|index|reindex|repo-list|repo-show|repo-suggest> ..."""
     if action == "search":
         params = {
             "q": query or "", "scope": scope, "limit": limit,
@@ -392,10 +416,29 @@ def knowledge_cmd(
         if task_id:
             params["task_id"] = task_id
         for key, value in (("kind", kind), ("tags", tags),
-                           ("repo", repo), ("module", module), ("role", role)):
+                           ("repo", repo), ("repos", repos),
+                           ("module", module), ("role", role)):
             if value:
                 params[key] = value
         _emit(_call("GET", "/api/v1/me/knowledge/search", params=params), json_out)
+    elif action == "repo-list":
+        _emit(_call("GET", "/api/v1/knowledge/repos"), json_out)
+    elif action == "repo-show":
+        name = repo or query
+        if not name:
+            typer.echo("knowledge repo-show 需要 --repo <name>", err=True)
+            raise typer.Exit(2)
+        from urllib.parse import quote
+        _emit(_call("GET", f"/api/v1/knowledge/repos/{quote(name, safe='')}"), json_out)
+    elif action == "repo-suggest":
+        if not query:
+            typer.echo("knowledge repo-suggest 需要任务标题", err=True)
+            raise typer.Exit(2)
+        _emit(_call("POST", "/api/v1/knowledge/repos/suggest", {
+            "title": query,
+            "tags": [x.strip() for x in tags.split(",")] if tags else [],
+            "repo": repo,
+        }), json_out)
     elif action == "show":
         if not note_id:
             typer.echo("knowledge show 需要 --id <note-id>", err=True)

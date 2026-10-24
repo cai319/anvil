@@ -1,9 +1,11 @@
 """工具治理端点（M3 / design §10）：skills、MCP servers、工具预设。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+import json
 
-from .. import services
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+
+from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..util import ConflictError
 
@@ -97,6 +99,8 @@ def create_mcp_server(body: dict, conn=Depends(get_db),
         return services.tooling.create_mcp_server(
             conn, name=name, transport=transport, command=body.get("command"),
             args=body.get("args") or [], env=body.get("env") or {}, url=body.get("url"),
+            description=str(body.get("description") or ""),
+            runtime=body.get("runtime"),
         )
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
@@ -149,6 +153,66 @@ def mcp_server_tools(mid: str, conn=Depends(get_db)):
             {**t, "estimated_tokens": max(80, int(len(str(t)) / 3.5))} for t in tools
         ],
     }
+
+
+# ---- 目录 / 压缩包导入 ----------------------------------------------------
+
+
+async def _read_uploads(files: list[UploadFile], paths_raw: str) -> tuple[list[tuple[str, bytes]], list[str]]:
+    try:
+        paths = json.loads(paths_raw or "[]")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail="paths must be a JSON array") from exc
+    if not isinstance(paths, list):
+        raise HTTPException(status_code=422, detail="paths must be a JSON array")
+    uploads: list[tuple[str, bytes]] = []
+    total = 0
+    for idx, upload in enumerate(files):
+        data = await upload.read()
+        total += len(data)
+        if total > 200 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="upload is too large")
+        name = upload.filename or f"file-{idx}"
+        uploads.append((name, data))
+    return uploads, [str(p) for p in paths]
+
+
+@router.post("/tooling/import/skills", status_code=201)
+async def import_skills(
+    runtime: str = Form(config.DEFAULT_RUNTIME),
+    overwrite: bool = Form(False),
+    paths: str = Form("[]"),
+    files: list[UploadFile] = File(...),
+    conn=Depends(get_db),
+    auth: Auth = Depends(require_human),
+):
+    uploads, rel_paths = await _read_uploads(files, paths)
+    try:
+        return services.tool_import.import_skills(
+            conn, runtime, uploads, rel_paths, overwrite=overwrite)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post("/tooling/import/mcp", status_code=201)
+async def import_mcp(
+    runtime: str = Form(config.DEFAULT_RUNTIME),
+    overwrite: bool = Form(False),
+    paths: str = Form("[]"),
+    files: list[UploadFile] = File(...),
+    conn=Depends(get_db),
+    auth: Auth = Depends(require_human),
+):
+    uploads, rel_paths = await _read_uploads(files, paths)
+    try:
+        return services.tool_import.import_mcp(
+            conn, runtime, uploads, rel_paths, overwrite=overwrite)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 # ---- tool presets ---------------------------------------------------------

@@ -13,6 +13,7 @@ import json
 import sqlite3
 
 from ..util import now_iso
+from . import repo_catalog
 from . import roles as roles_service
 from . import runs as runs_service
 from . import runtime as runtime_service
@@ -151,6 +152,49 @@ def _task_size_block(task: dict) -> str:
     return "\n".join(parts)
 
 
+def _task_knowledge_block(conn: sqlite3.Connection, task: dict) -> str:
+    parts: list[str] = []
+    if task.get("repo"):
+        parts.append(f"- 执行 repo：{task['repo']}")
+    if task.get("workspace_id"):
+        try:
+            ws = conn.execute(
+                "SELECT name, repo, description FROM workspaces WHERE id=?",
+                (task["workspace_id"],)).fetchone()
+        except sqlite3.Error:
+            ws = None
+        if ws is not None:
+            parts.append(f"- 频道：{ws['name'] or task['workspace_id']}"
+                         + (f"（repo={ws['repo']}）" if ws["repo"] else ""))
+            if ws["description"]:
+                parts.append(f"- 频道描述：{str(ws['description'])[:300]}")
+    if task.get("base_branch"):
+        parts.append(f"- base_branch：{task['base_branch']}")
+    if task.get("tags"):
+        parts.append("- 当前 tags：" + "、".join(str(x) for x in task["tags"]))
+    else:
+        parts.append("- 当前 tags：（空，请根据任务内容生成 2-6 个）")
+    bindings = task.get("knowledge_repos") or []
+    if bindings:
+        applied = [b["repo"] for b in bindings if b.get("status") == "applied"]
+        suggested = [b["repo"] for b in bindings if b.get("status") == "suggested"]
+        if applied:
+            parts.append("- 已自动绑定知识仓库：" + "、".join(applied))
+        if suggested:
+            parts.append("- 待确认建议：" + "、".join(suggested))
+    if task.get("parent_id"):
+        parent = tasks_service.get(conn, task["parent_id"]) or {}
+        parts.append(f"- 父任务：{parent.get('title') or task['parent_id']}"
+                     + (f"（repo={parent['repo']}）" if parent.get("repo") else ""))
+    if task.get("description"):
+        parts.append("- 任务描述（截断）：" + str(task["description"])[:1200])
+    catalog = repo_catalog.build_catalog(conn, exclude_task_id=task.get("id"))
+    rendered = repo_catalog.render_catalog_for_prompt(catalog)
+    if rendered:
+        parts.append("\n知识仓库目录（只能从这里选择；shared 不是候选）：\n" + rendered)
+    return "\n".join(parts)
+
+
 def _workflow_summary(wf: dict) -> str:
     """给重规划 planner 的当前 workflow 摘要（不逐条展开已生成的切片步骤）。"""
     lines = [f"- workflow id: {wf.get('id')}", f"- status: {wf.get('status')}"]
@@ -218,6 +262,9 @@ def start_planner_run(conn: sqlite3.Connection, db_path: str, orchestrator,
     size_block = _task_size_block(task)
     if size_block:
         prompt += "\n\n## 任务规模信息（用于判断是否需要切片）\n" + size_block
+    knowledge_block = _task_knowledge_block(conn, task)
+    if knowledge_block:
+        prompt += "\n\n## 任务知识与仓库上下文\n" + knowledge_block
     if extra_constraint.strip():
         prompt += "\n\n## 规划约束（必须遵守）\n" + extra_constraint.strip()
     try:

@@ -90,6 +90,34 @@ def get_channel(conn: sqlite3.Connection, wid: str) -> dict | None:
     return d
 
 
+def update_channel(conn: sqlite3.Connection, wid: str, *,
+                   name: str | None = None, repo: str | None = None,
+                   description: str | None = None,
+                   update_repo: bool = False,
+                   update_description: bool = False) -> dict | None:
+    """更新频道元数据；repo/description 显式传入时允许清空。"""
+    if get_channel(conn, wid) is None:
+        return None
+    fields: dict = {}
+    if name is not None:
+        fields["name"] = name
+    if update_repo:
+        fields["repo"] = repo
+    if update_description:
+        fields["description"] = description
+    if fields:
+        fields["updated_at"] = now_iso()
+        cols = ", ".join(f"{k}=?" for k in fields)
+        conn.execute(f"UPDATE workspaces SET {cols} WHERE id=?", (*fields.values(), wid))
+        conn.commit()
+        try:
+            from . import repo_catalog
+            repo_catalog.invalidate_catalog()
+        except Exception:  # noqa: BLE001
+            pass
+    return get_channel(conn, wid)
+
+
 def list_channels(conn: sqlite3.Connection) -> list[dict]:
     out = []
     for r in conn.execute("SELECT id FROM workspaces ORDER BY name"):

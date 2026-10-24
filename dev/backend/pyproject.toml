@@ -4,11 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "anvil"
-version = "0.1.0"
+version = "1.11"
 description = "Anvil backend (FastAPI)"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
+    "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.30",
     "pyyaml>=6.0",
     "langgraph>=0.2.40",

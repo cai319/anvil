@@ -23,7 +23,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import config
 from .api import (
-    actions, agent_inbox, board, events, governance, inbox, memory, reminders, roles, runs, runtimes, tasks, tooling, workflow, workspaces,
+    actions, agent_inbox, board, events, governance, inbox, knowledge_repos, memory, reminders, roles, runs, runtimes, tasks, tooling, workflow, workspaces,
 )
 from .db import connect, open_conn
 from .deps import token_is_valid
@@ -33,6 +33,7 @@ from .services import runs as runs_service
 from .graph import build_graph, get_checkpointer
 from .graph.orchestrator import Orchestrator
 from .scheduler import Scheduler
+from .version import VERSION
 
 
 def _db_path(db_url: str | None) -> str:
@@ -89,7 +90,7 @@ def _cleanup_orphans(conn) -> None:
     for wf in orphan_wfs:
         conn.execute("DELETE FROM workflow_steps WHERE workflow_id=?", (wf["id"],))
         conn.execute("DELETE FROM workflows WHERE id=?", (wf["id"],))
-    for table in ("task_deps", "task_assignees", "task_role_claims"):
+    for table in ("task_deps", "task_assignees", "task_role_claims", "task_knowledge_repos"):
         conn.execute(f"DELETE FROM {table} WHERE task_id NOT IN (SELECT id FROM tasks)")
     conn.execute(
         "DELETE FROM task_deps WHERE depends_on NOT IN (SELECT id FROM tasks)")
@@ -233,7 +234,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         finally:
             _conn.close()
 
-    app = FastAPI(title="Anvil", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Anvil", version=VERSION, lifespan=lifespan)
     app.state.db_path = path
     app.state.test_auth = test_auth
     app.state.graph_db_path = graph_db_path
@@ -253,6 +254,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     app.include_router(actions.router, prefix="/api/v1", tags=["actions"])
     app.include_router(workflow.router, prefix="/api/v1", tags=["workflow"])
     app.include_router(memory.router, prefix="/api/v1", tags=["memory"])
+    app.include_router(knowledge_repos.router, prefix="/api/v1/knowledge", tags=["knowledge-repos"])
     app.include_router(workspaces.router, prefix="/api/v1", tags=["workspaces"])
     app.include_router(governance.router, prefix="/api/v1", tags=["governance"])
     app.include_router(runs.router, prefix="/api/v1", tags=["runs"])

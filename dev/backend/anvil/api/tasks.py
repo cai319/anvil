@@ -6,10 +6,12 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
-from .. import services
+from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import ClaimIn, CommentIn, DepIn, ReviewIn, SubmitIn, TaskIn, TaskOut, TaskPatch
+from ..services import repo_catalog
 from ..services.tasks import ConflictError
+from ..util import now_iso
 from . import events
 
 router = APIRouter()
@@ -69,6 +71,8 @@ def create_task(body: TaskIn, conn=Depends(get_db),
                 auth: Auth = Depends(get_auth)):
     if auth.role:
         body.created_by = ("human" if auth.role == "human" else f"agent:{auth.role}")
+    repos = [r.model_dump() if hasattr(r, "model_dump") else r
+             for r in (body.knowledge_repos or [])]
     try:
         return services.tasks.create(
         conn, id=body.id, title=body.title, type=body.type, priority=body.priority,
@@ -78,6 +82,8 @@ def create_task(body: TaskIn, conn=Depends(get_db),
         plan_first=body.plan_first, planner=body.planner,
         created_by=body.created_by,
         parent_id=body.parent_id, depends_on=body.depends_on,
+        knowledge_repos=repos or None,
+        knowledge_repos_source="human" if auth.role in (None, "human") else "agent",
         )
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
@@ -235,6 +241,8 @@ def cancel_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(require_hum
         result = services.tasks.cancel(conn, tid, auth.role)
     except LookupError:
         raise HTTPException(status_code=404, detail="task not found")
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     events.publish("task", {"id": tid, "status": result["status"]})
     return result
 
@@ -245,6 +253,8 @@ def reopen_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(require_hum
         result = services.tasks.reopen(conn, tid, auth.role)
     except LookupError:
         raise HTTPException(status_code=404, detail="task not found")
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     events.publish("task", {"id": tid, "status": result["status"]})
     return result
 
@@ -252,10 +262,96 @@ def reopen_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(require_hum
 @router.patch("/{tid}", response_model=TaskOut)
 def patch_task(tid: str, body: TaskPatch, conn=Depends(get_db),
                auth: Auth = Depends(require_human)):
-    t = services.tasks.update(conn, tid, **body.model_dump(exclude_none=True))
+    if services.tasks.get(conn, tid) is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    fields = body.model_dump(exclude_none=True)
+    repos = fields.pop("knowledge_repos", None)
+    if repos is not None:
+        repos = [r if isinstance(r, dict) else {"repo": str(r)} for r in repos]
+        services.knowledge_binding.set_manual(
+            conn, tid, repos, source="human", lock=True)
+    try:
+        t = services.tasks.update(conn, tid, **fields)
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     if t is None:
         raise HTTPException(status_code=404, detail="task not found")
+    events.publish("task", {"id": tid, "kind": "knowledge-repos"})
     return t
+
+
+def _knowledge_repo_payload(conn, task: dict) -> dict:
+    return {
+        "task_id": task["id"],
+        "locked": bool(task.get("knowledge_repos_locked")),
+        "state": task.get("knowledge_binding_state"),
+        "repos": task.get("knowledge_repos") or [],
+        "scope": services.knowledge_binding.retrieval_scope(conn, task),
+    }
+
+
+@router.get("/{tid}/knowledge-repos")
+def get_task_knowledge_repos(tid: str, conn=Depends(get_db)):
+    task = services.tasks.get(conn, tid)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    return _knowledge_repo_payload(conn, task)
+
+
+@router.post("/{tid}/knowledge-repos/auto")
+def reauto_task_knowledge_repos(tid: str, conn=Depends(get_db),
+                                auth: Auth = Depends(require_human)):
+    """人工重新识别：解除锁定并重跑 deterministic 匹配；保留 human/cindy 行。"""
+    task = services.tasks.get(conn, tid)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    conn.execute("UPDATE tasks SET knowledge_repos_locked=0 WHERE id=?", (tid,))
+    conn.commit()
+    repo_catalog.invalidate_catalog()
+    services.knowledge_binding.auto_bind(conn, services.tasks.get(conn, tid) or task)
+    task = services.tasks.get(conn, tid)
+    events.publish("task", {"id": tid, "kind": "knowledge-repos"})
+    return _knowledge_repo_payload(conn, task)
+
+
+@router.post("/{tid}/knowledge-repos/{repo}/accept")
+def accept_suggested_repo(tid: str, repo: str, conn=Depends(get_db),
+                          auth: Auth = Depends(require_human)):
+    task = services.tasks.get(conn, tid)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    cur = conn.execute(
+        "UPDATE task_knowledge_repos SET status='applied', source='human', updated_at=? "
+        "WHERE task_id=? AND repo=? AND status='suggested'",
+        (now_iso(), tid, repo))
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="suggestion not found")
+    conn.execute(
+        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
+        "VALUES (?,?,?,?,?)",
+        ("human", tid, "task.knowledge_suggestion_accept", "{}", now_iso()))
+    conn.commit()
+    return _knowledge_repo_payload(conn, services.tasks.get(conn, tid))
+
+
+@router.post("/{tid}/knowledge-repos/{repo}/dismiss")
+def dismiss_suggested_repo(tid: str, repo: str, conn=Depends(get_db),
+                           auth: Auth = Depends(require_human)):
+    task = services.tasks.get(conn, tid)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    cur = conn.execute(
+        "UPDATE task_knowledge_repos SET status='dismissed', updated_at=? "
+        "WHERE task_id=? AND repo=? AND status='suggested'",
+        (now_iso(), tid, repo))
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="suggestion not found")
+    conn.execute(
+        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
+        "VALUES (?,?,?,?,?)",
+        ("human", tid, "task.knowledge_suggestion_dismiss", "{}", now_iso()))
+    conn.commit()
+    return _knowledge_repo_payload(conn, services.tasks.get(conn, tid))
 
 
 @router.post("/{tid}/claim", response_model=TaskOut)
@@ -278,6 +374,8 @@ def unclaim_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth))
         result = services.tasks.unclaim(conn, tid, auth.role)
     except LookupError:
         raise HTTPException(status_code=404, detail="task not found")
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     events.publish("task", {"id": tid, "status": result["status"]})
     return result
 
@@ -562,6 +660,18 @@ def dispatch_task(tid: str, request: Request, conn=Depends(get_db), auth: Auth =
         planner = services.roles.ensure_onboarding(conn)["slug"]
     elif len(assignees) >= 2 and onboarding_enabled:
         planner = services.roles.ensure_onboarding(conn)["slug"]
+    else:
+        # 无 tags（含单角色直派）或确定性匹配只是弱建议：让 Cindy 做一次
+        # 轻量知识路由，生成 tags + knowledge_repos；草案仍由人工批准。
+        cindy_mode = str(getattr(config, "KNOWLEDGE_CINDY_MODE", "tagless")).lower()
+        tagless = not (t.get("tags") or [])
+        weak = t.get("knowledge_binding_state") in (
+            "suggested", "needs_cindy", "fallback")
+        if (onboarding_enabled and cindy_mode != "off"
+                and getattr(config, "KNOWLEDGE_REPOS_ENABLED", True)
+                and str(getattr(config, "KNOWLEDGE_BINDING_MODE", "auto")).lower() != "off"
+                and (cindy_mode == "always" or tagless or weak)):
+            planner = services.roles.ensure_onboarding(conn)["slug"]
 
     if not assignees and planner is None:
         raise HTTPException(

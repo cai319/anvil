@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type Role, type Task, type TimelineEvent, type Workflow, type WorkflowStep } from "../api/client";
+import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Task, type TimelineEvent, type Workflow, type WorkflowStep } from "../api/client";
 import { RoleSessions } from "./RoleSessions";
 import { WorkflowGraph } from "./WorkflowGraph";
 import { roleStatusFromWorkflow } from "../workflowStatus";
@@ -16,12 +16,12 @@ const STATUS_LABEL: Record<Task["status"], string> = {
   in_progress: "进行中",
   in_review: "待评审",
   done: "完成",
-  closed: "已关闭",
+  closed: "已终止",
 };
 
 const RUN_LABEL: Record<string, string> = {
   created: "已创建",
-  projecting: "投影中",
+  projecting: "准备中",
   running: "运行中",
   submitted: "已提交",
   reviewing: "评审中",
@@ -138,6 +138,176 @@ const TL_FILTERS = [
   { key: "run", label: "运行" },
   { key: "review", label: "评审" },
 ] as const;
+
+const REPO_SOURCE_LABEL: Record<string, string> = {
+  auto: "自动",
+  cindy: "Cindy",
+  human: "人工",
+  inherited: "继承",
+  agent: "Agent",
+};
+
+const REPO_STATE_HINT: Record<string, string> = {
+  applied: "已按任务标签/文本自动关联。",
+  suggested: "低置信度建议，确认后才会参与检索。",
+  needs_cindy: "任务还没有标签，派发后由 Cindy 识别。",
+  fallback: "未匹配到知识仓库，回退到执行 repo + shared。",
+  locked: "已人工固定，自动识别和 Cindy 不会覆盖。",
+  off: "知识仓库功能已关闭。",
+};
+
+function KnowledgeRepoPanel({ task, onChanged }: { task: Task; onChanged: () => void }) {
+  const [repos, setRepos] = useState<KnowledgeRepoBinding[]>(task.knowledge_repos ?? []);
+  const [locked, setLocked] = useState(Boolean(task.knowledge_binding_locked));
+  const [state, setState] = useState<string | null>(task.knowledge_binding_state ?? null);
+  const [scope, setScope] = useState<string[] | null>(null);
+  const [catalog, setCatalog] = useState<KnowledgeRepoProfile[]>([]);
+  const [editing, setEditing] = useState(false);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const apply = useCallback((payload: {
+    locked?: boolean; state?: string | null; repos?: KnowledgeRepoBinding[];
+    scope?: { repos: string[] | null };
+  }) => {
+    if (payload.repos) setRepos(payload.repos);
+    if (payload.locked !== undefined) setLocked(Boolean(payload.locked));
+    if (payload.state !== undefined) setState(payload.state);
+    if (payload.scope) setScope(payload.scope.repos);
+  }, []);
+
+  const repoKey = JSON.stringify(task.knowledge_repos ?? []);
+  useEffect(() => {
+    setRepos(task.knowledge_repos ?? []);
+    setLocked(Boolean(task.knowledge_binding_locked));
+    setState(task.knowledge_binding_state ?? null);
+  }, [repoKey, task.knowledge_binding_locked, task.knowledge_binding_state]);
+
+  useEffect(() => {
+    setRepos(task.knowledge_repos ?? []);
+    setLocked(Boolean(task.knowledge_binding_locked));
+    setState(task.knowledge_binding_state ?? null);
+    api.getTaskKnowledgeRepos(task.id)
+      .then((d) => apply(d))
+      .catch(() => {});
+    api.listKnowledgeRepos()
+      .then((d) => setCatalog(d.repos ?? []))
+      .catch(() => setCatalog([]));
+  }, [task.id, apply]);
+
+  const run = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await fn();
+      onChanged();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const visible = repos.filter((r) => r.status !== "dismissed");
+  const applied = visible.filter((r) => r.status === "applied");
+  const suggested = visible.filter((r) => r.status === "suggested");
+
+  return (
+    <>
+      <h3 className="side-h">知识仓库</h3>
+      <div className="repo-panel">
+        {visible.length === 0 && (
+          <p className="muted hint">{REPO_STATE_HINT[state ?? ""] ?? "尚未关联知识仓库。"}</p>
+        )}
+        <div className="repo-chips">
+          {[...applied, ...suggested].map((r) => (
+            <span
+              key={`${r.repo}-${r.status}`}
+              className={`repo-chip repo-${r.status}`}
+              title={r.reason ?? undefined}
+            >
+              <span className="repo-chip-name">{r.repo}</span>
+              <span className="repo-chip-meta">
+                {REPO_SOURCE_LABEL[r.source] ?? r.source}
+                {r.status === "suggested" ? " · 建议" : ""}
+              </span>
+              {r.status === "suggested" && (
+                <span className="repo-chip-actions">
+                  <button type="button" disabled={busy}
+                    onClick={() => run(async () => {
+                      const d = await api.acceptTaskKnowledgeRepo(task.id, r.repo) as {
+                        locked: boolean; state: string; repos: KnowledgeRepoBinding[]; scope: { repos: string[] | null };
+                      };
+                      apply(d);
+                    })}>采纳</button>
+                  <button type="button" disabled={busy}
+                    onClick={() => run(async () => {
+                      const d = await api.dismissTaskKnowledgeRepo(task.id, r.repo) as {
+                        locked: boolean; state: string; repos: KnowledgeRepoBinding[]; scope: { repos: string[] | null };
+                      };
+                      apply(d);
+                    })}>忽略</button>
+                </span>
+              )}
+            </span>
+          ))}
+        </div>
+        {state && (
+          <p className="muted hint">
+            {REPO_STATE_HINT[state] ?? state}
+            {scope?.length ? ` 检索范围：${scope.join("、")}。` : ""}
+          </p>
+        )}
+        {locked && <p className="repo-lock">已人工固定</p>}
+        {!editing ? (
+          <div className="repo-actions">
+            <button type="button" className="small" disabled={busy}
+              onClick={() => {
+                setSelected(applied.map((r) => r.repo));
+                setEditing(true);
+              }}>编辑</button>
+            <button type="button" className="small" disabled={busy}
+              onClick={() => run(async () => {
+                const d = await api.reautoTaskKnowledgeRepos(task.id) as {
+                  locked: boolean; state: string | null; repos: KnowledgeRepoBinding[]; scope: { repos: string[] | null };
+                };
+                apply(d);
+              })}>重新识别</button>
+          </div>
+        ) : (
+          <div className="repo-editor">
+            <select
+              multiple
+              value={selected}
+              onChange={(e) => setSelected(
+                Array.from(e.currentTarget.selectedOptions).map((o) => o.value))}
+            >
+              {catalog.map((p) => (
+                <option key={p.key} value={p.repo}>{p.repo}</option>
+              ))}
+            </select>
+            <div className="repo-actions">
+              <button type="button" className="small" disabled={busy}
+                onClick={() => run(async () => {
+                  const next = await api.patchTask(task.id, {
+                    knowledge_repos: selected.map((repo) => ({ repo })),
+                  });
+                  setRepos(next.knowledge_repos ?? []);
+                  setLocked(Boolean(next.knowledge_binding_locked));
+                  setState(next.knowledge_binding_state ?? null);
+                  setEditing(false);
+                })}>保存并固定</button>
+              <button type="button" className="small" disabled={busy}
+                onClick={() => setEditing(false)}>取消</button>
+            </div>
+          </div>
+        )}
+        {error && <p className="error">{error}</p>}
+      </div>
+    </>
+  );
+}
 
 export function TaskDetail({ id }: { id: string }) {
   const [task, setTask] = useState<Task | null>(null);
@@ -366,6 +536,7 @@ export function TaskDetail({ id }: { id: string }) {
         avatar={roles.find((r) => r.slug === live.slug)?.avatar}
         color={roles.find((r) => r.slug === live.slug)?.avatar_color}
         size={18}
+        status={live.dot.cls}
       />
       <i className={`role-live-dot ${live.dot.cls}`} aria-label={live.title} />
       <span className={`status status-${stateClassForDot(live.dot.cls)} role-live-state`}>
@@ -657,7 +828,7 @@ export function TaskDetail({ id }: { id: string }) {
   };
 
   return (
-    <div className="session">
+    <div className="session task-page">
       <div className="task-sheet">
       <p className="session-back">
         <a href="/"><Icon name="chevron-left" /> 任务大厅</a>
@@ -718,6 +889,7 @@ export function TaskDetail({ id }: { id: string }) {
       </div>
       </div>
 
+      <div className={`task-tab-body ${tab === "chat" ? "is-chat" : ""}`}>
       {tab === "chat" && (
       <div
         className={`task-layout ${panel.collapsed ? "panel-collapsed" : ""}`}
@@ -749,7 +921,7 @@ export function TaskDetail({ id }: { id: string }) {
               <button
                 className="primary"
                 disabled={busy}
-                title="0 角色时 Cindy 会先分析并建议角色；多角色任务先由 Cindy 规划工作流，草案经你批准后按依赖执行"
+                title="0 角色时 Cindy 会先分析并建议角色；多角色任务先由 Cindy 规划工作流；单角色任务若无标签或知识仓库匹配较弱，也会先由 Cindy 识别知识仓库。草案经你批准后执行"
                 onClick={() => act(async () => {
                   const res = await api.dispatchTask(id);
                   setDispatchNote(
@@ -767,7 +939,11 @@ export function TaskDetail({ id }: { id: string }) {
                   ? "派发（Cindy 分析并建议角色）"
                   : (task.assignees?.length ?? 0) >= 2
                     ? "派发（先由 Cindy 规划）"
-                    : "派发并执行"}</button>
+                    : (!task.knowledge_binding_locked
+                        && ["needs_cindy", "suggested", "fallback"].includes(
+                          task.knowledge_binding_state ?? ""))
+                      ? "派发（Cindy 识别知识仓库）"
+                      : "派发并执行"}</button>
             )}
             {task.plan_first && task.status === "todo" && (
               <button
@@ -789,8 +965,16 @@ export function TaskDetail({ id }: { id: string }) {
             {task.status === "closed" && (
               <button onClick={() => act(() => api.reopenTask(id))} disabled={busy}>重新打开</button>
             )}
-            {task.status !== "closed" && (
-              <button className="danger" onClick={() => act(() => api.cancelTask(id))} disabled={busy}>取消任务</button>
+            {["todo", "in_progress", "in_review"].includes(task.status) && (
+              <button
+                className="danger"
+                disabled={busy}
+                onClick={() => {
+                  if (!window.confirm(
+                    "人工终止后任务会进入「已终止」状态，可重新打开；确定终止？")) return;
+                  act(() => api.cancelTask(id));
+                }}
+              >人工终止任务</button>
             )}
             <button
               className="danger"
@@ -910,6 +1094,7 @@ export function TaskDetail({ id }: { id: string }) {
                 ? "你（自然人）"
                 : (systemLabel ?? displayNameFor(role));
               const roleInfo = roles.find((r) => r.slug === role);
+              const liveRole = !isHuman && !systemLabel ? roleLiveFor(role) : null;
               return (
                 <div
                   className={`thread-item ${ev.kind === "comment" ? "is-message" : ""} ${d.mention ? "is-mention" : ""} ${isHuman ? "is-human" : ""} ${systemLabel ? "is-system-event" : ""}`}
@@ -927,6 +1112,7 @@ export function TaskDetail({ id }: { id: string }) {
                       color={roleInfo?.avatar_color}
                       size={32}
                       className="thread-role-avatar"
+                      status={liveRole?.dot.cls}
                     />
                   )}
                   <div className="thread-body">
@@ -1014,7 +1200,7 @@ export function TaskDetail({ id }: { id: string }) {
             </div>
             <button className="primary" onClick={send} disabled={busy || !comment.trim()}>发送</button>
           </div>
-          <p className="muted" style={{ fontSize: 11, margin: "4px 2px 0" }}>
+          <p className="muted hint" style={{ margin: "4px 2px 0" }}>
             提示：输入 <strong>@</strong> 会弹出角色选择（上下键选择，Enter 确认）；选中后按 Enter 发送。
             @角色 消息会按「@提及」发送——时间线标黄并唤醒该角色。
           </p>
@@ -1060,6 +1246,8 @@ export function TaskDetail({ id }: { id: string }) {
             <dt>标签</dt><dd>{task.tags?.length ? task.tags.join(", ") : "—"}</dd>
             <dt>ID</dt><dd className="mono">{task.id}</dd>
           </dl>
+
+          <KnowledgeRepoPanel task={task} onChanged={refresh} />
 
           {task.description && (
             <>
@@ -1200,6 +1388,7 @@ export function TaskDetail({ id }: { id: string }) {
       )}
 
       {tab === "runtime" && <RoleSessions task={task} roles={roles} workflow={workflow} />}
+      </div>
     </div>
   );
 }

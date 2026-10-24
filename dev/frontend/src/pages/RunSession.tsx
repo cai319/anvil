@@ -5,7 +5,7 @@ import { Icon } from "../components/Icon";
 
 const RUN_LABEL: Record<string, string> = {
   created: "已创建",
-  projecting: "投影中",
+  projecting: "准备中",
   running: "运行中",
   submitted: "已提交",
   reviewing: "评审中",
@@ -62,7 +62,12 @@ export function RunSession({ id }: { id: string }) {
       <div className="session-head">
         <div className="session-title">
           <h1 className="mono">run {run.id.slice(0, 8)}</h1>
-          <span className={`status status-${run.status}`}>{RUN_LABEL[run.status] ?? run.status}</span>
+          <span
+            className={`status status-${run.status}`}
+            title={run.status === "projecting"
+              ? "正在把角色说明、任务上下文、知识库和工具配置写入工作区"
+              : undefined}
+          >{RUN_LABEL[run.status] ?? run.status}</span>
           {run.failure_class && (
             <span className="badge badge-in_progress" title="失败分类（P0-4）">{run.failure_class}</span>
           )}
@@ -78,6 +83,12 @@ export function RunSession({ id }: { id: string }) {
           <span className="muted mono">worktree {run.worktree_path ?? "—"}</span>
         </div>
       </div>
+
+      {run.status === "projecting" && (
+        <p className="muted">
+          准备中：正在把角色说明、任务上下文、知识库和工具配置写入工作区，完成后会自动启动角色进程。
+        </p>
+      )}
 
       <div className="toolbar">
         <button onClick={() => api.restartRun(id).then(refresh).catch((e) => setError(String(e)))}>重启进程（保留上下文）</button>

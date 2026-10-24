@@ -108,6 +108,11 @@ class ToolsIn(BaseModel):
 # ---- Tasks ---------------------------------------------------------------
 
 
+class KnowledgeRepoIn(BaseModel):
+    repo: str
+    reason: str | None = None
+
+
 class TaskIn(BaseModel):
     id: str | None = None
     title: str
@@ -127,6 +132,7 @@ class TaskIn(BaseModel):
     created_by: str | None = None
     parent_id: str | None = None
     depends_on: list[str] = Field(default_factory=list)
+    knowledge_repos: list[str | KnowledgeRepoIn] | None = None
 
 
 class TaskPatch(BaseModel):
@@ -141,6 +147,7 @@ class TaskPatch(BaseModel):
     description: str | None = None
     acceptance: list[str] | None = None
     assignee: str | None = None
+    knowledge_repos: list[str | KnowledgeRepoIn] | None = None
 
 
 class TaskOut(BaseModel):
@@ -166,6 +173,9 @@ class TaskOut(BaseModel):
     created_by: str | None = None
     parent_id: str | None = None
     depends_on: list[str] = Field(default_factory=list)
+    knowledge_repos: list[dict[str, Any]] = Field(default_factory=list)
+    knowledge_binding_locked: bool = False
+    knowledge_binding_state: str | None = None
     created_at: str
     updated_at: str
 

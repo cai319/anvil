@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, subscribeEvents } from "./api/client";
 import { installLinkInterceptor, setRouteListener } from "./router";
+import { APP_VERSION } from "./version";
 import { Icon, type IconName } from "./components/Icon";
 import { ActivityHistory } from "./pages/ActivityHistory";
 import { AgentSessions } from "./pages/AgentSessions";
@@ -217,6 +218,11 @@ export default function App() {
   }, [navKey]);
 
   useEffect(() => {
+    // 浏览器标签页标题始终带版本号（静态 index.html 只是首屏兜底）。
+    document.title = `Anvil ${APP_VERSION} — ${PAGE_TITLE[route.page]}`;
+  }, [route.page]);
+
+  useEffect(() => {
     if (!drawerOpen) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -238,6 +244,9 @@ export default function App() {
         <a href="/" className="brand" onClick={() => setDrawerOpen(false)}>
           <span className="dot" />
           <span className="brand-name">Anvil</span>
+          <span className="brand-version" title={`Anvil 当前版本 ${APP_VERSION}`}>
+            {APP_VERSION}
+          </span>
         </a>
 
         <nav className="sidebar-nav">
@@ -297,7 +306,7 @@ export default function App() {
           <TopStatus />
         </header>
 
-        <main className="content">
+        <main className={`content ${route.page === "task" ? "content-task" : route.page === "roles" ? "content-roles" : route.page === "lobby" ? "content-lobby" : route.page === "tooling" ? "content-tooling" : route.page === "governance" ? "content-governance" : route.page === "reminders" ? "content-reminders" : route.page === "knowledge" ? "content-knowledge" : ""}`}>
           {route.page === "inbox" ? (
             <Inbox key={`inbox-${pageKey}`} />
           ) : route.page === "activity" ? (

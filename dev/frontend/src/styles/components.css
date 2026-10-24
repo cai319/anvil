@@ -1,3 +1,5 @@
+@layer legacy {
+
 /* ===== 文本上下文 ===== */
 .muted { color: var(--text-on-ink-muted); }
 .card .muted,
@@ -1296,3 +1298,200 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
 .wf-slice-step > span[style],
 .wf-detail .status[style] { color: var(--ink-900) !important; }
 .wf-detail { border-color: var(--ink-900); }
+
+/* ===== 共享经验记录列表 ===== */
+.lesson-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  background: var(--paper-3);
+  border: var(--stroke) solid var(--ink-900);
+  border-radius: var(--radius);
+  overflow: hidden;
+  color-scheme: light;
+}
+.lesson-list > li + li { border-top: 1.5px dashed var(--paper-2); }
+.lesson-row-wrap {
+  display: flex;
+  align-items: stretch;
+}
+.lesson-row {
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr) auto 18px;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-on-paper);
+  text-align: left;
+  box-shadow: none;
+}
+.lesson-row:hover:not(:disabled) {
+  background: var(--paper-hover);
+  transform: none;
+  box-shadow: none;
+}
+.lesson-row-delete {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: clamp(40px, 3vw, 52px);
+  border: 0;
+  border-left: 1.5px dashed var(--paper-2);
+  border-radius: 0;
+  background: transparent;
+  color: var(--red-on-paper);
+  box-shadow: none;
+}
+.lesson-row-delete:hover:not(:disabled) {
+  background: rgba(185, 28, 28, 0.08);
+  color: var(--red-on-paper);
+  transform: none;
+  box-shadow: none;
+}
+.lesson-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.lesson-source-name {
+  color: var(--text-on-paper);
+  font-size: var(--fs-meta);
+  font-weight: 700;
+  white-space: nowrap;
+}
+.lesson-row-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.lesson-row-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-on-paper);
+  font-size: var(--fs-base);
+  font-weight: 700;
+}
+.lesson-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--text-on-paper-muted);
+  font-size: var(--fs-meta);
+}
+.lesson-row-date {
+  color: var(--text-on-paper-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+  white-space: nowrap;
+}
+.lesson-row-chevron { display: flex; color: var(--text-on-paper-muted); }
+
+.lesson-detail-content {
+  margin: 0 0 14px;
+  color: var(--text-on-paper);
+  font-size: var(--fs-base);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.lesson-detail-meta {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px 14px;
+  margin: 0 0 14px;
+  color: var(--text-on-paper);
+  font-size: var(--fs-meta);
+}
+.lesson-detail-meta dt { color: var(--text-on-paper-muted); font-weight: 700; }
+.lesson-detail-meta dd { margin: 0; overflow-wrap: anywhere; }
+
+.propose-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.knowledge-section { margin-top: clamp(18px, 1.4vw, 28px); }
+.knowledge-section .pane-title {
+  margin: clamp(14px, 1.2vw, 22px) 0 clamp(8px, 0.7vw, 12px);
+}
+.knowledge-section > .pane-title:first-child { margin-top: 0; }
+
+/* 任务知识仓库绑定 */
+.repo-panel { display: flex; flex-direction: column; gap: 8px; }
+.repo-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.repo-chip {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--ink-line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--text-on-paper);
+  font-size: var(--fs-meta);
+  line-height: 1.35;
+}
+.repo-chip.repo-suggested {
+  border-style: dashed;
+  border-color: var(--accent);
+  background: var(--paper-2);
+}
+.repo-chip-name { font-weight: 700; overflow-wrap: anywhere; }
+.repo-chip-meta { color: var(--text-on-paper-muted); font-size: var(--fs-hint); }
+.repo-chip-actions { display: inline-flex; gap: 2px; }
+.repo-chip-actions button {
+  min-height: 0;
+  padding: 1px 5px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent);
+  font-size: var(--fs-hint);
+  cursor: pointer;
+}
+.repo-chip-actions button:hover { background: var(--paper-2); }
+.repo-lock { margin: 0; font-size: var(--fs-hint); color: var(--accent); }
+.repo-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.repo-editor select {
+  width: 100%;
+  min-height: 108px;
+  padding: 6px;
+  border: 1px solid var(--ink-line);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--text-on-paper);
+  font: inherit;
+}
+.repo-editor { display: flex; flex-direction: column; gap: 6px; }
+.repo-draft-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin-bottom: 8px;
+}
+.channel-meta-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+.channel-meta-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-on-ink-muted);
+  font-size: var(--fs-meta);
+}
+.channel-meta-form input,
+.channel-meta-form textarea {
+  width: 100%;
+  font: inherit;
+  color: var(--text-on-ink);
+}
+
+}

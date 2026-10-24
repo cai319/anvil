@@ -1,3 +1,5 @@
+@layer legacy {
+
 /* ── 品牌 ─────────────────────────────────────────── */
 .brand {
   display: flex;
@@ -729,3 +731,5 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
 }
 
 /* 响应式断点 */
+
+}

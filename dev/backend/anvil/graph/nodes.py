@@ -424,7 +424,7 @@ def _project_catalog(conn: sqlite3.Connection, effective: dict, workspace_path: 
             chosen.update({k: servers[k] for k in selected_mcp if k in servers})
         except Exception:  # noqa: BLE001
             pass
-    chosen.update(tooling_service.mcp_config_for(conn, selected_mcp))
+    chosen.update(tooling_service.mcp_config_for(conn, selected_mcp, runtime_id))
     if selected_mcp and chosen:
         try:
             settings = mcp_target
@@ -489,6 +489,7 @@ def project_node(state: dict, config) -> dict:
             responsibilities=proj.get("responsibilities") or [],
             memory=ctx["memory"], snapshot=ctx.get("snapshot", ""),
             notes=ctx["notes"], lessons=ctx["lessons"],
+            knowledge_repos=ctx.get("knowledge_repos"),
             prompt=run.get("prompt") or "",
             protocol=_protocol_for_run(conn, run),
         )

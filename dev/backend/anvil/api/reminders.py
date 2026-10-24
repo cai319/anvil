@@ -62,8 +62,8 @@ def fire_now(rid: str, request: Request, conn=Depends(get_db),
         raise HTTPException(status_code=404, detail="reminder not found")
     if not reminder["role_slug"]:
         raise HTTPException(status_code=422, detail="reminder has no role_slug")
-    run = services.runs.create_run(conn, reminder["role_slug"], None,
-                                   prompt=reminder["prompt"] or "定时提醒")
+    run = services.reminders.create_reminder_run(
+        conn, reminder["role_slug"], reminder["prompt"] or "定时提醒")
     if reminder["kind"] == "cron":
         services.reminders.update_reminder(conn, rid, status="pending")
     else:

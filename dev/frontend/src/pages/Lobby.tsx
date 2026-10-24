@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { api, subscribeEvents, type Role, type Run, type Task } from "../api/client";
+import { api, subscribeEvents, type Role, type RoleRuntimeStatus, type Run, type Task } from "../api/client";
 import { navigate } from "../router";
-import { formatClock, parseTime, useNow } from "../time";
+import { formatClock, formatDateTime, formatRelative, parseTime, useNow } from "../time";
 import { usePanelLayout } from "../usePanelLayout";
 import { NewTaskModal } from "./NewTaskModal";
 import { RoleAvatar } from "../components/RoleAvatar";
@@ -9,12 +9,13 @@ import { Icon } from "../components/Icon";
 import { PageHeader } from "../components/ui";
 
 const COLUMNS: Task["status"][] = ["todo", "in_progress", "in_review", "done", "closed"];
+const MAX_CARD_TAGS = 2;
 const STATUS_LABEL: Record<Task["status"], string> = {
   todo: "待办",
   in_progress: "进行中",
   in_review: "待评审",
   done: "完成",
-  closed: "已关闭",
+  closed: "已终止",
 };
 
 interface Activity {
@@ -34,20 +35,92 @@ const ACTION_LABEL: Record<string, string> = {
   wake: "唤醒",
   starvation: "饥饿升级",
   delete: "删除",
-  cancel: "取消",
-  reopen: "重开",
+  cancel: "人工终止",
+  reopen: "重新打开",
   plan: "规划",
 };
 
 /** 活跃会话的 run 状态（常驻模式下 suspended = 等待下一条消息）。 */
 const RUN_STATUS_LABEL: Record<string, string> = {
   created: "已创建",
-  projecting: "投影中",
+  projecting: "准备中",
   running: "运行中",
   submitted: "已提交",
   reviewing: "评审中",
   suspended: "等待唤醒",
 };
+
+const AVATAR_STATUS_LABEL: Record<string, string> = {
+  pending: "待认领",
+  working: "进行中",
+  running: "进行中",
+  queued: "等待中",
+  submitted: "待评审",
+  approved: "已通过",
+  completed: "已完成",
+  released: "已释放",
+};
+
+function runStatusClass(status: string): string {
+  if (status === "running" || status === "projecting") return "running";
+  if (status === "submitted" || status === "reviewing") return "submitted";
+  if (status === "failed" || status === "error") return "error";
+  return "idle";
+}
+
+/**
+ * 单张任务卡上某个角色的阴影状态。结合角色运行时：
+ * - 角色正忙在这张卡上 → running（绿）
+ * - 角色正忙在别的卡上，且这张卡已派给它或在它的队列里 → queued（橙，等待）
+ * - 已提交/已通过/已完成优先于“忙碌”
+ */
+function taskRoleStatus(task: Task, slug: string, rt?: RoleRuntimeStatus): string {
+  const claim = task.role_claims.find((c) => c.role_slug === slug)?.status ?? "pending";
+  if (task.status === "done" || task.status === "closed") {
+    return claim === "approved" ? "approved" : "completed";
+  }
+  if (claim === "approved") return "approved";
+  if (task.status === "in_review" || claim === "submitted") return "submitted";
+  if (claim === "released") return "released";
+
+  const busy = Boolean(rt?.alive && rt.status === "busy");
+  const assigned = (task.assignees ?? []).includes(slug) || task.assignee === slug;
+  const queuedHere = Boolean(
+    rt?.queue_tasks?.some((q) => q.id === task.id)
+    || (rt?.switching && assigned),
+  );
+
+  if (busy && rt?.current_task_id === task.id) return "running";
+  if (queuedHere) return "queued";
+  if (busy && rt?.current_task_id && rt.current_task_id !== task.id && assigned) {
+    return "queued";
+  }
+  if (claim === "working") return "running";
+  return claim;
+}
+
+/** 任务卡头像：只显示头像，阴影色表示该角色在这张任务上的实时状态。 */
+function TaskRoleAvatar({ task, slug, roles, runtime }: {
+  task: Task;
+  slug: string;
+  roles: Role[];
+  runtime?: RoleRuntimeStatus;
+}) {
+  const role = roles.find((r) => r.slug === slug);
+  const status = taskRoleStatus(task, slug, runtime);
+  const name = role?.display_name ?? slug;
+  return (
+    <RoleAvatar
+      slug={slug}
+      name={name}
+      avatar={role?.avatar}
+      color={role?.avatar_color}
+      size={28}
+      status={status}
+      label={`${name} · ${AVATAR_STATUS_LABEL[status] ?? status}`}
+    />
+  );
+}
 
 function fmtElapsed(start: string | null, now = Date.now()): string {
   const d = parseTime(start);
@@ -91,6 +164,7 @@ export function Lobby() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [roleRuntimes, setRoleRuntimes] = useState<RoleRuntimeStatus[]>([]);
   const [activity, setActivity] = useState<Activity[]>([]);
   const [showNew, setShowNew] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -99,12 +173,20 @@ export function Lobby() {
   const panel = usePanelLayout({ storageKey: "lobby" });
   const now = useNow(30_000); // 运行时长按系统当前时间刷新
 
+  const runtimeByRole = new Map(roleRuntimes.map((rt) => [rt.role_slug, rt]));
+
   const refresh = () =>
-    Promise.all([api.listTasks(), api.listRoles(), api.listActiveRuns()])
-      .then(([t, r, n]) => {
+    Promise.all([
+      api.listTasks(),
+      api.listRoles(),
+      api.listActiveRuns(),
+      api.listRoleRuntimes().catch(() => [] as RoleRuntimeStatus[]),
+    ])
+      .then(([t, r, n, rt]) => {
         setTasks(t);
         setRoles(r);
         setRuns(n);
+        setRoleRuntimes(rt);
       })
       .catch((e) => setError(String(e)));
 
@@ -117,7 +199,7 @@ export function Lobby() {
     refresh();
     refreshActivity();
     return subscribeEvents((ev) => {
-      if (ev.topic === "task" || ev.topic === "tick") refresh();
+      if (ev.topic === "task" || ev.topic === "tick" || ev.topic === "run") refresh();
       if (ev.topic === "task") {
         const p = ev.payload as Record<string, unknown>;
         setActivity((prev) =>
@@ -162,7 +244,7 @@ export function Lobby() {
     .slice(0, 20);
 
   return (
-    <div>
+    <div className="lobby-page">
       <PageHeader
         kicker="MISSION BOARD"
         title="任务大厅"
@@ -211,41 +293,61 @@ export function Lobby() {
                     onDragEnd={() => setDragId(null)}
                   >
                     <a className="card-link" href={`/tasks/${t.id}`} draggable={false}>
-                      <strong>{t.title}</strong>
+                      <strong className="card-title" title={t.title}>{t.title}</strong>
                       <div className="card-meta">
                         {t.assignees?.length ? (
                           <span className="card-roles">
-                            {t.assignees.map((slug) => {
-                              const role = roles.find((r) => r.slug === slug);
-                              return (
-                                <RoleAvatar
-                                  key={slug}
-                                  slug={slug}
-                                  name={role?.display_name ?? slug}
-                                  avatar={role?.avatar}
-                                  color={role?.avatar_color}
-                                  size={20}
-                                />
-                              );
-                            })}
-                            <span>{t.assignees.join("、")}</span>
+                            {t.assignees.map((slug) => (
+                              <TaskRoleAvatar
+                                key={slug}
+                                task={t}
+                                slug={slug}
+                                roles={roles}
+                                runtime={runtimeByRole.get(slug)}
+                              />
+                            ))}
                           </span>
                         ) : t.assignee ? (
                           <span className="card-roles">
-                            <RoleAvatar
+                            <TaskRoleAvatar
+                              task={t}
                               slug={t.assignee}
-                              name={roles.find((r) => r.slug === t.assignee)?.display_name ?? t.assignee}
-                              avatar={roles.find((r) => r.slug === t.assignee)?.avatar}
-                              color={roles.find((r) => r.slug === t.assignee)?.avatar_color}
-                              size={20}
+                              roles={roles}
+                              runtime={runtimeByRole.get(t.assignee)}
                             />
-                            <span>{t.assignee}</span>
                           </span>
                         ) : (
                           <span className="muted">未指派</span>
                         )}
-                        {t.tags?.length > 0 && <span className="muted">#{t.tags.join(" #")}</span>}
                       </div>
+                      {t.tags?.length > 0 && (
+                        <div
+                          className="card-tags"
+                          title={`标签：${t.tags.map((tag) => `#${tag}`).join(" ")}`}
+                        >
+                          {t.tags.slice(0, MAX_CARD_TAGS).map((tag) => (
+                            <span className="card-tag" key={tag}>#{tag}</span>
+                          ))}
+                          {t.tags.length > MAX_CARD_TAGS && (
+                            <span
+                              className="card-tag card-tag-more"
+                              aria-label={`另外 ${t.tags.length - MAX_CARD_TAGS} 个标签：${t.tags.slice(MAX_CARD_TAGS).join("、")}`}
+                            >
+                              +{t.tags.length - MAX_CARD_TAGS}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {t.updated_at && (
+                        <div className="card-foot">
+                          <time
+                            dateTime={t.updated_at}
+                            title={`${formatDateTime(t.updated_at)} · ${t.id}`}
+                          >
+                            {formatRelative(t.updated_at, now)}更新
+                          </time>
+                        </div>
+                      )}
                     </a>
                     {status === "in_review" && (
                       <div className="card-meta" style={{ marginTop: 2 }}>
@@ -321,7 +423,9 @@ export function Lobby() {
                   name={roleName}
                   avatar={roles.find((x) => x.slug === r.role_slug)?.avatar}
                   color={roles.find((x) => x.slug === r.role_slug)?.avatar_color}
-                  size={28}
+                  size={36}
+                  status={runStatusClass(r.status)}
+                  label={`${roleName} · ${RUN_STATUS_LABEL[r.status] ?? r.status}`}
                 />
                 <div className="run-body">
                   <div className="run-title">
@@ -359,6 +463,7 @@ export function Lobby() {
       {showNew && (
         <NewTaskModal
           roles={roles}
+          roleStatus={Object.fromEntries(runs.map((r) => [r.role_slug, runStatusClass(r.status)]))}
           onClose={() => setShowNew(false)}
           onCreated={(task) => {
             setShowNew(false);

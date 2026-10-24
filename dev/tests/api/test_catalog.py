@@ -31,6 +31,9 @@ async def test_runtime_catalog_structure(client):
     assert "skills" in d and "mcp_servers" in d
     assert isinstance(d["skills"], list)
     assert isinstance(d["mcp_servers"], list)
+    for server in d["mcp_servers"]:
+        assert "description" in server
+        assert server["transport"]
 
 
 async def test_role_profile_save_and_read(client):

@@ -127,6 +127,18 @@ def _drafts(conn: sqlite3.Connection) -> list[dict]:
         tree = jloads(r["tree_json"], {})
         kind = r["kind"] or "tasks"
         meta: dict = {"draft_kind": kind}
+        raw_repos = tree.get("knowledge_repos") or []
+        meta["tags"] = tree.get("tags") or []
+        meta["knowledge_repos"] = [
+            {"repo": x.get("repo") or x.get("name") or str(x),
+             "reason": x.get("reason") if isinstance(x, dict) else None}
+            for x in raw_repos if isinstance(x, (str, dict))
+        ]
+        if r["source_task"]:
+            row = conn.execute(
+                "SELECT knowledge_repos_locked FROM tasks WHERE id=?",
+                (r["source_task"],)).fetchone()
+            meta["binding_locked"] = bool(row and row["knowledge_repos_locked"])
         if kind == "role_suggestion":
             roles = tree.get("suggested_roles") or tree.get("roles") or []
             missing = tree.get("missing_capabilities") or []
