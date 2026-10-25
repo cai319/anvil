@@ -58,7 +58,9 @@ def _mentions(conn: sqlite3.Connection) -> list[dict]:
     out = []
     for tid, r in latest.items():
         handled = conn.execute(
-            "SELECT 1 FROM activities WHERE task_id=? AND id>? AND kind IN ('comment','review') LIMIT 1",
+            "SELECT 1 FROM activities WHERE task_id=? AND id>? AND ("
+            "kind IN ('comment','review') OR (kind='mention' AND role_slug='human')) "
+            "LIMIT 1",
             (tid, r["aid"]),
         ).fetchone()
         # 工作流草案在该提及之后被批准 → 也算已回应（Cindy 的「请审阅批准」不应长期滞留）
@@ -68,6 +70,13 @@ def _mentions(conn: sqlite3.Connection) -> list[dict]:
             (tid, r["created_at"]),
         ).fetchone()
         if handled or approved:
+            continue
+        # A done task has no agent waiting for a human reply. Info-only mentions
+        # (e.g. "planning complete, no further workflow changes") stay in the
+        # timeline but must not linger in the actionable inbox.
+        task_status = conn.execute(
+            "SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
+        if task_status and task_status["status"] == "done":
             continue
         p = jloads(r["payload_json"], {})
         msg = str(p.get("message", ""))

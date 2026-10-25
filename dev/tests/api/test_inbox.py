@@ -60,6 +60,34 @@ async def test_inbox_mention_lifecycle(client, seeded):
     assert all(i["kind"] != "mention" for i in body["items"])
 
 
+async def test_inbox_mention_clears_when_human_replies_to_sender(client, seeded):
+    await client.post("/api/v1/tasks", json=task_payload(id="T-REPLY"), headers=auth_headers())
+    await client.post("/api/v1/tasks/T-REPLY/mention",
+                      json={"target": "human", "message": "请确认是否继续"},
+                      headers=auth_headers("pm"))
+    assert any(i["kind"] == "mention" for i in (await _inbox(client))["items"])
+    # 自然人回复该角色（而不是评论）也应视为已响应。
+    await client.post("/api/v1/tasks/T-REPLY/mention",
+                      json={"target": "pm", "message": "已确认，继续"},
+                      headers=human_headers())
+    assert all(i["kind"] != "mention" for i in (await _inbox(client))["items"])
+
+
+async def test_inbox_mention_clears_on_done_task(client, seeded):
+    await client.post("/api/v1/tasks", json=task_payload(id="T-DONE"), headers=auth_headers())
+    await client.post("/api/v1/tasks/T-DONE/mention",
+                      json={"target": "human", "message": "规划确认：任务已完成"},
+                      headers=auth_headers("pm"))
+    assert any(i["kind"] == "mention" for i in (await _inbox(client))["items"])
+    await client.patch("/api/v1/tasks/T-DONE", json={"status": "in_review"},
+                       headers=human_headers())
+    reviewed = await client.post("/api/v1/tasks/T-DONE/review", json={"approve": True},
+                                 headers=human_headers())
+    assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()["status"] == "done"
+    assert all(i["kind"] != "mention" for i in (await _inbox(client))["items"])
+
+
 async def test_inbox_labels_workflow_sender(client, app, seeded):
     """workflow 是系统伪发送者，不是 Agent：收件箱要显示“工作流引擎/系统通知”。"""
     await client.post("/api/v1/tasks", json=task_payload(id="T-SYS"), headers=auth_headers())
