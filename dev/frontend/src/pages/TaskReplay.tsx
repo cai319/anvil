@@ -132,6 +132,7 @@ export function TaskReplay({ id }: { id: string }) {
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(4);
   const [error, setError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
   const streamRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -213,6 +214,24 @@ export function TaskReplay({ id }: { id: string }) {
     setPlaying((p) => !p);
   };
 
+  const exportLog = async () => {
+    setExporting(true);
+    setError(null);
+    try {
+      const blob = await api.downloadTaskReplayLog(id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `replay-${id.slice(0, 8)}.log`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setExporting(false);
+    }
+  };
+
   if (error) return <p className="error">{error}</p>;
   if (!task) return <p className="muted">加载任务回放…</p>;
 
@@ -232,9 +251,15 @@ export function TaskReplay({ id }: { id: string }) {
           </>
         }
         actions={
-          <span className={`status status-${task.status === "done" ? "done" : task.status === "in_progress" ? "in_progress" : "closed"}`}>
-            {task.status === "done" ? "已完成" : task.status === "in_progress" ? "进行中" : task.status}
-          </span>
+          <>
+            <button className="small" disabled={exporting} onClick={exportLog}>
+              <Icon name="file-text" size={12} />
+              {exporting ? "导出中…" : "导出日志"}
+            </button>
+            <span className={`status status-${task.status === "done" ? "done" : task.status === "in_progress" ? "in_progress" : "closed"}`}>
+              {task.status === "done" ? "已完成" : task.status === "in_progress" ? "进行中" : task.status}
+            </span>
+          </>
         }
       />
 

@@ -9,6 +9,7 @@ from ..services.tasks import ConflictError
 from ..services import dossier as dossier_service
 from ..services import leases as lease_service
 from ..services import metrics as metrics_service
+from ..services import replay as replay_service
 from ..services import reviews as review_service
 from ..services import weights as weight_service
 from . import events
@@ -93,6 +94,19 @@ def get_task_dossier(tid: str, workflow_id: str | None = None,
     if wid is None:
         raise HTTPException(status_code=404, detail="task has no workflow")
     return get_dossier(wid, format=format, conn=conn)
+
+
+@router.get("/tasks/{tid}/replay/log")
+def download_replay_log(tid: str, conn=Depends(get_db)):
+    """Export the complete task replay (metadata + workflow + event stream) as .log."""
+    try:
+        content = replay_service.render_log(conn, tid)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="task not found")
+    filename = replay_service.log_filename(tid)
+    return Response(
+        content=content, media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @router.get("/tasks/{tid}/leases")

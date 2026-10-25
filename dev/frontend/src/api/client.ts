@@ -232,6 +232,11 @@ export const api = {
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     return res.blob();
   },
+  downloadTaskReplayLog: async (taskId: string): Promise<Blob> => {
+    const res = await authFetch(`${BASE}/tasks/${taskId}/replay/log`);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return res.blob();
+  },
   setTaskWorkflowWeight: (taskId: string, weight: WorkflowWeight, reason?: string): Promise<TaskWeightResult> =>
     req("POST", `/tasks/${taskId}/workflow-weight`, { weight, reason }).then((r) => json<TaskWeightResult>(r)),
   clearTaskWorkflowWeight: (taskId: string): Promise<TaskWeightResult> =>

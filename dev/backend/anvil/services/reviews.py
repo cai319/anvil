@@ -255,7 +255,8 @@ def latest_packet(conn: sqlite3.Connection, workflow_id: str, step_id: str) -> d
 
 def decisions_for_step(conn: sqlite3.Connection, workflow_id: str, step_id: str) -> list[dict]:
     rows = conn.execute(
-        "SELECT * FROM decisions WHERE workflow_id=? AND step_id=? ORDER BY id",
+        "SELECT * FROM decisions WHERE workflow_id=? AND step_id=? "
+        "ORDER BY created_at, rowid",
         (workflow_id, step_id)).fetchall()
     out = []
     for row in rows:

@@ -18,7 +18,8 @@ def _packets(conn: sqlite3.Connection, wid: str) -> list[dict]:
                     "upstream_json", "risks_json", "recommendation_json"):
             d[key[:-5]] = jloads(d.pop(key), {} if key == "recommendation_json" else [])
         decisions = conn.execute(
-            "SELECT * FROM decisions WHERE packet_id=? ORDER BY id", (d["id"],)).fetchall()
+            "SELECT * FROM decisions WHERE packet_id=? "
+            "ORDER BY created_at, rowid", (d["id"],)).fetchall()
         d["decisions"] = []
         for dec in decisions:
             item = dict(dec)
