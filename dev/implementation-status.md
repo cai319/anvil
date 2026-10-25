@@ -44,6 +44,8 @@
   `POST .../resolve-conflicts`；冲突未裁决不注入。
 - CLI：`workspace knowledge list|propose|approve|harvest|review`、`task archive|unarchive|knowledge-*`、
   `memory/note` 实践证据参数、`knowledge card-template|card-validate`。
+- v1.30.1 前端反馈修正：频道页新增「任务」页签（含已归档任务）与紧凑响应式表单；
+  任务大厅固定展示全部未归档任务，不做频道筛选，仅保留「归档已完成」批量操作。
 - 注入默认 `CHANNEL_KNOWLEDGE_ENABLED=0`，按频道试点后再开启；任务知识默认开启。
 
 ### 多角色团队任务（2026-10-18 修正）

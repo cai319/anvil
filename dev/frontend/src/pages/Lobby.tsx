@@ -164,7 +164,6 @@ export function Lobby() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
-  const [channelFilter, setChannelFilter] = useState<string>("all");
   const [runs, setRuns] = useState<Run[]>([]);
   const [roleRuntimes, setRoleRuntimes] = useState<RoleRuntimeStatus[]>([]);
   const [activity, setActivity] = useState<Activity[]>([]);
@@ -259,11 +258,9 @@ export function Lobby() {
     await act(task.id, () => moveTask(task, target));
   };
 
-  // 任务大厅只展示高层任务（workflow 步骤不是 task）；归档任务由后端默认过滤。
-  const visibleTasks = channelFilter === "all"
-    ? tasks
-    : tasks.filter((t) => t.workspace_id === channelFilter);
-  const boardTasks = visibleTasks.filter((t) => !t.parent_id);
+  // 大厅固定展示全部未归档任务（归档由后端默认过滤）；频道内任务在频道页查看。
+  // workflow 步骤不是 task，这里只展示高层任务。
+  const boardTasks = tasks.filter((t) => !t.parent_id);
   const channelName = (id?: string | null) => {
     if (!id) return "未归属频道";
     return channels.find((c) => c.id === id)?.name ?? id.slice(0, 8);
@@ -288,8 +285,7 @@ export function Lobby() {
               <button className="small" onClick={panel.toggle}>显示右栏</button>
             )}
             <button className="small" onClick={() =>
-              act("archive-completed", () => api.archiveCompletedTasks(
-                channelFilter === "all" ? undefined : channelFilter))
+              act("archive-completed", () => api.archiveCompletedTasks())
             }>归档已完成</button>
             <button className="primary new-task-btn" onClick={() => setShowNew(true)}>
               <Icon name="plus" /> 新建任务
@@ -297,18 +293,8 @@ export function Lobby() {
           </>
         }
       />
-      <div className="toolbar" style={{ flexWrap: "wrap", marginBottom: 8 }}>
-        <button className={channelFilter === "all" ? "primary" : ""}
-          onClick={() => setChannelFilter("all")}>全部频道</button>
-        {channels.map((c) => (
-          <button key={c.id} className={channelFilter === c.id ? "primary" : ""}
-            onClick={() => setChannelFilter(c.id)} title={c.repo ?? ""}>
-            {c.name}
-          </button>
-        ))}
-      </div>
       <p className="muted" style={{ marginBottom: 12 }}>
-        选择参与成员后创建；多角色任务会先由 Cindy 规划工作流。频道是任务的上一层作用域。
+        全部未归档任务。选择参与成员后创建；多角色任务会先由 Cindy 规划工作流。
       </p>
 
       {error && <p className="error">{error}</p>}
@@ -399,13 +385,6 @@ export function Lobby() {
                         </div>
                       )}
                     </a>
-                    {(status === "done" || status === "closed") && (
-                      <div className="card-meta" style={{ marginTop: 2 }}>
-                        <button className="small" onClick={() => act(t.id, () => api.archiveTask(t.id))}>
-                          归档
-                        </button>
-                      </div>
-                    )}
                     {status === "in_review" && (
                       <div className="card-meta" style={{ marginTop: 2 }}>
                         <a className="badge review-flag" href="/inbox" draggable={false}
@@ -521,7 +500,7 @@ export function Lobby() {
         <NewTaskModal
           roles={roles}
           channels={channels}
-          defaultChannelId={channelFilter === "all" ? null : channelFilter}
+          defaultChannelId={null}
           roleStatus={Object.fromEntries(visibleRuns.map((r) => [r.role_slug, runStatusClass(r.status)]))}
           onClose={() => setShowNew(false)}
           onCreated={(task) => {

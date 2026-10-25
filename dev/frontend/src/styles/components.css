@@ -1484,14 +1484,129 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
   display: flex;
   flex-direction: column;
   gap: 4px;
-  color: var(--text-on-ink-muted);
-  font-size: var(--fs-meta);
+  color: var(--text-on-paper-muted);
+  font-size: var(--fs-hint);
+  font-weight: 600;
 }
 .channel-meta-form input,
-.channel-meta-form textarea {
+.channel-meta-form textarea,
+.channel-meta-form select {
   width: 100%;
-  font: inherit;
-  color: var(--text-on-ink);
+  min-height: var(--control-h-sm);
+  padding: 5px 8px;
+  font-size: var(--fs-hint);
+  color: var(--text-on-paper);
+}
+
+/* ── 频道页：与角色工坊一致的布局与紧凑表单 ─────────────── */
+.channels-page .channel-detail-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+}
+.channels-page .channel-detail-body > h3 {
+  margin: clamp(12px, 1vw, 18px) 0 4px;
+  padding-bottom: 5px;
+  border-bottom: 1.5px dashed var(--paper-2);
+  color: var(--text-on-paper-soft);
+  font-size: var(--fs-hint);
+}
+.channels-page .channel-detail-body > h3:first-child { margin-top: 0; }
+.channels-list a {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.channel-list-name {
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.channel-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: clamp(8px, 0.6vw, 12px);
+  max-width: 1040px;
+}
+.channel-form-grid .span-2 { grid-column: 1 / -1; }
+.channel-form-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-on-paper-muted);
+  font-size: var(--fs-hint);
+  font-weight: 600;
+}
+.channel-form-grid input,
+.channel-form-grid select,
+.channel-form-grid textarea {
+  width: 100%;
+  min-height: var(--control-h-sm);
+  padding: 5px 8px;
+  font-size: var(--fs-hint);
+  font-weight: 500;
+  color: var(--text-on-paper);
+}
+.channel-form-grid select { height: var(--control-h-sm); }
+.channel-form-grid textarea { line-height: 1.5; resize: vertical; }
+.channel-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: clamp(6px, 0.5vw, 10px);
+  max-width: 1040px;
+  margin-bottom: 12px;
+}
+.channel-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.channel-stat span,
+.channel-stat small { font-size: var(--fs-hint); color: var(--text-on-paper-muted); }
+.channel-stat strong { font-size: var(--fs-meta); overflow-wrap: anywhere; }
+.channel-task-list li { flex-wrap: wrap; gap: 6px 12px; }
+.channel-task-list a { font-weight: 600; overflow-wrap: anywhere; }
+.channel-task-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.channel-knowledge-list { list-style: none; padding-left: 0; max-height: none; overflow: visible; }
+.channel-knowledge-list li {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--border);
+}
+.channel-knowledge-list li:last-child { border-bottom: none; }
+.channel-knowledge-main { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
+.channel-knowledge-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-hint);
+}
+.channel-knowledge-tldr { color: var(--text-on-paper-soft); font-size: var(--fs-hint); }
+.channel-knowledge-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+@media (max-width: 899px) {
+  .channels-page .channel-detail-body { overflow: visible; padding-right: 0; scrollbar-gutter: auto; }
+  .channel-knowledge-list li { flex-direction: column; }
+  .channel-knowledge-actions { justify-content: flex-start; }
 }
 
 }

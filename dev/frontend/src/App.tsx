@@ -341,7 +341,7 @@ export default function App() {
           <TopStatus />
         </header>
 
-        <main className={`content ${route.page === "task" ? "content-task" : route.page === "replay" ? "content-replay" : route.page === "roles" ? "content-roles" : route.page === "lobby" ? "content-lobby" : route.page === "tooling" ? "content-tooling" : route.page === "governance" ? "content-governance" : route.page === "reminders" ? "content-reminders" : route.page === "knowledge" ? "content-knowledge" : route.page === "templates" ? "content-templates" : ""}`}>
+        <main className={`content ${route.page === "task" ? "content-task" : route.page === "replay" ? "content-replay" : (route.page === "roles" || route.page === "channels") ? "content-roles" : route.page === "lobby" ? "content-lobby" : route.page === "tooling" ? "content-tooling" : route.page === "governance" ? "content-governance" : route.page === "reminders" ? "content-reminders" : route.page === "knowledge" ? "content-knowledge" : route.page === "templates" ? "content-templates" : ""}`}>
           {route.page === "inbox" ? (
             <Inbox key={`inbox-${pageKey}`} />
           ) : route.page === "activity" ? (
