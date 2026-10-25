@@ -125,6 +125,8 @@ async def test_cards_aggregate_filters_and_pagination(client, app):
     assert body["total"] == 3
     assert {item["workspace_name"] for item in body["items"]} == {"alpha", "beta"}
     assert body["items"][0]["status"] == "proposed"  # proposed 排前
+    assert "hit_count" in body["items"][0]
+    assert "last_hit_at" in body["items"][0]
 
     proposed = await client.get(
         f"{API}/knowledge/cards?status=proposed", headers=human_headers()

@@ -59,6 +59,9 @@ export function TaskKnowledgeTab({ channels, onTotal }: {
           共 {total} 条{total > 500 ? "，显示前 500 条" : ""}
         </span>
       </div>
+      <p className="muted knowledge-scope-note">
+        任务知识用于任务内共享；目前不追踪单条命中次数。
+      </p>
       {error && <p className="error">{error}</p>}
       {loading ? (
         <p className="muted">加载中…</p>

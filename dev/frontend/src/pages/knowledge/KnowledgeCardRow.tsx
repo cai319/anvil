@@ -1,4 +1,5 @@
 import type { KnowledgeStatus, TaskKnowledge, WorkspaceKnowledge } from "../../api/client";
+import { formatDateTime } from "../../time";
 import {
   AUTHORITY_LABEL,
   KNOWLEDGE_KIND_LABEL,
@@ -39,7 +40,7 @@ export function KnowledgeBadges({ kind, authority, status, expired, reviewAt, co
         </span>
       )}
       <span className="chip">{KNOWLEDGE_KIND_LABEL[kind] ?? kind}</span>
-      {expired && <span className="review-reason">已过期，不注入</span>}
+      {expired && <span className="review-reason">已过期，不进入上下文</span>}
       {reviewAt && <span className="review-reason">复核 {fmtDate(reviewAt)}</span>}
       {conflicts && conflicts.length > 0 && (
         <span className="review-reason">冲突 {conflicts.length}</span>
@@ -74,6 +75,13 @@ export function ChannelKnowledgeRow({ card, busy, onApprove, onReject }: {
             </a>
             {card.completeness < 1 && (
               <span className="muted">完整度 {Math.round(card.completeness * 100)}%</span>
+            )}
+            {card.status === "approved" && (
+              <span className="knowledge-record-hits"
+                title="知识卡被检索命中并加入 CIC / one-shot 上下文的次数；只代表使用机会，不代表收益">
+                {card.hit_count ? `命中 ${card.hit_count} 次` : "未命中"}
+                {card.last_hit_at ? ` · 最近命中 ${formatDateTime(card.last_hit_at)}` : ""}
+              </span>
             )}
           </span>
           <span className="knowledge-record-tldr">{card.tldr}</span>

@@ -1411,6 +1411,7 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
 }
 .knowledge-scope-toolbar > select { max-width: 190px; }
 .knowledge-scope-count { font-size: var(--fs-card-meta); white-space: nowrap; }
+.knowledge-scope-note { margin: 0 0 8px; font-size: var(--fs-hint); }
 .knowledge-record-list {
   list-style: none;
   margin: 0;
@@ -1456,6 +1457,14 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
   color: var(--text-on-paper-soft);
   font-size: var(--fs-hint);
   line-height: 1.45;
+}
+.knowledge-record-hits {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--paper-2);
+  color: var(--text-on-paper-soft);
+  font-size: var(--fs-card-meta);
+  white-space: nowrap;
 }
 .knowledge-record-actions {
   display: flex;

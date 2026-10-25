@@ -596,8 +596,11 @@ export function Channels() {
                                 {KNOWLEDGE_STATUS_LABEL[k.status] ?? k.status} ·
                                 完整度 {Math.round(k.completeness * 100)}%
                                 {k.expires_at ? ` · 过期 ${k.expires_at.slice(0, 10)}` : ""}
-                                {k.is_expired ? " · 已过期（不注入）" : ""}
+                                {k.is_expired ? " · 已过期（不进入上下文）" : ""}
                                 {k.review_at ? ` · 复核 ${k.review_at.slice(0, 10)}` : ""}
+                                {k.status === "approved"
+                                  ? ` · 命中 ${k.hit_count ?? 0} 次${k.last_hit_at ? `（最近命中 ${k.last_hit_at.slice(0, 10)}）` : ""}`
+                                  : ""}
                                 {k.conflicts.length > 0 ? ` · 冲突 ${k.conflicts.length} 条` : ""}
                               </small>
                             </span>
