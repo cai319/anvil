@@ -180,6 +180,7 @@ class TaskOut(BaseModel):
     knowledge_binding_state: str | None = None
     created_at: str
     updated_at: str
+    archived_at: str | None = None
 
 
 class ClaimIn(BaseModel):
@@ -211,6 +212,11 @@ class CommentIn(BaseModel):
 
 class MemoryAppendIn(BaseModel):
     content: str
+    practice_task_id: str | None = None
+    practice_run_id: str | None = None
+    outcome: str | None = None
+    source_knowledge: list[str] = Field(default_factory=list)
+    force: bool = False
 
 
 class NoteWriteIn(BaseModel):
@@ -225,6 +231,11 @@ class NoteWriteIn(BaseModel):
     module: str | None = None
     confidence: float = Field(0.5, ge=0.0, le=1.0)
     mode: str = "append"  # append | replace
+    practice_task_id: str | None = None
+    practice_run_id: str | None = None
+    outcome: str | None = None
+    source_knowledge: list[str] = Field(default_factory=list)
+    force: bool = False
 
 
 class ProposalIn(BaseModel):

@@ -242,7 +242,7 @@ def _base_where(role: str, task_id: str | None, scope: str,
                 include_snapshots: bool, include_unclassified: bool,
                 repo_scope: str = "any", task_repo: str | None = None,
                 repos: tuple[str, ...] | list[str] | None = None):
-    clauses = ["n.role_slug=?"]
+    clauses = ["n.role_slug=?", "n.status='active'"]
     params: list = [role]
     if task_id is None:
         clauses.append("n.scope<>'task'")
@@ -851,6 +851,10 @@ def reindex_notes(conn: sqlite3.Connection, role_slug: str, *,
         except (ValueError, OSError):
             skipped += 1
             continue
+        if rel.startswith(".draft/"):
+            # 未验证的个人知识草稿不进入正式索引。
+            skipped += 1
+            continue
         scanned += 1
         try:
             if file.stat().st_size > 200_000:
@@ -875,19 +879,35 @@ def reindex_notes(conn: sqlite3.Connection, role_slug: str, *,
         if old is not None:
             conn.execute("DELETE FROM notes WHERE role_slug=? AND path=?",
                          (role_slug, rel))
+        text = body.strip()
+        title = (old["title"] if old is not None and old["title"] else
+                 text.splitlines()[0][:80] if text else "")
+        tldr = (old["tldr"] if old is not None and old["tldr"] else
+                " ".join(text.split())[:200])
         conn.execute(
             "INSERT INTO notes (id, role_slug, path, content, created_at, kind, scope, "
             "task_id, source_task, tags_json, repo, module, confidence, updated_at, "
-            "source, content_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "source, content_hash, title, tldr, fields_json, practice_task_id, "
+            "practice_run_id, outcome, verified_at, status, source_knowledge_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (hashlib.sha1(f"{role_slug}:{rel}:{inferred['content_hash']}".encode())
              .hexdigest()[:16], role_slug, rel, body, inferred["updated_at"],
              inferred["kind"], inferred["scope"], inferred["task_id"],
              inferred["source_task"], jdumps(inferred["tags"]), inferred["repo"],
              inferred["module"], inferred["confidence"], inferred["updated_at"],
-             "reindex", inferred["content_hash"]))
+             "reindex", inferred["content_hash"], title, tldr,
+             old["fields_json"] if old is not None else "{}",
+             old["practice_task_id"] if old is not None else None,
+             old["practice_run_id"] if old is not None else None,
+             old["outcome"] if old is not None else None,
+             old["verified_at"] if old is not None else None,
+             old["status"] if old is not None else "active",
+             old["source_knowledge_json"] if old is not None else "[]"))
     if prune and not dry_run:
         for rel, old in existing.items():
             if rel not in seen:
+                if old["status"] == "draft":
+                    continue
                 conn.execute("DELETE FROM notes WHERE id=?", (old["id"],))
                 updated += 1
     if not dry_run:

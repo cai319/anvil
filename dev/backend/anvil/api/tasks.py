@@ -69,12 +69,28 @@ def _resume_after_review(request: Request, conn, tid: str, approve: bool) -> Non
 @router.post("", status_code=201, response_model=TaskOut)
 def create_task(body: TaskIn, conn=Depends(get_db),
                 auth: Auth = Depends(get_auth)):
+    is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
+    if is_real_agent:
+        # 主任务保持 human 创建；角色运行时只能在“自己参与的任务”下创建子任务。
+        if not body.parent_id:
+            raise HTTPException(
+                status_code=403,
+                detail="agents may only create subtasks under a parent task",
+            )
+        parent = services.tasks.get(conn, body.parent_id)
+        if parent is None:
+            raise HTTPException(status_code=404, detail="parent task not found")
+        if not services.tasks.is_task_participant(conn, body.parent_id, auth.role):
+            raise HTTPException(
+                status_code=403,
+                detail="agent is not a participant of the parent task",
+            )
     if auth.role:
         body.created_by = ("human" if auth.role == "human" else f"agent:{auth.role}")
     repos = [r.model_dump() if hasattr(r, "model_dump") else r
              for r in (body.knowledge_repos or [])]
     try:
-        return services.tasks.create(
+        task = services.tasks.create(
         conn, id=body.id, title=body.title, type=body.type, priority=body.priority,
         tags=body.tags, repo=body.repo, workspace_id=body.workspace_id, base_branch=body.base_branch,
         scope_paths=body.scope_paths, description=body.description,
@@ -85,6 +101,16 @@ def create_task(body: TaskIn, conn=Depends(get_db),
         knowledge_repos=repos or None,
         knowledge_repos_source="human" if auth.role in (None, "human") else "agent",
         )
+        if is_real_agent:
+            services.tasks.audit_create(
+                conn, task["id"], auth.role,
+                parent_id=body.parent_id,
+                workspace_id=task.get("workspace_id"),
+                repo=task.get("repo"),
+            )
+        return task
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="task not found") from exc
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
@@ -167,10 +193,15 @@ def assign_existing_roles(tid: str, body: dict, request: Request,
 def list_tasks(status: str | None = Query(default=None), assignee: str | None = Query(default=None),
                workspace_id: str | None = Query(default=None), type: str | None = Query(default=None),
                tag: str | None = Query(default=None),
-               parent_id: str | None = Query(default=None), conn=Depends(get_db)):
+               parent_id: str | None = Query(default=None),
+               include_archived: bool = Query(default=False),
+               archived_only: bool = Query(default=False),
+               conn=Depends(get_db)):
     return services.tasks.list_all(conn, status=status, assignee=assignee,
                                    workspace_id=workspace_id, type=type, tag=tag,
-                                   parent_id=parent_id)
+                                   parent_id=parent_id,
+                                   include_archived=include_archived,
+                                   archived_only=archived_only)
 
 
 @router.get("/{tid}", response_model=TaskOut)
@@ -179,6 +210,45 @@ def get_task(tid: str, conn=Depends(get_db)):
     if t is None:
         raise HTTPException(status_code=404, detail="task not found")
     return t
+
+
+@router.get("/{tid}/knowledge")
+def list_task_knowledge(tid: str, include_subtasks: bool = False, deep: bool = False,
+                        conn=Depends(get_db)):
+    try:
+        return services.task_knowledge.list_for_task(
+            conn, tid, include_subtasks=include_subtasks, deep=deep)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="task not found")
+
+
+@router.post("/{tid}/knowledge", status_code=201)
+def create_task_knowledge(tid: str, body: dict, conn=Depends(get_db),
+                          auth: Auth = Depends(get_auth)):
+    is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
+    if is_real_agent and not services.tasks.is_task_participant(conn, tid, auth.role):
+        raise HTTPException(status_code=403, detail="agent is not a participant of this task")
+    try:
+        return services.task_knowledge.create(
+            conn, tid,
+            title=str(body.get("title") or "").strip(),
+            tldr=str(body.get("tldr") or "").strip(),
+            kind=str(body.get("kind") or ""),
+            fields=body.get("fields") or {},
+            tags=body.get("tags") or [],
+            source_role=auth.role,
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="task not found")
+    except services.tasks.ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.delete("/{tid}/knowledge/{kid}", status_code=204)
+def delete_task_knowledge(tid: str, kid: str, conn=Depends(get_db),
+                          auth: Auth = Depends(require_human)):
+    services.task_knowledge.delete(conn, kid)
+    return None
 
 
 @router.get("/{tid}/timeline")
@@ -257,6 +327,34 @@ def reopen_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(require_hum
         raise HTTPException(status_code=409, detail=str(exc))
     events.publish("task", {"id": tid, "status": result["status"]})
     return result
+
+
+@router.post("/{tid}/archive", response_model=TaskOut)
+def archive_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(require_human)):
+    try:
+        result = services.tasks.archive(conn, tid, auth.role)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="task not found")
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    events.publish("task", {"id": tid, "archived": True})
+    return result
+
+
+@router.post("/{tid}/unarchive", response_model=TaskOut)
+def unarchive_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(require_human)):
+    try:
+        result = services.tasks.unarchive(conn, tid, auth.role)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="task not found")
+    events.publish("task", {"id": tid, "archived": False})
+    return result
+
+
+@router.post("/archive-completed")
+def archive_completed_tasks(workspace_id: str | None = Query(default=None),
+                            conn=Depends(get_db), auth: Auth = Depends(require_human)):
+    return services.tasks.archive_completed(conn, workspace_id=workspace_id, role=auth.role)
 
 
 @router.patch("/{tid}", response_model=TaskOut)

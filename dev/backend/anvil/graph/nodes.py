@@ -489,6 +489,8 @@ def project_node(state: dict, config) -> dict:
             responsibilities=proj.get("responsibilities") or [],
             memory=ctx["memory"], snapshot=ctx.get("snapshot", ""),
             notes=ctx["notes"], lessons=ctx["lessons"],
+            channel_knowledge=ctx.get("channel_knowledge", ""),
+            task_knowledge=ctx.get("task_knowledge", ""),
             knowledge_repos=ctx.get("knowledge_repos"),
             prompt=run.get("prompt") or "",
             protocol=_protocol_for_run(conn, run),

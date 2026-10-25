@@ -18,6 +18,7 @@ class Auth:
     role: str | None
     task_id: str | None = None  # 绑定的任务；非空时该会话只能操作这一个任务
     run_id: str | None = None    # 运行级会话绑定的 run；用于 stale-run 围栏
+    test_bypass: bool = False    # ANVIL_TEST_AUTH 旁路；不代表真实 Agent 身份
 
 
 # 本地单用户模式下的共享 token。显式设置 ANVIL_AUTH_TOKEN 后只接受该值。
@@ -75,7 +76,11 @@ def get_auth(
     # 测试旁路（仅测试环境用；M2 上真 session 校验时须确保生产关死 ANVIL_TEST_AUTH）。
     test_auth = bool(getattr(request.app.state, "test_auth", False)) or os.environ.get("ANVIL_TEST_AUTH") == "1"
     if test_auth:
-        return Auth(session=x_anvil_session or "test-session", role=x_anvil_role or "qa-role")
+        return Auth(
+            session=x_anvil_session or "test-session",
+            role=x_anvil_role or "qa-role",
+            test_bypass=True,
+        )
     if not x_anvil_session:
         raise HTTPException(status_code=401, detail="missing X-Anvil-Session")
 

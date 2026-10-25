@@ -222,12 +222,18 @@ def task_cmd(
     force: bool = typer.Option(False, "--force", help="delete 强制；comment/mention 知情越过 held"),
     expect_activity: int = typer.Option(None, "--expect-activity",
                                         help="Held Draft：发送时依据的最新活动 id"),
+    tldr: str = typer.Option(None, "--tldr", help="knowledge-write 的一句话摘要"),
+    fields: str = typer.Option(None, "--fields", help="knowledge-write 的字段 JSON"),
+    knowledge_id: str = typer.Option(None, "--id", help="knowledge-delete 的知识 id"),
+    include_subtasks: bool = typer.Option(False, "--include-subtasks",
+                                         help="knowledge-list 包含直接子任务知识"),
     json_out: bool = typer.Option(False, "--json", help="输出 JSON"),
 ):
-    """anvil task <list|show|create|assign|claim|unclaim|heartbeat|submit|comment|mention|cancel|reopen|delete|block> …"""
+    """anvil task <list|show|create|assign|claim|unclaim|heartbeat|submit|comment|mention|cancel|reopen|delete|block|archive|unarchive|knowledge-list|knowledge-write|knowledge-delete> …"""
     tid = target or DEFAULT_TASK
     needs_target = {"show", "claim", "unclaim", "heartbeat", "submit", "comment", "mention",
-                    "cancel", "reopen", "delete", "block", "assign"}
+                    "cancel", "reopen", "delete", "block", "assign", "archive", "unarchive",
+                    "knowledge-list", "knowledge-write", "knowledge-delete"}
     if action in needs_target and not tid:
         typer.echo(f"task {action} 需要任务 id", err=True)
         raise typer.Exit(2)
@@ -311,6 +317,33 @@ def task_cmd(
             params = {"force": "true"}
     elif action == "block":
         method, path, payload = "POST", f"/api/v1/tasks/{tid}/deps", {"depends_on": [on]}
+    elif action == "archive":
+        method, path, payload = "POST", f"/api/v1/tasks/{tid}/archive", {}
+    elif action == "unarchive":
+        method, path, payload = "POST", f"/api/v1/tasks/{tid}/unarchive", {}
+    elif action == "knowledge-list":
+        method, path = "GET", f"/api/v1/tasks/{tid}/knowledge"
+        params = {"include_subtasks": "true"} if include_subtasks else None
+    elif action == "knowledge-write":
+        if not (title and tldr and kind):
+            typer.echo("task knowledge-write 需要 --title --tldr --kind", err=True)
+            raise typer.Exit(2)
+        parsed_fields: dict = {}
+        if fields:
+            try:
+                parsed_fields = json.loads(fields)
+            except json.JSONDecodeError as exc:
+                typer.echo(f"--fields 必须是 JSON 对象: {exc}", err=True)
+                raise typer.Exit(2)
+        payload = {"title": title, "tldr": tldr, "kind": kind, "fields": parsed_fields}
+        if tags:
+            payload["tags"] = [x.strip() for x in tags.split(",") if x.strip()]
+        method, path = "POST", f"/api/v1/tasks/{tid}/knowledge"
+    elif action == "knowledge-delete":
+        if not knowledge_id:
+            typer.echo("task knowledge-delete 需要 --id <knowledge-id>", err=True)
+            raise typer.Exit(2)
+        method, path, payload = "DELETE", f"/api/v1/tasks/{tid}/knowledge/{knowledge_id}", None
     else:
         typer.echo(f"unknown task action: {action}", err=True)
         raise typer.Exit(2)
@@ -324,11 +357,28 @@ def task_cmd(
 def memory_cmd(
     action: str = typer.Argument("append"),
     text: str = typer.Argument(None),
+    practice_task: str = typer.Option(None, "--practice-task",
+                                      help="成功实践的任务 id（个人知识门控）"),
+    practice_run: str = typer.Option(None, "--practice-run"),
+    outcome: str = typer.Option(None, "--outcome", help="实践结果/提炼结论"),
+    source_knowledge: str = typer.Option(None, "--source-knowledge",
+                                         help="只读参考过的知识 id（逗号分隔）"),
+    force: bool = typer.Option(False, "--force", help="human 强制写入（Agent 不允许）"),
     json_out: bool = typer.Option(False, "--json"),
 ):
     """anvil memory <append|search> <text>"""
     if action == "append":
-        _emit(_call("POST", "/api/v1/me/memory", {"content": text}), json_out)
+        body = {"content": text}
+        for key, value in (("practice_task_id", practice_task),
+                           ("practice_run_id", practice_run), ("outcome", outcome)):
+            if value:
+                body[key] = value
+        if source_knowledge:
+            body["source_knowledge"] = [
+                x.strip() for x in source_knowledge.split(",") if x.strip()]
+        if force:
+            body["force"] = True
+        _emit(_call("POST", "/api/v1/me/memory", body), json_out)
     elif action == "search":
         _emit(_call("GET", "/api/v1/me/memory/search", params={"q": text}), json_out)
     else:
@@ -349,6 +399,13 @@ def note_cmd(
     module: str = typer.Option(None, "--module"),
     confidence: float = typer.Option(0.5, "--confidence", min=0.0, max=1.0),
     replace: bool = typer.Option(False, "--replace", help="用完整内容替换同 path 旧笔记"),
+    practice_task: str = typer.Option(None, "--practice-task",
+                                      help="成功实践的任务 id（个人知识门控）"),
+    practice_run: str = typer.Option(None, "--practice-run"),
+    outcome: str = typer.Option(None, "--outcome", help="实践结果/提炼结论"),
+    source_knowledge: str = typer.Option(None, "--source-knowledge",
+                                         help="只读参考过的知识 id（逗号分隔）"),
+    force: bool = typer.Option(False, "--force", help="human 强制写入（Agent 不允许）"),
     json_out: bool = typer.Option(False, "--json"),
 ):
     """anvil note write <path> [--content-file f] [--kind/--scope/--tags/...]"""
@@ -373,11 +430,18 @@ def note_cmd(
         for key, value in (
             ("kind", kind), ("scope", effective_scope), ("task_id", effective_task),
             ("source_task", source_task), ("repo", repo), ("module", module),
+            ("practice_task_id", practice_task), ("practice_run_id", practice_run),
+            ("outcome", outcome),
         ):
             if value:
                 payload[key] = value
         if tags:
             payload["tags"] = [x.strip() for x in tags.split(",") if x.strip()]
+        if source_knowledge:
+            payload["source_knowledge"] = [
+                x.strip() for x in source_knowledge.split(",") if x.strip()]
+        if force:
+            payload["force"] = True
         _emit(_call("POST", "/api/v1/me/notes", payload), json_out)
     else:
         raise typer.Exit(2)
@@ -403,9 +467,13 @@ def knowledge_cmd(
     all_roles: bool = typer.Option(False, "--all", help="reindex 所有角色（human）"),
     dry_run: bool = typer.Option(False, "--dry-run"),
     prune: bool = typer.Option(False, "--prune"),
+    fields: str = typer.Option(None, "--fields", help="card-validate 的字段 JSON"),
+    file: str = typer.Option(None, "--file", help="card-validate 的知识卡 JSON 文件"),
+    for_approval: bool = typer.Option(False, "--for-approval",
+                                      help="card-validate 按 approve 必填项校验"),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    """anvil knowledge <search|show|index|reindex|repo-list|repo-show|repo-suggest> ..."""
+    """anvil knowledge <search|show|index|reindex|repo-list|repo-show|repo-suggest|card-template|card-validate> ..."""
     if action == "search":
         params = {
             "q": query or "", "scope": scope, "limit": limit,
@@ -465,6 +533,30 @@ def knowledge_cmd(
             _emit(_call("POST", "/api/v1/knowledge/reindex", body), json_out)
         else:
             _emit(_call("POST", "/api/v1/me/knowledge/reindex", body), json_out)
+    elif action == "card-template":
+        _emit(_call("GET", "/api/v1/knowledge/card/template",
+                    params={"kind": kind} if kind else None), json_out)
+    elif action == "card-validate":
+        payload: dict = {}
+        if file:
+            try:
+                with open(file, encoding="utf-8") as fh:
+                    payload = json.load(fh)
+            except (OSError, json.JSONDecodeError) as exc:
+                typer.echo(f"无法读取知识卡文件: {exc}", err=True)
+                raise typer.Exit(2)
+        if not isinstance(payload, dict):
+            typer.echo("知识卡文件必须是 JSON 对象", err=True)
+            raise typer.Exit(2)
+        if kind:
+            payload["kind"] = kind
+        if fields:
+            payload["fields"] = _fields_json(fields)
+        payload["for_approval"] = for_approval
+        result = _call("POST", "/api/v1/knowledge/card/validate", payload)
+        _emit(result, json_out)
+        if result.get("errors"):
+            raise typer.Exit(3)
     else:
         typer.echo("unknown knowledge action: " + action, err=True)
         raise typer.Exit(2)
@@ -556,6 +648,125 @@ def ws_cmd(
         _emit(_call("GET", f"/api/v1/workspaces/{ws_id}/diff"), json_out)
     else:
         raise typer.Exit(2)
+
+
+# ---- workspace（频道）与频道知识 ------------------------------------------
+
+
+workspace_app = typer.Typer(help="频道（任务归属 + 知识作用域 + 资产）")
+app.add_typer(workspace_app, name="workspace")
+ws_knowledge_app = typer.Typer(help="频道知识卡（Agent 只能 propose，human 批准）")
+workspace_app.add_typer(ws_knowledge_app, name="knowledge")
+
+
+def _fields_json(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        typer.echo(f"--fields 必须是 JSON 对象: {exc}", err=True)
+        raise typer.Exit(2)
+    if not isinstance(value, dict):
+        typer.echo("--fields 必须是 JSON 对象", err=True)
+        raise typer.Exit(2)
+    return value
+
+
+@workspace_app.command("list")
+def workspace_list(json_out: bool = typer.Option(False, "--json")):
+    """列出频道。"""
+    _emit(_call("GET", "/api/v1/workspaces"), json_out)
+
+
+@workspace_app.command("create")
+def workspace_create(
+    name: str = typer.Argument(...),
+    repo: str = typer.Option(None, "--repo", help="频道默认/领域 repo"),
+    knowledge_repo: str = typer.Option(None, "--knowledge-repo"),
+    description: str = typer.Option(None, "--description"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """创建频道（human）。"""
+    body = {"name": name}
+    for key, value in (("repo", repo), ("knowledge_repo", knowledge_repo),
+                       ("description", description)):
+        if value:
+            body[key] = value
+    _emit(_call("POST", "/api/v1/workspaces", body), json_out)
+
+
+@ws_knowledge_app.command("list")
+def ws_knowledge_list(
+    ws_id: str = typer.Argument(..., help="频道 id"),
+    status: str = typer.Option(None, "--status"),
+    kind: str = typer.Option(None, "--kind"),
+    sort: str = typer.Option(None, "--sort", help="freshness"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    params = {k: v for k, v in (("status", status), ("kind", kind), ("sort", sort)) if v}
+    _emit(_call("GET", f"/api/v1/workspaces/{ws_id}/knowledge", params=params), json_out)
+
+
+@ws_knowledge_app.command("propose")
+def ws_knowledge_propose(
+    ws_id: str = typer.Argument(..., help="频道 id"),
+    title: str = typer.Option(..., "--title"),
+    tldr: str = typer.Option(..., "--tldr"),
+    kind: str = typer.Option(..., "--kind",
+                             help="convention|decision|workflow|role_requirement|insight"),
+    fields: str = typer.Option(None, "--fields", help="知识卡字段 JSON"),
+    authority: str = typer.Option(None, "--authority", help="normative|reference"),
+    tags: str = typer.Option(None, "--tags", help="逗号分隔"),
+    source_task: str = typer.Option(None, "--source-task"),
+    review_at: str = typer.Option(None, "--review-at", help="YYYY-MM-DD"),
+    expires_at: str = typer.Option(None, "--expires-at"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """提交频道知识；Agent 写入为 proposed，human 写入为 approved。"""
+    body = {"title": title, "tldr": tldr, "kind": kind, "fields": _fields_json(fields)}
+    for key, value in (("authority", authority), ("source_task_id", source_task),
+                       ("review_at", review_at), ("expires_at", expires_at)):
+        if value:
+            body[key] = value
+    if tags:
+        body["tags"] = [x.strip() for x in tags.split(",") if x.strip()]
+    _emit(_call("POST", f"/api/v1/workspaces/{ws_id}/knowledge", body), json_out)
+
+
+@ws_knowledge_app.command("approve")
+def ws_knowledge_approve(
+    ws_id: str = typer.Argument(..., help="频道 id"),
+    knowledge_id: str = typer.Argument(..., help="知识卡 id"),
+    expected_version: int = typer.Option(None, "--expected-version"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """批准知识卡（仅 human）。"""
+    body = {}
+    if expected_version is not None:
+        body["expected_version"] = expected_version
+    _emit(_call("POST", f"/api/v1/workspaces/{ws_id}/knowledge/{knowledge_id}/approve",
+                body), json_out)
+
+
+@ws_knowledge_app.command("harvest")
+def ws_knowledge_harvest(
+    ws_id: str = typer.Argument(..., help="频道 id"),
+    task_id: str = typer.Argument(..., help="done/closed 任务 id"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """从终态任务收割知识（Agent 生成 proposed，human 可直接 approved）。"""
+    _emit(_call("POST", f"/api/v1/workspaces/{ws_id}/knowledge/harvest",
+                {"task_id": task_id}), json_out)
+
+
+@ws_knowledge_app.command("review")
+def ws_knowledge_review(
+    ws_id: str = typer.Argument(..., help="频道 id"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """知识复盘：过期、复核到期、长期未命中、冲突未裁决。"""
+    _emit(_call("GET", f"/api/v1/workspaces/{ws_id}/knowledge/review"), json_out)
 
 
 # ---- role（Agent 自行扩展团队）--------------------------------------------

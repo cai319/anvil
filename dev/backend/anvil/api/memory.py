@@ -138,7 +138,22 @@ def reset_my_session(body: dict, request: Request, conn=Depends(get_db),
 
 @router.post("/me/memory")
 def append_memory(body: MemoryAppendIn, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
-    return services.memory.append_memory(conn, auth.role or "qa-role", body.content)
+    role = auth.role or "qa-role"
+    is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
+    status = services.memory.resolve_practice_status(
+        conn,
+        practice_task_id=body.practice_task_id or auth.task_id,
+        practice_run_id=body.practice_run_id or auth.run_id,
+        force=(not is_real_agent) or (body.force and not is_real_agent),
+    )
+    return services.memory.append_memory(
+        conn, role, body.content,
+        practice_task_id=body.practice_task_id or auth.task_id,
+        practice_run_id=body.practice_run_id or auth.run_id,
+        outcome=body.outcome,
+        source_knowledge=body.source_knowledge,
+        status=status,
+    )
 
 
 @router.get("/me/memory/search")
@@ -161,12 +176,24 @@ def write_note(body: NoteWriteIn, conn=Depends(get_db), auth: Auth = Depends(get
         raise HTTPException(status_code=422, detail=f"invalid note kind: {body.kind}")
     if scope not in services.knowledge.NOTE_SCOPES:
         raise HTTPException(status_code=422, detail=f"invalid note scope: {scope}")
+    is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
+    status = services.memory.resolve_practice_status(
+        conn,
+        practice_task_id=body.practice_task_id or auth.task_id,
+        practice_run_id=body.practice_run_id or auth.run_id,
+        force=(not is_real_agent) or (body.force and not is_real_agent),
+    )
     try:
         return services.memory.write_note(
             conn, role, body.path, body.content,
             kind=body.kind, scope=scope, task_id=task_id,
             source_task=body.source_task, tags=body.tags, repo=body.repo,
-            module=body.module, confidence=body.confidence, mode=body.mode)
+            module=body.module, confidence=body.confidence, mode=body.mode,
+            practice_task_id=body.practice_task_id or auth.task_id,
+            practice_run_id=body.practice_run_id or auth.run_id,
+            outcome=body.outcome,
+            source_knowledge=body.source_knowledge,
+            status=status)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 

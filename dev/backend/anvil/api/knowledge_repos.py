@@ -5,9 +5,23 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..deps import Auth, get_auth, get_db, require_human
-from ..services import repo_catalog
+from ..services import knowledge_card, repo_catalog
 
 router = APIRouter()
+
+
+@router.get("/card/template")
+def card_template(kind: str | None = None, auth: Auth = Depends(get_auth)):
+    return knowledge_card.template(kind)
+
+
+@router.post("/card/validate")
+def card_validate(body: dict, auth: Auth = Depends(get_auth)):
+    return knowledge_card.validate_card(
+        str(body.get("kind") or ""),
+        body.get("fields") or {},
+        for_approval=bool(body.get("for_approval")),
+    )
 
 
 class SuggestIn(BaseModel):

@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     cost_budget_usd  REAL,
     cost_used_usd    REAL NOT NULL DEFAULT 0,
     created_at       TEXT NOT NULL,
-    updated_at       TEXT NOT NULL
+    updated_at       TEXT NOT NULL,
+    archived_at      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_deps (
@@ -572,15 +573,24 @@ CREATE INDEX IF NOT EXISTS idx_workflow_template_versions_state
 
 -- 频道（工作区即频道，§B）
 CREATE TABLE IF NOT EXISTS workspaces (
-    id          TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    repo        TEXT,
-    description TEXT,
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    repo           TEXT,
+    description    TEXT,
+    knowledge_repo TEXT,
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
 );
 
--- 频道成员（角色↔频道多对多，频道侧权威）
+-- 频道参与角色（仅作自动派发偏好/展示，不是权限；无 access 等级）
+CREATE TABLE IF NOT EXISTS workspace_participants (
+    workspace_id TEXT NOT NULL,
+    role_slug    TEXT NOT NULL,
+    joined_at    TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, role_slug)
+);
+
+-- 旧频道成员表：仅保留一个版本做兼容/取证，新代码不再写入。
 CREATE TABLE IF NOT EXISTS workspace_members (
     workspace_id TEXT NOT NULL,
     role_slug    TEXT NOT NULL,
@@ -588,6 +598,90 @@ CREATE TABLE IF NOT EXISTS workspace_members (
     joined_at    TEXT NOT NULL,
     PRIMARY KEY (workspace_id, role_slug)
 );
+
+-- 频道知识卡
+CREATE TABLE IF NOT EXISTS workspace_knowledge (
+    id            TEXT PRIMARY KEY,
+    workspace_id  TEXT NOT NULL,
+    repo          TEXT,
+    kind          TEXT NOT NULL,
+    authority     TEXT NOT NULL DEFAULT 'reference',
+    title         TEXT NOT NULL,
+    tldr          TEXT NOT NULL,
+    body_md       TEXT NOT NULL,
+    fields_json   TEXT NOT NULL DEFAULT '{}',
+    tags_json     TEXT NOT NULL DEFAULT '[]',
+    source_task_id TEXT,
+    source_subtask_id TEXT,
+    source_knowledge_json TEXT NOT NULL DEFAULT '[]',
+    owner         TEXT,
+    related_json  TEXT NOT NULL DEFAULT '[]',
+    supersedes_id TEXT,
+    content_hash  TEXT,
+    status        TEXT NOT NULL DEFAULT 'proposed',
+    version       INTEGER NOT NULL DEFAULT 1,
+    created_by    TEXT,
+    origin        TEXT NOT NULL DEFAULT 'human',
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    approved_at   TEXT,
+    approved_by   TEXT,
+    expires_at    TEXT,
+    last_hit_at   TEXT,
+    hit_count     INTEGER NOT NULL DEFAULT 0,
+    review_at     TEXT,
+    conflicts_json TEXT NOT NULL DEFAULT '[]',
+    completeness  REAL NOT NULL DEFAULT 0,
+    template_version INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS workspace_knowledge_versions (
+    knowledge_id  TEXT NOT NULL,
+    version       INTEGER NOT NULL,
+    title         TEXT NOT NULL,
+    tldr          TEXT NOT NULL,
+    body_md       TEXT NOT NULL,
+    fields_json   TEXT NOT NULL DEFAULT '{}',
+    authority     TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    source_task_id TEXT,
+    source_subtask_id TEXT,
+    origin        TEXT NOT NULL DEFAULT 'human',
+    created_at    TEXT NOT NULL,
+    created_by    TEXT,
+    PRIMARY KEY (knowledge_id, version)
+);
+
+-- 任务共享知识（任务参与角色共享；不是个人知识）
+CREATE TABLE IF NOT EXISTS task_knowledge (
+    id             TEXT PRIMARY KEY,
+    task_id        TEXT NOT NULL,
+    parent_task_id TEXT,
+    source_subtask_id TEXT,
+    origin         TEXT NOT NULL DEFAULT 'task', -- task|subtask
+    kind           TEXT NOT NULL,
+    title          TEXT NOT NULL,
+    tldr           TEXT NOT NULL,
+    body_md        TEXT NOT NULL,
+    fields_json    TEXT NOT NULL DEFAULT '{}',
+    tags_json      TEXT NOT NULL DEFAULT '[]',
+    source_role    TEXT,
+    status         TEXT NOT NULL DEFAULT 'active', -- active|archived
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_knowledge_ws_status
+    ON workspace_knowledge(workspace_id, status, kind, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_workspace_knowledge_repo_status
+    ON workspace_knowledge(repo, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_knowledge_harvest
+    ON workspace_knowledge(workspace_id, source_task_id, kind, content_hash)
+    WHERE source_task_id IS NOT NULL AND content_hash IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_task_knowledge_task_status
+    ON task_knowledge(task_id, status);
+CREATE INDEX IF NOT EXISTS idx_task_knowledge_parent_status
+    ON task_knowledge(parent_task_id, status);
 
 -- Skill 注册表（M3）：磁盘目录仍是真相；DB 用于 CRUD、版本与跨运行时分发。
 CREATE TABLE IF NOT EXISTS skills (
@@ -984,6 +1078,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_notes_path_unique(conn)
     _rebuild_memory_fts_once(conn)
     _reset_legacy_token_usage_once(conn)
+    _migrate_channel_knowledge_v1(conn)
     conn.commit()
 
 
@@ -1001,6 +1096,168 @@ def _set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
         (key, value, datetime.now(timezone.utc).isoformat()),
     )
+
+
+def _ensure_workspace_knowledge_fts(conn: sqlite3.Connection) -> bool:
+    """频道知识 FTS（trigram 优先）+ 同步触发器；失败则回退 LIKE。"""
+    sql = (
+        "CREATE VIRTUAL TABLE IF NOT EXISTS workspace_knowledge_fts USING fts5("
+        "knowledge_id UNINDEXED, workspace_id UNINDEXED, kind UNINDEXED, tags, title, tldr, body_md, "
+        "tokenize='trigram')"
+    )
+    try:
+        conn.execute(sql)
+    except sqlite3.OperationalError:
+        try:
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS workspace_knowledge_fts USING fts5("
+                "knowledge_id UNINDEXED, workspace_id UNINDEXED, kind UNINDEXED, tags, title, tldr, body_md, "
+                "tokenize='unicode61')")
+        except sqlite3.OperationalError:
+            for trigger in ("workspace_knowledge_fts_ai", "workspace_knowledge_fts_ad", "workspace_knowledge_fts_au"):
+                try:
+                    conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+                except sqlite3.OperationalError:
+                    pass
+            return False
+    for stmt in (
+        "CREATE TRIGGER IF NOT EXISTS workspace_knowledge_fts_ai AFTER INSERT ON workspace_knowledge BEGIN "
+        "INSERT INTO workspace_knowledge_fts(rowid, knowledge_id, workspace_id, kind, tags, title, tldr, body_md) "
+        "VALUES (new.rowid, new.id, new.workspace_id, new.kind, new.tags_json, new.title, new.tldr, new.body_md); END",
+        "CREATE TRIGGER IF NOT EXISTS workspace_knowledge_fts_ad AFTER DELETE ON workspace_knowledge BEGIN "
+        "DELETE FROM workspace_knowledge_fts WHERE rowid = old.rowid; END",
+        "CREATE TRIGGER IF NOT EXISTS workspace_knowledge_fts_au AFTER UPDATE ON workspace_knowledge BEGIN "
+        "DELETE FROM workspace_knowledge_fts WHERE rowid = old.rowid; "
+        "INSERT INTO workspace_knowledge_fts(rowid, knowledge_id, workspace_id, kind, tags, title, tldr, body_md) "
+        "VALUES (new.rowid, new.id, new.workspace_id, new.kind, new.tags_json, new.title, new.tldr, new.body_md); END",
+    ):
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+    return True
+
+
+def _ensure_task_knowledge_fts(conn: sqlite3.Connection) -> bool:
+    """任务共享知识 FTS（trigram 优先）+ 同步触发器。"""
+    sql = (
+        "CREATE VIRTUAL TABLE IF NOT EXISTS task_knowledge_fts USING fts5("
+        "knowledge_id UNINDEXED, task_id UNINDEXED, kind UNINDEXED, tags, title, tldr, body_md, "
+        "tokenize='trigram')"
+    )
+    try:
+        conn.execute(sql)
+    except sqlite3.OperationalError:
+        try:
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS task_knowledge_fts USING fts5("
+                "knowledge_id UNINDEXED, task_id UNINDEXED, kind UNINDEXED, tags, title, tldr, body_md, "
+                "tokenize='unicode61')")
+        except sqlite3.OperationalError:
+            for trigger in ("task_knowledge_fts_ai", "task_knowledge_fts_ad", "task_knowledge_fts_au"):
+                try:
+                    conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+                except sqlite3.OperationalError:
+                    pass
+            return False
+    for stmt in (
+        "CREATE TRIGGER IF NOT EXISTS task_knowledge_fts_ai AFTER INSERT ON task_knowledge BEGIN "
+        "INSERT INTO task_knowledge_fts(rowid, knowledge_id, task_id, kind, tags, title, tldr, body_md) "
+        "VALUES (new.rowid, new.id, new.task_id, new.kind, new.tags_json, new.title, new.tldr, new.body_md); END",
+        "CREATE TRIGGER IF NOT EXISTS task_knowledge_fts_ad AFTER DELETE ON task_knowledge BEGIN "
+        "DELETE FROM task_knowledge_fts WHERE rowid = old.rowid; END",
+        "CREATE TRIGGER IF NOT EXISTS task_knowledge_fts_au AFTER UPDATE ON task_knowledge BEGIN "
+        "DELETE FROM task_knowledge_fts WHERE rowid = old.rowid; "
+        "INSERT INTO task_knowledge_fts(rowid, knowledge_id, task_id, kind, tags, title, tldr, body_md) "
+        "VALUES (new.rowid, new.id, new.task_id, new.kind, new.tags_json, new.title, new.tldr, new.body_md); END",
+    ):
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+    return True
+
+
+def _migrate_channel_knowledge_v1(conn: sqlite3.Connection) -> None:
+    """v1.30 频道知识作用域基座：列、参与者、知识表与 FTS。"""
+    if _setting(conn, "schema.channel_knowledge_v1"):
+        return
+    column_specs = [
+        ("workspaces", "knowledge_repo TEXT"),
+        ("tasks", "archived_at TEXT"),
+        ("notes", "title TEXT"),
+        ("notes", "tldr TEXT"),
+        ("notes", "fields_json TEXT NOT NULL DEFAULT '{}'"),
+        ("notes", "practice_task_id TEXT"),
+        ("notes", "practice_run_id TEXT"),
+        ("notes", "outcome TEXT"),
+        ("notes", "verified_at TEXT"),
+        ("notes", "status TEXT NOT NULL DEFAULT 'active'"),
+        ("notes", "source_knowledge_json TEXT NOT NULL DEFAULT '[]'"),
+        ("lessons", "title TEXT"),
+        ("lessons", "tldr TEXT"),
+        ("lessons", "fields_json TEXT NOT NULL DEFAULT '{}'"),
+        ("memories", "title TEXT"),
+        ("memories", "tldr TEXT"),
+        ("memories", "fields_json TEXT NOT NULL DEFAULT '{}'"),
+        ("memories", "practice_task_id TEXT"),
+        ("memories", "practice_run_id TEXT"),
+        ("memories", "outcome TEXT"),
+        ("memories", "verified_at TEXT"),
+        ("memories", "status TEXT NOT NULL DEFAULT 'active'"),
+        ("memories", "source_knowledge_json TEXT NOT NULL DEFAULT '[]'"),
+    ]
+    for table, spec in column_specs:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {spec}")
+        except sqlite3.OperationalError:
+            pass
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_participants (workspace_id, role_slug, joined_at) "
+            "SELECT workspace_id, role_slug, joined_at FROM workspace_members"
+        )
+    except sqlite3.OperationalError:
+        pass
+    # 旧知识回填可读标题/摘要；正文仍是 content。
+    for table in ("notes", "lessons", "memories"):
+        try:
+            rows = conn.execute(
+                f"SELECT id, content FROM {table} WHERE title IS NULL OR title=''"
+            ).fetchall()
+            for row in rows:
+                text = (row["content"] or "").strip()
+                title = text.splitlines()[0][:80] if text else ""
+                tldr = " ".join(text.split())[:200]
+                conn.execute(
+                    f"UPDATE {table} SET title=?, tldr=? WHERE id=?",
+                    (title, tldr, row["id"]),
+                )
+        except sqlite3.OperationalError:
+            pass
+    for stmt in (
+        "CREATE INDEX IF NOT EXISTS idx_tasks_status_archived ON tasks(status, archived_at)",
+        "CREATE INDEX IF NOT EXISTS idx_notes_role_status ON notes(role_slug, status, updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_workspace_knowledge_ws_status "
+        "ON workspace_knowledge(workspace_id, status, kind, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_workspace_knowledge_repo_status "
+        "ON workspace_knowledge(repo, status)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_knowledge_harvest "
+        "ON workspace_knowledge(workspace_id, source_task_id, kind, content_hash) "
+        "WHERE source_task_id IS NOT NULL AND content_hash IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_task_knowledge_task_status "
+        "ON task_knowledge(task_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_task_knowledge_parent_status "
+        "ON task_knowledge(parent_task_id, status)",
+    ):
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+    _ensure_workspace_knowledge_fts(conn)
+    _ensure_task_knowledge_fts(conn)
+    _set_setting(conn, "schema.channel_knowledge_v1", "1")
+    conn.commit()
 
 
 def _safe_task_segment(task_id: str) -> str:

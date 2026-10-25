@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { api, isOnboardingRole, type Role, type Task, type WorkflowTemplate } from "../api/client";
+import { api, isOnboardingRole, type Channel, type Role, type Task, type WorkflowTemplate } from "../api/client";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
 
 /** 新建任务弹窗（参考 multica/raft：名称 + 描述 + 可滚动角色多选）。 */
-export function NewTaskModal({ roles, roleStatus, onClose, onCreated }: {
+export function NewTaskModal({ roles, roleStatus, channels = [], defaultChannelId, onClose, onCreated }: {
   roles: Role[];
   roleStatus?: Record<string, string>;
+  channels?: Channel[];
+  defaultChannelId?: string | null;
   onClose: () => void;
   onCreated: (task: Task) => void;
 }) {
@@ -15,11 +17,19 @@ export function NewTaskModal({ roles, roleStatus, onClose, onCreated }: {
   const [selected, setSelected] = useState<string[]>([]);
   const [seeds, setSeeds] = useState<WorkflowTemplate[]>([]);
   const [seedId, setSeedId] = useState("");
+  const [channelOptions, setChannelOptions] = useState<Channel[]>(channels);
+  const [channelId, setChannelId] = useState(defaultChannelId ?? "");
+  const [newChannelName, setNewChannelName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const composingRef = useRef(false);
 
   const candidates = roles.filter((r) => !isOnboardingRole(r));
+  const selectedChannel = channelOptions.find((c) => c.id === channelId) ?? null;
+
+  useEffect(() => {
+    setChannelOptions(channels);
+  }, [channels]);
 
   useEffect(() => {
     api.listWorkflowTemplates(undefined, "active").then((list) => {
@@ -31,6 +41,22 @@ export function NewTaskModal({ roles, roleStatus, onClose, onCreated }: {
   const toggle = (slug: string) =>
     setSelected((prev) => prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug]);
 
+  const createChannelInline = async () => {
+    if (!newChannelName.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const channel = await api.createChannel(newChannelName.trim());
+      setChannelOptions((prev) => [...prev, channel]);
+      setChannelId(channel.id);
+      setNewChannelName("");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const submit = async () => {
     if (!title.trim()) { setError("请填写任务名称"); return; }
     setBusy(true);
@@ -40,6 +66,7 @@ export function NewTaskModal({ roles, roleStatus, onClose, onCreated }: {
       const task = await api.createTask(title.trim(), {
         description: description.trim() || undefined,
         assignees: selected.length ? selected : undefined,
+        workspace_id: channelId || undefined,
         plan_seed: seed?.published_version ? {
           template_id: seed.id,
           version: seed.published_version,
@@ -86,6 +113,28 @@ export function NewTaskModal({ roles, roleStatus, onClose, onCreated }: {
           <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={4}
             placeholder="目标、验收标准、约束…（角色会读到这段描述）" />
         </label>
+
+        <div className="field">
+          <span>所属频道</span>
+          <div className="toolbar" style={{ flexWrap: "wrap" }}>
+            <select value={channelId} onChange={(e) => setChannelId(e.target.value)}>
+              <option value="">无频道</option>
+              {channelOptions.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+            <input value={newChannelName} onChange={(e) => setNewChannelName(e.target.value)}
+              placeholder="新频道名（可留空）" />
+            <button type="button" onClick={createChannelInline}
+              disabled={busy || !newChannelName.trim()}>新建频道</button>
+          </div>
+          <small className="muted">
+            {selectedChannel?.repo
+              ? `未填写执行 repo 时将继承频道 repo：${selectedChannel.repo}`
+              : "频道未绑定 repo；任务不会自动继承 repo。"}
+            {" "}子任务必须继承父任务结构标记，不能覆盖。
+          </small>
+        </div>
 
         <label className="field">
           <span>工作流模板种子（可选）</span>

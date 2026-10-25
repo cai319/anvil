@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, subscribeEvents, type Role, type RoleRuntimeStatus, type Run, type Task } from "../api/client";
+import { api, subscribeEvents, type Channel, type Role, type RoleRuntimeStatus, type Run, type Task } from "../api/client";
 import { navigate } from "../router";
 import { formatClock, formatDateTime, formatRelative, parseTime, useNow } from "../time";
 import { usePanelLayout } from "../usePanelLayout";
@@ -163,6 +163,8 @@ async function moveTask(task: Task, target: Task["status"]): Promise<unknown> {
 export function Lobby() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
+  const [channels, setChannels] = useState<Channel[]>([]);
+  const [channelFilter, setChannelFilter] = useState<string>("all");
   const [runs, setRuns] = useState<Run[]>([]);
   const [roleRuntimes, setRoleRuntimes] = useState<RoleRuntimeStatus[]>([]);
   const [activity, setActivity] = useState<Activity[]>([]);
@@ -203,12 +205,14 @@ export function Lobby() {
       api.listRoles(),
       api.listActiveRuns(),
       api.listRoleRuntimes().catch(() => [] as RoleRuntimeStatus[]),
+      api.listChannels().catch(() => [] as Channel[]),
     ])
-      .then(([t, r, n, rt]) => {
+      .then(([t, r, n, rt, cs]) => {
         setTasks(t);
         setRoles(r);
         setRuns(n);
         setRoleRuntimes(rt);
+        setChannels(cs);
       })
       .catch((e) => setError(String(e)));
 
@@ -255,8 +259,15 @@ export function Lobby() {
     await act(task.id, () => moveTask(task, target));
   };
 
-  // 任务大厅只展示高层任务（workflow 步骤不是 task）
-  const boardTasks = tasks.filter((t) => !t.parent_id);
+  // 任务大厅只展示高层任务（workflow 步骤不是 task）；归档任务由后端默认过滤。
+  const visibleTasks = channelFilter === "all"
+    ? tasks
+    : tasks.filter((t) => t.workspace_id === channelFilter);
+  const boardTasks = visibleTasks.filter((t) => !t.parent_id);
+  const channelName = (id?: string | null) => {
+    if (!id) return "未归属频道";
+    return channels.find((c) => c.id === id)?.name ?? id.slice(0, 8);
+  };
 
   // 右栏只保留最近 30 分钟的活动，且过滤心跳噪声；完整历史在 /activity。
   const cutoff = Date.now() - 30 * 60 * 1000;
@@ -276,14 +287,28 @@ export function Lobby() {
             {panel.collapsed && (
               <button className="small" onClick={panel.toggle}>显示右栏</button>
             )}
+            <button className="small" onClick={() =>
+              act("archive-completed", () => api.archiveCompletedTasks(
+                channelFilter === "all" ? undefined : channelFilter))
+            }>归档已完成</button>
             <button className="primary new-task-btn" onClick={() => setShowNew(true)}>
               <Icon name="plus" /> 新建任务
             </button>
           </>
         }
       />
+      <div className="toolbar" style={{ flexWrap: "wrap", marginBottom: 8 }}>
+        <button className={channelFilter === "all" ? "primary" : ""}
+          onClick={() => setChannelFilter("all")}>全部频道</button>
+        {channels.map((c) => (
+          <button key={c.id} className={channelFilter === c.id ? "primary" : ""}
+            onClick={() => setChannelFilter(c.id)} title={c.repo ?? ""}>
+            {c.name}
+          </button>
+        ))}
+      </div>
       <p className="muted" style={{ marginBottom: 12 }}>
-        选择参与成员后创建；多角色任务会先由 Cindy 规划工作流。
+        选择参与成员后创建；多角色任务会先由 Cindy 规划工作流。频道是任务的上一层作用域。
       </p>
 
       {error && <p className="error">{error}</p>}
@@ -360,6 +385,9 @@ export function Lobby() {
                           )}
                         </div>
                       )}
+                      <div className="card-tags">
+                        <span className="card-tag" title="所属频道"># {channelName(t.workspace_id)}</span>
+                      </div>
                       {t.updated_at && (
                         <div className="card-foot">
                           <time
@@ -371,6 +399,13 @@ export function Lobby() {
                         </div>
                       )}
                     </a>
+                    {(status === "done" || status === "closed") && (
+                      <div className="card-meta" style={{ marginTop: 2 }}>
+                        <button className="small" onClick={() => act(t.id, () => api.archiveTask(t.id))}>
+                          归档
+                        </button>
+                      </div>
+                    )}
                     {status === "in_review" && (
                       <div className="card-meta" style={{ marginTop: 2 }}>
                         <a className="badge review-flag" href="/inbox" draggable={false}
@@ -485,6 +520,8 @@ export function Lobby() {
       {showNew && (
         <NewTaskModal
           roles={roles}
+          channels={channels}
+          defaultChannelId={channelFilter === "all" ? null : channelFilter}
           roleStatus={Object.fromEntries(visibleRuns.map((r) => [r.role_slug, runStatusClass(r.status)]))}
           onClose={() => setShowNew(false)}
           onCreated={(task) => {

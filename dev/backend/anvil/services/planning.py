@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
+from .. import config
 from ..util import now_iso
 from . import repo_catalog
 from . import roles as roles_service
@@ -188,6 +189,20 @@ def _task_knowledge_block(conn: sqlite3.Connection, task: dict) -> str:
                      + (f"（repo={parent['repo']}）" if parent.get("repo") else ""))
     if task.get("description"):
         parts.append("- 任务描述（截断）：" + str(task["description"])[:1200])
+    try:
+        from . import task_knowledge as task_knowledge_service
+        from . import workspace_knowledge as workspace_knowledge_service
+        channel_knowledge = workspace_knowledge_service.render_for_task(
+            conn, task, budget_chars=config.CHANNEL_KNOWLEDGE_PLANNING_CHARS)
+        if channel_knowledge:
+            parts.append("\n" + channel_knowledge)
+        if task.get("id"):
+            task_shared = task_knowledge_service.render_for_task(
+                conn, task["id"], budget_chars=1200)
+            if task_shared:
+                parts.append("\n" + task_shared)
+    except Exception:  # noqa: BLE001 —— 知识注入失败不阻断规划
+        pass
     catalog = repo_catalog.build_catalog(conn, exclude_task_id=task.get("id"))
     rendered = repo_catalog.render_catalog_for_prompt(catalog)
     if rendered:

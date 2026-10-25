@@ -133,10 +133,13 @@ def tick(conn: sqlite3.Connection, force: bool = False, dispatch: bool = True,
     """
     now = now_iso()
     if force:
-        rows = conn.execute("SELECT id FROM tasks WHERE status='in_progress'").fetchall()
+        rows = conn.execute(
+            "SELECT id FROM tasks WHERE status='in_progress' AND archived_at IS NULL"
+        ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT id FROM tasks WHERE status='in_progress' AND lease_expires_at IS NOT NULL "
+            "SELECT id FROM tasks WHERE status='in_progress' AND archived_at IS NULL "
+            "AND lease_expires_at IS NOT NULL "
             "AND lease_expires_at < ? AND NOT EXISTS ("
             "  SELECT 1 FROM workflows w WHERE w.task_id=tasks.id AND w.status='running')",
             (now,),
@@ -209,7 +212,7 @@ def tick(conn: sqlite3.Connection, force: bool = False, dispatch: bool = True,
     starved = 0
     if dispatch:
         for t in conn.execute(
-            "SELECT * FROM tasks WHERE status='todo' "
+            "SELECT * FROM tasks WHERE status='todo' AND archived_at IS NULL "
             "AND NOT EXISTS ("
             "  SELECT 1 FROM task_deps d JOIN tasks dt ON dt.id = d.depends_on "
             "  WHERE d.task_id = tasks.id AND dt.status NOT IN ('done','closed')"
@@ -388,13 +391,16 @@ def _claim_allowed(conn: sqlite3.Connection, task: dict, role: str) -> bool:
 
 def _pick_eligible_agent(conn: sqlite3.Connection, task: dict) -> str | None:
     """匹配 eligible agent：频道成员（write/admin）∩ 四层闸门；不满足就换下一个。"""
+    if task.get("archived_at"):
+        return None
     wid = task.get("workspace_id")
+    rows = []
     if wid:
         rows = conn.execute(
-            "SELECT role_slug AS slug FROM workspace_members "
-            "WHERE workspace_id=? AND access IN ('write','admin') ORDER BY role_slug", (wid,)
+            "SELECT role_slug AS slug FROM workspace_participants "
+            "WHERE workspace_id=? ORDER BY role_slug", (wid,)
         ).fetchall()
-    else:
+    if not rows:
         rows = conn.execute("SELECT slug FROM roles WHERE enabled=1 ORDER BY slug").fetchall()
     for r in rows:
         if _claim_allowed(conn, task, r["slug"]):

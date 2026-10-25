@@ -46,6 +46,23 @@ CONTRACT = {
     "reminder list": (["reminder", "list"], "GET", f"{API}/reminders"),
     "reminder add": (["reminder", "add", "--cron", "0"], "POST", f"{API}/reminders"),
     "ws status": (["ws", "status"], "GET", f"{API}/workspaces/0/tree"),
+    "task archive": (["task", "archive", "T-0001"], "POST",
+                     f"{API}/tasks/T-0001/archive"),
+    "task knowledge-list": (["task", "knowledge-list", "T-0001"], "GET",
+                            f"{API}/tasks/T-0001/knowledge"),
+    "task knowledge-write": (["task", "knowledge-write", "T-0001",
+                              "--title", "t", "--tldr", "d", "--kind", "task_finding"],
+                             "POST", f"{API}/tasks/T-0001/knowledge"),
+    "workspace knowledge list": (["workspace", "knowledge", "list", "W-1"], "GET",
+                                 f"{API}/workspaces/W-1/knowledge"),
+    "workspace knowledge propose": (["workspace", "knowledge", "propose", "W-1",
+                                     "--title", "t", "--tldr", "d",
+                                     "--kind", "convention"], "POST",
+                                    f"{API}/workspaces/W-1/knowledge"),
+    "workspace knowledge review": (["workspace", "knowledge", "review", "W-1"], "GET",
+                                   f"{API}/workspaces/W-1/knowledge/review"),
+    "knowledge card-template": (["knowledge", "card-template"], "GET",
+                                f"{API}/knowledge/card/template"),
 }
 
 EXIT = {"ok": 0, "generic": 1, "usage": 2, "conflict": 3, "forbidden": 4}

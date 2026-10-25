@@ -33,16 +33,60 @@ def _invalidate_repo_catalog() -> None:
 # ---- MEMORY.md / notes ----------------------------------------------------
 
 
-def append_memory(conn: sqlite3.Connection, role: str, content: str) -> dict:
+def practice_evidence_ok(conn: sqlite3.Connection, task_id: str | None,
+                         run_id: str | None) -> bool:
+    """成功实践证据：任务 done/closed 或 run completed。"""
+    if task_id:
+        row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is not None and row["status"] in ("done", "closed"):
+            return True
+    if run_id:
+        row = conn.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
+        if row is not None and row["status"] == "completed":
+            return True
+    return False
+
+
+def resolve_practice_status(conn: sqlite3.Connection, *,
+                            practice_task_id: str | None = None,
+                            practice_run_id: str | None = None,
+                            force: bool = False) -> str:
+    if force:
+        return "active"
+    return "active" if practice_evidence_ok(
+        conn, practice_task_id, practice_run_id) else "draft"
+
+
+def append_memory(conn: sqlite3.Connection, role: str, content: str, *,
+                  practice_task_id: str | None = None,
+                  practice_run_id: str | None = None,
+                  outcome: str | None = None,
+                  source_knowledge: list | None = None,
+                  status: str = "active") -> dict:
     mid = new_id()
+    text = (content or "").strip()
+    title = text.splitlines()[0][:80] if text else ""
+    tldr = " ".join(text.split())[:200]
+    now = now_iso()
     conn.execute(
-        "INSERT INTO memories (id, role_slug, content, owner, created_at) VALUES (?,?,?,?,?)",
-        (mid, role, content, role, now_iso()),
+        "INSERT INTO memories (id, role_slug, content, owner, created_at, title, tldr, "
+        "fields_json, practice_task_id, practice_run_id, outcome, verified_at, status, "
+        "source_knowledge_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            mid, role, content, role, now, title, tldr, "{}",
+            practice_task_id, practice_run_id, outcome,
+            now if status == "active" and (practice_task_id or practice_run_id) else None,
+            status, jdumps(source_knowledge or []),
+        ),
     )
-    _index_fts(conn, role, content)
-    _append_to_home_file(role, "MEMORY.md", content)
+    if status == "active":
+        _index_fts(conn, role, content)
+        _append_to_home_file(role, "MEMORY.md", content)
     conn.commit()
-    return {"id": mid, "role_slug": role, "content": content, "owner": role}
+    return {
+        "id": mid, "role_slug": role, "content": content, "owner": role,
+        "status": status, "verified_at": now if status == "active" else None,
+    }
 
 
 def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
@@ -50,7 +94,12 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
                task_id: str | None = None, source_task: str | None = None,
                tags=None, repo: str | None = None, module: str | None = None,
                confidence: float = 0.5, mode: str = "append",
-               source: str = "agent", updated_at: str | None = None) -> dict:
+               source: str = "agent", updated_at: str | None = None,
+               practice_task_id: str | None = None,
+               practice_run_id: str | None = None,
+               outcome: str | None = None,
+               source_knowledge: list | None = None,
+               status: str = "active") -> dict:
     """写角色笔记：文件 + notes 索引 + notes_fts（触发器同步）。
 
     - path 必须是 notes/ 下的安全相对路径；
@@ -60,7 +109,7 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
     - 元数据只保留在文件头部的一份 `<!-- anvil: {...} -->` 注释里。
     """
     clean_path = knowledge_service.normalize_note_path(path)
-    rel_path = f"notes/{clean_path}"
+    rel_path = f"notes/.draft/{clean_path}" if status == "draft" else f"notes/{clean_path}"
     existing = conn.execute(
         "SELECT id, content, created_at FROM notes "
         "WHERE role_slug=? AND path=?", (role, clean_path)).fetchone()
@@ -95,38 +144,54 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
         "task_id": meta.get("task_id"), "source_task": meta.get("source_task"),
         "tags": meta.get("tags") or [], "repo": meta.get("repo"),
         "module": meta.get("module"), "confidence": meta.get("confidence"),
-        "updated_at": now, "source": source,
+        "updated_at": now, "source": source, "status": status,
+        "practice_task_id": practice_task_id, "practice_run_id": practice_run_id,
+        "outcome": outcome,
     }, ensure_ascii=False)
     file_content = f"<!-- anvil: {payload} -->\n{body.strip()}\n"
     _replace_home_file(role, rel_path, file_content)
 
     nid = existing["id"] if existing is not None else new_id()
     created_at = existing["created_at"] if existing is not None else now
+    text = body.strip()
+    title = text.splitlines()[0][:80] if text else ""
+    tldr = " ".join(text.split())[:200]
+    verified_at = now if status == "active" and (practice_task_id or practice_run_id) else None
     values = (
         nid, role, clean_path, body, created_at, meta["kind"], meta["scope"],
         meta.get("task_id"), meta.get("source_task"),
         jdumps(meta.get("tags") or []), meta.get("repo"), meta.get("module"),
         meta.get("confidence"), now, source, meta.get("content_hash"),
+        title, tldr, "{}", practice_task_id, practice_run_id, outcome, verified_at,
+        status, jdumps(source_knowledge or []),
     )
+    columns = (
+        "id, role_slug, path, content, created_at, kind, scope, "
+        "task_id, source_task, tags_json, repo, module, confidence, updated_at, "
+        "source, content_hash, title, tldr, fields_json, practice_task_id, "
+        "practice_run_id, outcome, verified_at, status, source_knowledge_json"
+    )
+    placeholders = ",".join("?" for _ in values)
     if _notes_path_is_unique(conn):
         conn.execute(
-            "INSERT INTO notes (id, role_slug, path, content, created_at, kind, scope, "
-            "task_id, source_task, tags_json, repo, module, confidence, updated_at, "
-            "source, content_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            f"INSERT INTO notes ({columns}) VALUES ({placeholders}) "
             "ON CONFLICT(role_slug, path) DO UPDATE SET "
             "content=excluded.content, kind=excluded.kind, scope=excluded.scope, "
             "task_id=excluded.task_id, source_task=excluded.source_task, "
             "tags_json=excluded.tags_json, repo=excluded.repo, module=excluded.module, "
             "confidence=excluded.confidence, updated_at=excluded.updated_at, "
-            "source=excluded.source, content_hash=excluded.content_hash",
+            "source=excluded.source, content_hash=excluded.content_hash, "
+            "title=excluded.title, tldr=excluded.tldr, fields_json=excluded.fields_json, "
+            "practice_task_id=excluded.practice_task_id, "
+            "practice_run_id=excluded.practice_run_id, outcome=excluded.outcome, "
+            "verified_at=excluded.verified_at, status=excluded.status, "
+            "source_knowledge_json=excluded.source_knowledge_json",
             values)
     else:
         conn.execute("DELETE FROM notes WHERE role_slug=? AND path=?",
                      (role, clean_path))
         conn.execute(
-            "INSERT INTO notes (id, role_slug, path, content, created_at, kind, scope, "
-            "task_id, source_task, tags_json, repo, module, confidence, updated_at, "
-            "source, content_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            f"INSERT INTO notes ({columns}) VALUES ({placeholders})",
             values)
     conn.commit()
     _invalidate_repo_catalog()
@@ -140,7 +205,8 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
         "tags": meta.get("tags") or [], "repo": meta.get("repo"),
         "module": meta.get("module"), "confidence": meta.get("confidence"),
         "updated_at": now, "created_at": row["created_at"] if row else created_at,
-        "content_hash": meta.get("content_hash"),
+        "content_hash": meta.get("content_hash"), "status": status,
+        "verified_at": verified_at,
     }
 
 
@@ -195,7 +261,8 @@ def search_memory(conn: sqlite3.Connection, role: str, q: str,
              "score": None, "owner": "self"}
             for r in conn.execute(
                 "SELECT role_slug, content, created_at FROM memories "
-                "WHERE owner = ? AND content LIKE ? ORDER BY created_at DESC LIMIT ?",
+                "WHERE owner = ? AND status='active' AND content LIKE ? "
+                "ORDER BY created_at DESC LIMIT ?",
                 (role, like, limit),
             ).fetchall()
         ]
@@ -369,6 +436,18 @@ def context_for_task(conn: sqlite3.Connection, role: str, task: dict | None,
             break
     notes_text = knowledge_service.format_hits(
         merged, max_item_chars=800, max_total_chars=4000)
+    channel_knowledge = ""
+    task_knowledge = ""
+    if task_id:
+        try:
+            from . import task_knowledge as task_knowledge_service
+            from . import workspace_knowledge as workspace_knowledge_service
+            channel_knowledge = workspace_knowledge_service.render_for_task(
+                conn, task, budget_chars=config.CHANNEL_KNOWLEDGE_CIC_CHARS)
+            task_knowledge = task_knowledge_service.render_for_task(
+                conn, task_id, budget_chars=800)
+        except Exception:  # noqa: BLE001 —— 投影失败不阻断 run
+            pass
     lessons = shared_lessons(conn, tags, repo=task.get("repo"), repos=repos, limit=8)
     lesson_lines: list[str] = []
     used = 0
@@ -384,6 +463,8 @@ def context_for_task(conn: sqlite3.Connection, role: str, task: dict | None,
         "snapshot": "",
         "notes": [notes_text] if notes_text else [],
         "lessons": lesson_lines,
+        "channel_knowledge": channel_knowledge,
+        "task_knowledge": task_knowledge,
         "knowledge_repos": repos or [],
         "retrieval_scope": scope.get("mode"),
     }

@@ -60,6 +60,31 @@ async def test_bind_member(client):
     assert any(m["role_slug"] == "backend-eng" and m["access"] == "write" for m in members)
 
 
+async def test_participants_crud(client):
+    """参与角色 CRUD：无 access 字段，仅作自动派发偏好/展示。"""
+    await _seed(client)
+    ws = (await _ws(client, name="c-part")).json()
+    added = await client.post(
+        f"{API}/workspaces/{ws['id']}/participants",
+        json={"role_slug": "backend-eng"},
+        headers=human_headers(),
+    )
+    assert added.status_code == 201, added.text
+    assert all("access" not in p for p in added.json())
+    listed = (await client.get(
+        f"{API}/workspaces/{ws['id']}/participants", headers=auth_headers()
+    )).json()
+    assert any(p["role_slug"] == "backend-eng" for p in listed)
+    removed = await client.delete(
+        f"{API}/workspaces/{ws['id']}/participants/backend-eng", headers=human_headers()
+    )
+    assert removed.status_code == 204
+    listed = (await client.get(
+        f"{API}/workspaces/{ws['id']}/participants", headers=auth_headers()
+    )).json()
+    assert not any(p["role_slug"] == "backend-eng" for p in listed)
+
+
 async def test_patch_member_access(client):
     """改成员权限 write→admin。"""
     await _seed(client)
@@ -88,39 +113,37 @@ async def test_unbind_member(client):
 # ---- 作用域隔离 ----------------------------------------------------------
 
 
-async def test_claim_rejects_non_member(client):
-    """非频道成员角色 claim 该频道任务 → 409。"""
+async def test_claim_allows_non_participant(client):
+    """参与角色只是自动派发偏好，不是认领权限：非参与角色仍可认领开放任务。"""
     await _seed(client)
     ws = (await _ws(client, name="c4")).json()
-    await client.post(f"{API}/workspaces/{ws['id']}/members", json={"role_slug": "backend-eng", "access": "write"}, headers=auth_headers())
-    # 任务属于 c4 频道，frontend-eng 非成员
+    await client.post(f"{API}/workspaces/{ws['id']}/participants", json={"role_slug": "backend-eng"}, headers=human_headers())
     task = (await client.post(f"{API}/tasks", json={"title": "x", "workspace_id": ws["id"]}, headers=auth_headers())).json()
     r = await client.post(f"{API}/tasks/{task['id']}/claim", json={}, headers=auth_headers("frontend-eng"))
-    assert r.status_code == 409
+    assert r.status_code == 200
 
 
-async def test_claim_rejects_readonly_member(client):
-    """access=read 的成员 claim → 409（须 write/admin）。"""
+async def test_claim_allows_read_participant(client):
+    """旧 access 不再生效；参与者（不论来源）都可认领开放任务。"""
     await _seed(client)
     ws = (await _ws(client, name="c5")).json()
     await client.post(f"{API}/workspaces/{ws['id']}/members", json={"role_slug": "backend-eng", "access": "read"}, headers=auth_headers())
     task = (await client.post(f"{API}/tasks", json={"title": "x", "workspace_id": ws["id"]}, headers=auth_headers())).json()
     r = await client.post(f"{API}/tasks/{task['id']}/claim", json={}, headers=auth_headers("backend-eng"))
-    assert r.status_code == 409
+    assert r.status_code == 200
 
 
 async def test_role_multi_channel_different_access(client):
-    """同一角色加入两个频道、不同 access。"""
+    """同一角色加入两个频道：旧 access 不影响认领。"""
     await _seed(client)
     ws1 = (await _ws(client, name="c6")).json()
     ws2 = (await _ws(client, name="c7")).json()
     await client.post(f"{API}/workspaces/{ws1['id']}/members", json={"role_slug": "backend-eng", "access": "write"}, headers=auth_headers())
     await client.post(f"{API}/workspaces/{ws2['id']}/members", json={"role_slug": "backend-eng", "access": "read"}, headers=auth_headers())
-    # 频道 1 可认领、频道 2 不可
     t1 = (await client.post(f"{API}/tasks", json={"title": "a", "workspace_id": ws1["id"]}, headers=auth_headers())).json()
     t2 = (await client.post(f"{API}/tasks", json={"title": "b", "workspace_id": ws2["id"]}, headers=auth_headers())).json()
     assert (await client.post(f"{API}/tasks/{t1['id']}/claim", json={}, headers=auth_headers("backend-eng"))).status_code == 200
-    assert (await client.post(f"{API}/tasks/{t2['id']}/claim", json={}, headers=auth_headers("backend-eng"))).status_code == 409
+    assert (await client.post(f"{API}/tasks/{t2['id']}/claim", json={}, headers=auth_headers("backend-eng"))).status_code == 200
 
 
 async def test_task_filtered_by_channel(client):

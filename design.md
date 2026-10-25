@@ -551,6 +551,13 @@ agents/backend-dev/
 
 **共享 Git 仓库** 是产出的地方。多个角色对同一仓库有各自的分支命名空间（`agent/<slug>/<task-id>`），互不覆盖。仓库通过 pygit2 操作，Anvil 负责建分支、检查 diff 范围、合并到主干。
 
+> **v1.30 术语澄清**：本节讨论的是“执行工作区/角色工作区”。产品中的**频道**（`workspaces`
+> 表、`/channels` 页面、任务的 `workspace_id`）是任务的上一层归属，承载频道级知识作用域
+> 与资产（默认 repo、knowledge repo、参与角色），**不是聊天室**；多 Agent 协作仍只发生在
+> 任务时间线。知识作用域分 `global / channel / task / role`，频道约定仅对绑定该频道的任务
+> 具有“约束”力，对只引用其 knowledge repo 的任务仅为“参考”。详见
+> `docs/v1.30-channel-knowledge.md`。
+
 ```
 repos/
 ├── main-project/           # 真正的 Git 仓库（bare 或普通均可）

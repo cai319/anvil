@@ -202,6 +202,41 @@ input::placeholder { color: var(--faint); }
 .roles-list li.active { border-color: var(--accent); background: var(--surface-2); }
 .roles-list a { color: var(--text); text-decoration: none; }
 .roles-detail { border: 1px solid var(--border); border-radius: var(--radius); padding: 0.9rem; background: var(--surface); }
+
+/* 频道知识卡 / 任务共享知识 */
+.channel-meta-form { display: grid; gap: 0.55rem; margin: 0.5rem 0 1rem; }
+.channel-meta-form label { display: grid; gap: 0.25rem; font-size: 12px; color: var(--muted); }
+.channel-meta-form input,
+.channel-meta-form textarea,
+.channel-meta-form select { width: 100%; }
+.authority-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.authority-normative { color: var(--amber, #b45309); font-weight: 600; }
+.authority-reference { color: var(--muted); }
+.channel-knowledge-list { list-style: none; padding-left: 0; max-height: 220px; overflow-y: auto; }
+.channel-knowledge-list li { display: grid; gap: 2px; padding: 4px 0; }
+.channel-knowledge-title { font-weight: 600; overflow-wrap: anywhere; }
+.task-knowledge-list { list-style: none; padding-left: 0; max-height: 260px; overflow-y: auto; }
+.task-knowledge-list li { display: grid; gap: 2px; padding: 5px 0; border-bottom: 1px dashed var(--border); }
+.task-knowledge-list li:last-child { border-bottom: none; }
+.task-knowledge-list li .small { justify-self: start; }
+.review-reason {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--muted);
+}
 .tabs { display: flex; gap: 0.3rem; margin-bottom: 0.8rem; flex-wrap: wrap; }
 .tabs button.active { background: var(--accent); color: var(--ink-900); border-color: var(--accent); }
 dl { display: grid; grid-template-columns: 150px 1fr; row-gap: 0.4rem; }

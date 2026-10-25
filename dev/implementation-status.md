@@ -28,6 +28,24 @@
 - 无任务 run 的 `runs.prompt` 注入；角色直接消息 `POST /roles/{slug}/message`。
 - 三档重置：`/runs/{id}/restart`、`session-reset`、`full-reset`（自动备份 home），以及 `DELETE /runs/{id}`。
 
+### v1.30 频道知识作用域（2026-10-25）
+- 频道（`workspaces`）扩展 `knowledge_repo`；`workspace_members` → `workspace_participants`
+  （无 access，仅作自动派发偏好/展示）；任务新增 `archived_at` 与归档 API/归档页。
+- 新增 `workspace_knowledge` + 版本表 + FTS：知识卡类型化校验、authority（normative/reference）、
+  human approved / agent proposed、`expected_version`、已批准卡不可原地改（编辑生成新提案）。
+- 新增 `task_knowledge`：任务参与角色共享；子任务知识带 `parent_task_id/source_subtask_id`
+  回流父任务视图。
+- 个人知识实践门控：`notes/memories` 记录 `practice_*`/`outcome`/`status/source_knowledge`；
+  无成功证据写 draft，不进入检索/CIC。
+- 子任务 guardrail：Agent 只能创建子任务、必须是父任务参与角色、继承
+  `workspace/repo/base_branch` 且不可覆盖，写审计。
+- 知识老化/冲突：`review_at`/`expires_at`、freshness 排序、重复/矛盾检测（双向
+  `conflicts_json`）、复盘端点 `GET /workspaces/{id}/knowledge/review`、人工裁决
+  `POST .../resolve-conflicts`；冲突未裁决不注入。
+- CLI：`workspace knowledge list|propose|approve|harvest|review`、`task archive|unarchive|knowledge-*`、
+  `memory/note` 实践证据参数、`knowledge card-template|card-validate`。
+- 注入默认 `CHANNEL_KNOWLEDGE_ENABLED=0`，按频道试点后再开启；任务知识默认开启。
+
 ### 多角色团队任务（2026-10-18 修正）
 - 新增 `task_role_claims`（task × role）：**每个参与角色独立认领/工作/提交**，不再由单一
   `assignee` 排他锁死；

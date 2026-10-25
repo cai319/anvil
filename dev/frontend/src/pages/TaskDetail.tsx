@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Task, type TaskLeases, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight } from "../api/client";
+import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type KnowledgeKind, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Task, type TaskKnowledge, type TaskLeases, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight, type WorkspaceKnowledge } from "../api/client";
+import {
+  AUTHORITY_LABEL,
+  KNOWLEDGE_CARD_FIELDS,
+  KNOWLEDGE_KINDS,
+  KNOWLEDGE_KIND_LABEL,
+} from "../knowledgeCard";
 import { RoleSessions } from "./RoleSessions";
 import { ApplyTemplateModal } from "./ApplyTemplateModal";
 import { WorkflowGraph } from "./WorkflowGraph";
@@ -562,6 +568,193 @@ function KnowledgeRepoPanel({ task, onChanged }: { task: Task; onChanged: () => 
                 onClick={() => setEditing(false)}>取消</button>
             </div>
           </div>
+        )}
+        {error && <p className="error">{error}</p>}
+      </div>
+    </>
+  );
+}
+
+/** 绑定频道的任务显示已批准频道知识：约定为“约束”，其余为“参考”。 */
+function ChannelKnowledgePanel({ task, onChanged }: { task: Task; onChanged: () => void }) {
+  const [cards, setCards] = useState<WorkspaceKnowledge[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const workspaceId = task.workspace_id ?? null;
+
+  const load = useCallback(() => {
+    if (!workspaceId) {
+      setCards([]);
+      return;
+    }
+    api.listWorkspaceKnowledge(workspaceId, { status: "approved" })
+      .then(setCards)
+      .catch(() => setCards([]));
+  }, [workspaceId]);
+
+  useEffect(() => {
+    load();
+    setNote(null);
+    setError(null);
+  }, [load, task.id]);
+
+  const harvest = async () => {
+    if (!workspaceId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const card = await api.harvestWorkspaceKnowledge(workspaceId, task.id);
+      setNote(card.status === "approved"
+        ? "已收割到频道知识。"
+        : "已生成频道知识草稿，等待人工批准。");
+      load();
+      onChanged();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const terminal = task.status === "done" || task.status === "closed";
+  return (
+    <>
+      <h3 className="side-h">频道知识</h3>
+      {!workspaceId ? (
+        <p className="muted hint">任务未归属频道，不注入频道约定。</p>
+      ) : (
+        <div className="channel-knowledge-panel">
+          {cards.length === 0 && <p className="muted hint">频道暂无已批准知识。</p>}
+          <ul className="side-list channel-knowledge-list">
+            {cards.map((k) => (
+              <li key={k.id} title={k.tldr}>
+                <span className={`authority-badge authority-${k.authority}`}>
+                  {AUTHORITY_LABEL[k.authority]}
+                </span>
+                <span className="channel-knowledge-title">{k.title}</span>
+                <small className="muted">{KNOWLEDGE_KIND_LABEL[k.kind] ?? k.kind}</small>
+              </li>
+            ))}
+          </ul>
+          {terminal && (
+            <button type="button" className="small" disabled={busy} onClick={harvest}>
+              {busy ? "收割中…" : "收割到频道"}
+            </button>
+          )}
+          {note && <p className="muted hint">{note}</p>}
+          {error && <p className="error">{error}</p>}
+        </div>
+      )}
+    </>
+  );
+}
+
+/** 任务共享知识：任务参与角色共享；子任务来源显式标记。 */
+function TaskKnowledgePanel({ task }: { task: Task }) {
+  const [cards, setCards] = useState<TaskKnowledge[]>([]);
+  const [open, setOpen] = useState(false);
+  const [kind, setKind] = useState<KnowledgeKind>("task_finding");
+  const [title, setTitle] = useState("");
+  const [tldr, setTldr] = useState("");
+  const [fields, setFields] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(
+    () => api.listTaskKnowledge(task.id, true).then(setCards).catch(() => setCards([])),
+    [task.id],
+  );
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => { setFields({}); }, [kind]);
+
+  const submit = async () => {
+    if (!title.trim() || !tldr.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.createTaskKnowledge(task.id, {
+        title: title.trim(),
+        tldr: tldr.trim(),
+        kind,
+        fields: Object.fromEntries(
+          Object.entries(fields).filter(([, v]) => String(v || "").trim())
+        ),
+      });
+      setTitle("");
+      setTldr("");
+      setFields({});
+      setOpen(false);
+      load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (kid: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteTaskKnowledge(task.id, kid);
+      load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <h3 className="side-h">任务共享知识</h3>
+      <div className="task-knowledge-panel">
+        {cards.length === 0 && <p className="muted hint">暂无任务知识。</p>}
+        <ul className="side-list task-knowledge-list">
+          {cards.map((k) => (
+            <li key={k.id}>
+              <span className="channel-knowledge-title">{k.title}</span>
+              <small className="muted">
+                {KNOWLEDGE_KIND_LABEL[k.kind] ?? k.kind}
+                {k.source_subtask_id ? ` · 来自子任务 ${k.source_subtask_id}` : " · 任务共享"}
+              </small>
+              <span className="muted">{k.tldr}</span>
+              <button type="button" className="small danger" disabled={busy}
+                onClick={() => remove(k.id)}>删除</button>
+            </li>
+          ))}
+        </ul>
+        {open ? (
+          <div className="channel-meta-form">
+            <label>标题
+              <input value={title} onChange={(e) => setTitle(e.target.value)} />
+            </label>
+            <label>TL;DR
+              <input value={tldr} onChange={(e) => setTldr(e.target.value)} />
+            </label>
+            <label>类型
+              <select value={kind} onChange={(e) => setKind(e.target.value as KnowledgeKind)}>
+                {KNOWLEDGE_KINDS.map((k) => (
+                  <option key={k} value={k}>{KNOWLEDGE_KIND_LABEL[k]}</option>
+                ))}
+              </select>
+            </label>
+            {KNOWLEDGE_CARD_FIELDS[kind].map((f) => (
+              <label key={f.key}>{f.label}
+                <textarea rows={2} value={fields[f.key] || ""}
+                  onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })} />
+              </label>
+            ))}
+            <div className="toolbar">
+              <button type="button" className="primary" disabled={busy || !title.trim() || !tldr.trim()}
+                onClick={submit}>写入任务知识</button>
+              <button type="button" className="small" onClick={() => setOpen(false)}>取消</button>
+            </div>
+          </div>
+        ) : (
+          <button type="button" className="small" onClick={() => setOpen(true)}>添加任务知识</button>
         )}
         {error && <p className="error">{error}</p>}
       </div>
@@ -1158,6 +1351,15 @@ export function TaskDetail({ id }: { id: string }) {
           <a className="small button-like" href={`/tasks/${id}/replay`}>
             <Icon name="play" size={12} /> 任务回放
           </a>
+          {(task.status === "done" || task.status === "closed") && (
+            task.archived_at ? (
+              <button className="small" disabled={busy}
+                onClick={() => act(() => api.unarchiveTask(id))}>取消归档</button>
+            ) : (
+              <button className="small" disabled={busy}
+                onClick={() => act(() => api.archiveTask(id))}>归档任务</button>
+            )
+          )}
           {["todo", "in_progress", "in_review"].includes(task.status) && (
             <button
               className="small danger"
@@ -1192,8 +1394,18 @@ export function TaskDetail({ id }: { id: string }) {
         <div className="session-title">
           <h1>{task.title}</h1>
           <span className={`status status-${task.status}`}>{STATUS_LABEL[task.status]}</span>
+          {task.archived_at && <span className="chip">已归档</span>}
         </div>
         <div className="session-meta">
+          {task.workspace ? (
+            <a className="session-meta-item"
+              href={`/channels?channel=${encodeURIComponent(task.workspace.id)}&tab=knowledge`}
+              title="打开频道知识">
+              <Icon name="hash" /> {task.workspace.name}
+            </a>
+          ) : (
+            <span className="muted">未归属频道</span>
+          )}
           {task.assignee && (
             <span className="session-meta-item"><Icon name="user" /> {task.assignee}</span>
           )}
@@ -1579,12 +1791,28 @@ export function TaskDetail({ id }: { id: string }) {
                 ? renderRoleLive(roleLiveFor(task.assignee))
                 : (task.assignees?.length ? "待认领" : "未指派")}
             </dd>
+            <dt>频道</dt>
+            <dd>
+              {task.workspace ? (
+                <a href={`/channels?channel=${encodeURIComponent(task.workspace.id)}&tab=knowledge`}>
+                  {task.workspace.name}
+                </a>
+              ) : task.workspace_id ? <span className="mono">{task.workspace_id}</span> : "未归属"}
+            </dd>
             <dt>类型</dt><dd>{task.type ?? "—"}</dd>
             <dt>标签</dt><dd>{task.tags?.length ? task.tags.join(", ") : "—"}</dd>
+            {task.archived_at && (
+              <>
+                <dt>归档</dt>
+                <dd><a href="/archive">{task.archived_at.slice(0, 10)} · 查看归档</a></dd>
+              </>
+            )}
             <dt>ID</dt><dd className="mono">{task.id}</dd>
           </dl>
 
           <KnowledgeRepoPanel task={task} onChanged={refresh} />
+          <ChannelKnowledgePanel task={task} onChanged={refresh} />
+          <TaskKnowledgePanel task={task} />
 
           {task.description && (
             <>

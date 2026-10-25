@@ -44,7 +44,24 @@ npm run dev
 `done` 是评审通过后的成功终态；`closed` 表示人工终止，非终态可终止，已终止可重新打开回 `todo`。
 `runs` 运行生命周期八态（`created/projecting/running/submitted/reviewing/completed/failed/abandoned`）是另一概念。
 
+## 术语：频道 / 执行工作区 / 角色工作区
+
+v1.30 起明确区分三个容易混淆的概念：
+
+- **频道**（`workspaces` 表、`/channels` 页面、任务的 `workspace_id`）：任务的上一层归属，
+  承载频道级知识作用域与资产（默认 repo、knowledge repo、参与角色）。频道**不是聊天室**，
+  多 Agent 协作仍然只发生在任务时间线。
+- **执行工作区**：任务运行时的 worktree/路径，由任务的 `repo`/`base_branch` 决定；
+  子任务继承父任务，不可覆盖。
+- **角色工作区**（`agents/<slug>/`）：角色私有 home，含 `MEMORY.md`、`notes/`、工具配置。
+
+知识作用域为 `global / channel / task / role`：频道约定对**绑定该频道**的任务是“约束”，
+对只引用其 knowledge repo 的任务是“参考”；任务知识在参与角色间共享；角色知识私有，
+必须通过成功实践 + 提炼写入（无证据只能写 draft）。
+
+设计细节见 `../docs/v1.30-channel-knowledge.md`。
+
 ## 当前实现状态
 
 详见 `implementation-status.md`（各里程碑的已实现 / 未实现清单）。当前自动化测试：
-**455 passed + 26 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行）。
+**540 passed + 33 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行）。

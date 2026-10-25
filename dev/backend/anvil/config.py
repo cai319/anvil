@@ -153,6 +153,15 @@ KNOWLEDGE_CINDY_MODE = _env("ANVIL_KNOWLEDGE_CINDY_MODE", "tagless")
 # 无任务上下文（reminder/直聊）的知识范围：all（现状）或 shared。
 KNOWLEDGE_TASKLESS_SCOPE = _env("ANVIL_KNOWLEDGE_TASKLESS_SCOPE", "all")
 
+# v1.30 频道/任务知识作用域。频道知识默认关闭，先按试点指标验证。
+CHANNEL_KNOWLEDGE_ENABLED = _env("ANVIL_CHANNEL_KNOWLEDGE", "0") == "1"
+CHANNEL_KNOWLEDGE_AGENT_AUTO_APPROVE = _env(
+    "ANVIL_CHANNEL_KNOWLEDGE_AGENT_AUTO_APPROVE", "0") == "1"
+CHANNEL_KNOWLEDGE_CIC_CHARS = int(_env("ANVIL_CHANNEL_KNOWLEDGE_CIC_CHARS", "1200"))
+CHANNEL_KNOWLEDGE_PLANNING_CHARS = int(
+    _env("ANVIL_CHANNEL_KNOWLEDGE_PLANNING_CHARS", "2200"))
+TASK_KNOWLEDGE_ENABLED = _env("ANVIL_TASK_KNOWLEDGE", "1") != "0"
+
 # Runtime definitions (design §2.6 存储分层)：
 #   - 内置（随包分发）：backend/anvil/runtimes/*.yaml
 #   - 用户自定义/覆盖：%APPDATA%/Anvil/runtimes/（macOS 用 ~/.config/Anvil/runtimes/）

@@ -79,6 +79,31 @@ def is_team_task(conn: sqlite3.Connection, tid: str) -> bool:
     return row is not None
 
 
+def is_task_participant(conn: sqlite3.Connection, tid: str, role: str) -> bool:
+    """角色是否为任务参与角色：团队 assignee 或单负责人。"""
+    row = conn.execute(
+        "SELECT 1 FROM task_assignees WHERE task_id=? AND role_slug=? LIMIT 1", (tid, role)
+    ).fetchone()
+    if row is not None:
+        return True
+    row = conn.execute(
+        "SELECT 1 FROM tasks WHERE id=? AND assignee=? LIMIT 1", (tid, role)
+    ).fetchone()
+    return row is not None
+
+
+def audit_create(conn: sqlite3.Connection, tid: str, actor: str | None, *,
+                 parent_id: str | None = None, workspace_id: str | None = None,
+                 repo: str | None = None) -> None:
+    """记录任务创建审计，尤其是角色运行时创建的子任务。"""
+    _audit(conn, actor, tid, "create", {
+        "parent_id": parent_id,
+        "workspace_id": workspace_id,
+        "repo": repo,
+    })
+    conn.commit()
+
+
 def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
            type: str | None = None, priority=None, tags: list[str] | None = None,
            repo: str | None = None, workspace_id: str | None = None, base_branch: str | None = None,
@@ -99,11 +124,24 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
     tags = knowledge.normalize_tags(tags or [])
     _assert_assignable(conn, assignees or [])
     if parent_id:
-        # 子任务继承父任务的仓库/频道/基线，保证 worktree 与 diff 校验可用
-        parent = get(conn, parent_id) or {}
-        repo = repo or parent.get("repo")
-        workspace_id = workspace_id or parent.get("workspace_id")
-        base_branch = base_branch or parent.get("base_branch")
+        # 子任务从属于父任务：继承 workspace/repo/base_branch，禁止覆盖结构标记。
+        parent = get(conn, parent_id)
+        if parent is None:
+            raise LookupError(parent_id)
+        for field_name, supplied in (
+            ("workspace_id", workspace_id),
+            ("repo", repo),
+            ("base_branch", base_branch),
+        ):
+            inherited = parent.get(field_name)
+            if supplied is not None and supplied != inherited:
+                raise ConflictError(
+                    f"subtask {field_name} must inherit parent {parent_id}: "
+                    f"expected {inherited!r}, got {supplied!r}"
+                )
+        repo = parent.get("repo")
+        workspace_id = parent.get("workspace_id")
+        base_branch = parent.get("base_branch")
     conn.execute(
         """INSERT INTO tasks (id, title, type, status, priority, tags_json, repo, workspace_id,
                               base_branch, scope_paths_json, description, acceptance_json,
@@ -193,16 +231,21 @@ def add_assignees(conn: sqlite3.Connection, tid: str, roles: list[str]) -> dict:
     if t.get("workspace_id"):
         from . import workspace as workspace_service
         for r in added:
-            workspace_service.add_member(conn, t["workspace_id"], r, "write")
+            workspace_service.add_participant(conn, t["workspace_id"], r)
     conn.commit()
     return get(conn, tid)  # type: ignore[return-value]
 
 
 def list_all(conn: sqlite3.Connection, status: str | None = None, assignee: str | None = None,
              workspace_id: str | None = None, type: str | None = None,
-             tag: str | None = None, parent_id: str | None = None) -> list[dict]:
+             tag: str | None = None, parent_id: str | None = None,
+             include_archived: bool = False, archived_only: bool = False) -> list[dict]:
     q = "SELECT * FROM tasks"
     clauses, params = [], []
+    if archived_only:
+        clauses.append("archived_at IS NOT NULL")
+    elif not include_archived:
+        clauses.append("archived_at IS NULL")
     if status:
         clauses.append("status=?"); params.append(status)
     if assignee:
@@ -312,7 +355,6 @@ def claim(conn: sqlite3.Connection, tid: str, role: str, paths: list[str] | None
             raise LookupError(tid)
         _assert_claimable(conn, t)
         governance.check_claim_allowed(conn, t, role)
-        _assert_channel_member(conn, t, role)
         lease = (datetime.now(timezone.utc) + timedelta(seconds=LEASE_SECONDS)).isoformat()
         now = now_iso()
         if t["assignees"]:
@@ -559,7 +601,7 @@ def reopen(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
     _assert_can_reopen(t)
     conn.execute(
         "UPDATE tasks SET status='todo', assignee=NULL, claimed_at=NULL, "
-        "lease_expires_at=NULL, updated_at=? WHERE id=?",
+        "lease_expires_at=NULL, archived_at=NULL, updated_at=? WHERE id=?",
         (now_iso(), tid),
     )
     conn.execute(
@@ -570,6 +612,62 @@ def reopen(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
     _audit(conn, role, tid, "reopen")
     conn.commit()
     return get(conn, tid)  # type: ignore[return-value]
+
+
+def archive(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
+    """归档终态任务（done/closed）；不删除任务、run 或 timeline。"""
+    t = get(conn, tid)
+    if t is None:
+        raise LookupError(tid)
+    if t["status"] not in ("done", "closed"):
+        raise ConflictError(
+            f"task {tid} is {t['status']}; only done/closed tasks can be archived"
+        )
+    now = now_iso()
+    conn.execute(
+        "UPDATE tasks SET archived_at=?, updated_at=? WHERE id=?",
+        (now, now, tid),
+    )
+    _audit(conn, role, tid, "archive")
+    conn.commit()
+    return get(conn, tid)  # type: ignore[return-value]
+
+
+def unarchive(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
+    """取消归档；任务状态不变。"""
+    t = get(conn, tid)
+    if t is None:
+        raise LookupError(tid)
+    conn.execute(
+        "UPDATE tasks SET archived_at=NULL, updated_at=? WHERE id=?",
+        (now_iso(), tid),
+    )
+    _audit(conn, role, tid, "unarchive")
+    conn.commit()
+    return get(conn, tid)  # type: ignore[return-value]
+
+
+def archive_completed(conn: sqlite3.Connection, workspace_id: str | None = None,
+                      role: str | None = None) -> list[dict]:
+    """批量归档 done/closed 任务，可按频道过滤。"""
+    clauses = ["status IN ('done','closed')", "archived_at IS NULL"]
+    params: list = []
+    if workspace_id:
+        clauses.append("workspace_id=?")
+        params.append(workspace_id)
+    rows = conn.execute(
+        f"SELECT id FROM tasks WHERE {' AND '.join(clauses)}", params
+    ).fetchall()
+    ids = [r["id"] for r in rows]
+    now = now_iso()
+    for tid in ids:
+        conn.execute(
+            "UPDATE tasks SET archived_at=?, updated_at=? WHERE id=?",
+            (now, now, tid),
+        )
+        _audit(conn, role, tid, "archive")
+    conn.commit()
+    return [get(conn, tid) for tid in ids]  # type: ignore[list-item]
 
 
 def task_diff(conn: sqlite3.Connection, tid: str) -> dict:
@@ -667,6 +765,13 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
                     consolidated.append(role_slug)
             except Exception as exc:  # noqa: BLE001 —— 快照失败不阻断删除，但写进删除审计
                 consolidation_errors.append(f"{role_slug}: {exc}")
+
+    # 任务共享知识不随任务物理删除：标记 archived，保留来源指针供频道/父任务追溯。
+    try:
+        from . import task_knowledge as task_knowledge_service
+        task_knowledge_service.archive_for_task(conn, tid)
+    except Exception:  # noqa: BLE001 —— 归档失败不阻断删除
+        pass
 
     # 清理该任务的运行时进程：按角色去重，从所有 run/上下文槽中收集。
     # cancel_task 只会终止「正忙于此任务」或「空闲且最后处理的就是此任务」的常驻进程，

@@ -1632,12 +1632,14 @@ class DaemonManager:
         """
         from . import knowledge as knowledge_service  # 惰性导入避免循环
         from . import memory as memory_service
+        from . import task_knowledge as task_knowledge_service
+        from . import workspace_knowledge as workspace_knowledge_service
 
         task = None
         if task_id:
             task = conn.execute(
-                "SELECT id,title,status,tags_json,repo,scope_paths_json FROM tasks "
-                "WHERE id=?", (task_id,)).fetchone()
+                "SELECT id,title,status,tags_json,repo,scope_paths_json,workspace_id "
+                "FROM tasks WHERE id=?", (task_id,)).fetchone()
         tags = [str(t) for t in jloads(task["tags_json"], [])] if task else []
         repos = knowledge_service.scope_repos(
             conn, task_id, task["repo"] if task else None)
@@ -1654,6 +1656,19 @@ class DaemonManager:
                 header += "\n- 知识仓库：" + "、".join(repos)
             blocks.append({
                 "priority": 5, "order": 5, "cap": 500, "min": 120, "text": header})
+
+            channel_knowledge = workspace_knowledge_service.render_for_task(
+                conn, dict(task), budget_chars=config.CHANNEL_KNOWLEDGE_CIC_CHARS)
+            if channel_knowledge:
+                blocks.append({
+                    "priority": 45, "order": 35, "cap": config.CHANNEL_KNOWLEDGE_CIC_CHARS,
+                    "min": 200, "text": channel_knowledge,
+                })
+            task_shared = task_knowledge_service.render_for_task(conn, task_id, budget_chars=800)
+            if task_shared:
+                blocks.append({
+                    "priority": 42, "order": 36, "cap": 800, "min": 150, "text": task_shared,
+                })
 
             snap = knowledge_service.latest_task_snapshot(conn, role, task_id)
             if snap:

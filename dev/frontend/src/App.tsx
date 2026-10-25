@@ -6,6 +6,7 @@ import { Icon, type IconName } from "./components/Icon";
 import { ActivityHistory } from "./pages/ActivityHistory";
 import { AgentSessions } from "./pages/AgentSessions";
 import { Channels } from "./pages/Channels";
+import { ArchivedTasks } from "./pages/ArchivedTasks";
 import { Decompose } from "./pages/Decompose";
 import { WorkflowTemplates } from "./pages/WorkflowTemplates";
 import { Governance } from "./pages/Governance";
@@ -29,6 +30,7 @@ type Route =
   | { page: "decompose" }
   | { page: "templates" }
   | { page: "channels" }
+  | { page: "archive" }
   | { page: "roles" }
   | { page: "runtimes" }
   | { page: "governance" }
@@ -47,6 +49,7 @@ const NAV_GROUPS = [
     items: [
       { href: "/inbox", label: "收件箱", icon: "inbox" },
       { href: "/", label: "任务大厅", icon: "dashboard" },
+      { href: "/archive", label: "归档", icon: "clock" },
       { href: "/templates", label: "工作流模板", icon: "git-branch" },
       { href: "/channels", label: "频道", icon: "hash" },
     ],
@@ -79,6 +82,7 @@ const PAGE_TITLE: Record<Route["page"], string> = {
   decompose: "目标拆解",
   templates: "工作流模板",
   channels: "频道",
+  archive: "归档",
   roles: "角色工坊",
   runtimes: "运行时",
   governance: "治理",
@@ -107,6 +111,7 @@ function parseRoute(path: string): Route {
   if (path.startsWith("/activity")) return { page: "activity" };
   if (path.startsWith("/decompose")) return { page: "decompose" };
   if (path.startsWith("/templates")) return { page: "templates" };
+  if (path.startsWith("/archive")) return { page: "archive" };
   if (path.startsWith("/channels")) return { page: "channels" };
   if (path.startsWith("/roles")) return { page: "roles" };
   if (path.startsWith("/runtimes")) return { page: "runtimes" };
@@ -355,6 +360,8 @@ export default function App() {
             <Decompose key={`decompose-${pageKey}`} />
           ) : route.page === "templates" ? (
             <WorkflowTemplates key={`templates-${pageKey}`} />
+          ) : route.page === "archive" ? (
+            <ArchivedTasks key={`archive-${pageKey}`} />
           ) : route.page === "channels" ? (
             <Channels key={`channels-${pageKey}`} />
           ) : route.page === "roles" ? (

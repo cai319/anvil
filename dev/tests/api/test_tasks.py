@@ -109,9 +109,8 @@ async def test_S6_deps_block_claim(client):
 async def test_S7_parent_cannot_submit_before_children(client):
     """S7 父任务在所有子任务 done 前不可 submit。"""
     await _seed(client)
-    await _post_task(client, id_="T-P", parent_id="T-C")  # 占位：父/子关系经 parent_id/deps
-    # 依赖路径统一走 task_deps；此用例在 deps 落地后按 parent_id 语义断言
-    await _post_task(client, id_="T-C")
+    await _post_task(client, id_="T-P")
+    await _post_task(client, id_="T-C", parent_id="T-P")
     r = await client.post(
         f"{API}/tasks/T-P/submit", json={"summary": "x"}, headers=auth_headers()
     )

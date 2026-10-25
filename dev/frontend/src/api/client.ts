@@ -36,6 +36,8 @@ export interface Task {
   tags: string[];
   repo: string | null;
   workspace_id?: string | null;
+  workspace?: { id: string; name: string; repo: string | null } | null;
+  archived_at?: string | null;
   base_branch?: string | null;
   knowledge_repos?: KnowledgeRepoBinding[];
   knowledge_binding_locked?: boolean;
@@ -173,7 +175,19 @@ function req(method: string, path: string, body?: unknown, role?: string): Promi
 
 export const api = {
   // tasks
-  listTasks: (): Promise<Task[]> => authFetch(`${BASE}/tasks`).then((r) => json<Task[]>(r)),
+  listTasks: (params?: {
+    workspace_id?: string; include_archived?: boolean; archived_only?: boolean;
+    parent_id?: string; status?: string;
+  }): Promise<Task[]> => {
+    const qs = new URLSearchParams();
+    if (params?.workspace_id) qs.set("workspace_id", params.workspace_id);
+    if (params?.include_archived) qs.set("include_archived", "true");
+    if (params?.archived_only) qs.set("archived_only", "true");
+    if (params?.parent_id) qs.set("parent_id", params.parent_id);
+    if (params?.status) qs.set("status", params.status);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return authFetch(`${BASE}/tasks${suffix}`).then((r) => json<Task[]>(r));
+  },
   getTask: (id: string): Promise<Task> => authFetch(`${BASE}/tasks/${id}`).then((r) => json<Task>(r)),
   createTask: (title: string, opts?: {
     description?: string; assignees?: string[]; plan_first?: boolean; planner?: string;
@@ -507,26 +521,92 @@ export const api = {
 
   // channels (workspaces)
   listChannels: (): Promise<Channel[]> => authFetch(`${BASE}/workspaces`).then((r) => json<Channel[]>(r)),
-  createChannel: (name: string): Promise<Channel> =>
-    req("POST", "/workspaces", { name }).then((r) => json<Channel>(r)),
+  createChannel: (name: string, opts?: {
+    repo?: string | null; description?: string | null; knowledge_repo?: string | null;
+  }): Promise<Channel> =>
+    req("POST", "/workspaces", { name, ...opts }).then((r) => json<Channel>(r)),
   updateChannel: (id: string, patch: {
     name?: string; repo?: string | null; description?: string | null;
+    knowledge_repo?: string | null;
   }): Promise<Channel> =>
     req("PATCH", `/workspaces/${id}`, patch).then((r) => json<Channel>(r)),
-  listMembers: (wsId: string): Promise<Member[]> =>
-    authFetch(`${BASE}/workspaces/${wsId}/members`).then((r) => json<Member[]>(r)),
-  addMember: (wsId: string, roleSlug: string, access: string): Promise<Member[]> =>
-    req("POST", `/workspaces/${wsId}/members`, { role_slug: roleSlug, access }).then((r) => json<Member[]>(r)),
-  updateMember: (wsId: string, roleSlug: string, access: string): Promise<Member[]> =>
-    req("PATCH", `/workspaces/${wsId}/members/${roleSlug}`, { access }).then((r) => json<Member[]>(r)),
-  removeMember: (wsId: string, roleSlug: string): Promise<void> =>
-    req("DELETE", `/workspaces/${wsId}/members/${roleSlug}`).then((r) => {
+  deleteChannel: (id: string): Promise<void> =>
+    req("DELETE", `/workspaces/${id}`).then((r) => {
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    }),
+  listParticipants: (wsId: string): Promise<Participant[]> =>
+    authFetch(`${BASE}/workspaces/${wsId}/participants`).then((r) => json<Participant[]>(r)),
+  addParticipant: (wsId: string, roleSlug: string): Promise<Participant[]> =>
+    req("POST", `/workspaces/${wsId}/participants`, { role_slug: roleSlug }).then((r) => json<Participant[]>(r)),
+  removeParticipant: (wsId: string, roleSlug: string): Promise<void> =>
+    req("DELETE", `/workspaces/${wsId}/participants/${roleSlug}`).then((r) => {
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    }),
+  listWorkspaceKnowledge: (wsId: string, params?: { status?: string; kind?: string }): Promise<WorkspaceKnowledge[]> => {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set("status", params.status);
+    if (params?.kind) qs.set("kind", params.kind);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return authFetch(`${BASE}/workspaces/${wsId}/knowledge${suffix}`).then((r) => json<WorkspaceKnowledge[]>(r));
+  },
+  createWorkspaceKnowledge: (wsId: string, body: {
+    title: string; tldr: string; kind: string; authority?: string;
+    fields: Record<string, unknown>; tags?: string[]; source_task_id?: string | null;
+    source_subtask_id?: string | null; owner?: string; review_at?: string | null;
+    expires_at?: string | null; related?: string[]; supersedes_id?: string | null;
+  }): Promise<WorkspaceKnowledge> =>
+    req("POST", `/workspaces/${wsId}/knowledge`, body).then((r) => json<WorkspaceKnowledge>(r)),
+  updateWorkspaceKnowledge: (wsId: string, kid: string, body: Record<string, unknown> & {
+    expected_version?: number;
+  }): Promise<WorkspaceKnowledge> =>
+    req("PATCH", `/workspaces/${wsId}/knowledge/${kid}`, body).then((r) => json<WorkspaceKnowledge>(r)),
+  approveWorkspaceKnowledge: (wsId: string, kid: string, expectedVersion?: number): Promise<WorkspaceKnowledge> =>
+    req("POST", `/workspaces/${wsId}/knowledge/${kid}/approve`, { expected_version: expectedVersion }).then((r) => json<WorkspaceKnowledge>(r)),
+  rejectWorkspaceKnowledge: (wsId: string, kid: string, expectedVersion?: number): Promise<WorkspaceKnowledge> =>
+    req("POST", `/workspaces/${wsId}/knowledge/${kid}/reject`, { expected_version: expectedVersion }).then((r) => json<WorkspaceKnowledge>(r)),
+  deleteWorkspaceKnowledge: (wsId: string, kid: string): Promise<void> =>
+    req("DELETE", `/workspaces/${wsId}/knowledge/${kid}`).then((r) => {
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    }),
+  validateKnowledgeCard: (body: {
+    kind: string; fields: Record<string, unknown>; for_approval?: boolean;
+  }): Promise<KnowledgeCardCheck> =>
+    req("POST", "/knowledge/card/validate", body).then((r) => json<KnowledgeCardCheck>(r)),
+  reviewWorkspaceKnowledge: (wsId: string): Promise<KnowledgeReview> =>
+    authFetch(`${BASE}/workspaces/${wsId}/knowledge/review`).then((r) => json<KnowledgeReview>(r)),
+  resolveWorkspaceKnowledgeConflicts: (wsId: string, kid: string): Promise<WorkspaceKnowledge> =>
+    req("POST", `/workspaces/${wsId}/knowledge/${kid}/resolve-conflicts`, {})
+      .then((r) => json<WorkspaceKnowledge>(r)),
+  harvestWorkspaceKnowledge: (wsId: string, taskId: string): Promise<WorkspaceKnowledge> =>
+    req("POST", `/workspaces/${wsId}/knowledge/harvest`, { task_id: taskId }).then((r) => json<WorkspaceKnowledge>(r)),
+  listTaskKnowledge: (taskId: string, includeSubtasks = false, deep = false): Promise<TaskKnowledge[]> => {
+    const qs = new URLSearchParams();
+    if (includeSubtasks || deep) qs.set("include_subtasks", "true");
+    if (deep) qs.set("deep", "true");
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return authFetch(`${BASE}/tasks/${taskId}/knowledge${suffix}`).then((r) => json<TaskKnowledge[]>(r));
+  },
+  createTaskKnowledge: (taskId: string, body: {
+    title: string; tldr: string; kind: string; fields: Record<string, unknown>;
+    tags?: string[];
+  }): Promise<TaskKnowledge> =>
+    req("POST", `/tasks/${taskId}/knowledge`, body).then((r) => json<TaskKnowledge>(r)),
+  deleteTaskKnowledge: (taskId: string, kid: string): Promise<void> =>
+    req("DELETE", `/tasks/${taskId}/knowledge/${kid}`).then((r) => {
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
     }),
 
   // tasks（补齐 cancel/reopen）
   cancelTask: (id: string): Promise<Task> => req("POST", `/tasks/${id}/cancel`, {}).then((r) => json<Task>(r)),
   reopenTask: (id: string): Promise<Task> => req("POST", `/tasks/${id}/reopen`, {}).then((r) => json<Task>(r)),
+  archiveTask: (id: string): Promise<Task> =>
+    req("POST", `/tasks/${id}/archive`, {}).then((r) => json<Task>(r)),
+  unarchiveTask: (id: string): Promise<Task> =>
+    req("POST", `/tasks/${id}/unarchive`, {}).then((r) => json<Task>(r)),
+  archiveCompletedTasks: (workspaceId?: string): Promise<Task[]> => {
+    const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : "";
+    return req("POST", `/tasks/archive-completed${qs}`, {}).then((r) => json<Task[]>(r));
+  },
   deleteTask: (id: string, force = false): Promise<void> =>
     req("DELETE", `/tasks/${id}${force ? "?force=true" : ""}`).then((r) => {
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
@@ -633,7 +713,9 @@ export interface Channel {
   name: string;
   repo: string | null;
   description: string | null;
+  knowledge_repo: string | null;
   member_count: number;
+  participant_count?: number;
   task_count: number;
   created_at: string;
 }
@@ -643,6 +725,89 @@ export interface Member {
   role_slug: string;
   access: string;
   joined_at: string;
+}
+
+export interface Participant {
+  workspace_id: string;
+  role_slug: string;
+  joined_at: string;
+}
+
+export type KnowledgeKind =
+  | "convention" | "workflow" | "role_requirement" | "decision" | "insight"
+  | "task_finding" | "personal_lesson";
+export type KnowledgeAuthority = "normative" | "reference";
+export type KnowledgeStatus =
+  | "draft" | "proposed" | "approved" | "rejected" | "deprecated" | "expired";
+
+export interface WorkspaceKnowledge {
+  id: string;
+  workspace_id: string;
+  repo: string | null;
+  kind: KnowledgeKind;
+  authority: KnowledgeAuthority;
+  title: string;
+  tldr: string;
+  body_md: string;
+  fields: Record<string, unknown>;
+  tags: string[];
+  source_task_id: string | null;
+  source_subtask_id: string | null;
+  owner: string | null;
+  related: string[];
+  supersedes_id: string | null;
+  status: KnowledgeStatus;
+  version: number;
+  origin: "human" | "agent" | "system";
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  approved_at: string | null;
+  approved_by: string | null;
+  expires_at: string | null;
+  review_at: string | null;
+  conflicts: string[];
+  completeness: number;
+  hit_count?: number;
+  last_hit_at?: string | null;
+  is_expired?: boolean;
+  freshness?: number;
+}
+
+export interface KnowledgeCardCheck {
+  errors: string[];
+  warnings: string[];
+  completeness: number;
+}
+
+export interface KnowledgeReviewItem {
+  card: WorkspaceKnowledge;
+  reasons: string[];
+  freshness: number;
+}
+
+export interface KnowledgeReview {
+  items: KnowledgeReviewItem[];
+  counts: Record<string, number>;
+  total: number;
+}
+
+export interface TaskKnowledge {
+  id: string;
+  task_id: string;
+  parent_task_id: string | null;
+  source_subtask_id: string | null;
+  origin: "task" | "subtask";
+  kind: KnowledgeKind;
+  title: string;
+  tldr: string;
+  body_md: string;
+  fields: Record<string, unknown>;
+  tags: string[];
+  source_role: string | null;
+  status: "active" | "archived";
+  created_at: string;
+  updated_at: string;
 }
 
 export type RunStatus =
