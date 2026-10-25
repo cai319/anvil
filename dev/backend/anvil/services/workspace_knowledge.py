@@ -217,6 +217,56 @@ def list_for_workspace(conn: sqlite3.Connection, workspace_id: str, *,
     return cards
 
 
+def _like_pattern(text: str) -> str:
+    escaped = (str(text).replace("\\", "\\\\")
+               .replace("%", "\\%").replace("_", "\\_"))
+    return f"%{escaped}%"
+
+
+def list_all(conn: sqlite3.Connection, *, status: str | None = None,
+             kind: str | None = None, workspace_id: str | None = None,
+             q: str | None = None, limit: int = 200, offset: int = 0) -> dict:
+    """跨频道知识列表（人工审计视图）。"""
+    limit = max(1, min(500, int(limit or 200)))
+    offset = max(0, int(offset or 0))
+    clauses: list[str] = []
+    params: list = []
+    if status and status != "all":
+        clauses.append("wk.status=?")
+        params.append(status)
+    if kind:
+        clauses.append("wk.kind=?")
+        params.append(kind)
+    if workspace_id:
+        clauses.append("wk.workspace_id=?")
+        params.append(workspace_id)
+    if q and str(q).strip():
+        pattern = _like_pattern(str(q).strip())
+        clauses.append(
+            "(wk.title LIKE ? ESCAPE '\\' OR wk.tldr LIKE ? ESCAPE '\\' "
+            "OR wk.body_md LIKE ? ESCAPE '\\' OR wk.tags_json LIKE ? ESCAPE '\\' "
+            "OR COALESCE(w.name, '') LIKE ? ESCAPE '\\')"
+        )
+        params.extend([pattern] * 5)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    total = conn.execute(
+        "SELECT COUNT(*) FROM workspace_knowledge wk "
+        "LEFT JOIN workspaces w ON w.id=wk.workspace_id "
+        f"{where}", params,
+    ).fetchone()[0]
+    rows = conn.execute(
+        "SELECT wk.*, w.name AS workspace_name FROM workspace_knowledge wk "
+        "LEFT JOIN workspaces w ON w.id=wk.workspace_id "
+        f"{where} "
+        "ORDER BY CASE wk.status WHEN 'proposed' THEN 0 WHEN 'draft' THEN 1 ELSE 2 END, "
+        "wk.created_at DESC LIMIT ? OFFSET ?",
+        (*params, limit, offset),
+    ).fetchall()
+    items = [_row(r) for r in rows]  # type: ignore[list-item]
+    return {"items": items, "total": total, "limit": limit,
+            "offset": offset, "has_more": offset + len(items) < total}
+
+
 def _snapshot(conn: sqlite3.Connection, knowledge: dict) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO workspace_knowledge_versions "

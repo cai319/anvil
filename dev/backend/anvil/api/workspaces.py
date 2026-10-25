@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
+from ..util import now_iso
 
 router = APIRouter()
 
@@ -73,6 +74,11 @@ def delete_workspace(ws_id: str, conn=Depends(get_db),
         "(SELECT id FROM workspace_knowledge WHERE workspace_id=?)", (ws_id,)
     )
     conn.execute("DELETE FROM workspace_knowledge WHERE workspace_id=?", (ws_id,))
+    conn.execute(
+        "UPDATE tasks SET workspace_id=NULL, updated_at=? WHERE workspace_id=?",
+        (now_iso(), ws_id),
+    )
+    conn.execute("UPDATE board_drafts SET workspace_id=NULL WHERE workspace_id=?", (ws_id,))
     conn.commit()
     if cur.rowcount == 0:
         raise HTTPException(status_code=404, detail="workspace not found")

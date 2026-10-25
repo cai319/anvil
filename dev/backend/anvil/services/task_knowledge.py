@@ -58,6 +58,55 @@ def list_for_task(conn: sqlite3.Connection, task_id: str, *,
     return [_row(r) for r in rows]  # type: ignore[list-item]
 
 
+def _like_pattern(text: str) -> str:
+    escaped = (str(text).replace("\\", "\\\\")
+               .replace("%", "\\%").replace("_", "\\_"))
+    return f"%{escaped}%"
+
+
+def list_all(conn: sqlite3.Connection, *, status: str | None = None,
+             workspace_id: str | None = None, q: str | None = None,
+             limit: int = 200, offset: int = 0) -> dict:
+    """跨任务知识列表（人工审计视图）。"""
+    limit = max(1, min(500, int(limit or 200)))
+    offset = max(0, int(offset or 0))
+    clauses: list[str] = []
+    params: list = []
+    if status and status != "all":
+        clauses.append("tk.status=?")
+        params.append(status)
+    if workspace_id:
+        clauses.append("t.workspace_id=?")
+        params.append(workspace_id)
+    if q and str(q).strip():
+        pattern = _like_pattern(str(q).strip())
+        clauses.append(
+            "(tk.title LIKE ? ESCAPE '\\' OR tk.tldr LIKE ? ESCAPE '\\' "
+            "OR tk.body_md LIKE ? ESCAPE '\\' OR tk.tags_json LIKE ? ESCAPE '\\' "
+            "OR COALESCE(t.title, '') LIKE ? ESCAPE '\\')"
+        )
+        params.extend([pattern] * 5)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    total = conn.execute(
+        "SELECT COUNT(*) FROM task_knowledge tk "
+        "LEFT JOIN tasks t ON t.id=tk.task_id "
+        f"{where}", params,
+    ).fetchone()[0]
+    rows = conn.execute(
+        "SELECT tk.*, t.title AS task_title, t.status AS task_status, "
+        "t.workspace_id AS workspace_id, t.archived_at AS task_archived_at, "
+        "w.name AS workspace_name "
+        "FROM task_knowledge tk "
+        "LEFT JOIN tasks t ON t.id=tk.task_id "
+        "LEFT JOIN workspaces w ON w.id=t.workspace_id "
+        f"{where} ORDER BY tk.created_at DESC LIMIT ? OFFSET ?",
+        (*params, limit, offset),
+    ).fetchall()
+    items = [_row(r) for r in rows]  # type: ignore[list-item]
+    return {"items": items, "total": total, "limit": limit,
+            "offset": offset, "has_more": offset + len(items) < total}
+
+
 def create(conn: sqlite3.Connection, task_id: str, *,
            title: str, tldr: str, kind: str,
            fields: dict | None = None, tags: list[str] | None = None,

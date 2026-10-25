@@ -1,9 +1,13 @@
-import { useEffect, useState } from "react";
-import { api, type Lesson, type Proposal, type Role } from "../api/client";
+import { useCallback, useEffect, useState } from "react";
+import { api, type Channel, type Lesson, type Proposal, type Role } from "../api/client";
 import { PageHeader } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { formatDateTime } from "../time";
+import { ChannelKnowledgeTab } from "./knowledge/ChannelKnowledgeTab";
+import { TaskKnowledgeTab } from "./knowledge/TaskKnowledgeTab";
+import { RoleKnowledgeTab } from "./knowledge/RoleKnowledgeTab";
+import { KnowledgeStatsTab } from "./knowledge/KnowledgeStatsTab";
 
 const LESSON_STATUS_LABEL: Record<Lesson["status"], string> = {
   pending: "待审批",
@@ -251,11 +255,26 @@ function LessonList({ lessons, roles, empty, dateKey, onOpen, onDelete }: {
   );
 }
 
+type Scope = "channel" | "task" | "role" | "shared" | "proposals" | "stats";
+
+const SCOPES: { key: Scope; label: string }[] = [
+  { key: "channel", label: "频道知识" },
+  { key: "task", label: "任务知识" },
+  { key: "role", label: "角色知识" },
+  { key: "shared", label: "共享经验" },
+  { key: "proposals", label: "演化提案" },
+  { key: "stats", label: "效果评估" },
+];
+
 export function Knowledge() {
+  const [scope, setScope] = useState<Scope>("channel");
+  const [visited, setVisited] = useState<Set<Scope>>(() => new Set(["channel"]));
+  const [counts, setCounts] = useState<Record<string, number>>({});
   const [pending, setPending] = useState<Lesson[]>([]);
   const [approved, setApproved] = useState<Lesson[]>([]);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
+  const [channels, setChannels] = useState<Channel[]>([]);
   const [repoOptions, setRepoOptions] = useState<string[]>(["shared"]);
   const [content, setContent] = useState("");
   const [tags, setTags] = useState("");
@@ -266,6 +285,17 @@ export function Knowledge() {
   const [detail, setDetail] = useState<Lesson | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const setChannelTotal = useCallback(
+    (n: number) => setCounts((prev) => ({ ...prev, channel: n })), []);
+  const setTaskTotal = useCallback(
+    (n: number) => setCounts((prev) => ({ ...prev, task: n })), []);
+  const setRoleTotal = useCallback(
+    (n: number) => setCounts((prev) => ({ ...prev, role: n })), []);
+
+  useEffect(() => {
+    setVisited((prev) => (prev.has(scope) ? prev : new Set(prev).add(scope)));
+  }, [scope]);
+
   const refresh = () =>
     Promise.all([
       api.listLessons("pending"),
@@ -273,19 +303,20 @@ export function Knowledge() {
       api.listProposals(),
       api.listRoles(),
       api.listTasks().catch(() => []),
-      api.listChannels().catch(() => []),
+      api.listChannels().catch(() => [] as Channel[]),
       api.listKnowledgeRepos().catch(() => ({ repos: [], total: 0, enabled: false })),
     ])
-      .then(([p, a, props, rs, tasks, channels, catalog]) => {
+      .then(([p, a, props, rs, tasks, chans, catalog]) => {
         setPending(p);
         setApproved(a);
         setProposals(props);
         setRoles(rs);
+        setChannels(chans);
         const names = new Set<string>(["shared"]);
         for (const item of catalog.repos ?? []) if (item.repo) names.add(item.repo);
         for (const lesson of [...p, ...a]) if (lesson.repo) names.add(lesson.repo);
         for (const task of tasks) if (task.repo) names.add(task.repo);
-        for (const channel of channels) if (channel.repo) names.add(channel.repo);
+        for (const channel of chans) if (channel.repo) names.add(channel.repo);
         setRepoOptions([...names].sort((x, y) => (
           x === "shared" ? -1 : y === "shared" ? 1 : x.localeCompare(y)
         )));
@@ -384,30 +415,72 @@ export function Knowledge() {
   ].join(" ").toLowerCase().includes(needle);
   const filteredPending = pending.filter(matchesQuery);
   const filteredApproved = approved.filter(matchesQuery);
+  const sharedCount = pending.length + approved.length;
+  const pendingProposals = proposals.filter((p) => p.status === "pending").length;
+
+  const tabCount = (key: Scope): number | undefined => {
+    if (key === "channel") return counts.channel;
+    if (key === "task") return counts.task;
+    if (key === "role") return counts.role;
+    if (key === "shared") return sharedCount;
+    if (key === "proposals") return pendingProposals;
+    return undefined;
+  };
 
   return (
     <div className="knowledge-page">
       <PageHeader
         kicker="KNOWLEDGE"
-        title="知识库与提案"
-        actions={(
+        title="知识库"
+        subtitle="频道 / 任务 / 角色 / 共享经验"
+        actions={scope === "shared" ? (
           <button className="primary propose-btn" onClick={openPropose}>
             <Icon name="plus" size={14} /> 提议升格
           </button>
-        )}
+        ) : undefined}
       />
       {error && <p className="error">{error}</p>}
 
-      <div className="knowledge-layout">
-        <section className="knowledge-panel knowledge-shared">
-          <div className="knowledge-panel-head">
-            <div>
-              <h2 className="pane-title">共享经验</h2>
-              <span className="muted">待审批 {pending.length} · 已批准 {approved.length}</span>
-            </div>
-            <div className="toolbar lesson-search">
+      <div className="tabs knowledge-tabs">
+        {SCOPES.map((item) => {
+          const count = tabCount(item.key);
+          return (
+            <button
+              key={item.key}
+              className={scope === item.key ? "active" : ""}
+              onClick={() => setScope(item.key)}
+            >
+              {item.label}
+              {count !== undefined && count > 0 && (
+                <span className="tab-count">{count}</span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="knowledge-scope-body">
+        {visited.has("channel") && (
+          <div hidden={scope !== "channel"}>
+            <ChannelKnowledgeTab channels={channels} onTotal={setChannelTotal} />
+          </div>
+        )}
+        {visited.has("task") && (
+          <div hidden={scope !== "task"}>
+            <TaskKnowledgeTab channels={channels} onTotal={setTaskTotal} />
+          </div>
+        )}
+        {visited.has("role") && (
+          <div hidden={scope !== "role"}>
+            <RoleKnowledgeTab roles={roles} onTotal={setRoleTotal} />
+          </div>
+        )}
+        {visited.has("shared") && (
+          <div hidden={scope !== "shared"}>
+            <div className="knowledge-scope-toolbar">
               <input
                 type="search"
+                className="knowledge-search"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="搜索内容或提议人（角色名 / slug）"
@@ -416,9 +489,10 @@ export function Knowledge() {
               {query && (
                 <button type="button" className="small" onClick={() => setQuery("")}>清除</button>
               )}
+              <span className="muted knowledge-scope-count">
+                待审批 {pending.length} · 已批准 {approved.length}
+              </span>
             </div>
-          </div>
-          <div className="knowledge-panel-body">
             <h3 className="knowledge-list-title">
               待审批 {pending.length}
               {needle && ` · 匹配 ${filteredPending.length}`}
@@ -443,18 +517,14 @@ export function Knowledge() {
               onDelete={removeLesson}
             />
           </div>
-        </section>
-
-        <section className="knowledge-panel knowledge-proposals">
-          <div className="knowledge-panel-head">
-            <div>
-              <h2 className="pane-title">角色演化提案</h2>
+        )}
+        {visited.has("proposals") && (
+          <div hidden={scope !== "proposals"}>
+            <div className="knowledge-scope-toolbar">
               <span className="muted">
-                {proposals.filter((p) => p.status === "pending").length} 待审
+                共 {proposals.length} 条 · {pendingProposals} 条待审
               </span>
             </div>
-          </div>
-          <div className="knowledge-panel-body">
             <ul className="drafts">
               {proposals.length === 0 && <li className="muted">暂无提案 —— Agent 可用 `anvil self propose` 提交。</li>}
               {proposals.map((p) => (
@@ -476,7 +546,12 @@ export function Knowledge() {
               ))}
             </ul>
           </div>
-        </section>
+        )}
+        {visited.has("stats") && (
+          <div hidden={scope !== "stats"}>
+            <KnowledgeStatsTab />
+          </div>
+        )}
       </div>
 
       {detail && (

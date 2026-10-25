@@ -5,9 +5,50 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..deps import Auth, get_auth, get_db, require_human
-from ..services import knowledge_card, repo_catalog
+from ..services import knowledge_card, knowledge_stats, repo_catalog, task_knowledge, workspace_knowledge
 
 router = APIRouter()
+
+_KNOWLEDGE_STATUSES = {"draft", "proposed", "approved", "rejected", "deprecated", "expired"}
+_TASK_KNOWLEDGE_STATUSES = {"active", "archived"}
+
+
+@router.get("/cards")
+def list_knowledge_cards(
+    status: str | None = None, kind: str | None = None,
+    workspace_id: str | None = None, q: str | None = None,
+    limit: int = 200, offset: int = 0,
+    conn=Depends(get_db), auth: Auth = Depends(require_human),
+):
+    if status and status != "all" and status not in _KNOWLEDGE_STATUSES:
+        raise HTTPException(status_code=422, detail=f"invalid status: {status}")
+    if kind and kind not in knowledge_card.KINDS:
+        raise HTTPException(status_code=422, detail=f"invalid kind: {kind}")
+    return workspace_knowledge.list_all(
+        conn, status=status, kind=kind, workspace_id=workspace_id,
+        q=q, limit=limit, offset=offset,
+    )
+
+
+@router.get("/stats")
+def knowledge_library_stats(
+    conn=Depends(get_db), auth: Auth = Depends(require_human),
+):
+    return knowledge_stats.library_stats(conn)
+
+
+@router.get("/task-cards")
+def list_task_knowledge_cards(
+    status: str | None = None, workspace_id: str | None = None,
+    q: str | None = None, limit: int = 200, offset: int = 0,
+    conn=Depends(get_db), auth: Auth = Depends(require_human),
+):
+    if status and status != "all" and status not in _TASK_KNOWLEDGE_STATUSES:
+        raise HTTPException(status_code=422, detail=f"invalid status: {status}")
+    return task_knowledge.list_all(
+        conn, status=status, workspace_id=workspace_id,
+        q=q, limit=limit, offset=offset,
+    )
 
 
 @router.get("/card/template")

@@ -596,6 +596,45 @@ export const api = {
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
     }),
 
+  // knowledge library（人工审计）
+  listAllWorkspaceKnowledge: (params?: {
+    status?: string; kind?: string; workspace_id?: string; q?: string;
+    limit?: number; offset?: number;
+  }): Promise<KnowledgePage<WorkspaceKnowledge>> => {
+    const qs = new URLSearchParams();
+    for (const [key, value] of Object.entries(params ?? {})) {
+      if (value !== undefined && value !== null && value !== "") qs.set(key, String(value));
+    }
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return authFetch(`${BASE}/knowledge/cards${suffix}`)
+      .then((r) => json<KnowledgePage<WorkspaceKnowledge>>(r));
+  },
+  listAllTaskKnowledge: (params?: {
+    status?: string; workspace_id?: string; q?: string; limit?: number; offset?: number;
+  }): Promise<KnowledgePage<TaskKnowledge>> => {
+    const qs = new URLSearchParams();
+    for (const [key, value] of Object.entries(params ?? {})) {
+      if (value !== undefined && value !== null && value !== "") qs.set(key, String(value));
+    }
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return authFetch(`${BASE}/knowledge/task-cards${suffix}`)
+      .then((r) => json<KnowledgePage<TaskKnowledge>>(r));
+  },
+  getKnowledgeStats: (): Promise<KnowledgeStats> =>
+    authFetch(`${BASE}/knowledge/stats`).then((r) => json<KnowledgeStats>(r)),
+  getRoleKnowledgeIndex: (role: string): Promise<RoleKnowledgeIndex> =>
+    authFetch(`${BASE}/me/knowledge/index?role=${encodeURIComponent(role)}`)
+      .then((r) => json<RoleKnowledgeIndex>(r)),
+  searchRoleKnowledge: (role: string, q: string, limit = 20): Promise<{
+    role_slug: string; query: string; count: number; results: KnowledgeHit[];
+  }> => {
+    const qs = new URLSearchParams({
+      role, q, scope: "role", limit: String(limit),
+    });
+    return authFetch(`${BASE}/me/knowledge/search?${qs.toString()}`)
+      .then((r) => json(r));
+  },
+
   // tasks（补齐 cancel/reopen）
   cancelTask: (id: string): Promise<Task> => req("POST", `/tasks/${id}/cancel`, {}).then((r) => json<Task>(r)),
   reopenTask: (id: string): Promise<Task> => req("POST", `/tasks/${id}/reopen`, {}).then((r) => json<Task>(r)),
@@ -743,6 +782,7 @@ export type KnowledgeStatus =
 export interface WorkspaceKnowledge {
   id: string;
   workspace_id: string;
+  workspace_name?: string | null;
   repo: string | null;
   kind: KnowledgeKind;
   authority: KnowledgeAuthority;
@@ -795,6 +835,11 @@ export interface KnowledgeReview {
 export interface TaskKnowledge {
   id: string;
   task_id: string;
+  task_title?: string | null;
+  task_status?: string | null;
+  workspace_id?: string | null;
+  workspace_name?: string | null;
+  task_archived_at?: string | null;
   parent_task_id: string | null;
   source_subtask_id: string | null;
   origin: "task" | "subtask";
@@ -808,6 +853,79 @@ export interface TaskKnowledge {
   status: "active" | "archived";
   created_at: string;
   updated_at: string;
+}
+
+export interface KnowledgePage<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export interface RoleKnowledgeIndex {
+  role_slug: string;
+  task_id: string | null;
+  role_counts: Record<string, number>;
+  task_counts: Record<string, number>;
+  recent: { id: string; path: string; kind: string; repo: string | null; updated_at: string | null }[];
+  total_role: number;
+  total_task: number;
+}
+
+export interface ChannelKnowledgeStats {
+  workspace_id: string;
+  workspace_name: string;
+  approved: number;
+  used: number;
+  hits: number;
+  zero_hit: number;
+  proposed: number;
+  tasks: number;
+  hit_rate: number;
+  avg_hits_per_card: number;
+  hits_per_task: number;
+}
+
+export interface KnowledgeStats {
+  channels: ChannelKnowledgeStats[];
+  totals: {
+    approved: number;
+    used: number;
+    hits: number;
+    zero_hit: number;
+    proposed: number;
+    expired: number;
+    review_due: number;
+    conflicts: number;
+    hit_rate: number;
+    avg_hits_per_card: number;
+  };
+  task_knowledge: {
+    active: number;
+    tasks_with_knowledge: number;
+    tasks_total: number;
+    coverage: number;
+  };
+  lessons: { pending: number; approved: number };
+  role_knowledge: { notes_total: number; roles_with_notes: number; usage_tracked: boolean };
+  generated_at: string;
+  note: string;
+}
+
+export interface KnowledgeHit {
+  id: string;
+  path: string;
+  kind: string;
+  scope: string;
+  task_id: string | null;
+  repo: string | null;
+  module?: string | null;
+  tags: string[];
+  snippet: string;
+  updated_at?: string | null;
+  created_at?: string | null;
+  confidence?: number;
 }
 
 export type RunStatus =
