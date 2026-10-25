@@ -208,8 +208,10 @@ function WorkflowSummary({ workflow, taskStatus, metrics, diff }: {
             人工等待 {Math.round((metrics.waiting.human_seconds
               + metrics.waiting.pending_human_seconds) / 60)} 分钟
           </span>
-          <span title="Token 使用量">
-            Token {(metrics.tokens.input_tokens ?? 0) + (metrics.tokens.output_tokens ?? 0)}
+          <span title="仅 workflow 步骤关联 run 的 Token 总量（输入 + 输出 + 缓存读取 + 缓存写入）">
+            Token {(metrics.tokens.total_tokens
+              ?? (metrics.tokens.input_tokens ?? 0) + (metrics.tokens.output_tokens ?? 0)
+            ).toLocaleString("en-US")}
           </span>
           {metrics.steps.generated_slices > 0 && (
             <span>切片 {metrics.steps.generated_slices} 步</span>

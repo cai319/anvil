@@ -208,6 +208,11 @@ export function TaskReplay({ id }: { id: string }) {
   const progress = workflow?.steps.length
     ? Math.round((doneCount / workflow.steps.length) * 100) : 0;
   const playbackTime = current?.ts || task?.created_at || null;
+  const tokenExec = metrics?.tokens.total_tokens
+    ?? ((metrics?.tokens.input_tokens ?? 0) + (metrics?.tokens.output_tokens ?? 0));
+  const rawTaskTokens = (metrics?.tokens.task_input_tokens ?? 0)
+    + (metrics?.tokens.task_output_tokens ?? 0);
+  const tokenTask = metrics?.tokens.task_total_tokens ?? (rawTaskTokens || tokenExec);
 
   const togglePlay = () => {
     if (cursor >= events.length) setCursor(0);
@@ -400,7 +405,12 @@ export function TaskReplay({ id }: { id: string }) {
                 <strong>{metrics.decisions.human_interventions ?? metrics.decisions.human}</strong>
               </div>
               <div><span>返工</span><strong>{metrics.decisions.rejected}</strong></div>
-              <div><span>Token</span><strong>{(metrics.tokens.input_tokens ?? 0) + (metrics.tokens.output_tokens ?? 0)}</strong></div>
+              <div title={`任务所有 run：输入 ${metrics.tokens.task_input_tokens ?? 0} + 输出 ${metrics.tokens.task_output_tokens ?? 0} + 缓存读取 ${metrics.tokens.task_cache_read_tokens ?? 0} + 缓存写入 ${metrics.tokens.task_cache_creation_tokens ?? 0}`}>
+                <span>任务 Token</span><strong>{tokenTask.toLocaleString("en-US")}</strong>
+              </div>
+              <div title={`仅 workflow 步骤关联的 run：输入 ${metrics.tokens.input_tokens ?? 0} + 输出 ${metrics.tokens.output_tokens ?? 0} + 缓存读取 ${metrics.tokens.cache_read_tokens ?? 0} + 缓存写入 ${metrics.tokens.cache_creation_tokens ?? 0}`}>
+                <span>执行 Token</span><strong>{tokenExec.toLocaleString("en-US")}</strong>
+              </div>
               {metrics.gates.total === 0 && (
                 <p className="replay-metric-note">
                   本执行没有 workflow 审核门；最终人工验收单独计入人工干预。

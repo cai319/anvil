@@ -105,8 +105,17 @@ export function ExecutionDossier({ id }: { id: string }) {
         <div><span>人工等待</span>
           <strong>{Math.round((m.waiting.human_seconds + m.waiting.pending_human_seconds) / 60)} 分</strong>
         </div>
-        <div><span>Token</span>
-          <strong>{(m.tokens.input_tokens ?? 0) + (m.tokens.output_tokens ?? 0)}</strong>
+        <div title="仅 workflow 步骤关联 run：输入 + 输出 + 缓存读取 + 缓存写入">
+          <span>执行 Token</span>
+          <strong>{(m.tokens.total_tokens
+            ?? (m.tokens.input_tokens ?? 0) + (m.tokens.output_tokens ?? 0)
+          ).toLocaleString("en-US")}</strong>
+        </div>
+        <div title="该任务所有 run（含规划、最终验收与未挂步骤的会话）">
+          <span>任务 Token</span>
+          <strong>{(m.tokens.task_total_tokens
+            ?? (m.tokens.task_input_tokens ?? 0) + (m.tokens.task_output_tokens ?? 0)
+          ).toLocaleString("en-US")}</strong>
         </div>
         <div><span>切片步骤</span><strong>{m.steps.generated_slices}</strong></div>
       </div>

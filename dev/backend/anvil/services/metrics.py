@@ -61,18 +61,37 @@ def _depth(steps: list[dict]) -> int:
     return max((visit(s) for s in by_id), default=0)
 
 
-def _usage(conn: sqlite3.Connection, wid: str) -> dict:
-    row = conn.execute(
-        """SELECT COALESCE(SUM(input_tokens),0) AS input_tokens,
-                  COALESCE(SUM(output_tokens),0) AS output_tokens,
-                  COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens,
-                  COALESCE(SUM(cache_creation_tokens),0) AS cache_creation_tokens,
-                  COUNT(*) AS records
-             FROM token_usage
-            WHERE run_id IN (SELECT run_id FROM workflow_steps
-                              WHERE workflow_id=? AND run_id IS NOT NULL)""",
-        (wid,)).fetchone()
-    return dict(row) if row else {}
+def _usage(conn: sqlite3.Connection, wid: str, task_id: str) -> dict:
+    def agg(where: str, params: tuple) -> dict:
+        row = conn.execute(
+            f"""SELECT COALESCE(SUM(input_tokens),0) AS input_tokens,
+                       COALESCE(SUM(output_tokens),0) AS output_tokens,
+                       COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens,
+                       COALESCE(SUM(cache_creation_tokens),0) AS cache_creation_tokens,
+                       COUNT(*) AS records
+                  FROM token_usage WHERE {where}""", params).fetchone()
+        data = dict(row) if row else {}
+        data["total_tokens"] = (data.get("input_tokens", 0)
+                                + data.get("output_tokens", 0)
+                                + data.get("cache_read_tokens", 0)
+                                + data.get("cache_creation_tokens", 0))
+        return data
+
+    workflow = agg(
+        "run_id IN (SELECT run_id FROM workflow_steps "
+        "WHERE workflow_id=? AND run_id IS NOT NULL)", (wid,))
+    task = agg("task_id=?", (task_id,))
+    return {
+        **workflow,
+        # Task-level totals include planner/final-review and any role run that
+        # was not directly attached to a workflow step.
+        "task_input_tokens": task["input_tokens"],
+        "task_output_tokens": task["output_tokens"],
+        "task_cache_read_tokens": task["cache_read_tokens"],
+        "task_cache_creation_tokens": task["cache_creation_tokens"],
+        "task_records": task["records"],
+        "task_total_tokens": task["total_tokens"],
+    }
 
 
 def compute(conn: sqlite3.Connection, wid: str) -> dict:
@@ -173,7 +192,7 @@ def compute(conn: sqlite3.Connection, wid: str) -> dict:
             "pending_human_seconds": round(pending_wait, 1),
         },
         "evidence": {"packets": evidence},
-        "tokens": _usage(conn, wid),
+        "tokens": _usage(conn, wid, wf["task_id"]),
     }
 
 

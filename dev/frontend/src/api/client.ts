@@ -909,7 +909,14 @@ export interface WorkflowMetrics {
     output_tokens?: number;
     cache_read_tokens?: number;
     cache_creation_tokens?: number;
+    total_tokens?: number;
     records?: number;
+    task_input_tokens?: number;
+    task_output_tokens?: number;
+    task_cache_read_tokens?: number;
+    task_cache_creation_tokens?: number;
+    task_total_tokens?: number;
+    task_records?: number;
   };
 }
 

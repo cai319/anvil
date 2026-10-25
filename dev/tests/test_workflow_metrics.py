@@ -93,6 +93,34 @@ def test_planned_actual_diff_includes_generated_slices(tmp_path):
     assert row["evidence_required"] == 1
 
 
+def test_token_totals_include_cache_and_task_level_runs(tmp_path):
+    conn = _conn(tmp_path)
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "实现", "role": "dev"}]})
+    wf_service.advance(conn, wf["id"], starter=_starter("S1"))
+    wf_service.submit_step(conn, wf["id"], "S1", "dev", "完成")
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO token_usage (role_slug, task_id, run_id, input_tokens, output_tokens, "
+        "cache_read_tokens, cache_creation_tokens, recorded_at) VALUES "
+        "('dev','T1','run-S1',100,20,30,5,?)", (now,))
+    # Planner/final-review style run not attached to a workflow step.
+    conn.execute(
+        "INSERT INTO token_usage (role_slug, task_id, run_id, input_tokens, output_tokens, "
+        "cache_read_tokens, cache_creation_tokens, recorded_at) VALUES "
+        "('cindy','T1',NULL,10,2,0,0,?)", (now,))
+    conn.commit()
+    m = metrics.compute(conn, wf["id"])
+    t = m["tokens"]
+    assert t["input_tokens"] == 100
+    assert t["output_tokens"] == 20
+    assert t["cache_read_tokens"] == 30
+    assert t["total_tokens"] == 155
+    assert t["task_input_tokens"] == 110
+    assert t["task_total_tokens"] == 167
+    assert t["task_records"] == 2
+
+
 def test_legacy_decision_step_and_human_review_are_counted(tmp_path):
     conn = _conn(tmp_path)
     wf = wf_service.create_workflow(conn, "T1", {"steps": [
