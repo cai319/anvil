@@ -18,6 +18,8 @@ import { Runtimes } from "./pages/Runtimes";
 import { RunSession } from "./pages/RunSession";
 import { TaskDetail } from "./pages/TaskDetail";
 import { Tooling } from "./pages/Tooling";
+import { ExecutionDossier } from "./pages/ExecutionDossier";
+import { TaskReplay } from "./pages/TaskReplay";
 
 type Route =
   | { page: "lobby" }
@@ -33,6 +35,8 @@ type Route =
   | { page: "knowledge" }
   | { page: "tooling" }
   | { page: "task"; id: string }
+  | { page: "replay"; id: string }
+  | { page: "dossier"; id: string }
   | { page: "agent"; slug: string }
   | { page: "run"; id: string };
 
@@ -81,6 +85,8 @@ const PAGE_TITLE: Record<Route["page"], string> = {
   knowledge: "知识库",
   tooling: "工具",
   task: "任务详情",
+  replay: "任务回放",
+  dossier: "执行档案",
   agent: "角色会话",
   run: "运行详情",
 };
@@ -107,6 +113,10 @@ function parseRoute(path: string): Route {
   if (path.startsWith("/reminders")) return { page: "reminders" };
   if (path.startsWith("/knowledge")) return { page: "knowledge" };
   if (path.startsWith("/tooling")) return { page: "tooling" };
+  const rp = path.match(/^\/tasks\/([^/]+)\/replay$/);
+  if (rp) return { page: "replay", id: decodeURIComponent(rp[1]) };
+  const d = path.match(/^\/tasks\/([^/]+)\/dossier$/);
+  if (d) return { page: "dossier", id: decodeURIComponent(d[1]) };
   const m = path.match(/^\/tasks\/([^/]+)$/);
   if (m) return { page: "task", id: decodeURIComponent(m[1]) };
   const a = path.match(/^\/agents\/([^/]+)$/);
@@ -117,7 +127,8 @@ function parseRoute(path: string): Route {
 }
 
 function activeHref(route: Route): string {
-  if (route.page === "task" || route.page === "run") return "/";
+  if (route.page === "task" || route.page === "run"
+    || route.page === "dossier" || route.page === "replay") return "/";
   if (route.page === "agent") return "/roles";
   return route.page === "lobby" ? "/" : `/${route.page}`;
 }
@@ -317,6 +328,10 @@ export default function App() {
             <ActivityHistory key={`activity-${pageKey}`} />
           ) : route.page === "task" ? (
             <TaskDetail key={`task-${route.id}-${pageKey}`} id={route.id} />
+          ) : route.page === "replay" ? (
+            <TaskReplay key={`replay-${route.id}-${pageKey}`} id={route.id} />
+          ) : route.page === "dossier" ? (
+            <ExecutionDossier key={`dossier-${route.id}-${pageKey}`} id={route.id} />
           ) : route.page === "agent" ? (
             <AgentSessions key={`agent-${route.slug}-${pageKey}`} slug={route.slug} />
           ) : route.page === "run" ? (

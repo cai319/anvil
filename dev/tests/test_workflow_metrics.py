@@ -90,6 +90,34 @@ def test_planned_actual_diff_includes_generated_slices(tmp_path):
     assert row["evidence_required"] == 1
 
 
+def test_light_weight_skips_fix_and_verify2(tmp_path):
+    conn = _conn(tmp_path)
+    definition = {
+        "steps": [{"id": "P1", "title": "盘点切片", "role": "lead",
+                   "kind": "plan_slices"}],
+        "loop": {
+            "from": "P1",
+            "execute": {"role": "dev"},
+            "verify": {"role": "qa"},
+            "decide": {"role": "lead"},
+        },
+        "weight": "light",
+    }
+    wf = wf_service.create_workflow(conn, "T1", definition)
+    wf_service.advance(conn, wf["id"], starter=_starter("P1"))
+    wf = wf_service.apply_slice_plan(conn, wf["id"], "P1", "lead", {
+        "slices": [{"id": "a", "title": "小改动"}]})
+    ids = {s["step_id"] for s in wf["steps"]}
+    assert "P1.a.execute" in ids
+    assert "P1.a.verify" in ids
+    assert "P1.a.decide" in ids
+    assert "P1.a.fix" not in ids
+    assert "P1.a.verify2" not in ids
+    decide = next(s for s in wf["steps"] if s["step_id"] == "P1.a.decide")
+    assert decide["depends_on"] == ["P1.a.verify"]
+    assert set(decide["on_reject"]) == {"P1.a.execute", "P1.a.verify"}
+
+
 def test_dossier_persisted_on_termination(tmp_path):
     conn = _conn(tmp_path)
     wf = wf_service.create_workflow(conn, "T1", {"steps": [

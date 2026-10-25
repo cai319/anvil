@@ -63,6 +63,37 @@ def test_decision_step_records_reject(tmp_path):
     assert decisions[-1]["rework_targets"] == ["S1"]
 
 
+def test_ai_approval_escalates_on_configured_or_unmet_triggers(tmp_path):
+    conn = connect(str(tmp_path / "t.db"))
+    _task(conn)
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "实现", "role": "dev"},
+        {"id": "D1", "title": "发布验收", "role": "lead", "kind": "decision",
+         "depends_on": ["S1"], "on_reject": ["S1"],
+         "escalate": ["policy_or_security"],
+         "acceptance": [{"criterion": "安全评审完成", "status": "unmet"}]},
+    ]})
+    wf_service.advance(conn, wf["id"], starter=lambda *a: {"id": "r1"})
+    wf_service.submit_step(conn, wf["id"], "S1", "dev", "完成")
+    wf_service.advance(conn, wf["id"], starter=lambda *a: {"id": "r2"})
+    with pytest.raises(ConflictError) as exc:
+        wf_service.decide_step(conn, wf["id"], "D1", "lead", True, "通过")
+    message = str(exc.value)
+    assert "escalation_required" in message
+    assert "policy_or_security" in message
+    assert "acceptance_unmet" in message
+    wf = wf_service.escalate_step(conn, wf["id"], "D1", "lead", "需人工确认安全评审")
+    packet = reviews.latest_packet(conn, wf["id"], "D1")
+    assert set(packet["recommendation"]["triggers"]) >= {
+        "policy_or_security", "acceptance_unmet"}
+    wf = wf_service.decide_step(
+        conn, wf["id"], "D1", "human", True, "人工确认放行",
+        override_reason="安全负责人人工确认")
+    decisions = reviews.decisions_for_step(conn, wf["id"], "D1")
+    assert decisions[-1]["decision"] == "approve"
+    assert "acceptance_unmet" in decisions[-1]["reasons"]
+
+
 def test_gate_reject_can_widen_rework_scope(tmp_path):
     conn = connect(str(tmp_path / "r.db"))
     _task(conn)

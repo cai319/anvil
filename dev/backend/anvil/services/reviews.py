@@ -125,6 +125,24 @@ def packet_has_stale_evidence(packet: dict | None) -> bool:
     return any(not e.get("fresh", True) for e in (packet or {}).get("evidence") or [])
 
 
+def escalation_triggers(step: dict, packet: dict | None) -> list[str]:
+    """Triggers that must stop an AI approval and hand the decision to a human."""
+    triggers = set(str(x) for x in jloads(step.get("escalate_json") or "[]", []))
+    if not step.get("reversible", True):
+        triggers.add("irreversible_action")
+    if str(step.get("risk_level") or "normal") == "critical":
+        triggers.add("high_risk")
+    evidence = (packet or {}).get("evidence") or []
+    explicit = [e for e in evidence if e.get("kind") != "summary"]
+    if step.get("evidence_required") and not explicit:
+        triggers.add("evidence_missing")
+    if any(not e.get("fresh", True) for e in evidence):
+        triggers.add("evidence_stale")
+    if any(a.get("status") == "unmet" for a in (packet or {}).get("acceptance") or []):
+        triggers.add("acceptance_unmet")
+    return sorted(triggers)
+
+
 def authority_of(step: dict) -> str:
     value = str(step.get("decision_authority") or "").strip()
     if value in ("ai", "human", "joint"):

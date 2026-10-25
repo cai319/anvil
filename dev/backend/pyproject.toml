@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "anvil"
-version = "1.26"
+version = "1.27"
 description = "Anvil backend (FastAPI)"
 requires-python = ">=3.11"
 dependencies = [

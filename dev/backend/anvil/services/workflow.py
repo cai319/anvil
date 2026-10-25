@@ -707,35 +707,38 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
             "slice_key": slice_id,
         })
 
-        fix_spec = _loop_spec(loop, "fix")
-        fix_id = add({
-            "id": f"{plan_step_id}.{slice_id}.fix",
-            "title": f"{title} · {fix_spec.get('title') or '修复与补证'}",
-            "role": fix_role,
-            "depends_on": [verify_id],
-            "instructions": _join_instructions(fix_spec, context),
-            "acceptance": _merge_unique(
-                fix_spec.get("acceptance"),
-                ["验证提出的问题逐条有处置结论（修复/补证/误报）"]),
-            "contract": str(fix_spec.get("contract") or "") or None,
-            "source_step_id": plan_step_id,
-            "slice_key": slice_id,
-        })
+        fix_id = None
+        verify2_id = None
+        if weight != "light":
+            fix_spec = _loop_spec(loop, "fix")
+            fix_id = add({
+                "id": f"{plan_step_id}.{slice_id}.fix",
+                "title": f"{title} · {fix_spec.get('title') or '修复与补证'}",
+                "role": fix_role,
+                "depends_on": [verify_id],
+                "instructions": _join_instructions(fix_spec, context),
+                "acceptance": _merge_unique(
+                    fix_spec.get("acceptance"),
+                    ["验证提出的问题逐条有处置结论（修复/补证/误报）"]),
+                "contract": str(fix_spec.get("contract") or "") or None,
+                "source_step_id": plan_step_id,
+                "slice_key": slice_id,
+            })
 
-        verify2_spec = _loop_spec(loop, "verify2")
-        verify2_id = add({
-            "id": f"{plan_step_id}.{slice_id}.verify2",
-            "title": f"{title} · {verify2_spec.get('title') or '复验'}",
-            "role": verify2_role,
-            "depends_on": [fix_id],
-            "instructions": _join_instructions(verify2_spec, context),
-            "acceptance": _merge_unique(
-                verify2_spec.get("acceptance"),
-                ["原验证问题逐条确认关闭或仍存在，并附证据"]),
-            "contract": str(verify2_spec.get("contract") or "") or None,
-            "source_step_id": plan_step_id,
-            "slice_key": slice_id,
-        })
+            verify2_spec = _loop_spec(loop, "verify2")
+            verify2_id = add({
+                "id": f"{plan_step_id}.{slice_id}.verify2",
+                "title": f"{title} · {verify2_spec.get('title') or '复验'}",
+                "role": verify2_role,
+                "depends_on": [fix_id],
+                "instructions": _join_instructions(verify2_spec, context),
+                "acceptance": _merge_unique(
+                    verify2_spec.get("acceptance"),
+                    ["原验证问题逐条确认关闭或仍存在，并附证据"]),
+                "contract": str(verify2_spec.get("contract") or "") or None,
+                "source_step_id": plan_step_id,
+                "slice_key": slice_id,
+            })
 
         decide_spec = _loop_spec(loop, "decide")
         try:
@@ -756,8 +759,9 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
             "kind": "decision",
             "title": f"{title} · {decide_spec.get('title') or '切片决策'}",
             "role": decision_role,
-            "depends_on": [verify2_id],
-            "on_reject": [fix_id, verify2_id],
+            "depends_on": [verify2_id or verify_id],
+            "on_reject": ([fix_id, verify2_id] if verify2_id else
+                          [*execute_ids, verify_id]),
             "max_rework": max_rework,
             "instructions": _join_instructions(decide_spec, context),
             "acceptance": decide_acceptance,
@@ -1750,9 +1754,11 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
                 f"override_reason_required: human override of ai decision {step_id}")
         packet = reviews.ensure_packet(
             conn, wf, step, created_by=role or "system", commit=False)
-        if approve and not is_human and reviews.packet_has_stale_evidence(packet):
+        approval_triggers = reviews.escalation_triggers(step, packet)
+        if approve and not is_human and approval_triggers:
             raise ConflictError(
-                f"evidence_stale: step {step_id} has stale evidence; escalate instead")
+                f"escalation_required: {', '.join(approval_triggers)}; "
+                f"step {step_id} must be escalated instead of approved by AI")
 
         if authority == "joint" and approve and not is_human:
             # AI may only recommend approval under joint authority. The run is
@@ -1806,12 +1812,18 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
                 (feedback, now, now, wid, step_id))
             _step_activity(conn, wf["task_id"], step["role_slug"], step,
                            "approved", feedback or None)
+            decision_reasons = reasons
+            if is_human and approval_triggers:
+                decision_reasons = sorted(
+                    set(reasons or []) | set(approval_triggers))
             reviews.record_decision(
                 conn, wf, step, actor_type="human" if role == "human" else "role",
                 actor=role or step["role_slug"], decision="approve",
-                feedback=feedback or note, reasons=reasons, packet_id=packet_id,
+                feedback=feedback or note, reasons=decision_reasons,
+                packet_id=packet_id,
                 override_reason=override_reason or (
-                    feedback if role == "human" and authority != "human" else None),
+                    feedback if role == "human"
+                    and (authority != "human" or approval_triggers) else None),
                 commit=False,
             )
             leases.release(conn, step.get("lease_id"), commit=False)
@@ -1916,7 +1928,10 @@ def escalate_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | 
         raise ConflictError(f"step {step_id} is {step['status']}, expected running")
     if not (reason or "").strip():
         raise ConflictError("escalation reason is required")
-    reviews.ensure_packet(conn, wf, step, created_by=role or "system", commit=False)
+    packet = reviews.ensure_packet(
+        conn, wf, step, created_by=role or "system", commit=False)
+    triggers = sorted(set(triggers or []) | set(
+        reviews.escalation_triggers(step, packet)))
     if step["run_id"]:
         row = conn.execute("SELECT status FROM runs WHERE id=?", (step["run_id"],)).fetchone()
         conn.execute("UPDATE runs SET status='completed', ended_at=? WHERE id=?",

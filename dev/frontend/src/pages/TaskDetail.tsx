@@ -1147,6 +1147,9 @@ export function TaskDetail({ id }: { id: string }) {
           <a href="/"><Icon name="chevron-left" /> 任务大厅</a>
         </p>
         <div className="task-sheet-actions">
+          <a className="small button-like" href={`/tasks/${id}/replay`}>
+            <Icon name="play" size={12} /> 任务回放
+          </a>
           {["todo", "in_progress", "in_review"].includes(task.status) && (
             <button
               className="small danger"
@@ -1655,6 +1658,10 @@ export function TaskDetail({ id }: { id: string }) {
                     } catch (e) { setError(String(e)); }
                     finally { setDossierBusy(false); }
                   }}>{dossierBusy ? "导出中…" : "导出执行档案"}</button>
+                <a className="small button-like"
+                  href={`/tasks/${id}/dossier?workflow_id=${displayWorkflow.id}`}>
+                  查看执行档案
+                </a>
               </>
             )}
             <span className="wf-template-actions-divider" />
