@@ -34,7 +34,7 @@
 .brand .dot { display: none; }
 .brand-name {
   display: inline-block;
-  padding: 2px 8px;
+  padding: 3px 9px;
   border: var(--stroke) solid var(--ink-900);
   background: var(--yellow);
   color: var(--ink-900);

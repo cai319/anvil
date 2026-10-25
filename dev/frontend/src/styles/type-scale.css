@@ -149,7 +149,7 @@ small,
 .modal-head h2 { font-size: var(--fs-h2); }
 .content > h2 { font-size: var(--fs-h2); }
 .brand { font-size: clamp(16px, 0.3vw + 11.7px, 22px); }
-.brand-name { font-size: clamp(14px, 0.25vw + 10.5px, 20px); }
+.brand-name { font-size: clamp(17px, 0.36vw + 12px, 24px); }
 
 /* ── 控件与间距跟随字号放大 ─────────────────────── */
 .sidebar {
