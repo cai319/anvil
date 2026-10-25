@@ -1557,6 +1557,45 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
   font-size: var(--fs-hint);
   font-weight: 600;
 }
+.channel-field-label { display: inline-flex; align-items: center; gap: 5px; }
+.field-hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  border: 1px solid #c2ad92;
+  border-radius: 50%;
+  background: #fffaf1;
+  color: #6b6375;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: help;
+  user-select: none;
+}
+.field-hint:hover,
+.field-hint:focus-visible {
+  border-color: #14131a;
+  color: #14131a;
+  outline: none;
+}
+.field-hint-bubble {
+  position: fixed;
+  z-index: 1000;
+  width: min(280px, calc(100vw - 24px));
+  padding: 7px 9px;
+  border: 1px solid #c2ad92;
+  border-radius: 8px;
+  background: #fffaf1;
+  color: #4b4652;
+  font-size: var(--fs-hint);
+  font-weight: 500;
+  line-height: 1.45;
+  box-shadow: 0 6px 18px rgba(20, 19, 26, 0.16);
+  pointer-events: none;
+}
 .channel-form-grid input,
 .channel-form-grid select,
 .channel-form-grid textarea {

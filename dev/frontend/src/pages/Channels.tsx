@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   api,
   type Channel,
@@ -16,6 +17,7 @@ import { UNBOUND_CHANNEL_VIEW } from "../channelView";
 import {
   AUTHORITY_LABEL,
   KNOWLEDGE_CARD_FIELDS,
+  KNOWLEDGE_FIELD_HINT,
   KNOWLEDGE_KINDS,
   KNOWLEDGE_KIND_LABEL,
   KNOWLEDGE_STATUS_LABEL,
@@ -38,6 +40,58 @@ const REVIEW_REASON_LABEL: Record<string, string> = {
   conflict: "冲突未裁决",
   low_hit: "长期未命中",
 };
+
+/** 字段说明气泡：固定定位到 body，避免被频道详情的滚动容器裁切。 */
+function FieldHint({ text }: { text: string }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+
+  const show = () => {
+    const el = ref.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const width = Math.min(280, window.innerWidth - 24);
+    const left = Math.min(
+      window.innerWidth - width - 12,
+      Math.max(12, rect.left + rect.width / 2 - width / 2),
+    );
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const top = spaceBelow >= 110 ? rect.bottom + 8 : Math.max(12, rect.top - 104);
+    setPos({ top, left });
+  };
+
+  return (
+    <>
+      <span
+        ref={ref}
+        className="field-hint"
+        tabIndex={0}
+        aria-label={text}
+        onMouseEnter={show}
+        onMouseLeave={() => setPos(null)}
+        onFocus={show}
+        onBlur={() => setPos(null)}
+      >
+        ?
+      </span>
+      {pos && createPortal(
+        <span className="field-hint-bubble" style={{ top: pos.top, left: pos.left }} role="tooltip">
+          {text}
+        </span>,
+        document.body,
+      )}
+    </>
+  );
+}
+
+function FieldLabel({ label, hint }: { label: string; hint?: string }) {
+  return (
+    <span className="channel-field-label">
+      {label}
+      {hint && <FieldHint text={hint} />}
+    </span>
+  );
+}
 
 const TABS: { key: Tab; label: string }[] = [
   { key: "overview", label: "概览" },
@@ -441,25 +495,30 @@ export function Channels() {
                   <>
                     <h3>新增知识卡</h3>
                     <div className="channel-form-grid">
-                      <label className="span-2">标题
+                      <label className="span-2">
+                        <FieldLabel label="标题" hint={KNOWLEDGE_FIELD_HINT.title} />
                         <input value={cardTitle} onChange={(e) => setCardTitle(e.target.value)} />
                       </label>
-                      <label className="span-2">TL;DR
+                      <label className="span-2">
+                        <FieldLabel label="TL;DR" hint={KNOWLEDGE_FIELD_HINT.tldr} />
                         <input value={cardTldr} onChange={(e) => setCardTldr(e.target.value)} />
                       </label>
-                      <label>类型
+                      <label>
+                        <FieldLabel label="类型" hint={KNOWLEDGE_FIELD_HINT.kind} />
                         <select value={cardKind} onChange={(e) => setCardKind(e.target.value as KnowledgeKind)}>
                           {KNOWLEDGE_KINDS.map((k) => <option key={k} value={k}>{KNOWLEDGE_KIND_LABEL[k]}</option>)}
                         </select>
                       </label>
-                      <label>约束力
+                      <label>
+                        <FieldLabel label="约束力" hint={KNOWLEDGE_FIELD_HINT.authority} />
                         <select value={cardAuthority} onChange={(e) => setCardAuthority(e.target.value as KnowledgeAuthority)}>
                           <option value="normative">normative（仅 convention）</option>
                           <option value="reference">reference</option>
                         </select>
                       </label>
                       {KNOWLEDGE_CARD_FIELDS[cardKind].map((f) => (
-                        <label key={f.key}>{f.label}
+                        <label key={f.key}>
+                          <FieldLabel label={f.label} hint={KNOWLEDGE_FIELD_HINT[f.key]} />
                           <textarea rows={2} value={cardFields[f.key] || ""}
                             onChange={(e) => setCardFields({ ...cardFields, [f.key]: e.target.value })} />
                         </label>
