@@ -103,7 +103,7 @@ export function ExecutionDossier({ id }: { id: string }) {
             ?? Math.max(0, m.duration_seconds - (m.waiting.excluded_seconds ?? 0)))}</strong>
         </div>
         <div title="没有角色在推进、纯等待人工审核的时长（区间去重）">
-          <span>人工等待</span><strong>{formatDuration(m.waiting.excluded_seconds ?? 0)}</strong>
+          <span>工作流人工等待</span><strong>{formatDuration(m.waiting.excluded_seconds ?? 0)}</strong>
         </div>
         <div><span>最大深度</span><strong>{m.steps.max_depth}</strong></div>
         <div><span>审核门</span><strong>{m.gates.total}</strong></div>
@@ -112,9 +112,6 @@ export function ExecutionDossier({ id }: { id: string }) {
           <strong>{m.decisions.human_interventions ?? m.decisions.human}</strong>
         </div>
         <div><span>打回</span><strong>{m.decisions.rejected}</strong></div>
-        <div><span>人工等待</span>
-          <strong>{Math.round((m.waiting.human_seconds + m.waiting.pending_human_seconds) / 60)} 分</strong>
-        </div>
         <div title="仅 workflow 步骤关联 run：输入 + 输出 + 缓存读取 + 缓存写入">
           <span>执行 Token</span>
           <strong>{(m.tokens.total_tokens

@@ -403,7 +403,7 @@ export function TaskReplay({ id }: { id: string }) {
                     - (metrics.waiting.excluded_seconds ?? 0)))}</strong>
               </div>
               <div title="没有角色在推进、纯等待人工审核的时长（区间去重）">
-                <span>人工等待</span>
+                <span>工作流人工等待</span>
                 <strong>{formatDuration(metrics.waiting.excluded_seconds ?? 0)}</strong>
               </div>
               <div title="workflow gate 步骤数；任务最终评审不计入审核门">
