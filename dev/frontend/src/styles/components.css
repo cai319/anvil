@@ -1499,27 +1499,36 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
 }
 
 /* ── 频道页：与角色工坊一致的布局与紧凑表单 ─────────────── */
+.channels-page {
+  --channel-line: #d8cbb8;
+  --channel-line-strong: #c2ad92;
+  font-size: var(--fs-hint);
+}
 .channels-page .channel-detail-body {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   padding-right: 4px;
+  line-height: 1.45;
   scrollbar-gutter: stable;
 }
 .channels-page .channel-detail-body > h3 {
-  margin: clamp(12px, 1vw, 18px) 0 4px;
-  padding-bottom: 5px;
-  border-bottom: 1.5px dashed var(--paper-2);
+  margin: clamp(9px, 0.7vw, 13px) 0 3px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--paper-2);
   color: var(--text-on-paper-soft);
   font-size: var(--fs-hint);
 }
 .channels-page .channel-detail-body > h3:first-child { margin-top: 0; }
+.channels-page .channels-list li { padding: 7px 9px; }
 .channels-list a {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   min-width: 0;
+  text-decoration: none !important;
 }
+.channels-list a:hover { text-decoration: none !important; }
 .channel-list-name {
   font-weight: 700;
   overflow: hidden;
@@ -1529,7 +1538,7 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
 .channel-form-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
-  gap: clamp(8px, 0.6vw, 12px);
+  gap: clamp(6px, 0.45vw, 9px);
   max-width: 1040px;
 }
 .channel-form-grid .span-2 { grid-column: 1 / -1; }
@@ -1540,7 +1549,7 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
 .channel-form-grid label {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
   color: var(--text-on-paper-muted);
   font-size: var(--fs-hint);
   font-weight: 600;
@@ -1551,7 +1560,7 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
   width: 100%;
   min-height: var(--control-h-sm);
   padding: 5px 9px;
-  border: 1px solid var(--paper-2);
+  border: 1px solid var(--channel-line);
   border-radius: 6px;
   background: var(--paper-3);
   box-shadow: none;
@@ -1562,7 +1571,7 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
 }
 .channel-form-grid input:hover,
 .channel-form-grid select:hover,
-.channel-form-grid textarea:hover { border-color: #d8cbb8; }
+.channel-form-grid textarea:hover { border-color: var(--channel-line-strong); }
 .channel-form-grid input:focus,
 .channel-form-grid select:focus,
 .channel-form-grid textarea:focus,
@@ -1580,7 +1589,7 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
 .channels-page .channel-detail-body .toolbar textarea {
   min-height: var(--control-h-sm);
   padding: 5px 9px;
-  border: 1px solid var(--paper-2);
+  border: 1px solid var(--channel-line);
   border-radius: 6px;
   background: var(--paper-3);
   box-shadow: none;
@@ -1601,30 +1610,57 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
 .channel-stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 1px;
+  gap: clamp(6px, 0.5vw, 10px);
   max-width: 1040px;
-  margin-bottom: 14px;
-  border: 1px solid var(--paper-2);
-  border-radius: 8px;
-  background: var(--paper-2);
-  overflow: hidden;
+  margin-bottom: 11px;
 }
 .channel-stat {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   min-width: 0;
-  padding: 9px 12px;
-  border: 0;
-  border-radius: 0;
-  background: var(--paper);
+  padding: 7px 10px;
+  border: 1px solid var(--channel-line);
+  border-radius: 8px;
+  background: var(--paper-3);
+  box-shadow: 1px 1px 0 rgba(20, 19, 26, 0.06);
 }
 .channel-stat span,
 .channel-stat small { font-size: var(--fs-hint); color: var(--text-on-paper-muted); }
-.channel-stat strong { font-size: var(--fs-meta); overflow-wrap: anywhere; }
-.channel-task-list li { flex-wrap: wrap; gap: 6px 12px; }
-.channel-task-list a { font-weight: 600; overflow-wrap: anywhere; }
-.channel-task-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.channel-stat strong { font-size: var(--fs-hint); overflow-wrap: anywhere; }
+.channel-task-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 520px;
+  margin: 2px 0 8px;
+}
+.channel-task-search input {
+  flex: 1 1 220px;
+  min-width: 0;
+  min-height: var(--control-h-sm);
+  padding: 4px 9px;
+  border: 1px solid var(--channel-line);
+  border-radius: 6px;
+  background: var(--paper-3);
+  box-shadow: none;
+  font-size: var(--fs-hint);
+  color: var(--text-on-paper);
+}
+.channel-task-search input:focus {
+  border-color: var(--link-on-paper);
+  outline: none;
+  box-shadow: none;
+}
+.channel-task-search > .muted {
+  flex: none;
+  font-size: var(--fs-card-meta);
+  white-space: nowrap;
+}
+.channel-task-list li { flex-wrap: wrap; gap: 4px 12px; }
+.channel-task-list a { font-size: var(--fs-hint); font-weight: 600; overflow-wrap: anywhere; }
+.channel-task-meta { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.channel-task-meta small { font-size: var(--fs-card-meta); }
 .channel-knowledge-list { list-style: none; padding-left: 0; max-height: none; overflow: visible; }
 .channel-knowledge-list li {
   display: flex;
@@ -1652,49 +1688,45 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
   justify-content: flex-end;
 }
 
-/* 频道详情是纸面卡片：内部控件、页签、列表改用同色系细分隔，避免“白框套黑框”。 */
+/* 频道详情：保留盒式结构，用暖灰描边替代纯黑，避免“白框套黑框”。 */
 .channels-page .roles-detail .role-detail-head {
   margin-bottom: 10px;
   padding-bottom: 10px;
-  border-bottom: 1px solid var(--paper-2);
+  border-bottom: 1px solid var(--channel-line);
 }
 .channels-page .roles-detail .tabs {
-  width: 100%;
-  max-width: none;
+  width: fit-content;
+  max-width: 100%;
   margin-bottom: clamp(10px, 0.8vw, 16px);
-  padding: 0;
-  border: 0;
-  border-bottom: 1px solid var(--paper-2);
-  border-radius: 0;
-  background: transparent;
+  padding: 4px;
+  gap: 4px;
+  border: 1px solid var(--channel-line);
+  border-radius: 8px;
+  background: var(--paper-2);
   box-shadow: none;
-  gap: 2px;
 }
 .channels-page .roles-detail .tabs button {
   min-height: var(--control-h-sm);
-  padding: 0 11px;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-on-paper-muted);
   box-shadow: none;
   font-weight: 700;
 }
 .channels-page .roles-detail .tabs button:hover:not(:disabled) {
-  background: transparent;
+  background: rgba(20, 19, 26, 0.05);
   border-color: transparent;
-  border-bottom-color: var(--paper-2);
   color: var(--text-on-paper);
   transform: none;
   box-shadow: none;
 }
 .channels-page .roles-detail .tabs button.active {
-  background: transparent;
-  border-color: transparent;
-  border-bottom-color: var(--ink-900);
+  background: var(--paper);
+  border-color: var(--channel-line-strong);
   color: var(--text-on-paper);
-  box-shadow: none;
+  box-shadow: 1px 1px 0 rgba(20, 19, 26, 0.1);
 }
 .channels-page .roles-detail .tabs button.active .tab-count {
   background: var(--paper-2);
@@ -1702,20 +1734,18 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
 }
 .channels-page .roles-detail .roles-list { gap: 0; }
 .channels-page .roles-detail .roles-list li {
-  margin: 0;
-  padding: 9px 2px;
-  border: 0;
-  border-bottom: 1px solid var(--paper-2);
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
+  margin: 0 0 6px;
+  padding: 7px 9px;
+  border: 1px solid var(--channel-line);
+  border-radius: 8px;
+  background: var(--paper-3);
+  box-shadow: 1px 1px 0 rgba(20, 19, 26, 0.06);
 }
-.channels-page .roles-detail .roles-list li:last-child { border-bottom: 0; }
+.channels-page .roles-detail .roles-list li:last-child { margin-bottom: 0; }
 .channels-page .roles-detail .roles-list li.active {
-  border-color: var(--paper-2);
-  background: transparent;
+  border-color: var(--channel-line-strong);
+  background: var(--paper-3);
 }
-.channels-page .channel-knowledge-list li { border-bottom-style: solid; }
 .channels-page .review-reason {
   margin-left: 0;
   border-color: transparent;
@@ -1723,20 +1753,16 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
   color: var(--text-on-paper-soft);
 }
 .channels-page .channel-detail-body button:not(.primary):not(.danger) {
-  border-color: var(--paper-2);
-  background: transparent;
-  box-shadow: none;
+  border: 1px solid var(--channel-line);
+  background: var(--paper-3);
+  box-shadow: 1px 1px 0 rgba(20, 19, 26, 0.06);
   color: var(--text-on-paper-soft);
 }
 .channels-page .channel-detail-body button:not(.primary):not(.danger):hover:not(:disabled) {
-  border-color: #d8cbb8;
+  border-color: var(--channel-line-strong);
   background: var(--paper-2);
   color: var(--text-on-paper);
   transform: none;
-  box-shadow: none;
-}
-.channels-page .channel-detail-body button.primary,
-.channels-page .channel-detail-body button.danger {
   box-shadow: none;
 }
 
@@ -1919,3 +1945,5 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
 .gate-actions-spacer { flex: 1 1 auto; }
 .gate-inbox-meta { margin: 0 0 6px; }
 .gate-drawer .badge-done { background: rgba(21, 128, 61, 0.14); color: var(--green-on-paper); }
+
+}

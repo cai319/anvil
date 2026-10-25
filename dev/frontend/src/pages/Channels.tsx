@@ -78,6 +78,7 @@ export function Channels() {
   const [cardFields, setCardFields] = useState<Record<string, string>>({});
   const [cardCheck, setCardCheck] = useState<KnowledgeCardCheck | null>(null);
   const [harvestTask, setHarvestTask] = useState("");
+  const [taskQuery, setTaskQuery] = useState("");
 
   const isUnbound = selected === UNBOUND_CHANNEL_VIEW;
   const selectedChannel = isUnbound ? null : channels.find((c) => c.id === selected) ?? null;
@@ -128,6 +129,7 @@ export function Channels() {
     refreshDetail(selected);
     setRoleSlug("");
     setHarvestTask("");
+    setTaskQuery("");
   }, [selected]);
 
   useEffect(() => {
@@ -259,10 +261,27 @@ export function Channels() {
     [tasks]
   );
   const archivedCount = tasks.filter((t) => t.archived_at).length;
+  const visibleTasks = useMemo(() => {
+    const needle = taskQuery.trim().toLowerCase();
+    if (!needle) return tasks;
+    return tasks.filter((t) => t.title.toLowerCase().includes(needle));
+  }, [tasks, taskQuery]);
+  const emptyTaskText = taskQuery.trim() ? "没有匹配的任务。" : "暂无任务。";
+
+  const renderTaskSearch = () => (
+    <div className="channel-task-search">
+      <input value={taskQuery} onChange={(e) => setTaskQuery(e.target.value)}
+        placeholder="按任务名称过滤" aria-label="按任务名称过滤" />
+      <span className="muted">{visibleTasks.length}/{tasks.length}</span>
+      {taskQuery && (
+        <button type="button" className="small" onClick={() => setTaskQuery("")}>清除</button>
+      )}
+    </div>
+  );
 
   const renderTaskList = (items: Task[]) => (
     <ul className="roles-list channel-task-list">
-      {items.length === 0 && <li className="muted">暂无任务。</li>}
+      {items.length === 0 && <li className="muted">{emptyTaskText}</li>}
       {items.map((t) => (
         <li key={t.id}>
           <a href={`/tasks/${t.id}`} title={t.title}>{t.title}</a>
@@ -333,7 +352,8 @@ export function Channels() {
                 <p className="muted">
                   共 {tasks.length} 个任务，其中 {archivedCount} 个已归档。
                 </p>
-                {renderTaskList(tasks)}
+                {tasks.length > 0 && renderTaskSearch()}
+                {renderTaskList(visibleTasks)}
               </div>
             </>
           ) : !selectedChannel ? (
@@ -412,7 +432,8 @@ export function Channels() {
                     <p className="muted">
                       {tasks.length} 个任务，其中 {archivedCount} 个已归档；归档任务在大厅隐藏，可在此查看。
                     </p>
-                    {renderTaskList(tasks)}
+                    {tasks.length > 0 && renderTaskSearch()}
+                    {renderTaskList(visibleTasks)}
                   </>
                 )}
 

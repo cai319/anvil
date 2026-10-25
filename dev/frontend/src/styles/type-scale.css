@@ -2683,3 +2683,25 @@ details.replay-event-body > div { margin-top: 4px; }
 .token-chip:hover { border-color: var(--yellow); color: var(--text-on-ink); }
 .token-chip:focus-visible { outline: 2px solid var(--yellow); outline-offset: 2px; }
 .token-reset-modal { width: min(520px, 94vw); }
+
+/* 频道页：窄屏必须上下堆叠（外层 legacy @layer 的网格规则可能被覆盖）。 */
+@media (max-width: 899px) {
+  .channels-page .roles-layout { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* 频道页：紧凑尺度写在无 layer 的 type-scale 中，才能压过全局控件尺度。 */
+.channels-page .channels-list li { padding: 7px 9px; }
+.channels-page .roles-detail .roles-list li { padding: 7px 9px; }
+.channels-page .roles-detail .tabs { padding: 4px; gap: 4px; }
+.channels-page .roles-detail .tabs button { min-height: var(--control-h-sm); padding: 0 10px; }
+.channels-page .channel-form-grid input,
+.channels-page .channel-form-grid select,
+.channels-page .channel-form-grid textarea,
+.channels-page .channel-detail-body .toolbar input,
+.channels-page .channel-detail-body .toolbar select,
+.channels-page .channel-detail-body .toolbar textarea,
+.channels-page .channel-task-search input {
+  min-height: var(--control-h-sm);
+  padding: 5px 9px;
+}
+.channels-page .channel-task-search input { padding: 4px 9px; }
