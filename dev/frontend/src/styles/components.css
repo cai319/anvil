@@ -1533,6 +1533,10 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
   max-width: 1040px;
 }
 .channel-form-grid .span-2 { grid-column: 1 / -1; }
+.channel-form-grid.two-col { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 720px) {
+  .channel-form-grid.two-col { grid-template-columns: 1fr; }
+}
 .channel-form-grid label {
   display: flex;
   flex-direction: column;
@@ -1546,29 +1550,74 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
 .channel-form-grid textarea {
   width: 100%;
   min-height: var(--control-h-sm);
-  padding: 5px 8px;
+  padding: 5px 9px;
+  border: 1px solid var(--paper-2);
+  border-radius: 6px;
+  background: var(--paper-3);
+  box-shadow: none;
   font-size: var(--fs-hint);
   font-weight: 500;
   color: var(--text-on-paper);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.channel-form-grid input:hover,
+.channel-form-grid select:hover,
+.channel-form-grid textarea:hover { border-color: #d8cbb8; }
+.channel-form-grid input:focus,
+.channel-form-grid select:focus,
+.channel-form-grid textarea:focus,
+.channel-form-grid input:focus-visible,
+.channel-form-grid select:focus-visible,
+.channel-form-grid textarea:focus-visible {
+  border-color: var(--link-on-paper);
+  box-shadow: none;
+  outline: none;
 }
 .channel-form-grid select { height: var(--control-h-sm); }
 .channel-form-grid textarea { line-height: 1.5; resize: vertical; }
+.channels-page .channel-detail-body .toolbar input,
+.channels-page .channel-detail-body .toolbar select,
+.channels-page .channel-detail-body .toolbar textarea {
+  min-height: var(--control-h-sm);
+  padding: 5px 9px;
+  border: 1px solid var(--paper-2);
+  border-radius: 6px;
+  background: var(--paper-3);
+  box-shadow: none;
+  font-size: var(--fs-hint);
+  color: var(--text-on-paper);
+}
+.channels-page .channel-detail-body .toolbar select { height: var(--control-h-sm); }
+.channels-page .channel-detail-body .toolbar input:focus,
+.channels-page .channel-detail-body .toolbar select:focus,
+.channels-page .channel-detail-body .toolbar textarea:focus,
+.channels-page .channel-detail-body .toolbar input:focus-visible,
+.channels-page .channel-detail-body .toolbar select:focus-visible,
+.channels-page .channel-detail-body .toolbar textarea:focus-visible {
+  border-color: var(--link-on-paper);
+  box-shadow: none;
+  outline: none;
+}
 .channel-stats {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  gap: clamp(6px, 0.5vw, 10px);
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1px;
   max-width: 1040px;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
+  border: 1px solid var(--paper-2);
+  border-radius: 8px;
+  background: var(--paper-2);
+  overflow: hidden;
 }
 .channel-stat {
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 0;
+  background: var(--paper);
 }
 .channel-stat span,
 .channel-stat small { font-size: var(--fs-hint); color: var(--text-on-paper-muted); }
@@ -1603,12 +1652,98 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
   justify-content: flex-end;
 }
 
+/* 频道详情是纸面卡片：内部控件、页签、列表改用同色系细分隔，避免“白框套黑框”。 */
+.channels-page .roles-detail .role-detail-head {
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--paper-2);
+}
+.channels-page .roles-detail .tabs {
+  width: 100%;
+  max-width: none;
+  margin-bottom: clamp(10px, 0.8vw, 16px);
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid var(--paper-2);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  gap: 2px;
+}
+.channels-page .roles-detail .tabs button {
+  min-height: var(--control-h-sm);
+  padding: 0 11px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-on-paper-muted);
+  box-shadow: none;
+  font-weight: 700;
+}
+.channels-page .roles-detail .tabs button:hover:not(:disabled) {
+  background: transparent;
+  border-color: transparent;
+  border-bottom-color: var(--paper-2);
+  color: var(--text-on-paper);
+  transform: none;
+  box-shadow: none;
+}
+.channels-page .roles-detail .tabs button.active {
+  background: transparent;
+  border-color: transparent;
+  border-bottom-color: var(--ink-900);
+  color: var(--text-on-paper);
+  box-shadow: none;
+}
+.channels-page .roles-detail .tabs button.active .tab-count {
+  background: var(--paper-2);
+  color: var(--text-on-paper-soft);
+}
+.channels-page .roles-detail .roles-list { gap: 0; }
+.channels-page .roles-detail .roles-list li {
+  margin: 0;
+  padding: 9px 2px;
+  border: 0;
+  border-bottom: 1px solid var(--paper-2);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.channels-page .roles-detail .roles-list li:last-child { border-bottom: 0; }
+.channels-page .roles-detail .roles-list li.active {
+  border-color: var(--paper-2);
+  background: transparent;
+}
+.channels-page .channel-knowledge-list li { border-bottom-style: solid; }
+.channels-page .review-reason {
+  margin-left: 0;
+  border-color: transparent;
+  background: var(--paper-2);
+  color: var(--text-on-paper-soft);
+}
+.channels-page .channel-detail-body button:not(.primary):not(.danger) {
+  border-color: var(--paper-2);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-on-paper-soft);
+}
+.channels-page .channel-detail-body button:not(.primary):not(.danger):hover:not(:disabled) {
+  border-color: #d8cbb8;
+  background: var(--paper-2);
+  color: var(--text-on-paper);
+  transform: none;
+  box-shadow: none;
+}
+.channels-page .channel-detail-body button.primary,
+.channels-page .channel-detail-body button.danger {
+  box-shadow: none;
+}
+
 @media (max-width: 899px) {
   .channels-page .channel-detail-body { overflow: visible; padding-right: 0; scrollbar-gutter: auto; }
   .channel-knowledge-list li { flex-direction: column; }
   .channel-knowledge-actions { justify-content: flex-start; }
-}
-
 }
 
 /* ---- Gate / decision review drawer ------------------------------------ */

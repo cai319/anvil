@@ -6,6 +6,7 @@ import {
   KNOWLEDGE_KINDS,
   KNOWLEDGE_KIND_LABEL,
 } from "../knowledgeCard";
+import { UNBOUND_CHANNEL_VIEW } from "../channelView";
 import { RoleSessions } from "./RoleSessions";
 import { ApplyTemplateModal } from "./ApplyTemplateModal";
 import { WorkflowGraph } from "./WorkflowGraph";
@@ -622,7 +623,10 @@ function ChannelKnowledgePanel({ task, onChanged }: { task: Task; onChanged: () 
     <>
       <h3 className="side-h">频道知识</h3>
       {!workspaceId ? (
-        <p className="muted hint">任务未归属频道，不注入频道约定。</p>
+        <p className="muted hint">
+          任务未归属频道，不注入频道约定。{" "}
+          <a href={`/channels?channel=${UNBOUND_CHANNEL_VIEW}`}>查看未绑定任务</a>
+        </p>
       ) : (
         <div className="channel-knowledge-panel">
           {cards.length === 0 && <p className="muted hint">频道暂无已批准知识。</p>}
@@ -1404,7 +1408,11 @@ export function TaskDetail({ id }: { id: string }) {
               <Icon name="hash" /> {task.workspace.name}
             </a>
           ) : (
-            <span className="muted">未归属频道</span>
+            <a className="session-meta-item"
+              href={`/channels?channel=${UNBOUND_CHANNEL_VIEW}`}
+              title="查看未绑定频道的任务">
+              <Icon name="hash" /> 未归属频道
+            </a>
           )}
           {task.assignee && (
             <span className="session-meta-item"><Icon name="user" /> {task.assignee}</span>
@@ -1797,7 +1805,11 @@ export function TaskDetail({ id }: { id: string }) {
                 <a href={`/channels?channel=${encodeURIComponent(task.workspace.id)}&tab=knowledge`}>
                   {task.workspace.name}
                 </a>
-              ) : task.workspace_id ? <span className="mono">{task.workspace_id}</span> : "未归属"}
+              ) : task.workspace_id ? (
+                <span className="mono">{task.workspace_id}</span>
+              ) : (
+                <a href={`/channels?channel=${UNBOUND_CHANNEL_VIEW}`}># 无主题</a>
+              )}
             </dd>
             <dt>类型</dt><dd>{task.type ?? "—"}</dd>
             <dt>标签</dt><dd>{task.tags?.length ? task.tags.join(", ") : "—"}</dd>

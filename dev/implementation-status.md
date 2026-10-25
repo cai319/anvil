@@ -30,7 +30,8 @@
 
 ### v1.30 频道知识作用域（2026-10-25）
 - 频道（`workspaces`）扩展 `knowledge_repo`；`workspace_members` → `workspace_participants`
-  （无 access，仅作自动派发偏好/展示）；任务新增 `archived_at` 与归档 API/归档页。
+  （无 access，仅作自动派发偏好/展示）；任务新增 `archived_at` 与归档 API；归档任务在频道页
+  「任务」页签查看，未绑定任务在内置 `#无主题` 视图查看（独立归档页已移除）。
 - 新增 `workspace_knowledge` + 版本表 + FTS：知识卡类型化校验、authority（normative/reference）、
   human approved / agent proposed、`expected_version`、已批准卡不可原地改（编辑生成新提案）。
 - 新增 `task_knowledge`：任务参与角色共享；子任务知识带 `parent_task_id/source_subtask_id`

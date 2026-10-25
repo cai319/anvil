@@ -12,6 +12,7 @@ import {
   type WorkspaceKnowledge,
 } from "../api/client";
 import { PageHeader } from "../components/ui";
+import { UNBOUND_CHANNEL_VIEW } from "../channelView";
 import {
   AUTHORITY_LABEL,
   KNOWLEDGE_CARD_FIELDS,
@@ -78,13 +79,25 @@ export function Channels() {
   const [cardCheck, setCardCheck] = useState<KnowledgeCardCheck | null>(null);
   const [harvestTask, setHarvestTask] = useState("");
 
-  const selectedChannel = channels.find((c) => c.id === selected) ?? null;
+  const isUnbound = selected === UNBOUND_CHANNEL_VIEW;
+  const selectedChannel = isUnbound ? null : channels.find((c) => c.id === selected) ?? null;
 
   const refreshChannels = () =>
     api.listChannels().then(setChannels).catch((e) => setError(String(e)));
 
-  const refreshDetail = (id: string) =>
-    Promise.all([
+  const refreshDetail = (id: string) => {
+    if (id === UNBOUND_CHANNEL_VIEW) {
+      // 未绑定频道只展示任务；不建立频道知识/资产/参与角色作用域。
+      return api.listTasks({ include_archived: true })
+        .then((all) => {
+          setTasks(all.filter((t) => !t.workspace_id));
+          setParticipants([]);
+          setKnowledge([]);
+          setReview(null);
+        })
+        .catch((e) => setError(String(e)));
+    }
+    return Promise.all([
       api.listParticipants(id),
       api.listWorkspaceKnowledge(id),
       api.reviewWorkspaceKnowledge(id),
@@ -97,6 +110,7 @@ export function Channels() {
         setTasks(t);
       })
       .catch((e) => setError(String(e)));
+  };
 
   useEffect(() => {
     // 支持从任务详情深链：/channels?channel=<id>&tab=knowledge
@@ -162,7 +176,7 @@ export function Channels() {
 
   const saveChannel = () =>
     run(async () => {
-      if (!selected) return;
+      if (!selected || isUnbound) return;
       await api.updateChannel(selected, {
         repo: repo.trim() || null,
         description: description.trim() || null,
@@ -172,14 +186,14 @@ export function Channels() {
 
   const addParticipant = () =>
     run(async () => {
-      if (!selected || !roleSlug) return;
+      if (!selected || isUnbound || !roleSlug) return;
       await api.addParticipant(selected, roleSlug);
       setRoleSlug("");
     });
 
   const removeParticipant = (slug: string) =>
     run(async () => {
-      if (!selected) return;
+      if (!selected || isUnbound) return;
       await api.removeParticipant(selected, slug);
     });
 
@@ -202,7 +216,7 @@ export function Channels() {
 
   const createCard = () =>
     run(async () => {
-      if (!selected || !cardTitle.trim() || !cardTldr.trim()) return;
+      if (!selected || isUnbound || !cardTitle.trim() || !cardTldr.trim()) return;
       await api.createWorkspaceKnowledge(selected, {
         title: cardTitle.trim(),
         tldr: cardTldr.trim(),
@@ -227,13 +241,13 @@ export function Channels() {
 
   const harvest = () =>
     run(async () => {
-      if (!selected || !harvestTask) return;
+      if (!selected || isUnbound || !harvestTask) return;
       await api.harvestWorkspaceKnowledge(selected, harvestTask);
       setHarvestTask("");
     });
 
   const deleteChannel = () => {
-    if (!selected || !window.confirm("删除频道？任务会解绑，频道知识会删除。")) return;
+    if (!selected || isUnbound || !window.confirm("删除频道？任务会解绑，频道知识会删除。")) return;
     run(async () => {
       await api.deleteChannel(selected);
       setSelected(null);
@@ -245,6 +259,28 @@ export function Channels() {
     [tasks]
   );
   const archivedCount = tasks.filter((t) => t.archived_at).length;
+
+  const renderTaskList = (items: Task[]) => (
+    <ul className="roles-list channel-task-list">
+      {items.length === 0 && <li className="muted">暂无任务。</li>}
+      {items.map((t) => (
+        <li key={t.id}>
+          <a href={`/tasks/${t.id}`} title={t.title}>{t.title}</a>
+          <span className="channel-task-meta">
+            <span className={`status status-${t.status}`}>
+              {TASK_STATUS_LABEL[t.status] ?? t.status}
+            </span>
+            {t.parent_id && <span className="muted">子任务</span>}
+            {t.archived_at && <span className="chip">已归档</span>}
+            <small className="muted">
+              {t.repo || "无 repo"}
+              {t.archived_at ? ` · 归档 ${t.archived_at.slice(0, 10)}` : ""}
+            </small>
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
 
   return (
     <div className="roles roles-page channels-page">
@@ -260,7 +296,13 @@ export function Channels() {
 
       <div className="roles-layout">
         <ul className="roles-list channels-list">
-          {channels.length === 0 && <li className="muted">暂无频道。</li>}
+          <li className={isUnbound ? "active" : ""}>
+            <a href="#" onClick={(e) => { e.preventDefault(); setSelected(UNBOUND_CHANNEL_VIEW); }}>
+              <span className="channel-list-name"># 无主题</span>
+              <small className="muted">未绑定频道的任务</small>
+            </a>
+          </li>
+          {channels.length === 0 && <li className="muted">暂无其他频道。</li>}
           {channels.map((c) => (
             <li key={c.id} className={selected === c.id ? "active" : ""}>
               <a href="#" onClick={(e) => { e.preventDefault(); setSelected(c.id); }}>
@@ -274,7 +316,27 @@ export function Channels() {
         </ul>
 
         <div className="roles-detail">
-          {!selectedChannel ? (
+          {isUnbound ? (
+            <>
+              <div className="role-detail-head">
+                <div className="role-detail-title">
+                  <h2># 无主题</h2>
+                  <span className="mono">未绑定频道的任务 · 不建立知识作用域</span>
+                </div>
+              </div>
+              <div className="channel-detail-body">
+                <p className="muted">
+                  这些任务没有上一层频道，知识没有共通主题，因此不提供频道知识、资产或参与角色；
+                  归档任务也在这里查看。该视图是内置的，不是真实频道对象，不可删除。
+                </p>
+                <h3>未绑定任务</h3>
+                <p className="muted">
+                  共 {tasks.length} 个任务，其中 {archivedCount} 个已归档。
+                </p>
+                {renderTaskList(tasks)}
+              </div>
+            </>
+          ) : !selectedChannel ? (
             <p className="muted">选择左侧频道管理任务、知识与参与角色。</p>
           ) : (
             <>
@@ -318,7 +380,7 @@ export function Channels() {
                     </div>
 
                     <h3>频道信息</h3>
-                    <div className="channel-form-grid">
+                    <div className="channel-form-grid two-col">
                       <label>
                         执行 repo
                         <input value={repo} onChange={(e) => setRepo(e.target.value)}
@@ -348,27 +410,9 @@ export function Channels() {
                   <>
                     <h3>频道任务</h3>
                     <p className="muted">
-                      {tasks.length} 个任务，其中 {archivedCount} 个已归档；归档任务仅在频道页可见。
+                      {tasks.length} 个任务，其中 {archivedCount} 个已归档；归档任务在大厅隐藏，可在此查看。
                     </p>
-                    <ul className="roles-list channel-task-list">
-                      {tasks.length === 0 && <li className="muted">该频道暂无任务。</li>}
-                      {tasks.map((t) => (
-                        <li key={t.id}>
-                          <a href={`/tasks/${t.id}`} title={t.title}>{t.title}</a>
-                          <span className="channel-task-meta">
-                            <span className={`status status-${t.status}`}>
-                              {TASK_STATUS_LABEL[t.status] ?? t.status}
-                            </span>
-                            {t.parent_id && <span className="muted">子任务</span>}
-                            {t.archived_at && <span className="chip">已归档</span>}
-                            <small className="muted">
-                              {t.repo || "无 repo"}
-                              {t.archived_at ? ` · 归档 ${t.archived_at.slice(0, 10)}` : ""}
-                            </small>
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
+                    {renderTaskList(tasks)}
                   </>
                 )}
 
@@ -561,7 +605,7 @@ export function Channels() {
               <h2>新建频道</h2>
               <button className="modal-close" onClick={() => setCreateOpen(false)} aria-label="关闭">×</button>
             </div>
-            <div className="channel-form-grid">
+            <div className="channel-form-grid two-col">
               <label className="span-2">频道名
                 <input autoFocus value={newName} onChange={(e) => setNewName(e.target.value)} />
               </label>
