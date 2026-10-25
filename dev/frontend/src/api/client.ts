@@ -238,6 +238,12 @@ export const api = {
     req("DELETE", `/tasks/${taskId}/workflow-weight`).then((r) => json<TaskWeightResult>(r)),
   restartTaskWorkflow: (taskId: string, reason?: string, note?: string): Promise<Workflow> =>
     req("POST", `/tasks/${taskId}/workflow/restart`, { reason, note }).then((r) => json<Workflow>(r)),
+  listTaskLeases: (taskId: string): Promise<TaskLeases> =>
+    authFetch(`${BASE}/tasks/${taskId}/leases`).then((r) => json<TaskLeases>(r)),
+  reserveTaskPaths: (taskId: string, paths: string[], holder?: string): Promise<TaskLeases> =>
+    req("POST", `/tasks/${taskId}/reservations`, { paths, holder }).then((r) => json<TaskLeases>(r)),
+  releaseTaskPaths: (taskId: string, paths: string[], holder?: string): Promise<{ released: number }> =>
+    req("DELETE", `/tasks/${taskId}/reservations`, { paths, holder }).then((r) => json<{ released: number }>(r)),
   reviewWorkflowStep: (wid: string, sid: string, approve: boolean, feedback?: string,
     opts?: { rework_targets?: string[]; reasons?: string[]; packet_id?: string; override_reason?: string }): Promise<Workflow> =>
     req("POST", `/workflows/${wid}/steps/${sid}/review`, {
@@ -820,6 +826,11 @@ export interface WorkflowStep {
   packet_id?: string | null;
   submitted_at?: string | null;
   scope_paths?: string[];
+  lease_id?: string | null;
+  fence_token?: number;
+  lease_holder?: string | null;
+  lease_expires_at?: string | null;
+  lease_fence?: number | null;
   failure_reason: string | null;
   status: "pending" | "running" | "submitted" | "approved" | "rejected" | "failed" | "skipped";
   run_id: string | null;
@@ -929,6 +940,37 @@ export interface WorkflowDossier {
   event_counts: Record<string, number>;
   digest: string;
   generated_at: string;
+}
+
+export interface LeaseRecord {
+  id: string;
+  resource_type: "step" | "slice" | "path" | "task";
+  resource_key: string;
+  holder_type: string;
+  holder: string | null;
+  run_id: string | null;
+  fence: number;
+  status: "active" | "released" | "expired";
+  acquired_at: string;
+  renewed_at: string | null;
+  expires_at: string | null;
+  meta_json?: string;
+}
+
+export interface TaskLeaseStep {
+  workflow_id: string;
+  step_id: string;
+  status: string;
+  lease_id: string | null;
+  fence_token: number;
+  holder: string | null;
+  expires_at: string | null;
+  lease_status: string | null;
+}
+
+export interface TaskLeases {
+  paths: LeaseRecord[];
+  steps: TaskLeaseStep[];
 }
 
 export interface TaskWeightResult {

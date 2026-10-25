@@ -20,7 +20,7 @@ from .api.events import publish
 from .db import open_conn
 from .platform import factory
 from .services import daemon as daemon_service
-from .services import governance, runs as runs_service, tasks as tasks_service
+from .services import governance, leases, runs as runs_service, tasks as tasks_service
 from .services import workflow as workflow_service
 
 
@@ -117,6 +117,17 @@ class Scheduler:
 
     def _advance_workflows(self, conn) -> None:
         """推进所有 running workflow：依赖满足且角色空闲的步骤创建 run。"""
+        leases.reap_expired(conn)
+        # A holder that never renewed loses the step; the retry path re-dispatches
+        # with a new fence so a zombie run cannot submit.
+        expired = conn.execute(
+            "SELECT s.workflow_id, s.step_id FROM workflow_steps s "
+            "JOIN leases l ON l.id=s.lease_id "
+            "WHERE s.status='running' AND l.status='expired'").fetchall()
+        for row in expired:
+            workflow_service.fail_step(
+                conn, row["workflow_id"], row["step_id"],
+                "lease_expired", "environment")
         for wf in conn.execute("SELECT id FROM workflows WHERE status='running'").fetchall():
             wid = wf["id"]
 

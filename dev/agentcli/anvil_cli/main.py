@@ -673,10 +673,12 @@ def step_submit(
     summary: str = typer.Option("", "--summary", help="完成摘要"),
     evidence_file: str = typer.Option(
         "", "--evidence-file", help="证据 JSON 文件（数组）"),
+    changed_paths: str = typer.Option(
+        "", "--changed-paths", help="本步骤改动的路径，逗号分隔"),
     json_out: bool = typer.Option(False, "--json"),
 ):
     """提交当前工作流步骤（完成后必须调用；不要用 task submit）。"""
-    body: dict = {"summary": summary}
+    body: dict = {"summary": summary, "changed_paths": _csv(changed_paths)}
     if evidence_file:
         with open(evidence_file, encoding="utf-8") as fh:
             body["evidence"] = json.load(fh)
@@ -821,6 +823,65 @@ def step_show(
         typer.echo(
             f"{st['step_id']:4s} {st['status']:10s} {st['role_slug']:12s} "
             f"{st['title']}{gate}{kind}{slice_info}{rework}{on_reject}")
+
+
+# ---- lease（step/path 租约与路径预留）------------------------------------
+
+
+lease_app = typer.Typer(help="执行租约与路径预留")
+app.add_typer(lease_app, name="lease")
+
+
+@lease_app.command("list")
+def lease_list(
+    task: str = typer.Option(DEFAULT_TASK, "--task", help="任务 id"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """查看任务当前的执行租约与路径预留。"""
+    out = _call("GET", f"/api/v1/tasks/{task}/leases")
+    if json_out:
+        _emit(out, True)
+        return
+    active_steps = [s for s in out.get("steps") or [] if s.get("lease_status") == "active"]
+    for s in active_steps:
+        typer.echo(f"step {s['step_id']}: {s.get('holder')} fence={s.get('fence_token')} "
+                   f"until {s.get('expires_at')}")
+    for p in out.get("paths") or []:
+        if p.get("status") == "active":
+            path = str(p.get("resource_key", "")).split(":", 1)[-1]
+            typer.echo(f"path {path}: {p.get('holder')} until {p.get('expires_at')}")
+    if not active_steps and not any(p.get("status") == "active" for p in out.get("paths") or []):
+        typer.echo("没有活跃租约")
+
+
+@lease_app.command("reserve")
+def lease_reserve(
+    paths: list[str] = typer.Argument(..., help="要预留的相对路径，可多个"),
+    task: str = typer.Option(DEFAULT_TASK, "--task", help="任务 id"),
+    ttl: float = typer.Option(0, "--ttl", help="租约秒数（0=默认）"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """预留路径，避免多个角色同时写同一文件。"""
+    body = {"paths": paths, "ttl_seconds": ttl or None}
+    out = _call("POST", f"/api/v1/tasks/{task}/reservations", body)
+    if json_out:
+        _emit(out, True)
+    else:
+        typer.echo(f"已预留 {len(paths)} 个路径")
+
+
+@lease_app.command("release")
+def lease_release(
+    paths: list[str] = typer.Argument(..., help="要释放的相对路径"),
+    task: str = typer.Option(DEFAULT_TASK, "--task", help="任务 id"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """释放当前角色持有的路径预留。"""
+    out = _call("DELETE", f"/api/v1/tasks/{task}/reservations", {"paths": paths})
+    if json_out:
+        _emit(out, True)
+    else:
+        typer.echo(f"已释放 {out.get('released', 0)} 个路径")
 
 
 # ---- board（P1-0 计划先行：工作流草案）------------------------------------

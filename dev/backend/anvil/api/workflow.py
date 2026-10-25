@@ -7,6 +7,7 @@ from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..services.tasks import ConflictError
 from ..services import dossier as dossier_service
+from ..services import leases as lease_service
 from ..services import metrics as metrics_service
 from ..services import reviews as review_service
 from ..services import weights as weight_service
@@ -92,6 +93,47 @@ def get_task_dossier(tid: str, workflow_id: str | None = None,
     if wid is None:
         raise HTTPException(status_code=404, detail="task has no workflow")
     return get_dossier(wid, format=format, conn=conn)
+
+
+@router.get("/tasks/{tid}/leases")
+def list_leases(tid: str, conn=Depends(get_db)):
+    steps = [dict(r) for r in conn.execute(
+        "SELECT s.workflow_id, s.step_id, s.status, s.lease_id, s.fence_token, "
+        "l.holder, l.expires_at, l.status AS lease_status "
+        "FROM workflow_steps s JOIN workflows w ON w.id=s.workflow_id "
+        "LEFT JOIN leases l ON l.id=s.lease_id "
+        "WHERE w.task_id=? AND s.lease_id IS NOT NULL "
+        "ORDER BY s.updated_at DESC", (tid,)).fetchall()]
+    return {"paths": lease_service.for_task(conn, tid), "steps": steps}
+
+
+@router.post("/tasks/{tid}/reservations")
+def reserve_paths(tid: str, body: dict, conn=Depends(get_db),
+                  auth: Auth = Depends(get_auth)):
+    paths = body.get("paths") or []
+    if not isinstance(paths, list) or not paths:
+        raise HTTPException(status_code=422, detail="paths is required")
+    holder = auth.role or str(body.get("holder") or "human")
+    if holder == "human" and body.get("holder"):
+        holder = str(body["holder"])
+    try:
+        lease_service.reserve_paths(
+            conn, tid, [str(p) for p in paths], holder=holder,
+            ttl_seconds=body.get("ttl_seconds"))
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"paths": lease_service.for_task(conn, tid)}
+
+
+@router.delete("/tasks/{tid}/reservations")
+def release_reservations(tid: str, body: dict, conn=Depends(get_db),
+                         auth: Auth = Depends(get_auth)):
+    paths = body.get("paths") or []
+    holder = auth.role or "human"
+    if holder == "human" and body.get("holder"):
+        holder = str(body["holder"])
+    count = lease_service.release_paths(conn, tid, [str(p) for p in paths], holder)
+    return {"released": count}
 
 
 @router.post("/tasks/{tid}/workflow/restart")
@@ -214,7 +256,7 @@ def submit_step(wid: str, sid: str, body: dict, conn=Depends(get_db),
     try:
         wf = services.workflow.submit_step(
             conn, wid, sid, auth.role or "", body.get("summary"), auth.run_id,
-            body.get("evidence"))
+            body.get("evidence"), body.get("changed_paths"))
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ConflictError as exc:

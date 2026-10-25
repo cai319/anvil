@@ -45,6 +45,8 @@ SCHEDULER_INTERVAL = float(_env("ANVIL_SCHEDULER_INTERVAL", "5.0"))
 
 # 运行超时（秒）：monitor 对超过此时长仍 running 的 run 终止并标 failed（防 agent 卡死）。
 RUN_TIMEOUT_SECONDS = float(_env("ANVIL_RUN_TIMEOUT", "600"))
+# 资源租约：默认与 run 超时对齐；持有者需在到期前续租。
+LEASE_TTL_SECONDS = float(_env("ANVIL_LEASE_TTL", str(RUN_TIMEOUT_SECONDS)))
 
 # Utility LLM 调用（AI 生成画像/角色）经默认 CLI 运行时执行；同步请求的超时（秒）。
 UTILITY_TIMEOUT_SECONDS = float(_env("ANVIL_UTILITY_TIMEOUT", "120"))

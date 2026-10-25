@@ -8,6 +8,7 @@ import {
   type LoopSummary,
 } from "../workflowGroups";
 import { Icon } from "../components/Icon";
+import { formatDateTime } from "../time";
 
 /**
  * 工作流 DAG 图谱（纯 SVG，无第三方依赖）。
@@ -502,6 +503,13 @@ export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenR
             </span>
           </div>
           {selectedStep.reviewer && <div className="muted">验证者（builder ≠ verifier）：{selectedStep.reviewer}</div>}
+          {selectedStep.lease_holder && (
+            <div className="muted">
+              执行租约：{selectedStep.lease_holder}
+              {selectedStep.lease_expires_at ? ` · 到期 ${formatDateTime(selectedStep.lease_expires_at)}` : ""}
+              {selectedStep.lease_fence ? ` · fence ${selectedStep.lease_fence}` : ""}
+            </div>
+          )}
           {selectedStep.kind === "plan_slices" && (
             <div className="muted">
               切片计划步骤：由该角色盘点项目并产出切片；服务端按 loop 模板为每片生成

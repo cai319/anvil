@@ -2401,3 +2401,34 @@ select { height: var(--control-h); }
   font-size: var(--fs-meta);
 }
 .wf-weight-restart-note p { margin: 0 0 6px; }
+
+/* ---- Phase 3: leases & path reservations -------------------------------- */
+.wf-leases {
+  margin: 6px 0;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: var(--fs-hint);
+}
+.wf-leases summary { cursor: pointer; display: flex; gap: 10px; align-items: center; }
+.wf-lease-list { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; }
+.wf-lease-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 3px 0;
+  border-bottom: 1px dotted var(--border);
+}
+.wf-lease-row:last-of-type { border-bottom: none; }
+.wf-lease-form { display: flex; gap: 6px; margin-top: 6px; }
+.wf-lease-form input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--paper-3);
+  color: var(--text-on-paper);
+}

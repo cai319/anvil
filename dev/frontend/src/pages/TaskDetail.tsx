@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Task, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight } from "../api/client";
+import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Task, type TaskLeases, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight } from "../api/client";
 import { RoleSessions } from "./RoleSessions";
 import { ApplyTemplateModal } from "./ApplyTemplateModal";
 import { WorkflowGraph } from "./WorkflowGraph";
@@ -595,6 +595,8 @@ export function TaskDetail({ id }: { id: string }) {
   const [viewingWorkflow, setViewingWorkflow] = useState<Workflow | null>(null);
   const [workflowMetrics, setWorkflowMetrics] = useState<WorkflowMetrics | null>(null);
   const [graphDiff, setGraphDiff] = useState<WorkflowGraphResponse | null>(null);
+  const [taskLeases, setTaskLeases] = useState<TaskLeases | null>(null);
+  const [reserveInput, setReserveInput] = useState("");
   const [showWeight, setShowWeight] = useState(false);
   const [dossierBusy, setDossierBusy] = useState(false);
   const [reviewStep, setReviewStep] = useState<WorkflowStep | null>(null);
@@ -613,7 +615,12 @@ export function TaskDetail({ id }: { id: string }) {
   const refreshWorkflow = () => {
     api.getTaskWorkflow(id).then(setWorkflow).catch(() => setWorkflow(null));
     api.listTaskWorkflows(id).then(setWorkflowHistory).catch(() => setWorkflowHistory([]));
+    api.listTaskLeases(id).then(setTaskLeases).catch(() => setTaskLeases(null));
   };
+
+  useEffect(() => {
+    api.listTaskLeases(id).then(setTaskLeases).catch(() => setTaskLeases(null));
+  }, [id]);
 
   useEffect(() => {
     if (!displayWorkflow) {
@@ -629,7 +636,7 @@ export function TaskDetail({ id }: { id: string }) {
       .then((d) => alive && setGraphDiff(d))
       .catch(() => alive && setGraphDiff(null));
     return () => { alive = false; };
-  }, [displayWorkflow?.id]);
+  }, [displayWorkflow?.id, displayWorkflow?.updated_at]);
 
   const refreshChildren = () =>
     api.listTaskChildren(id).then(setChildren).catch(() => []);
@@ -1074,6 +1081,12 @@ export function TaskDetail({ id }: { id: string }) {
           {st.depends_on?.length > 0 && <div className="muted wf-deps">依赖：{st.depends_on.join("、")}</div>}
           {st.contract && <div className="muted wf-deps">契约：{st.contract}</div>}
           {st.failure_reason && <div className="muted wf-deps">失败归因：{st.failure_reason}</div>}
+          {st.lease_holder && (
+            <div className="muted wf-deps">
+              执行租约：{st.lease_holder}
+              {st.lease_expires_at ? ` · 到期 ${formatDateTime(st.lease_expires_at)}` : ""}
+            </div>
+          )}
           {st.summary && <div className="muted wf-summary">{st.summary}</div>}
         </div>
         <div className="wf-actions">
@@ -1670,6 +1683,54 @@ export function TaskDetail({ id }: { id: string }) {
             <>
               <WorkflowSummary workflow={displayWorkflow} taskStatus={task.status}
                 metrics={workflowMetrics} diff={graphDiff} />
+              {!isViewingHistory && taskLeases && (
+                <details className="wf-leases">
+                  <summary>
+                    路径预留 · {(taskLeases.paths || []).filter((p) => p.status === "active").length}
+                    <span className="muted">执行租约 {taskLeases.steps.filter((s) => s.lease_status === "active").length}</span>
+                  </summary>
+                  <div className="wf-lease-list">
+                    {(taskLeases.paths || []).filter((p) => p.status === "active").map((p) => (
+                      <div key={p.id} className="wf-lease-row">
+                        <span className="mono">{p.resource_key.split(":").slice(1).join(":")}</span>
+                        <span className="muted">{p.holder || "—"}</span>
+                        <span className="muted">
+                          {p.expires_at ? `到期 ${formatDateTime(p.expires_at)}` : ""}
+                        </span>
+                        <button className="small" onClick={() => act(async () => {
+                          await api.releaseTaskPaths(id,
+                            [p.resource_key.split(":").slice(1).join(":")], p.holder || "human");
+                          refreshWorkflow();
+                        })}>释放</button>
+                      </div>
+                    ))}
+                    {taskLeases.steps.filter((s) => s.lease_status === "active").map((s) => (
+                      <div key={`${s.workflow_id}:${s.step_id}`} className="wf-lease-row">
+                        <span className="mono">{s.step_id}</span>
+                        <span className="muted">执行中 · {s.holder || "—"} · fence {s.fence_token}</span>
+                        <span className="muted">
+                          {s.expires_at ? `到期 ${formatDateTime(s.expires_at)}` : ""}
+                        </span>
+                      </div>
+                    ))}
+                    {taskLeases.paths.filter((p) => p.status === "active").length === 0
+                      && taskLeases.steps.filter((s) => s.lease_status === "active").length === 0 && (
+                      <span className="muted">当前没有活跃租约。</span>
+                    )}
+                    <div className="wf-lease-form">
+                      <input value={reserveInput} onChange={(e) => setReserveInput(e.target.value)}
+                        placeholder="预留路径，逗号分隔：src/a.ts, src/b.ts" />
+                      <button className="small" disabled={!reserveInput.trim()} onClick={() => act(async () => {
+                        const paths = reserveInput.split(",").map((x) => x.trim()).filter(Boolean);
+                        if (!paths.length) return;
+                        await api.reserveTaskPaths(id, paths, "human");
+                        setReserveInput("");
+                        refreshWorkflow();
+                      })}>预留</button>
+                    </div>
+                  </div>
+                </details>
+              )}
               {isViewingHistory && (
                 <div className="wf-history-banner">
                   <span>

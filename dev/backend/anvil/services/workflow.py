@@ -12,10 +12,11 @@ import re
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
+from fnmatch import fnmatch
 
 from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
-from . import dossier, ledger, reviews, weights
+from . import dossier, leases, ledger, reviews, weights
 
 RUN_ACTIVE = ("created", "projecting", "running")
 STEP_DONE = ("approved", "skipped")
@@ -833,6 +834,8 @@ def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
         if step is None:
             raise LookupError(step_id)
         _assert_current_run(step, run_id)
+        if step["status"] == "running":
+            leases.assert_step(conn, step, run_id)
         if step.get("kind") != "plan_slices":
             raise ConflictError(f"step {step_id} is not a plan_slices step")
         if role and role != "human" and role != step["role_slug"]:
@@ -931,6 +934,7 @@ def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
         _step_activity(
             conn, wf["task_id"], step["role_slug"], step, "planned", summary,
             extra={"slice_ids": [str(s.get("id")) for s in slices]})
+        leases.release(conn, step.get("lease_id"), commit=False)
         conn.commit()
         _finalize_if_done(conn, wid)
         return get_workflow(conn, wid)  # type: ignore[return-value]
@@ -1040,6 +1044,9 @@ def _terminate_running_workflow(conn: sqlite3.Connection, wid: str, reason: str,
                 runs_service.set_status(conn, st["run_id"], "abandoned", ended_at=now)
             except Exception:  # noqa: BLE001
                 pass
+    for lease in leases.for_workflow(conn, wid):
+        if lease.get("status") == "active":
+            leases.release(conn, lease["id"], commit=False)
     conn.execute(
         "UPDATE workflow_steps SET status='failed', failure_reason='terminated', "
         "ended_at=?, updated_at=? WHERE workflow_id=? AND status IN ('running','submitted')",
@@ -1243,7 +1250,11 @@ def list_for_task(conn: sqlite3.Connection, task_id: str) -> list[dict]:
 
 def _steps(conn: sqlite3.Connection, wid: str) -> list[dict]:
     out = []
-    for r in conn.execute("SELECT * FROM workflow_steps WHERE workflow_id=? ORDER BY rowid", (wid,)):
+    for r in conn.execute(
+            "SELECT s.*, l.holder AS lease_holder, l.expires_at AS lease_expires_at, "
+            "l.fence AS lease_fence FROM workflow_steps s "
+            "LEFT JOIN leases l ON l.id=s.lease_id "
+            "WHERE s.workflow_id=? ORDER BY s.rowid", (wid,)):
         d = dict(r)
         d["workflow_id"] = wid
         d["depends_on"] = jloads(d.get("depends_on_json") or "[]", [])
@@ -1455,6 +1466,7 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
                   "--summary \"完成摘要\"")
     if step.get("evidence_required"):
         submit_cmd += " --evidence-file evidence.json"
+    submit_cmd += ' --changed-paths "src/a.py,src/b.py"'
     return (
         base
         + loop_block
@@ -1574,23 +1586,46 @@ def _advance_locked(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
                     payload={"role": role, "reason": str(exc)},
                 )
                 continue
-        prompt = step_prompt(wf, s, dict(task) if task else None)
-        if starter is not None:
-            run = starter(role, wf["task_id"], prompt, s)
-            run_id = (run or {}).get("id")
-        else:
-            run_id = None
+        try:
+            lease = leases.acquire(
+                conn, "step", f"{wid}:{s['step_id']}", holder_type="role",
+                holder=role, meta={"task_id": wf["task_id"], "workflow_id": wid,
+                                   "step_id": s["step_id"]})
+        except ConflictError:
+            continue
         now = now_iso()
-        conn.execute(
-            "UPDATE workflow_steps SET status='running', run_id=?, started_at=?, ended_at=NULL, "
-            "summary=NULL, failure_reason=NULL, next_retry_at=NULL, updated_at=? "
-            "WHERE workflow_id=? AND step_id=?",
-            (run_id, now, now, wid, s["step_id"]),
-        )
+        claimed = conn.execute(
+            "UPDATE workflow_steps SET status='running', run_id=NULL, started_at=?, "
+            "ended_at=NULL, summary=NULL, failure_reason=NULL, next_retry_at=NULL, "
+            "lease_id=?, fence_token=?, updated_at=? "
+            "WHERE workflow_id=? AND step_id=? AND status='pending'",
+            (now, lease["id"], int(lease["fence"]), now, wid, s["step_id"]))
+        if claimed.rowcount != 1:
+            leases.release(conn, lease["id"])
+            continue
+        prompt = step_prompt(wf, s, dict(task) if task else None)
+        run_id = None
+        try:
+            if starter is not None:
+                run = starter(role, wf["task_id"], prompt, s)
+                run_id = (run or {}).get("id")
+        except BaseException:
+            leases.release(conn, lease["id"])
+            conn.execute(
+                "UPDATE workflow_steps SET status='pending', lease_id=NULL, fence_token=0, "
+                "started_at=NULL, updated_at=? WHERE workflow_id=? AND step_id=?",
+                (now_iso(), wid, s["step_id"]))
+            conn.commit()
+            raise
+        if run_id:
+            conn.execute("UPDATE workflow_steps SET run_id=? WHERE workflow_id=? AND step_id=?",
+                         (run_id, wid, s["step_id"]))
+            leases.bind_run(conn, lease["id"], run_id)
         _step_activity(
             conn, wf["task_id"], role, s, "running",
-            extra={"rework_count": int(s.get("rework_count") or 0)}
-            if int(s.get("rework_count") or 0) else None,
+            extra={"rework_count": int(s.get("rework_count") or 0),
+                   "fence": int(lease["fence"])}
+            if int(s.get("rework_count") or 0) else {"fence": int(lease["fence"])},
         )
         started.append(s["step_id"])
     conn.commit()
@@ -1602,7 +1637,8 @@ def _advance_locked(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
 
 def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
                 summary: str | None, run_id: str | None = None,
-                evidence: list | None = None) -> dict:
+                evidence: list | None = None,
+                changed_paths: list | None = None) -> dict:
     """角色提交当前步骤（anvil step submit）。gate 步骤进入人工审核。"""
     from . import runs as runs_service
 
@@ -1613,6 +1649,7 @@ def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
     if step is None:
         raise LookupError(step_id)
     _assert_current_run(step, run_id)
+    leases.assert_step(conn, step, run_id)
     if step["role_slug"] != role:
         raise ConflictError(f"step {step_id} belongs to {step['role_slug']}, not {role}")
     if step["status"] != "running":
@@ -1630,6 +1667,16 @@ def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
     if step.get("evidence_required") and not normalized:
         raise ConflictError(
             f"evidence_required: step {step_id} requires at least one evidence item")
+    changed = [leases.normalize_path(p) for p in (changed_paths or [])]
+    if changed:
+        conflicts = leases.check_paths(conn, wf["task_id"], changed, holder=role)
+        if conflicts:
+            raise ConflictError(f"path_conflict: {conflicts[0]}")
+        scope = step.get("scope_paths") or []
+        outside = [p for p in changed
+                   if scope and not any(fnmatch(p, pattern) for pattern in scope)]
+        if outside:
+            raise ConflictError(f"scope_violation: {outside[0]} is outside step scope")
     now = now_iso()
     conn.execute(
         "UPDATE workflow_steps SET status='submitted', summary=?, evidence_json=?, "
@@ -1653,6 +1700,7 @@ def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
             "UPDATE workflow_steps SET status='approved', ended_at=?, updated_at=? "
             "WHERE workflow_id=? AND step_id=?", (now, now, wid, step_id))
         _step_activity(conn, wf["task_id"], role, step, "approved", summary)
+    leases.release(conn, step.get("lease_id"), commit=False)
     conn.commit()
     _finalize_if_done(conn, wid)
     return get_workflow(conn, wid)  # type: ignore[return-value]
@@ -1683,6 +1731,8 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
         if step is None:
             raise LookupError(step_id)
         _assert_current_run(step, run_id)
+        if step["status"] == "running":
+            leases.assert_step(conn, step, run_id)
         if step.get("kind") != "decision":
             raise ConflictError(f"step {step_id} is not a decision step")
         is_human = role == "human"
@@ -1728,6 +1778,7 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
             reviews.record_recommendation(
                 conn, wf, step, actor=role or step["role_slug"], decision="approve",
                 feedback=feedback, commit=False)
+            leases.release(conn, step.get("lease_id"), commit=False)
             conn.commit()
             return get_workflow(conn, wid)  # type: ignore[return-value]
 
@@ -1763,6 +1814,7 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
                     feedback if role == "human" and authority != "human" else None),
                 commit=False,
             )
+            leases.release(conn, step.get("lease_id"), commit=False)
             conn.commit()
             _finalize_if_done(conn, wid)
             return get_workflow(conn, wid)  # type: ignore[return-value]
@@ -1795,6 +1847,7 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
                 feedback=note, reasons=["rework_exhausted"], packet_id=packet_id,
                 commit=False,
             )
+            leases.release(conn, step.get("lease_id"), commit=False)
             conn.commit()
             return get_workflow(conn, wid)  # type: ignore[return-value]
 
@@ -1831,6 +1884,7 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
             reasons=reasons, packet_id=packet_id, override_reason=override_reason,
             commit=False,
         )
+        leases.release(conn, step.get("lease_id"), commit=False)
         conn.commit()
         return get_workflow(conn, wid)  # type: ignore[return-value]
     except BaseException:
@@ -1852,6 +1906,8 @@ def escalate_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | 
     if step is None:
         raise LookupError(step_id)
     _assert_current_run(step, run_id)
+    if step["status"] == "running":
+        leases.assert_step(conn, step, run_id)
     if step.get("kind") != "decision":
         raise ConflictError(f"step {step_id} is not a decision step")
     if role and role != "human" and role != step["role_slug"]:
@@ -1882,6 +1938,7 @@ def escalate_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | 
         conn, wf, step, actor=role or step["role_slug"], reason=reason,
         triggers=triggers, proposed_decision=proposed_decision,
         proposed_feedback=proposed_feedback, commit=False)
+    leases.release(conn, step.get("lease_id"), commit=False)
     conn.commit()
     return get_workflow(conn, wid)  # type: ignore[return-value]
 
@@ -1936,7 +1993,7 @@ def review_step(conn: sqlite3.Connection, wid: str, step_id: str, approve: bool,
             conn.execute(
                 "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, "
                 "ended_at=NULL, summary=NULL, recovery_count=0, next_retry_at=NULL, "
-                "feedback=COALESCE(?, feedback), updated_at=? "
+                "lease_id=NULL, fence_token=0, feedback=COALESCE(?, feedback), updated_at=? "
                 "WHERE workflow_id=? AND step_id=?",
                 (feedback, now, wid, target))
             target_step = by_id.get(target) or {}
@@ -1978,12 +2035,15 @@ def retry_step(conn: sqlite3.Connection, wid: str, step_id: str) -> dict:
     conn.execute(
         "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, ended_at=NULL, "
         "summary=NULL, recovery_count=0, next_retry_at=NULL, nudge_count=0, last_nudge_at=NULL, "
-        "updated_at=? WHERE workflow_id=? AND step_id=?",
+        "lease_id=NULL, fence_token=0, updated_at=? "
+        "WHERE workflow_id=? AND step_id=?",
         (now, wid, step_id))
     if step and step.get("kind") == "decision":
         conn.execute(
             "UPDATE workflow_steps SET rework_count=0 WHERE workflow_id=? AND step_id=?",
             (wid, step_id))
+    if step:
+        leases.release(conn, step.get("lease_id"), commit=False)
     conn.commit()
     return get_workflow(conn, wid)  # type: ignore[return-value]
 
@@ -2019,18 +2079,19 @@ def fail_step(conn: sqlite3.Connection, wid: str, step_id: str, reason: str,
         conn.execute(
             "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, "
             "ended_at=NULL, summary=?, failure_reason=?, recovery_count=?, next_retry_at=?, "
-            "nudge_count=0, last_nudge_at=NULL, updated_at=? "
+            "lease_id=NULL, fence_token=0, nudge_count=0, last_nudge_at=NULL, updated_at=? "
             "WHERE workflow_id=? AND step_id=?",
             (reason, category, recovery, next_at, now, wid, step_id))
         _step_activity(conn, wf["task_id"], step["role_slug"], step, "retrying", reason,
                        extra={"failure_reason": category, "attempt": recovery,
                               "retry_at": next_at, "backoff_seconds": int(delay)})
+        leases.release(conn, step.get("lease_id"), commit=False)
         conn.commit()
         return
     conn.execute(
         "UPDATE workflow_steps SET status='failed', summary=?, failure_reason=?, "
-        "recovery_count=?, next_retry_at=NULL, ended_at=?, updated_at=? "
-        "WHERE workflow_id=? AND step_id=?",
+        "recovery_count=?, next_retry_at=NULL, lease_id=NULL, fence_token=0, "
+        "ended_at=?, updated_at=? WHERE workflow_id=? AND step_id=?",
         (reason, category, recovery, now, now, wid, step_id))
     _step_activity(conn, wf["task_id"], step["role_slug"], step, "failed", reason,
                    extra={"failure_reason": category, "attempt": recovery})
@@ -2047,6 +2108,7 @@ def fail_step(conn: sqlite3.Connection, wid: str, step_id: str, reason: str,
                  "auto_recovered": recovery - 1}),
          now),
     )
+    leases.release(conn, step.get("lease_id"), commit=False)
     conn.commit()
 
 

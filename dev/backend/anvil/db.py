@@ -155,6 +155,8 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     packet_id        TEXT,
     submitted_at     TEXT,
     scope_paths_json TEXT NOT NULL DEFAULT '[]',
+    lease_id         TEXT,
+    fence_token      INTEGER NOT NULL DEFAULT 0,
     status           TEXT NOT NULL DEFAULT 'pending',
     -- pending|running|submitted|approved|rejected|failed|skipped
     run_id           TEXT,
@@ -407,6 +409,26 @@ CREATE TABLE IF NOT EXISTS workflow_dossiers (
 );
 CREATE INDEX IF NOT EXISTS idx_dossiers_task
     ON workflow_dossiers(task_id, created_at DESC);
+
+-- 资源租约：step/slice/path/task。唯一活跃租约 + fencing token 防止重复执行。
+CREATE TABLE IF NOT EXISTS leases (
+    id            TEXT PRIMARY KEY,
+    resource_type TEXT NOT NULL,             -- step|slice|path|task
+    resource_key  TEXT NOT NULL,
+    holder_type   TEXT NOT NULL DEFAULT 'role',
+    holder        TEXT,
+    run_id        TEXT,
+    fence         INTEGER NOT NULL DEFAULT 1,
+    status        TEXT NOT NULL DEFAULT 'active', -- active|released|expired
+    acquired_at   TEXT NOT NULL,
+    renewed_at    TEXT,
+    expires_at    TEXT,
+    meta_json     TEXT NOT NULL DEFAULT '{}'
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_leases_active_unique
+    ON leases(resource_type, resource_key) WHERE status='active';
+CREATE INDEX IF NOT EXISTS idx_leases_holder ON leases(holder, status);
+CREATE INDEX IF NOT EXISTS idx_leases_expiry ON leases(status, expires_at);
 
 CREATE TABLE IF NOT EXISTS audit (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -853,6 +875,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         "packet_id TEXT",
         "submitted_at TEXT",
         "scope_paths_json TEXT NOT NULL DEFAULT '[]'",
+        "lease_id TEXT",
+        "fence_token INTEGER NOT NULL DEFAULT 0",
     ):
         try:
             conn.execute(f"ALTER TABLE workflow_steps ADD COLUMN {col}")
