@@ -317,10 +317,15 @@ def ensure_packet(conn: sqlite3.Connection, wf: dict, step: dict,
          jdumps(risks), jdumps(previous_recommendation), _digest(evidence),
          24 * 3600, _deadline(), created_by, now),
     )
+    # A forced refresh supersedes a packet that is still pending; the human has
+    # been waiting since the original submission, not since the refresh click.
+    submitted_at = now
+    if current and current["status"] in ("pending_human", "pending_ai"):
+        submitted_at = step.get("submitted_at") or current.get("created_at") or now
     conn.execute(
         "UPDATE workflow_steps SET packet_id=?, submitted_at=? "
         "WHERE workflow_id=? AND step_id=?",
-        (packet_id, now, wf["id"], step["step_id"]))
+        (packet_id, submitted_at, wf["id"], step["step_id"]))
     ledger.emit(
         conn, "gate.packet_created", task_id=wf["task_id"], workflow_id=wf["id"],
         execution_no=wf.get("execution_no"), step_id=step["step_id"],

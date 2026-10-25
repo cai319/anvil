@@ -88,14 +88,30 @@ def _human_wait_seconds(conn: sqlite3.Connection, wid: str, wf: dict,
     if not start_bound or not end_bound:
         return 0.0
     packets = conn.execute(
-        "SELECT id, status, authority, created_at FROM gate_packets "
-        "WHERE workflow_id=?", (wid,)).fetchall()
+        "SELECT id, step_id, status, authority, created_at, superseded_by "
+        "FROM gate_packets WHERE workflow_id=? ORDER BY revision", (wid,)).fetchall()
+    step_submitted = {r["step_id"]: r["submitted_at"] for r in conn.execute(
+        "SELECT step_id, submitted_at FROM workflow_steps WHERE workflow_id=?",
+        (wid,)).fetchall()}
     decisions = conn.execute(
         "SELECT packet_id, decider_type, decision, created_at FROM decisions "
         "WHERE workflow_id=? ORDER BY created_at, rowid", (wid,)).fetchall()
     by_packet: dict[str, list[dict]] = {}
     for d in decisions:
         by_packet.setdefault(d["packet_id"], []).append(dict(d))
+    previous_packet = {p["superseded_by"]: p["id"] for p in packets
+                       if p["superseded_by"]}
+
+    def chain(packet_id: str) -> list[str]:
+        ids = [packet_id]
+        seen = {packet_id}
+        while ids[-1] in previous_packet:
+            prev_id = previous_packet[ids[-1]]
+            if prev_id in seen:
+                break
+            ids.append(prev_id)
+            seen.add(prev_id)
+        return ids
     intervals: list[tuple[datetime, datetime]] = []
     for packet in packets:
         rows = by_packet.get(packet["id"], [])
@@ -114,11 +130,19 @@ def _human_wait_seconds(conn: sqlite3.Connection, wid: str, wf: dict,
             continue
         if end is None:
             continue
-        handovers = [d for d in rows if d["decider_type"] != "human"
+        chain_decisions = [
+            d for pid in chain(packet["id"]) for d in by_packet.get(pid, [])]
+        handovers = [d for d in chain_decisions if d["decider_type"] != "human"
                      and d["decision"] in ("escalate", "recommend_approve")
                      and (_parse(d["created_at"]) or end) <= end]
-        start = (min(_parse(d["created_at"]) for d in handovers)
-                 if handovers else _parse(packet["created_at"]))
+        if handovers:
+            start = min(_parse(d["created_at"]) for d in handovers)
+        else:
+            # Prefer the step submission time: a forced packet refresh creates a
+            # new packet while the human has already been waiting.
+            submitted = _parse(step_submitted.get(packet["step_id"]))
+            start = submitted if submitted and submitted <= end else _parse(
+                packet["created_at"])
         if start is None:
             continue
         start = max(start, start_bound)

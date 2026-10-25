@@ -1,4 +1,4 @@
 """Anvil 版本号（单一来源；发布前与前端 src/version.ts 保持一致）。"""
 
-VERSION = "1.28.6"
+VERSION = "1.28.7"
 VERSION_LABEL = f"v{VERSION}"

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from anvil.db import connect
 from anvil.services import dossier as dossier_service
 from anvil.services import metrics
+from anvil.services import reviews
 from anvil.services import tasks as tasks_service
 from anvil.services import workflow as wf_service
 from anvil.util import now_iso
@@ -116,6 +117,43 @@ def test_active_duration_excludes_human_review_wait(tmp_path):
     assert 3590 <= m["waiting"]["excluded_seconds"] <= 3610
     assert 3580 <= m["active_duration_seconds"] <= 3620
     assert m["waiting"]["active_seconds"] == round(m["active_duration_seconds"], 1)
+
+
+def test_packet_refresh_preserves_human_wait(tmp_path):
+    conn = _conn(tmp_path)
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "实现", "role": "dev"},
+        {"id": "D1", "title": "联合验收", "role": "pm", "kind": "decision",
+         "decision_authority": "joint", "depends_on": ["S1"], "on_reject": ["S1"]},
+    ]})
+    wf_service.advance(conn, wf["id"], starter=_starter("S1"))
+    wf_service.submit_step(conn, wf["id"], "S1", "dev", "完成")
+    wf_service.advance(conn, wf["id"], starter=_starter("D1"))
+    wf_service.decide_step(conn, wf["id"], "D1", "pm", True, "建议通过")
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(hours=1)).isoformat()
+    created = (now - timedelta(hours=2)).isoformat()
+    conn.execute("UPDATE workflows SET created_at=? WHERE id=?", (created, wf["id"]))
+    conn.execute(
+        "UPDATE workflow_steps SET submitted_at=? WHERE workflow_id=? AND step_id='D1'",
+        (old, wf["id"]))
+    conn.execute("UPDATE gate_packets SET created_at=? WHERE workflow_id=?",
+                 (old, wf["id"]))
+    conn.execute("UPDATE decisions SET created_at=? WHERE workflow_id=?",
+                 (old, wf["id"]))
+    conn.commit()
+    current = wf_service.get_workflow(conn, wf["id"])
+    step = next(s for s in current["steps"] if s["step_id"] == "D1")
+    reviews.ensure_packet(conn, current, step, created_by="human", force=True)
+    refreshed = wf_service.get_workflow(conn, wf["id"])
+    d1 = next(s for s in refreshed["steps"] if s["step_id"] == "D1")
+    assert d1["submitted_at"] == old
+    wf_service.decide_step(
+        conn, wf["id"], "D1", "human", True, "确认",
+        override_reason="人工确认")
+    m = metrics.compute(conn, wf["id"])
+    assert 3590 <= m["waiting"]["excluded_seconds"] <= 3610
+    assert 3580 <= m["active_duration_seconds"] <= 3620
 
 
 def test_token_totals_include_cache_and_task_level_runs(tmp_path):
