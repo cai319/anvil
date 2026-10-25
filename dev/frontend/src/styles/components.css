@@ -1520,6 +1520,9 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
   font-size: var(--fs-hint);
 }
 .channels-page .channel-detail-body > h3:first-child { margin-top: 0; }
+/* 操作按钮与上方表单/说明留出呼吸空间。 */
+.channels-page .channel-detail-body > .toolbar { margin-top: clamp(10px, 0.8vw, 14px); }
+.channels-page .channel-detail-body > button { margin-top: clamp(10px, 0.8vw, 14px); }
 .channels-page .channels-list li { padding: 7px 9px; }
 .channels-list a {
   display: flex;
