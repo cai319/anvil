@@ -94,7 +94,17 @@ export function ExecutionDossier({ id }: { id: string }) {
 
       <div className="dossier-metrics">
         <div><span>步骤</span><strong>{m.steps.done}/{m.steps.total}</strong></div>
-        <div><span>总耗时</span><strong>{formatDuration(m.duration_seconds)}</strong></div>
+        <div title="workflow 创建到完成/终止">
+          <span>工作流耗时</span><strong>{formatDuration(m.duration_seconds)}</strong>
+        </div>
+        <div title="扣除纯等待人工介入的时间">
+          <span>有效执行</span>
+          <strong>{formatDuration(m.active_duration_seconds
+            ?? Math.max(0, m.duration_seconds - (m.waiting.excluded_seconds ?? 0)))}</strong>
+        </div>
+        <div title="没有角色在推进、纯等待人工审核的时长（区间去重）">
+          <span>人工等待</span><strong>{formatDuration(m.waiting.excluded_seconds ?? 0)}</strong>
+        </div>
         <div><span>最大深度</span><strong>{m.steps.max_depth}</strong></div>
         <div><span>审核门</span><strong>{m.gates.total}</strong></div>
         <div><span>决策</span><strong>{m.decisions.total}</strong></div>

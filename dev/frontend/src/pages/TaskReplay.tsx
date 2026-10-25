@@ -389,8 +389,22 @@ export function TaskReplay({ id }: { id: string }) {
             <div className="replay-side-block replay-metrics">
               <span className="page-kicker">FINAL METRICS</span>
               <div><span>步骤</span><strong>{metrics.steps.done}/{metrics.steps.total}</strong></div>
-              <div><span>总耗时</span>
+              <div title="任务创建到最后更新的墙钟时间">
+                <span>任务总耗时</span>
                 <strong>{formatDuration(secondsBetween(task.created_at, task.updated_at))}</strong>
+              </div>
+              <div title="workflow 创建到完成/终止">
+                <span>工作流耗时</span><strong>{formatDuration(metrics.duration_seconds)}</strong>
+              </div>
+              <div title="工作流耗时扣除纯等待人工介入的时间">
+                <span>工作流有效执行</span>
+                <strong>{formatDuration(metrics.active_duration_seconds
+                  ?? Math.max(0, metrics.duration_seconds
+                    - (metrics.waiting.excluded_seconds ?? 0)))}</strong>
+              </div>
+              <div title="没有角色在推进、纯等待人工审核的时长（区间去重）">
+                <span>人工等待</span>
+                <strong>{formatDuration(metrics.waiting.excluded_seconds ?? 0)}</strong>
               </div>
               <div title="workflow gate 步骤数；任务最终评审不计入审核门">
                 <span>审核门</span><strong>{metrics.gates.total}</strong>

@@ -201,12 +201,17 @@ function WorkflowSummary({ workflow, taskStatus, metrics, diff }: {
       {metrics && (
         <div className="wf-metrics">
           <span title="最大依赖深度">深度 {metrics.steps.max_depth}</span>
-          <span title="执行总耗时">耗时 {formatDuration(metrics.duration_seconds)}</span>
+          <span title="workflow 创建到完成/终止">耗时 {formatDuration(metrics.duration_seconds)}</span>
+          <span title="扣除纯等待人工介入的时间">
+            有效 {formatDuration(metrics.active_duration_seconds
+              ?? Math.max(0, metrics.duration_seconds
+                - (metrics.waiting.excluded_seconds ?? 0)))}
+          </span>
           <span title="人工审核门">审核门 {metrics.gates.total}（待 {metrics.gates.pending}）</span>
           <span title="决策与返工">决策 {metrics.decisions.total} · 打回 {metrics.decisions.rejected}</span>
-          <span title="人工等待时间">
-            人工等待 {Math.round((metrics.waiting.human_seconds
-              + metrics.waiting.pending_human_seconds) / 60)} 分钟
+          <span title="没有角色在推进、纯等待人工审核的时长（区间去重）">
+            人工等待 {formatDuration(metrics.waiting.excluded_seconds
+              ?? (metrics.waiting.human_seconds + metrics.waiting.pending_human_seconds))}
           </span>
           <span title="仅 workflow 步骤关联 run 的 Token 总量（输入 + 输出 + 缓存读取 + 缓存写入）">
             Token {(metrics.tokens.total_tokens

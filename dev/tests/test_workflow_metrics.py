@@ -93,6 +93,31 @@ def test_planned_actual_diff_includes_generated_slices(tmp_path):
     assert row["evidence_required"] == 1
 
 
+def test_active_duration_excludes_human_review_wait(tmp_path):
+    conn = _conn(tmp_path)
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "G1", "title": "评审", "role": "qa", "gate": True,
+         "reviewer": "lead"}]})
+    wf_service.advance(conn, wf["id"], starter=_starter("G1"))
+    wf_service.submit_step(conn, wf["id"], "G1", "qa", "完成")
+    now = datetime.now(timezone.utc)
+    created = (now - timedelta(hours=2)).isoformat()
+    wait_start = (now - timedelta(hours=1)).isoformat()
+    conn.execute("UPDATE workflows SET created_at=? WHERE id=?", (created, wf["id"]))
+    conn.execute(
+        "UPDATE workflow_steps SET submitted_at=? WHERE workflow_id=? AND step_id='G1'",
+        (wait_start, wf["id"]))
+    conn.execute("UPDATE gate_packets SET created_at=? WHERE workflow_id=?",
+                 (wait_start, wf["id"]))
+    conn.commit()
+    wf_service.review_step(conn, wf["id"], "G1", True, "通过")
+    m = metrics.compute(conn, wf["id"])
+    assert 7190 <= m["duration_seconds"] <= 7210
+    assert 3590 <= m["waiting"]["excluded_seconds"] <= 3610
+    assert 3580 <= m["active_duration_seconds"] <= 3620
+    assert m["waiting"]["active_seconds"] == round(m["active_duration_seconds"], 1)
+
+
 def test_token_totals_include_cache_and_task_level_runs(tmp_path):
     conn = _conn(tmp_path)
     wf = wf_service.create_workflow(conn, "T1", {"steps": [

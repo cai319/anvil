@@ -879,6 +879,7 @@ export interface WorkflowMetrics {
   created_at: string | null;
   finished_at: string | null;
   duration_seconds: number;
+  active_duration_seconds: number;
   steps: {
     total: number;
     done: number;
@@ -902,7 +903,12 @@ export interface WorkflowMetrics {
     pending_human: number;
     rework_rate: number;
   };
-  waiting: { human_seconds: number; pending_human_seconds: number };
+  waiting: {
+    human_seconds: number;
+    pending_human_seconds: number;
+    excluded_seconds?: number;
+    active_seconds?: number;
+  };
   evidence: { packets: number };
   tokens: {
     input_tokens?: number;

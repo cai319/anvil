@@ -61,6 +61,73 @@ def _depth(steps: list[dict]) -> int:
     return max((visit(s) for s in by_id), default=0)
 
 
+def _union_seconds(intervals: list[tuple[datetime, datetime]]) -> float:
+    if not intervals:
+        return 0.0
+    ordered = sorted(intervals, key=lambda x: x[0])
+    merged: list[list[datetime]] = []
+    for start, end in ordered:
+        if end <= start:
+            continue
+        if not merged or start > merged[-1][1]:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+    return sum(max(0.0, (end - start).total_seconds()) for start, end in merged)
+
+
+def _human_wait_seconds(conn: sqlite3.Connection, wid: str, wf: dict,
+                        window_start: str | None, window_end: str | None) -> float:
+    """Union of intervals where the workflow was waiting for a human.
+
+    Only packets that actually required a human (human/joint authority, AI
+    escalation, or pending_human) are counted, so a human override of a normal
+    AI decision does not inflate the wait.
+    """
+    start_bound, end_bound = _parse(window_start), _parse(window_end)
+    if not start_bound or not end_bound:
+        return 0.0
+    packets = conn.execute(
+        "SELECT id, status, authority, created_at FROM gate_packets "
+        "WHERE workflow_id=?", (wid,)).fetchall()
+    decisions = conn.execute(
+        "SELECT packet_id, decider_type, decision, created_at FROM decisions "
+        "WHERE workflow_id=? ORDER BY created_at, rowid", (wid,)).fetchall()
+    by_packet: dict[str, list[dict]] = {}
+    for d in decisions:
+        by_packet.setdefault(d["packet_id"], []).append(dict(d))
+    intervals: list[tuple[datetime, datetime]] = []
+    for packet in packets:
+        rows = by_packet.get(packet["id"], [])
+        humans = [d for d in rows if d["decider_type"] == "human"]
+        escalated = any(d["decision"] == "escalate" for d in rows)
+        waiting = (packet["authority"] in ("human", "joint") or escalated
+                   or packet["status"] == "pending_human")
+        if not waiting:
+            continue
+        if humans:
+            end = min(_parse(d["created_at"]) for d in humans)
+        elif packet["status"] == "pending_human":
+            end = (datetime.now(timezone.utc) if wf["status"] == "running"
+                   else end_bound)
+        else:
+            continue
+        if end is None:
+            continue
+        handovers = [d for d in rows if d["decider_type"] != "human"
+                     and d["decision"] in ("escalate", "recommend_approve")
+                     and (_parse(d["created_at"]) or end) <= end]
+        start = (min(_parse(d["created_at"]) for d in handovers)
+                 if handovers else _parse(packet["created_at"]))
+        if start is None:
+            continue
+        start = max(start, start_bound)
+        end = min(end, end_bound)
+        if end > start:
+            intervals.append((start, end))
+    return _union_seconds(intervals)
+
+
 def _usage(conn: sqlite3.Connection, wid: str, task_id: str) -> dict:
     def agg(where: str, params: tuple) -> dict:
         row = conn.execute(
@@ -149,6 +216,10 @@ def compute(conn: sqlite3.Connection, wid: str) -> dict:
         "SELECT COUNT(*) AS n FROM gate_packets WHERE workflow_id=?", (wid,)).fetchone()["n"]
 
     step_roles = {s["role_slug"] for s in steps if s["role_slug"]}
+    excluded_wait = _human_wait_seconds(
+        conn, wid, wf, wf.get("created_at"), end)
+    duration_seconds = _seconds(wf.get("created_at"), end)
+    active_seconds = max(0.0, duration_seconds - excluded_wait)
     return {
         "workflow_id": wid,
         "task_id": wf["task_id"],
@@ -158,7 +229,8 @@ def compute(conn: sqlite3.Connection, wid: str) -> dict:
         "weight_source": wf.get("weight_source") or "default",
         "created_at": wf.get("created_at"),
         "finished_at": finished_at,
-        "duration_seconds": _seconds(wf.get("created_at"), end),
+        "duration_seconds": duration_seconds,
+        "active_duration_seconds": active_seconds,
         "steps": {
             "total": len(steps),
             "done": done,
@@ -188,8 +260,12 @@ def compute(conn: sqlite3.Connection, wid: str) -> dict:
             if total_decisions else 0.0,
         },
         "waiting": {
+            # Decision latency is per decision; excluded_seconds is the union
+            # of pure human-wait windows inside the workflow wall clock.
             "human_seconds": round(human_wait, 1),
             "pending_human_seconds": round(pending_wait, 1),
+            "excluded_seconds": round(excluded_wait, 1),
+            "active_seconds": round(active_seconds, 1),
         },
         "evidence": {"packets": evidence},
         "tokens": _usage(conn, wid, wf["task_id"]),
