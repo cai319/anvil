@@ -136,6 +136,17 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     source_step_id   TEXT,                           -- 动态切片：生成该步骤的 plan_slices 步骤
     slice_key        TEXT,                           -- 动态切片：所属切片 id
     plan_json        TEXT,                           -- plan_slices：切片计划原文
+    decision_authority TEXT NOT NULL DEFAULT '',     -- 空=派生；ai|human|joint
+    risk_level       TEXT NOT NULL DEFAULT 'normal', -- normal|high|critical
+    reversible       INTEGER NOT NULL DEFAULT 1,
+    escalate_json    TEXT NOT NULL DEFAULT '[]',     -- 触发器列表
+    decision_question TEXT,
+    decision_options_json TEXT NOT NULL DEFAULT '[]',
+    evidence_json    TEXT NOT NULL DEFAULT '[]',
+    evidence_required INTEGER NOT NULL DEFAULT 0,
+    packet_id        TEXT,
+    submitted_at     TEXT,
+    scope_paths_json TEXT NOT NULL DEFAULT '[]',
     status           TEXT NOT NULL DEFAULT 'pending',
     -- pending|running|submitted|approved|rejected|failed|skipped
     run_id           TEXT,
@@ -315,6 +326,64 @@ CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type, id);
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_source
     ON events(source, source_id) WHERE source IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS gate_packets (
+    id                 TEXT PRIMARY KEY,
+    task_id            TEXT NOT NULL,
+    workflow_id        TEXT NOT NULL,
+    execution_no       INTEGER NOT NULL DEFAULT 1,
+    step_id            TEXT NOT NULL,
+    kind               TEXT NOT NULL,
+    revision           INTEGER NOT NULL DEFAULT 1,
+    status             TEXT NOT NULL DEFAULT 'pending_human',
+    authority          TEXT NOT NULL,
+    question           TEXT NOT NULL,
+    options_json       TEXT NOT NULL DEFAULT '[]',
+    acceptance_json    TEXT NOT NULL DEFAULT '[]',
+    evidence_json      TEXT NOT NULL DEFAULT '[]',
+    upstream_json      TEXT NOT NULL DEFAULT '[]',
+    risks_json         TEXT NOT NULL DEFAULT '[]',
+    recommendation_json TEXT NOT NULL DEFAULT '{}',
+    evidence_digest    TEXT,
+    sla_seconds        INTEGER,
+    deadline_at        TEXT,
+    sla_notified_at    TEXT,
+    created_by         TEXT,
+    created_at         TEXT NOT NULL,
+    superseded_by      TEXT,
+    UNIQUE(workflow_id, step_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_packets_pending ON gate_packets(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_packets_step
+    ON gate_packets(workflow_id, step_id, revision DESC);
+CREATE INDEX IF NOT EXISTS idx_packets_task
+    ON gate_packets(task_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS decisions (
+    id                 TEXT PRIMARY KEY,
+    packet_id          TEXT NOT NULL,
+    task_id            TEXT NOT NULL,
+    workflow_id        TEXT NOT NULL,
+    execution_no       INTEGER NOT NULL DEFAULT 1,
+    step_id            TEXT NOT NULL,
+    authority          TEXT NOT NULL,
+    decider_type       TEXT NOT NULL,
+    decider            TEXT NOT NULL,
+    decision           TEXT NOT NULL,
+    feedback           TEXT,
+    reasons_json       TEXT NOT NULL DEFAULT '[]',
+    rework_targets_json TEXT NOT NULL DEFAULT '[]',
+    evidence_digest    TEXT,
+    override_reason    TEXT,
+    latency_seconds    REAL,
+    created_at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_step
+    ON decisions(workflow_id, step_id, id);
+CREATE INDEX IF NOT EXISTS idx_decisions_task
+    ON decisions(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_decisions_packet
+    ON decisions(packet_id);
 
 CREATE TABLE IF NOT EXISTS audit (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -750,6 +819,17 @@ def init_schema(conn: sqlite3.Connection) -> None:
         "source_step_id TEXT",
         "slice_key TEXT",
         "plan_json TEXT",
+        "decision_authority TEXT NOT NULL DEFAULT ''",
+        "risk_level TEXT NOT NULL DEFAULT 'normal'",
+        "reversible INTEGER NOT NULL DEFAULT 1",
+        "escalate_json TEXT NOT NULL DEFAULT '[]'",
+        "decision_question TEXT",
+        "decision_options_json TEXT NOT NULL DEFAULT '[]'",
+        "evidence_json TEXT NOT NULL DEFAULT '[]'",
+        "evidence_required INTEGER NOT NULL DEFAULT 0",
+        "packet_id TEXT",
+        "submitted_at TEXT",
+        "scope_paths_json TEXT NOT NULL DEFAULT '[]'",
     ):
         try:
             conn.execute(f"ALTER TABLE workflow_steps ADD COLUMN {col}")

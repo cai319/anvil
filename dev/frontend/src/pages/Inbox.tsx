@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, subscribeEvents, type InboxItem } from "../api/client";
 import { formatDateTime } from "../time";
 import { PageHeader } from "../components/ui";
+import { GateReviewDrawer } from "../components/GateReviewDrawer";
 
 /** Inbox（信息架构重构）：四类人机决策点统一入口，action card 式就地操作。 */
 
@@ -12,6 +13,7 @@ const KIND_LABEL: Record<InboxItem["kind"], string> = {
   lesson: "经验",
   proposal: "提案",
   gate: "审核门",
+  decision: "决策",
   action: "操作申请",
 };
 
@@ -22,6 +24,7 @@ const KIND_COLOR: Record<InboxItem["kind"], string> = {
   lesson: "#166534",
   proposal: "#854d0e",
   gate: "#92400e",
+  decision: "#0f766e",
   action: "#be185d",
 };
 
@@ -35,6 +38,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "lesson", label: "经验" },
   { key: "proposal", label: "提案" },
   { key: "gate", label: "审核门" },
+  { key: "decision", label: "决策" },
   { key: "action", label: "操作申请" },
 ];
 
@@ -43,6 +47,7 @@ export function Inbox() {
   const [tab, setTab] = useState<Tab>("all");
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [reviewTarget, setReviewTarget] = useState<{ wid: string; sid: string } | null>(null);
 
   const refresh = () =>
     api.getInbox().then((b) => setItems(b.items)).catch((e) => setError(String(e)));
@@ -157,14 +162,13 @@ export function Inbox() {
           </>
         );
       }
-      case "gate": {
+      case "gate":
+      case "decision": {
         const [, wid, sid] = it.id.split(":");
         return (
           <>
             <button className="primary small" disabled={disabled}
-              onClick={() => act(it.id, () => api.reviewWorkflowStep(wid, sid, true))}>通过</button>
-            <button className="small danger" disabled={disabled}
-              onClick={() => act(it.id, () => api.reviewWorkflowStep(wid, sid, false, "请按评审意见修改"))}>驳回</button>
+              onClick={() => setReviewTarget({ wid, sid })}>打开审查材料</button>
             {it.task_id && <a className="small" href={`/tasks/${it.task_id}`}>看工作流</a>}
           </>
         );
@@ -209,6 +213,23 @@ export function Inbox() {
               {it.meta.assessment ? ` · ${it.meta.assessment}` : ""}
             </div>
           )}
+          {(it.kind === "gate" || it.kind === "decision") && (
+            <div className="repo-draft-meta gate-inbox-meta">
+              <span className={`gate-authority is-${it.meta?.authority || "human"}`}>
+                {it.meta?.authority === "joint" ? "联合决策"
+                  : it.meta?.authority === "ai" ? "AI 决策" : "人工决策"}
+              </span>
+              <span className="muted">证据 {it.meta?.evidence_count ?? 0}</span>
+              {(it.meta?.waiting_seconds ?? 0) > 0 && (
+                <span className="muted">已等待 {Math.floor((it.meta?.waiting_seconds ?? 0) / 60)} 分钟</span>
+              )}
+              {it.meta?.recommendation?.decision && (
+                <span className="muted">
+                  AI 建议：{it.meta.recommendation.decision === "approve" ? "通过" : it.meta.recommendation.decision}
+                </span>
+              )}
+            </div>
+          )}
           {it.kind === "draft" && it.meta?.draft_kind !== "role_suggestion" && (
             <div className="repo-draft-meta">
               {(it.meta?.tags?.length ?? 0) > 0 && (
@@ -231,6 +252,14 @@ export function Inbox() {
           <div className="card-actions" style={{ gap: 6 }}>{renderActions(it)}</div>
         </div>
       ))}
+      {reviewTarget && (
+        <GateReviewDrawer
+          wid={reviewTarget.wid}
+          sid={reviewTarget.sid}
+          onClose={() => setReviewTarget(null)}
+          onDone={() => { setReviewTarget(null); refresh(); }}
+        />
+      )}
     </div>
   );
 }

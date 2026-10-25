@@ -671,15 +671,24 @@ def step_submit(
     workflow_id: str = typer.Argument(..., help="工作流 ID"),
     step_id: str = typer.Argument(..., help="步骤 ID（如 S1）"),
     summary: str = typer.Option("", "--summary", help="完成摘要"),
+    evidence_file: str = typer.Option(
+        "", "--evidence-file", help="证据 JSON 文件（数组）"),
     json_out: bool = typer.Option(False, "--json"),
 ):
     """提交当前工作流步骤（完成后必须调用；不要用 task submit）。"""
-    out = _call("POST", f"/api/v1/workflows/{workflow_id}/steps/{step_id}/submit",
-                {"summary": summary})
+    body: dict = {"summary": summary}
+    if evidence_file:
+        with open(evidence_file, encoding="utf-8") as fh:
+            body["evidence"] = json.load(fh)
+    out = _call("POST", f"/api/v1/workflows/{workflow_id}/steps/{step_id}/submit", body)
     if json_out:
         _emit(out, True)
     else:
         typer.echo(f"步骤 {step_id} 已提交（{'等待人工审核' if any(s['step_id'] == step_id and s['status'] == 'submitted' and s['gate'] for s in out.get('steps', [])) else '已通过，工作流继续推进'}）")
+
+
+def _csv(value: str) -> list[str]:
+    return [x.strip() for x in value.split(",") if x.strip()]
 
 
 @step_app.command("decide")
@@ -689,18 +698,82 @@ def step_decide(
     approve: bool = typer.Option(False, "--approve", help="通过"),
     reject: bool = typer.Option(False, "--reject", help="打回重做"),
     feedback: str = typer.Option("", "--feedback", help="决策结论 / 打回原因"),
+    rework_targets: str = typer.Option(
+        "", "--rework-targets", help="打回范围，逗号分隔的步骤 ID"),
+    reasons: str = typer.Option("", "--reason", help="结构化原因，逗号分隔"),
+    override_reason: str = typer.Option(
+        "", "--override-reason", help="人工覆盖 AI/联合决策时的理由"),
+    packet_id: str = typer.Option("", "--packet", help="决策针对的 packet ID"),
+    acknowledge_stale: bool = typer.Option(
+        False, "--acknowledge-stale", help="确认接受过期证据"),
     json_out: bool = typer.Option(False, "--json"),
 ):
     """决策角色通过或打回 decision 步骤（只能二选一）。"""
     if approve == reject:
         typer.echo("必须且只能给 --approve 或 --reject", err=True)
         raise typer.Exit(2)
-    out = _call("POST", f"/api/v1/workflows/{workflow_id}/steps/{step_id}/decide",
-                {"approve": approve, "feedback": feedback})
+    body = {
+        "approve": approve,
+        "feedback": feedback,
+        "rework_targets": _csv(rework_targets),
+        "reasons": _csv(reasons),
+        "override_reason": override_reason or None,
+        "packet_id": packet_id or None,
+        "acknowledge_stale": acknowledge_stale,
+    }
+    out = _call("POST", f"/api/v1/workflows/{workflow_id}/steps/{step_id}/decide", body)
     if json_out:
         _emit(out, True)
     else:
-        typer.echo(f"决策步骤 {step_id} 已{'通过' if approve else '打回重做'}")
+        typer.echo(f"决策步骤 {step_id} 已{'提交' if approve else '打回重做'}")
+
+
+@step_app.command("escalate")
+def step_escalate(
+    workflow_id: str = typer.Argument(..., help="工作流 ID"),
+    step_id: str = typer.Argument(..., help="decision 步骤 ID"),
+    reason: str = typer.Option(..., "--reason", help="升级原因"),
+    triggers: str = typer.Option("", "--triggers", help="触发原因，逗号分隔"),
+    proposed_decision: str = typer.Option(
+        "", "--proposed-decision", help="建议结论 approve|reject"),
+    proposed_feedback: str = typer.Option("", "--proposed-feedback"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """证据不足/风险超限时把决策升级给自然人。"""
+    out = _call("POST", f"/api/v1/workflows/{workflow_id}/steps/{step_id}/escalate", {
+        "reason": reason,
+        "triggers": _csv(triggers),
+        "proposed_decision": proposed_decision or None,
+        "proposed_feedback": proposed_feedback or None,
+    })
+    if json_out:
+        _emit(out, True)
+    else:
+        typer.echo(f"决策步骤 {step_id} 已升级人工")
+
+
+@step_app.command("packet")
+def step_packet(
+    workflow_id: str = typer.Argument(..., help="工作流 ID"),
+    step_id: str = typer.Argument(..., help="步骤 ID"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """查看 gate/decision 的 review packet 与历史决策。"""
+    out = _call("GET", f"/api/v1/workflows/{workflow_id}/steps/{step_id}/packet")
+    if json_out:
+        _emit(out, True)
+        return
+    packet = out.get("packet")
+    if not packet:
+        typer.echo("该步骤尚未生成 packet（可能还未提交或不在审核中）")
+        return
+    typer.echo(f"问题：{packet.get('question')}")
+    typer.echo(f"权限：{packet.get('authority')} · 状态：{packet.get('status')}")
+    for e in packet.get("evidence") or []:
+        mark = "新鲜" if e.get("fresh", True) else "过期"
+        typer.echo(f"- [{e.get('kind')}] {e.get('ref')} ({mark})")
+    for d in out.get("decisions") or []:
+        typer.echo(f"决策：{d.get('decider')} {d.get('decision')} {d.get('feedback') or ''}")
 
 
 @step_app.command("plan")

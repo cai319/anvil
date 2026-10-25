@@ -21,6 +21,7 @@ def collect(conn: sqlite3.Connection) -> dict:
     items.extend(_lessons(conn))
     items.extend(_proposals(conn))
     items.extend(_workflow_gates(conn))
+    items.extend(_workflow_decisions(conn))
     items.extend(_action_cards(conn))
     items.sort(key=lambda i: i["created_at"] or "", reverse=True)
     return {"count": len(items), "items": items}
@@ -201,14 +202,76 @@ def _workflow_gates(conn: sqlite3.Connection) -> list[dict]:
     """工作流 gate 步骤：角色已提交，等待自然人审核。"""
     from . import workflow as workflow_service
 
+    from . import reviews as review_service
+    from datetime import datetime, timezone
+
     out = []
     for r in workflow_service.gates(conn):
+        packet = review_service.latest_packet(conn, r["workflow_id"], r["step_id"])
+        waiting = 0
+        if packet and packet.get("created_at"):
+            try:
+                start = datetime.fromisoformat(str(packet["created_at"]))
+                waiting = max(0, int((datetime.now(timezone.utc) - start).total_seconds()))
+            except (TypeError, ValueError):
+                waiting = 0
+        question = (packet or {}).get("question") or ""
         out.append({
             "id": f"gate:{r['workflow_id']}:{r['step_id']}", "kind": "gate",
             "title": f"步骤审核：{r['title']}",
-            "detail": f"{r['role_slug']} 已提交 · {r.get('task_title') or ''}"
-                      + (f" · {r['summary'][:40]}" if r.get("summary") else ""),
+            "detail": question or (
+                f"{r['role_slug']} 已提交 · {r.get('task_title') or ''}"
+                + (f" · {r['summary'][:40]}" if r.get("summary") else "")),
             "task_id": r.get("task_id"), "created_at": r["updated_at"],
+            "meta": {
+                "workflow_id": r["workflow_id"], "step_id": r["step_id"],
+                "packet_id": (packet or {}).get("id"),
+                "authority": (packet or {}).get("authority") or "human",
+                "question": question,
+                "evidence_count": len((packet or {}).get("evidence") or []),
+                "waiting_seconds": waiting,
+                "deadline_at": (packet or {}).get("deadline_at"),
+            },
+        })
+    return out
+
+
+def _workflow_decisions(conn: sqlite3.Connection) -> list[dict]:
+    """Decision steps waiting for a human (human or joint authority)."""
+    from . import reviews as review_service
+    from datetime import datetime, timezone
+
+    out = []
+    for p in review_service.human_decision_items(conn):
+        waiting = 0
+        if p.get("created_at"):
+            try:
+                start = datetime.fromisoformat(str(p["created_at"]))
+                waiting = max(0, int((datetime.now(timezone.utc) - start).total_seconds()))
+            except (TypeError, ValueError):
+                waiting = 0
+        recommendation = p.get("recommendation") or {}
+        detail = p.get("question") or f"{p.get('role_slug')} 的决策等待人工确认"
+        if recommendation.get("decision"):
+            detail += f" · AI 建议：{recommendation['decision']}"
+            if recommendation.get("feedback"):
+                detail += f"（{str(recommendation['feedback'])[:60]}）"
+        out.append({
+            "id": f"decision:{p['workflow_id']}:{p['step_id']}", "kind": "decision",
+            "title": f"待决策：{p.get('title') or p['step_id']}",
+            "detail": detail,
+            "task_id": p.get("task_id"), "created_at": p["created_at"],
+            "meta": {
+                "workflow_id": p["workflow_id"], "step_id": p["step_id"],
+                "packet_id": p["id"],
+                "authority": p.get("authority") or "human",
+                "question": p.get("question") or "",
+                "evidence_count": len(p.get("evidence") or []),
+                "waiting_seconds": waiting,
+                "deadline_at": p.get("deadline_at"),
+                "recommendation": recommendation,
+                "task_title": p.get("task_title"),
+            },
         })
     return out
 

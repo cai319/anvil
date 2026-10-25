@@ -90,11 +90,11 @@ function computeLayers(nodes: VisualNode[]): Map<string, number> {
   return layers;
 }
 
-export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
+export function WorkflowGraph({ workflow, roles, busy, onOpenReview, onRetry }: {
   workflow: Workflow;
   roles: Role[];
   busy: boolean;
-  onReview: (step: WorkflowStep, approve: boolean) => void;
+  onOpenReview: (step: WorkflowStep) => void;
   onRetry: (step: WorkflowStep) => void;
 }) {
   const [selected, setSelected] = useState<string | null>(null);
@@ -347,7 +347,13 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
                 <span className="wf-node-top">
                   <span className="wf-node-id mono">{s.step_id}</span>
                   {s.gate && <span className="wf-node-gate">审核门</span>}
-                  {s.kind === "decision" && <span className="wf-node-gate">决策</span>}
+                  {s.kind === "decision" && (
+                    <span className="wf-node-gate">
+                      {s.decision_authority === "human" ? "人工决策"
+                        : s.decision_authority === "joint" ? "联合决策" : "决策"}
+                    </span>
+                  )}
+                  {s.evidence_required && <span className="wf-node-gate is-evidence">证据</span>}
                   {s.kind === "plan_slices" && <span className="wf-node-gate">切片计划</span>}
                   <span className="wf-node-status" style={{ color: meta.color }}>{meta.label}</span>
                 </span>
@@ -503,9 +509,20 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
           )}
           {selectedStep.kind === "decision" && (
             <div className="muted">
-              决策步骤：通过后解锁下一片；打回 fix/verify2 重做
+              决策步骤（{selectedStep.decision_authority === "human" ? "人工"
+                : selectedStep.decision_authority === "joint" ? "联合" : "AI"}）：
+              通过后解锁下一片；打回 fix/verify2 重做
               {typeof selectedStep.rework_count === "number"
                 ? `（已重做 ${selectedStep.rework_count}/${selectedStep.max_rework ?? 0}）` : ""}
+            </div>
+          )}
+          {selectedStep.evidence_required && (
+            <div className="muted">证据要求：提交时必须附可核验证据。</div>
+          )}
+          {(selectedStep.evidence?.length ?? 0) > 0 && (
+            <div className="muted">
+              已提交证据 {selectedStep.evidence!.length} 条
+              {selectedStep.evidence!.some((e) => !e.fresh) ? " · 含过期证据" : ""}
             </div>
           )}
           {selectedStep.kind === "decision" && selectedStep.on_reject && selectedStep.on_reject.length > 0 && (
@@ -526,13 +543,13 @@ export function WorkflowGraph({ workflow, roles, busy, onReview, onRetry }: {
           {selectedStep.summary && <div className="muted">提交摘要：{selectedStep.summary}</div>}
           <div className="wf-actions">
             {selectedStep.run_id && <a href={`/runs/${selectedStep.run_id}`}>查看会话</a>}
-            {selectedStep.gate && selectedStep.status === "submitted" && (
-              <>
-                <button className="small primary" disabled={busy}
-                  onClick={() => onReview(selectedStep, true)}>通过</button>
-                <button className="small danger" disabled={busy}
-                  onClick={() => onReview(selectedStep, false)}>驳回</button>
-              </>
+            {(selectedStep.gate && selectedStep.status === "submitted"
+              || selectedStep.kind === "decision"
+              && (selectedStep.status === "submitted" || selectedStep.status === "running")) && (
+              <button className="small primary" disabled={busy}
+                onClick={() => onOpenReview(selectedStep)}>
+                {selectedStep.kind === "decision" ? "查看决策材料" : "审查证据"}
+              </button>
             )}
             {(selectedStep.status === "failed" || selectedStep.status === "rejected") && (
               <button className="small" disabled={busy} onClick={() => onRetry(selectedStep)}>重试</button>

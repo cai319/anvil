@@ -11,6 +11,11 @@ import { usePanelLayout } from "../usePanelLayout";
 import { STATUS_META, isDynamicStep, summarizeLoops, type LoopSummary } from "../workflowGroups";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
+import { GateReviewDrawer } from "../components/GateReviewDrawer";
+
+const stepAuthority = (st: WorkflowStep): "ai" | "human" | "joint" =>
+  st.decision_authority
+  || (st.gate ? "human" : st.kind === "decision" ? "ai" : "human");
 
 const STATUS_LABEL: Record<Task["status"], string> = {
   todo: "待办",
@@ -184,6 +189,7 @@ function describe(
         approved: "已通过",
         rework: "决策打回，返工中",
         rework_exhausted: "重做次数耗尽，需人工介入",
+        escalated: "升级人工决策",
         rejected: "人工驳回，返工中",
         failed: "执行失败",
       };
@@ -192,6 +198,21 @@ function describe(
         text: `工作流步骤 ${String(p.step ?? "")}「${String(p.title ?? "")}」`
           + `${label[status] ?? status}${summary}`,
       };
+    }
+    case "decision": {
+      const decision = String(p.decision ?? "");
+      const label: Record<string, string> = {
+        approve: "通过",
+        reject: "打回",
+        escalate: "升级人工",
+        recommend_approve: "建议通过",
+        recommend_reject: "建议打回",
+      };
+      const targetList = p.rework_targets;
+      const targets = Array.isArray(targetList) && targetList.length
+        ? ` · 返工：${targetList.join("、")}` : "";
+      const feedback = p.feedback ? `：${String(p.feedback)}` : "";
+      return { text: `决策${label[decision] ?? decision}${feedback}${targets}` };
     }
     default:
       return { text: ev.kind };
@@ -203,6 +224,7 @@ const TL_FILTERS = [
   { key: "dialog", label: "对话" },
   { key: "mention", label: "@提及" },
   { key: "step", label: "工作流" },
+  { key: "decision", label: "决策" },
   { key: "run", label: "运行" },
   { key: "review", label: "评审" },
 ] as const;
@@ -400,7 +422,7 @@ export function TaskDetail({ id }: { id: string }) {
   const [drafts, setDrafts] = useState<BoardDraft[]>([]);
   const [dispatchNote, setDispatchNote] = useState<string | null>(null);
   const [tab, setTab] = useState<"chat" | "workflow" | "subtasks" | "runtime">("chat");
-  const [tlKind, setTlKind] = useState<"all" | "dialog" | "mention" | "step" | "run" | "review">("all");
+  const [tlKind, setTlKind] = useState<"all" | "dialog" | "mention" | "step" | "decision" | "run" | "review">("all");
   const [tlLimit, setTlLimit] = useState(40);
   const threadRef = useRef<HTMLElement>(null);
   const pinnedRef = useRef(true);          // 用户是否停留在底部
@@ -408,6 +430,7 @@ export function TaskDetail({ id }: { id: string }) {
   const autoScrollingRef = useRef(false);  // 程序化滚动期间忽略 onScroll 的“用户滚动”判定
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [workflowHistory, setWorkflowHistory] = useState<WorkflowHistoryItem[]>([]);
+  const [reviewStep, setReviewStep] = useState<WorkflowStep | null>(null);
   const [children, setChildren] = useState<Task[]>([]);
   const [wfView, setWfView] = useState<"graph" | "list">("graph");
   const [showApplyTemplate, setShowApplyTemplate] = useState(false);
@@ -833,6 +856,11 @@ export function TaskDetail({ id }: { id: string }) {
       : status === "rejected" ? "in_review"
       : "closed";
 
+  const isReviewable = (st: WorkflowStep) =>
+    (st.gate && st.status === "submitted")
+    || (st.kind === "decision"
+      && (st.status === "submitted" || st.status === "running"));
+
   const renderStepRow = (st: WorkflowStep) => {
     const cls = statusClass(st.status);
     const label = STATUS_META[st.status].label;
@@ -845,6 +873,15 @@ export function TaskDetail({ id }: { id: string }) {
             <span className="wf-role">{st.role_slug}</span>
             {st.reviewer && <span className="wf-role">验证：{st.reviewer}</span>}
             {st.gate && <span className="badge wf-gate">审核门</span>}
+            {st.kind === "decision" && (
+              <span className={`badge wf-gate ${stepAuthority(st) === "joint" ? "is-joint" : ""}`}>
+                {stepAuthority(st) === "human" ? "人工决策"
+                  : stepAuthority(st) === "joint" ? "联合决策" : "AI 决策"}
+              </span>
+            )}
+            {st.risk_level && st.risk_level !== "normal" && (
+              <span className="badge gate-stale">风险 {st.risk_level}</span>
+            )}
             <span className={`status status-${cls}`}>{label}</span>
           </div>
           {st.depends_on?.length > 0 && <div className="muted wf-deps">依赖：{st.depends_on.join("、")}</div>}
@@ -854,17 +891,10 @@ export function TaskDetail({ id }: { id: string }) {
         </div>
         <div className="wf-actions">
           {st.run_id && <a href={`/runs/${st.run_id}`}>会话</a>}
-          {st.gate && st.status === "submitted" && (
-            <>
-              <button className="small primary" onClick={() => act(async () => {
-                const w = await api.reviewWorkflowStep(workflow!.id, st.step_id, true);
-                setWorkflow(w);
-              })}>通过</button>
-              <button className="small danger" onClick={() => act(async () => {
-                const w = await api.reviewWorkflowStep(workflow!.id, st.step_id, false, "请按评审意见修改");
-                setWorkflow(w);
-              })}>驳回</button>
-            </>
+          {isReviewable(st) && (
+            <button className="small primary" onClick={() => setReviewStep(st)}>
+              {st.kind === "decision" ? "人工决策" : "审查"}
+            </button>
           )}
           {(st.status === "failed" || st.status === "rejected") && (
             <button className="small" onClick={() => act(async () => {
@@ -1469,12 +1499,7 @@ export function TaskDetail({ id }: { id: string }) {
                   workflow={workflow}
                   roles={roles}
                   busy={busy}
-                  onReview={(step, approve) => act(async () => {
-                    const w = await api.reviewWorkflowStep(
-                      workflow.id, step.step_id, approve,
-                      approve ? undefined : "请按评审意见修改");
-                    setWorkflow(w);
-                  })}
+                  onOpenReview={(step) => setReviewStep(step)}
                   onRetry={(step) => act(async () => {
                     setWorkflow(await api.retryWorkflowStep(workflow.id, step.step_id));
                   })}
@@ -1525,6 +1550,14 @@ export function TaskDetail({ id }: { id: string }) {
 
       {tab === "runtime" && <RoleSessions task={task} roles={roles} workflow={workflow} />}
       </div>
+      {reviewStep && workflow && (
+        <GateReviewDrawer
+          wid={workflow.id}
+          sid={reviewStep.step_id}
+          onClose={() => setReviewStep(null)}
+          onDone={(wf) => { setWorkflow(wf); refreshWorkflow(); }}
+        />
+      )}
       {showApplyTemplate && (
         <ApplyTemplateModal
           task={task}

@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
-from . import ledger
+from . import ledger, reviews
 
 RUN_ACTIVE = ("created", "projecting", "running")
 STEP_DONE = ("approved", "skipped")
@@ -297,7 +297,7 @@ def _plan_steps(conn: sqlite3.Connection, steps: list[dict]):
             stack.extend(str(x) for x in (raw[cur].get("depends_on") or []))
         return found
 
-    plan: list[tuple[str, str, str, str, int, list[str], int]] = []
+    plan: list[tuple[str, str, str, str, int, list[str], int, dict]] = []
     for sid, s in raw.items():
         role = str(s.get("role") or s.get("role_slug") or "")
         if role and roles_service.is_onboarding(conn, role):
@@ -310,6 +310,47 @@ def _plan_steps(conn: sqlite3.Connection, steps: list[dict]):
         if kind not in ("task", "decision", "plan_slices"):
             raise ConflictError(f"step {sid}: invalid kind {kind!r}")
         gate = 1 if s.get("gate") else 0
+        authority = str(s.get("decision_authority") or "").strip().lower()
+        if authority not in ("", "ai", "human", "joint"):
+            raise ConflictError(f"step {sid}: invalid decision_authority {authority!r}")
+        if gate and authority == "ai":
+            raise ConflictError(f"step {sid}: a gate cannot use ai authority")
+        risk_level = str(s.get("risk_level") or "normal").strip().lower()
+        if risk_level not in ("normal", "high", "critical"):
+            raise ConflictError(f"step {sid}: invalid risk_level {risk_level!r}")
+        reversible = 1 if s.get("reversible", True) else 0
+        if kind == "decision" and not reversible and authority == "ai":
+            raise ConflictError(
+                f"step {sid}: irreversible decisions cannot use ai authority")
+        if kind == "decision" and risk_level == "critical" and authority == "ai":
+            raise ConflictError(
+                f"step {sid}: critical-risk decisions cannot use ai authority")
+        triggers = s.get("escalate") or []
+        if not isinstance(triggers, list):
+            raise ConflictError(f"step {sid}: escalate must be a list")
+        options = s.get("decision_options") or []
+        if not isinstance(options, list):
+            raise ConflictError(f"step {sid}: decision_options must be a list")
+        for opt in options:
+            if not isinstance(opt, dict):
+                raise ConflictError(f"step {sid}: each decision option must be an object")
+            if str(opt.get("decision") or "") not in ("approve", "reject", "escalate"):
+                raise ConflictError(
+                    f"step {sid}: option decision must be approve|reject|escalate")
+        question = str(s.get("decision_question") or "").strip() or None
+        scope_paths = s.get("scope_paths") or []
+        if not isinstance(scope_paths, list):
+            raise ConflictError(f"step {sid}: scope_paths must be a list")
+        meta = {
+            "decision_authority": authority,
+            "risk_level": risk_level,
+            "reversible": reversible,
+            "escalate": [str(x) for x in triggers],
+            "decision_question": question,
+            "decision_options": options,
+            "evidence_required": 1 if s.get("evidence_required") else 0,
+            "scope_paths": [str(x) for x in scope_paths],
+        }
         on_reject: list[str] = []
         max_rework = 0
         if kind == "plan_slices":
@@ -357,7 +398,9 @@ def _plan_steps(conn: sqlite3.Connection, steps: list[dict]):
                 raise ConflictError(f"decision step {sid}: max_rework must be >= 0")
         elif s.get("on_reject"):
             raise ConflictError(f"step {sid}: on_reject is only valid for decision steps")
-        plan.append((sid, role, kind, reviewer or "", gate, on_reject, max_rework))
+        if kind == "decision" and authority == "joint" and not role:
+            raise ConflictError(f"step {sid}: joint authority requires a decider role")
+        plan.append((sid, role, kind, reviewer or "", gate, on_reject, max_rework, meta))
 
     # 大型多角色工作流必须有决策点，不能退化成一条纯串行链。
     roles = {str(s.get("role") or s.get("role_slug") or "") for s in raw.values()}
@@ -1089,18 +1132,24 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
         payload={"previous_workflow_id": previous_workflow_id,
                  "template_id": template_id, "template_version": template_version},
     )
-    for sid, role, kind, reviewer, gate, on_reject, max_rework in plan:
+    for sid, role, kind, reviewer, gate, on_reject, max_rework, meta in plan:
         s = raw[sid]
         conn.execute(
             "INSERT INTO workflow_steps (workflow_id, step_id, title, role_slug, instructions, "
             "depends_on_json, acceptance_json, gate, reviewer, contract, kind, on_reject_json, "
-            "max_rework, rework_count, status, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "max_rework, rework_count, decision_authority, risk_level, reversible, escalate_json, "
+            "decision_question, decision_options_json, evidence_required, scope_paths_json, "
+            "status, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (wid, sid, str(s.get("title") or sid), role,
              str(s.get("instructions") or s.get("description") or ""),
              jdumps(s.get("depends_on") or []), jdumps(s.get("acceptance") or []),
              gate, reviewer or None, str(s.get("contract") or "") or None,
-             kind, jdumps(on_reject), max_rework, 0, "pending", now),
+             kind, jdumps(on_reject), max_rework, 0,
+             meta["decision_authority"], meta["risk_level"], meta["reversible"],
+             jdumps(meta["escalate"]), meta["decision_question"],
+             jdumps(meta["decision_options"]), meta["evidence_required"],
+             jdumps(meta["scope_paths"]), "pending", now),
         )
     conn.execute(
         "UPDATE tasks SET status='in_progress', assignee=NULL, lease_expires_at=NULL, "
@@ -1173,6 +1222,7 @@ def _steps(conn: sqlite3.Connection, wid: str) -> list[dict]:
     out = []
     for r in conn.execute("SELECT * FROM workflow_steps WHERE workflow_id=? ORDER BY rowid", (wid,)):
         d = dict(r)
+        d["workflow_id"] = wid
         d["depends_on"] = jloads(d.get("depends_on_json") or "[]", [])
         d["acceptance"] = jloads(d.get("acceptance_json") or "[]", [])
         d["gate"] = bool(d["gate"])
@@ -1180,6 +1230,11 @@ def _steps(conn: sqlite3.Connection, wid: str) -> list[dict]:
         d["on_reject"] = jloads(d.get("on_reject_json") or "[]", [])
         d["max_rework"] = int(d.get("max_rework") or 0)
         d["rework_count"] = int(d.get("rework_count") or 0)
+        d["reversible"] = bool(d.get("reversible", 1))
+        d["evidence"] = jloads(d.get("evidence_json") or "[]", [])
+        d["decision_options"] = jloads(d.get("decision_options_json") or "[]", [])
+        d["escalate"] = jloads(d.get("escalate_json") or "[]", [])
+        d["scope_paths"] = jloads(d.get("scope_paths_json") or "[]", [])
         out.append(d)
     return out
 
@@ -1221,6 +1276,21 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
     feedback_block = ""
     if feedback:
         feedback_block = f"\n## 上次决策/评审反馈（必须处理）\n{feedback}\n"
+
+    evidence = step.get("evidence") or []
+    evidence_block = ""
+    if step.get("evidence_required") or evidence:
+        supplied = "\n".join(
+            f"- [{e.get('kind', 'note')}] {e.get('ref') or e.get('label') or ''}"
+            for e in evidence if isinstance(e, dict)) or "-（尚未提交）"
+        evidence_block = (
+            "\n## 证据要求\n"
+            "提交时必须附可核验证据（文件/测试/命令输出/产物/URL），不要只写摘要。\n"
+            "证据 JSON 为数组："
+            "[{\"kind\":\"file|test|command|artifact|url|note\",\"ref\":\"...\","
+            "\"label\":\"...\"}]；文件证据只能使用 repo 或 agent home 内的相对路径。\n"
+            f"已提交证据：\n{supplied}\n")
+
 
     failure_reason = (step.get("failure_reason") or "").strip()
     recovery_block = ""
@@ -1334,6 +1404,7 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
         return (
             base
             + loop_block
+            + evidence_block
             + "\n## 本切片依赖步骤产出（决策依据）\n"
             + dep_output_block + "\n"
             + "\n## 决策职责\n"
@@ -1342,6 +1413,8 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
             "打回时逐条列出必须修改的问题、验收口径与复验要求。\n"
             f"重做次数：{step.get('rework_count', 0)} / {step.get('max_rework', 0)}\n"
             f"可打回的目标步骤（on_reject）：\n{target_block}\n"
+            f"决策权限：{reviews.authority_of(step)}"
+            "（ai=AI 可决定；human=等待自然人；joint=AI 只能建议通过，自然人确认）\n"
             + feedback_block
             + recovery_block
             + "\n完成后执行：\n"
@@ -1349,16 +1422,22 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
             "--approve --feedback \"结论\"`\n"
             f"- 打回：`anvil step decide {workflow['id']} {step['step_id']} "
             "--reject --feedback \"具体问题与修改要求\"`\n"
+            f"- 证据不足/风险超限：`anvil step escalate {workflow['id']} {step['step_id']} "
+            "--reason \"原因\"`\n"
             "不要调用 `anvil step submit` / `anvil task submit` / `anvil task claim`。\n"
         )
 
+    submit_cmd = (f"anvil step submit {workflow['id']} {step['step_id']} "
+                  "--summary \"完成摘要\"")
+    if step.get("evidence_required"):
+        submit_cmd += " --evidence-file evidence.json"
     return (
         base
         + loop_block
+        + evidence_block
         + feedback_block
         + recovery_block
-        + f"\n完成后必须执行：`anvil step submit {workflow['id']} {step['step_id']} "
-          "--summary \"完成摘要\"`。\n"
+        + f"\n完成后必须执行：`{submit_cmd}`。\n"
         "不要调用 `anvil task submit` / `anvil task claim`。\n"
     )
 
@@ -1414,6 +1493,7 @@ def _advance_locked(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
     by_id = {s["step_id"]: s for s in steps}
     task = conn.execute("SELECT * FROM tasks WHERE id=?", (wf["task_id"],)).fetchone()
     started: list[str] = []
+    waiting_human: list[str] = []
     now_dt = datetime.now(timezone.utc)
     for s in steps:
         if s["status"] != "pending":
@@ -1430,6 +1510,20 @@ def _advance_locked(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
             except (ValueError, TypeError):
                 pass
         if any(by_id.get(d, {}).get("status") not in STEP_DONE for d in s["depends_on"]):
+            continue
+        # human authority decision: no AI decider run at all — dependencies are
+        # enough to open the packet and put it in the human inbox.
+        if s.get("kind") == "decision" and reviews.authority_of(s) == "human":
+            now = now_iso()
+            conn.execute(
+                "UPDATE workflow_steps SET status='submitted', submitted_at=?, updated_at=?, "
+                "summary=COALESCE(summary, ?) WHERE workflow_id=? AND step_id=?",
+                (now, now, "等待人工决策", wid, s["step_id"]))
+            reviews.ensure_packet(
+                conn, wf, {**s, "summary": None, "status": "submitted"},
+                created_by="system", commit=False)
+            _step_activity(conn, wf["task_id"], None, s, "submitted", "等待人工决策")
+            waiting_human.append(s["step_id"])
             continue
         role = s["role_slug"]
         if not role:
@@ -1479,11 +1573,12 @@ def _advance_locked(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
     _finalize_if_done(conn, wid)
     wf = get_workflow(conn, wid)
     all_done = wf is not None and wf["status"] == "done"
-    return {"started": started, "done": all_done}
+    return {"started": started, "waiting_human": waiting_human, "done": all_done}
 
 
 def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
-                summary: str | None, run_id: str | None = None) -> dict:
+                summary: str | None, run_id: str | None = None,
+                evidence: list | None = None) -> dict:
     """角色提交当前步骤（anvil step submit）。gate 步骤进入人工审核。"""
     from . import runs as runs_service
 
@@ -1504,11 +1599,18 @@ def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
     if step.get("kind") == "plan_slices":
         raise ConflictError(
             f"step {step_id} is a plan_slices step; use `anvil step plan`")
+    try:
+        normalized = reviews.normalize_evidence(evidence) if evidence is not None else []
+    except reviews.EvidenceError as exc:
+        raise ConflictError(f"evidence_invalid: {exc}")
+    if step.get("evidence_required") and not normalized:
+        raise ConflictError(
+            f"evidence_required: step {step_id} requires at least one evidence item")
     now = now_iso()
     conn.execute(
-        "UPDATE workflow_steps SET status='submitted', summary=?, updated_at=? "
-        "WHERE workflow_id=? AND step_id=?",
-        (summary, now, wid, step_id),
+        "UPDATE workflow_steps SET status='submitted', summary=?, evidence_json=?, "
+        "updated_at=? WHERE workflow_id=? AND step_id=?",
+        (summary, jdumps(normalized or step.get("evidence") or []), now, wid, step_id),
     )
     if step["run_id"]:
         try:
@@ -1519,6 +1621,9 @@ def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
         # 审核门条目由收件箱聚合（kind=gate），这里只记时间线，不重复发 mention
         _step_activity(conn, wf["task_id"], role, step, "submitted", summary)
         conn.execute("UPDATE workflows SET updated_at=? WHERE id=?", (now, wid))
+        reviews.ensure_packet(conn, wf, {
+            **step, "summary": summary, "evidence": normalized or step.get("evidence") or [],
+            "status": "submitted"}, created_by=role)
     else:
         conn.execute(
             "UPDATE workflow_steps SET status='approved', ended_at=?, updated_at=? "
@@ -1531,7 +1636,12 @@ def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
 
 def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | None,
                 approve: bool, feedback: str | None = None,
-                run_id: str | None = None) -> dict:
+                run_id: str | None = None,
+                packet_id: str | None = None,
+                rework_targets: list[str] | None = None,
+                reasons: list[str] | None = None,
+                override_reason: str | None = None,
+                acknowledge_stale: bool = False) -> dict:
     """决策角色 approve/reject 一个 decision 步骤。
 
     reject 时把 on_reject 闭包内的步骤重置为 pending，并把 decision 自身重置为 pending；
@@ -1551,26 +1661,68 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
         _assert_current_run(step, run_id)
         if step.get("kind") != "decision":
             raise ConflictError(f"step {step_id} is not a decision step")
-        if step["status"] != "running":
-            raise ConflictError(f"step {step_id} is {step['status']}, expected running")
-        if role and role != "human" and role != step["role_slug"]:
+        is_human = role == "human"
+        if role and not is_human and role != step["role_slug"]:
             raise PermissionError(f"role {role} cannot decide step {step_id}")
+        authority = reviews.authority_of(step)
+        expected = ("running", "submitted") if is_human else ("running",)
+        if step["status"] not in expected:
+            raise ConflictError(
+                f"step {step_id} is {step['status']}, expected {'/'.join(expected)}")
+        if authority == "human" and not is_human:
+            raise PermissionError(f"step {step_id} requires a human decision")
+        if authority == "ai" and is_human and not override_reason:
+            raise ConflictError(
+                f"override_reason_required: human override of ai decision {step_id}")
+        packet = reviews.ensure_packet(
+            conn, wf, step, created_by=role or "system", commit=False)
+        if approve and not is_human and reviews.packet_has_stale_evidence(packet):
+            raise ConflictError(
+                f"evidence_stale: step {step_id} has stale evidence; escalate instead")
+
+        if authority == "joint" and approve and not is_human:
+            # AI may only recommend approval under joint authority. The run is
+            # finished, the step waits for a human, and the packet stays open.
+            if step["run_id"]:
+                conn.execute(
+                    "UPDATE runs SET status='completed', ended_at=? WHERE id=?",
+                    (now, step["run_id"]))
+                ledger.emit(
+                    conn, "run.status_changed", task_id=wf["task_id"], workflow_id=wid,
+                    execution_no=wf.get("execution_no"), step_id=step_id,
+                    run_id=step["run_id"], actor_type="role", actor=step["role_slug"],
+                    payload={"status": "completed", "prev": "running"},
+                    mirror_activity=True, activity_kind="run",
+                    activity_role=step["role_slug"],
+                )
+            conn.execute(
+                "UPDATE workflow_steps SET status='submitted', submitted_at=?, feedback=?, "
+                "updated_at=? WHERE workflow_id=? AND step_id=?",
+                (now, feedback, now, wid, step_id))
+            _step_activity(conn, wf["task_id"], step["role_slug"], step, "submitted",
+                           "AI 建议通过，等待人工确认")
+            reviews.record_recommendation(
+                conn, wf, step, actor=role or step["role_slug"], decision="approve",
+                feedback=feedback, commit=False)
+            conn.commit()
+            return get_workflow(conn, wid)  # type: ignore[return-value]
 
         if step["run_id"]:
             # 直接 UPDATE，避免 runs.set_status 内部 commit 打断 BEGIN IMMEDIATE。
             run_row = conn.execute(
                 "SELECT status FROM runs WHERE id=?", (step["run_id"],)).fetchone()
-            conn.execute("UPDATE runs SET status='completed', ended_at=? WHERE id=?",
-                         (now, step["run_id"]))
-            ledger.emit(
-                conn, "run.status_changed", task_id=wf["task_id"], workflow_id=wid,
-                execution_no=wf.get("execution_no"), step_id=step_id,
-                run_id=step["run_id"], actor_type="role", actor=step["role_slug"],
-                payload={"status": "completed",
-                         "prev": run_row["status"] if run_row else None},
-                mirror_activity=True, activity_kind="run",
-                activity_role=step["role_slug"],
-            )
+            if run_row is None or run_row["status"] != "completed":
+                conn.execute("UPDATE runs SET status='completed', ended_at=? WHERE id=?",
+                             (now, step["run_id"]))
+                ledger.emit(
+                    conn, "run.status_changed", task_id=wf["task_id"], workflow_id=wid,
+                    execution_no=wf.get("execution_no"), step_id=step_id,
+                    run_id=step["run_id"], actor_type="role", actor=step["role_slug"],
+                    payload={"status": "completed",
+                             "prev": run_row["status"] if run_row else None},
+                    mirror_activity=True, activity_kind="run",
+                    activity_role=step["role_slug"],
+                )
 
         if approve:
             conn.execute(
@@ -1579,6 +1731,14 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
                 (feedback, now, now, wid, step_id))
             _step_activity(conn, wf["task_id"], step["role_slug"], step,
                            "approved", feedback or None)
+            reviews.record_decision(
+                conn, wf, step, actor_type="human" if role == "human" else "role",
+                actor=role or step["role_slug"], decision="approve",
+                feedback=feedback or note, reasons=reasons, packet_id=packet_id,
+                override_reason=override_reason or (
+                    feedback if role == "human" and authority != "human" else None),
+                commit=False,
+            )
             conn.commit()
             _finalize_if_done(conn, wid)
             return get_workflow(conn, wid)  # type: ignore[return-value]
@@ -1605,6 +1765,12 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
                                f"（{max_rework} 次）；请人工介入。反馈：{note}",
                     "event": "rework_exhausted", "workflow_id": wid, "step_id": step_id,
                 }), now))
+            reviews.record_decision(
+                conn, wf, step, actor_type="human" if role == "human" else "role",
+                actor=role or step["role_slug"], decision="escalate",
+                feedback=note, reasons=["rework_exhausted"], packet_id=packet_id,
+                commit=False,
+            )
             conn.commit()
             return get_workflow(conn, wid)  # type: ignore[return-value]
 
@@ -1634,6 +1800,13 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
             (note, count, now, wid, step_id))
         _step_activity(conn, wf["task_id"], step["role_slug"], step, "rework", note,
                        extra={"rework_count": count})
+        reviews.record_decision(
+            conn, wf, step, actor_type="human" if role == "human" else "role",
+            actor=role or step["role_slug"], decision="reject", feedback=note,
+            rework_targets=rework_targets or [str(x) for x in (step.get("on_reject") or [])],
+            reasons=reasons, packet_id=packet_id, override_reason=override_reason,
+            commit=False,
+        )
         conn.commit()
         return get_workflow(conn, wid)  # type: ignore[return-value]
     except BaseException:
@@ -1641,9 +1814,64 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
         raise
 
 
+def escalate_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | None,
+                  reason: str, triggers: list[str] | None = None,
+                  proposed_decision: str | None = None,
+                  proposed_feedback: str | None = None,
+                  run_id: str | None = None) -> dict:
+    """AI decider escalates to a human; the packet stays open for human decision."""
+    now = now_iso()
+    wf = get_workflow(conn, wid)
+    if wf is None:
+        raise LookupError(wid)
+    step = next((s for s in wf["steps"] if s["step_id"] == step_id), None)
+    if step is None:
+        raise LookupError(step_id)
+    _assert_current_run(step, run_id)
+    if step.get("kind") != "decision":
+        raise ConflictError(f"step {step_id} is not a decision step")
+    if role and role != "human" and role != step["role_slug"]:
+        raise PermissionError(f"role {role} cannot escalate step {step_id}")
+    if step["status"] not in ("running", "submitted"):
+        raise ConflictError(f"step {step_id} is {step['status']}, expected running")
+    if not (reason or "").strip():
+        raise ConflictError("escalation reason is required")
+    reviews.ensure_packet(conn, wf, step, created_by=role or "system", commit=False)
+    if step["run_id"]:
+        row = conn.execute("SELECT status FROM runs WHERE id=?", (step["run_id"],)).fetchone()
+        conn.execute("UPDATE runs SET status='completed', ended_at=? WHERE id=?",
+                     (now, step["run_id"]))
+        ledger.emit(
+            conn, "run.status_changed", task_id=wf["task_id"], workflow_id=wid,
+            execution_no=wf.get("execution_no"), step_id=step_id,
+            run_id=step["run_id"], actor_type="role", actor=step["role_slug"],
+            payload={"status": "completed", "prev": row["status"] if row else None},
+            mirror_activity=True, activity_kind="run", activity_role=step["role_slug"],
+        )
+    conn.execute(
+        "UPDATE workflow_steps SET status='submitted', submitted_at=?, feedback=?, "
+        "updated_at=? WHERE workflow_id=? AND step_id=?",
+        (now, reason, now, wid, step_id))
+    _step_activity(conn, wf["task_id"], role or step["role_slug"], step,
+                   "escalated", reason, extra={"triggers": triggers or []})
+    reviews.record_escalation(
+        conn, wf, step, actor=role or step["role_slug"], reason=reason,
+        triggers=triggers, proposed_decision=proposed_decision,
+        proposed_feedback=proposed_feedback, commit=False)
+    conn.commit()
+    return get_workflow(conn, wid)  # type: ignore[return-value]
+
+
 def review_step(conn: sqlite3.Connection, wid: str, step_id: str, approve: bool,
-                feedback: str | None = None) -> dict:
-    """人工审核 gate 步骤：通过则解锁下游；驳回则回到 pending 等待角色重做。"""
+                feedback: str | None = None,
+                reasons: list[str] | None = None,
+                rework_targets: list[str] | None = None,
+                packet_id: str | None = None,
+                override_reason: str | None = None) -> dict:
+    """人工审核 gate 步骤：通过则解锁下游；驳回则回到 pending 等待角色重做。
+
+    驳回时可指定返工范围（当前步骤或任意上游祖先）；默认只重做当前步骤。
+    """
     wf = get_workflow(conn, wid)
     if wf is None:
         raise LookupError(wid)
@@ -1654,6 +1882,23 @@ def review_step(conn: sqlite3.Connection, wid: str, step_id: str, approve: bool,
         raise ConflictError("decision steps are decided by their role, not a human gate")
     if step["status"] != "submitted":
         raise ConflictError(f"step {step_id} is {step['status']}, expected submitted")
+    targets = sorted({step_id, *[str(x) for x in (rework_targets or [])]})
+    by_id = {s["step_id"]: s for s in wf["steps"]}
+    if not approve:
+        ancestors: set[str] = set()
+        stack = [str(x) for x in step.get("depends_on") or []]
+        while stack:
+            cur = stack.pop()
+            if cur in ancestors:
+                continue
+            ancestors.add(cur)
+            stack.extend(str(x) for x in (by_id.get(cur, {}).get("depends_on") or []))
+        allowed = ancestors | {step_id}
+        for target in targets:
+            if target not in allowed:
+                raise ConflictError(
+                    f"rework target {target} is not an ancestor of step {step_id}")
+    packet = reviews.ensure_packet(conn, wf, step, created_by="human")
     now = now_iso()
     if approve:
         conn.execute(
@@ -1663,19 +1908,32 @@ def review_step(conn: sqlite3.Connection, wid: str, step_id: str, approve: bool,
         _step_activity(conn, wf["task_id"], "human", step, "approved",
                        feedback or step.get("summary"))
     else:
-        conn.execute(
-            "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, "
-            "summary=NULL, feedback=COALESCE(?, feedback), updated_at=? "
-            "WHERE workflow_id=? AND step_id=?",
-            (feedback, now, wid, step_id))
+        for target in targets:
+            conn.execute(
+                "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, "
+                "ended_at=NULL, summary=NULL, recovery_count=0, next_retry_at=NULL, "
+                "feedback=COALESCE(?, feedback), updated_at=? "
+                "WHERE workflow_id=? AND step_id=?",
+                (feedback, now, wid, target))
+            target_step = by_id.get(target) or {}
+            if target != step_id and target_step.get("role_slug"):
+                _mention(
+                    conn, wf["task_id"], target_step["role_slug"],
+                    f"评审驳回，需重做步骤「{target_step.get('title', target)}」："
+                    f"{feedback or '请按评审意见修改后重新提交'}。")
         _step_activity(conn, wf["task_id"], "human", step, "rejected",
                        feedback or "请按评审意见修改后重新提交")
-        from . import roles as roles_service
         _mention(
             conn, wf["task_id"], step["role_slug"],
-            f"步骤「{step['title']}」被驳回：{feedback or '请按评审意见修改后重新提交'}。",
-            sender=roles_service.notification_sender(
-                conn, wf["task_id"], wf.get("created_by")))
+            f"步骤「{step['title']}」被驳回：{feedback or '请按评审意见修改后重新提交'}。")
+    reviews.record_decision(
+        conn, wf, step, actor_type="human", actor="human",
+        decision="approve" if approve else "reject",
+        feedback=feedback, reasons=reasons,
+        rework_targets=[] if approve else targets,
+        packet_id=packet.get("id") if packet else packet_id,
+        override_reason=override_reason,
+    )
     conn.commit()
     return get_workflow(conn, wid)  # type: ignore[return-value]
 

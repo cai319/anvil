@@ -217,8 +217,27 @@ export const api = {
     authFetch(`${BASE}/tasks/${taskId}/workflow`).then((r) => json<Workflow>(r)),
   listTaskWorkflows: (taskId: string): Promise<WorkflowHistoryItem[]> =>
     authFetch(`${BASE}/tasks/${taskId}/workflows`).then((r) => json<WorkflowHistoryItem[]>(r)),
-  reviewWorkflowStep: (wid: string, sid: string, approve: boolean, feedback?: string): Promise<Workflow> =>
-    req("POST", `/workflows/${wid}/steps/${sid}/review`, { approve, feedback }).then((r) => json<Workflow>(r)),
+  reviewWorkflowStep: (wid: string, sid: string, approve: boolean, feedback?: string,
+    opts?: { rework_targets?: string[]; reasons?: string[]; packet_id?: string; override_reason?: string }): Promise<Workflow> =>
+    req("POST", `/workflows/${wid}/steps/${sid}/review`, {
+      approve, feedback, ...opts,
+    }).then((r) => json<Workflow>(r)),
+  decideWorkflowStep: (wid: string, sid: string, body: {
+    approve: boolean; feedback?: string; packet_id?: string;
+    rework_targets?: string[]; reasons?: string[]; override_reason?: string;
+    acknowledge_stale?: boolean;
+  }): Promise<Workflow> =>
+    req("POST", `/workflows/${wid}/steps/${sid}/decide`, body).then((r) => json<Workflow>(r)),
+  escalateWorkflowStep: (wid: string, sid: string, body: {
+    reason: string; triggers?: string[]; proposed_decision?: string; proposed_feedback?: string;
+  }): Promise<Workflow> =>
+    req("POST", `/workflows/${wid}/steps/${sid}/escalate`, body).then((r) => json<Workflow>(r)),
+  getStepPacket: (wid: string, sid: string): Promise<StepPacketResponse> =>
+    authFetch(`${BASE}/workflows/${wid}/steps/${sid}/packet`)
+      .then((r) => json<StepPacketResponse>(r)),
+  refreshStepPacket: (wid: string, sid: string): Promise<{ packet: ReviewPacket; decisions: DecisionRecord[] }> =>
+    req("POST", `/workflows/${wid}/steps/${sid}/packet/refresh`, {})
+      .then((r) => json<{ packet: ReviewPacket; decisions: DecisionRecord[] }>(r)),
   retryWorkflowStep: (wid: string, sid: string): Promise<Workflow> =>
     req("POST", `/workflows/${wid}/steps/${sid}/retry`, {}).then((r) => json<Workflow>(r)),
   planTask: (id: string): Promise<Run> =>
@@ -641,16 +660,113 @@ export interface InboxDraftMeta {
   running_workflow?: boolean;
   running_workflow_id?: string | null;
   running_execution_no?: number | null;
+  // gate / decision review metadata
+  workflow_id?: string;
+  step_id?: string;
+  packet_id?: string | null;
+  authority?: DecisionAuthority;
+  question?: string;
+  evidence_count?: number;
+  waiting_seconds?: number;
+  deadline_at?: string | null;
+  recommendation?: PacketRecommendation;
+  task_title?: string;
 }
 
 export interface InboxItem {
   id: string;
-  kind: "review" | "mention" | "draft" | "lesson" | "proposal" | "gate" | "action";
+  kind: "review" | "mention" | "draft" | "lesson" | "proposal" | "gate" | "decision" | "action";
   title: string;
   detail: string;
   task_id: string | null;
   created_at: string;
   meta?: InboxDraftMeta;
+}
+
+export type DecisionAuthority = "ai" | "human" | "joint";
+
+export interface ReviewEvidence {
+  id: string;
+  kind: string;
+  ref: string;
+  label: string;
+  digest?: string | null;
+  captured_at?: string | null;
+  fresh: boolean;
+}
+
+export interface ReviewAcceptance {
+  criterion: string;
+  status: string;
+  evidence_refs: string[];
+}
+
+export interface ReviewUpstream {
+  step_id: string;
+  title?: string | null;
+  summary?: string | null;
+  decision?: string | null;
+}
+
+export interface PacketRecommendation {
+  decision?: string;
+  actor?: string;
+  feedback?: string | null;
+  confidence?: number | null;
+  triggers?: string[];
+  escalated?: boolean;
+  at?: string;
+}
+
+export interface ReviewPacket {
+  id: string;
+  task_id: string;
+  workflow_id: string;
+  execution_no: number;
+  step_id: string;
+  kind: "gate" | "decision";
+  revision: number;
+  status: "pending_human" | "pending_ai" | "decided" | "superseded";
+  authority: DecisionAuthority;
+  question: string;
+  options: { id?: string; label?: string; decision: string; requires_note?: boolean }[];
+  acceptance: ReviewAcceptance[];
+  evidence: ReviewEvidence[];
+  upstream: ReviewUpstream[];
+  risks: string[];
+  recommendation: PacketRecommendation;
+  evidence_digest?: string | null;
+  sla_seconds?: number | null;
+  deadline_at?: string | null;
+  created_at: string;
+}
+
+export interface DecisionRecord {
+  id: string;
+  packet_id: string;
+  step_id: string;
+  authority: DecisionAuthority;
+  decider_type: string;
+  decider: string;
+  decision: string;
+  feedback?: string | null;
+  reasons: string[];
+  rework_targets: string[];
+  override_reason?: string | null;
+  latency_seconds?: number | null;
+  created_at: string;
+}
+
+export interface StepPacketResponse {
+  step: WorkflowStep | null;
+  packet: ReviewPacket | null;
+  decisions: DecisionRecord[];
+  can_decide: {
+    human: boolean;
+    role: boolean;
+    authority: DecisionAuthority;
+    stale_evidence: boolean;
+  };
 }
 
 export interface WorkflowStep {
@@ -672,6 +788,17 @@ export interface WorkflowStep {
   source_step_id?: string | null;
   slice_key?: string | null;
   plan_json?: string | null;
+  decision_authority?: DecisionAuthority | "";
+  risk_level?: "normal" | "high" | "critical";
+  reversible?: boolean;
+  escalate?: string[];
+  decision_question?: string | null;
+  decision_options?: { id?: string; label?: string; decision: string; requires_note?: boolean }[];
+  evidence_required?: boolean;
+  evidence?: ReviewEvidence[];
+  packet_id?: string | null;
+  submitted_at?: string | null;
+  scope_paths?: string[];
   failure_reason: string | null;
   status: "pending" | "running" | "submitted" | "approved" | "rejected" | "failed" | "skipped";
   run_id: string | null;
