@@ -11,7 +11,7 @@ import {
 import { PageHeader } from "../components/ui";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
-import { formatClock, formatDateTime } from "../time";
+import { formatClock, formatDateTime, formatDuration, secondsBetween } from "../time";
 import { STATUS_META } from "../workflowGroups";
 
 /** A read-only replay of a task's complete activity stream and workflow state. */
@@ -384,11 +384,33 @@ export function TaskReplay({ id }: { id: string }) {
             <div className="replay-side-block replay-metrics">
               <span className="page-kicker">FINAL METRICS</span>
               <div><span>步骤</span><strong>{metrics.steps.done}/{metrics.steps.total}</strong></div>
-              <div><span>审核门</span><strong>{metrics.gates.total}</strong></div>
-              <div><span>决策</span><strong>{metrics.decisions.total}</strong></div>
-              <div><span>人工干预</span><strong>{metrics.decisions.human}</strong></div>
+              <div><span>总耗时</span>
+                <strong>{formatDuration(secondsBetween(task.created_at, task.updated_at))}</strong>
+              </div>
+              <div title="workflow gate 步骤数；任务最终评审不计入审核门">
+                <span>审核门</span><strong>{metrics.gates.total}</strong>
+              </div>
+              <div title={metrics.decisions.legacy
+                ? "历史执行没有不可变决策记录，决策数按决策步骤状态与返工次数推算"
+                : "不可变决策记录数"}>
+                <span>决策</span><strong>{metrics.decisions.total}</strong>
+              </div>
+              <div title="workflow 人工决策 + 任务最终人工评审">
+                <span>人工干预</span>
+                <strong>{metrics.decisions.human_interventions ?? metrics.decisions.human}</strong>
+              </div>
               <div><span>返工</span><strong>{metrics.decisions.rejected}</strong></div>
               <div><span>Token</span><strong>{(metrics.tokens.input_tokens ?? 0) + (metrics.tokens.output_tokens ?? 0)}</strong></div>
+              {metrics.gates.total === 0 && (
+                <p className="replay-metric-note">
+                  本执行没有 workflow 审核门；最终人工验收单独计入人工干预。
+                </p>
+              )}
+              {(metrics.decisions.legacy ?? 0) > 0 && (
+                <p className="replay-metric-note">
+                  历史执行无不可变决策记录，决策数由决策步骤状态推算。
+                </p>
+              )}
             </div>
           )}
         </aside>

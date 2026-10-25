@@ -85,15 +85,40 @@ def compute(conn: sqlite3.Connection, wid: str) -> dict:
         counts[s["status"]] = counts.get(s["status"], 0) + 1
     done = counts.get("approved", 0) + counts.get("skipped", 0)
     now = datetime.now(timezone.utc).isoformat()
-    end = wf.get("finished_at") or wf.get("terminated_at") or (
-        now if wf["status"] == "running" else wf.get("updated_at"))
+    finished_at = (wf.get("finished_at") or wf.get("terminated_at")
+                   or (wf.get("updated_at") if wf["status"] != "running" else None))
+    end = finished_at or (now if wf["status"] == "running" else wf.get("updated_at"))
 
     decisions = conn.execute(
-        "SELECT decider_type, decision, latency_seconds FROM decisions "
-        "WHERE workflow_id=? ORDER BY id", (wid,)).fetchall()
+        "SELECT step_id, decider_type, decision, latency_seconds FROM decisions "
+        "WHERE workflow_id=? ORDER BY created_at, rowid", (wid,)).fetchall()
     human_decisions = [d for d in decisions if d["decider_type"] == "human"]
     rejects = [d for d in decisions if d["decision"] == "reject"]
     human_wait = sum(float(d["latency_seconds"] or 0) for d in human_decisions)
+    human_reviews = conn.execute(
+        "SELECT COUNT(*) AS n FROM events WHERE task_id=? AND event_type='audit.review'",
+        (wf["task_id"],)).fetchone()["n"]
+    if human_reviews == 0:
+        human_reviews = conn.execute(
+            "SELECT COUNT(*) AS n FROM activities WHERE task_id=? AND kind='review'",
+            (wf["task_id"],)).fetchone()["n"]
+
+    # Legacy executions predate immutable decision rows. Count the terminal
+    # outcome of decision steps so replay metrics don't show a misleading zero.
+    recorded_steps = {d["step_id"] for d in decisions}
+    legacy_decisions: list[str] = []
+    for step in steps:
+        if step["kind"] != "decision" or step["step_id"] in recorded_steps:
+            continue
+        reworks = int(step.get("rework_count") or 0)
+        if step["status"] == "approved":
+            legacy_decisions.extend(["reject"] * reworks)
+            legacy_decisions.append("approve")
+        elif step["status"] in ("failed", "rejected"):
+            legacy_decisions.extend(["reject"] * max(1, reworks))
+    legacy_rejects = len([d for d in legacy_decisions if d == "reject"])
+    total_decisions = len(decisions) + len(legacy_decisions)
+    total_rejects = len(rejects) + legacy_rejects
 
     packets = conn.execute(
         "SELECT status, created_at FROM gate_packets WHERE workflow_id=?",
@@ -113,7 +138,7 @@ def compute(conn: sqlite3.Connection, wid: str) -> dict:
         "weight": wf.get("weight") or "standard",
         "weight_source": wf.get("weight_source") or "default",
         "created_at": wf.get("created_at"),
-        "finished_at": wf.get("finished_at") or wf.get("terminated_at"),
+        "finished_at": finished_at,
         "duration_seconds": _seconds(wf.get("created_at"), end),
         "steps": {
             "total": len(steps),
@@ -132,11 +157,16 @@ def compute(conn: sqlite3.Connection, wid: str) -> dict:
                             if s["gate"] and s["status"] == "submitted"]),
         },
         "decisions": {
-            "total": len(decisions),
+            "total": total_decisions,
+            "recorded": len(decisions),
+            "legacy": len(legacy_decisions),
             "human": len(human_decisions),
-            "rejected": len(rejects),
+            "human_reviews": human_reviews,
+            "human_interventions": len(human_decisions) + human_reviews,
+            "rejected": total_rejects,
             "pending_human": len([p for p in packets if p["status"] == "pending_human"]),
-            "rework_rate": round(len(rejects) / len(decisions), 3) if decisions else 0.0,
+            "rework_rate": round(total_rejects / total_decisions, 3)
+            if total_decisions else 0.0,
         },
         "waiting": {
             "human_seconds": round(human_wait, 1),

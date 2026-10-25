@@ -28,6 +28,26 @@ export function formatDateTime(iso?: string | null): string {
     : "";
 }
 
+/** 时长（秒）格式化为中文可读文本。 */
+export function formatDuration(seconds?: number | null): string {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  if (total < 60) return `${total} 秒`;
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) return `${minutes} 分 ${total % 60} 秒`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时 ${minutes % 60} 分`;
+  const days = Math.floor(hours / 24);
+  return `${days} 天 ${hours % 24} 小时`;
+}
+
+/** 两个 ISO 时间之间的秒数（缺失或非法时为 0）。 */
+export function secondsBetween(start?: string | null, end?: string | null): number {
+  const a = parseTime(start);
+  const b = parseTime(end);
+  if (!a || !b) return 0;
+  return Math.max(0, (b.getTime() - a.getTime()) / 1000);
+}
+
 /** 本地时间：MM-DD HH:mm。 */
 export function formatShort(iso?: string | null): string {
   const d = parseTime(iso);

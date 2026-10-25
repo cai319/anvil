@@ -1,9 +1,12 @@
 """Workflow metrics, planned/actual graphs and execution dossiers."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from anvil.db import connect
 from anvil.services import dossier as dossier_service
 from anvil.services import metrics
+from anvil.services import tasks as tasks_service
 from anvil.services import workflow as wf_service
 from anvil.util import now_iso
 
@@ -88,6 +91,38 @@ def test_planned_actual_diff_includes_generated_slices(tmp_path):
         "SELECT evidence_required FROM workflow_steps WHERE workflow_id=? "
         "AND step_id=? ", (wf["id"], generated[0]["step_id"])).fetchone()
     assert row["evidence_required"] == 1
+
+
+def test_legacy_decision_step_and_human_review_are_counted(tmp_path):
+    conn = _conn(tmp_path)
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "实现", "role": "dev"},
+        {"id": "D1", "title": "放行决策", "role": "pm", "kind": "decision",
+         "depends_on": ["S1"], "on_reject": ["S1"]},
+    ]})
+    now = now_iso()
+    later = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved', feedback='APPROVE：通过', "
+        "ended_at=? WHERE workflow_id=? AND step_id IN ('S1','D1')", (now, wf["id"]))
+    conn.execute(
+        "UPDATE workflows SET status='done', finished_at=?, updated_at=? WHERE id=?",
+        (later, later, wf["id"]))
+    conn.commit()
+    tasks_service.comment(conn, "T1", "human", "最终验收通过")
+    # Simulate the task-level final review activity (no workflow decision row).
+    conn.execute(
+        "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
+        "VALUES ('T1','human','review','{\"approve\": true}',?)", (now,))
+    conn.commit()
+    m = metrics.compute(conn, wf["id"])
+    assert m["decisions"]["recorded"] == 0
+    assert m["decisions"]["total"] == 1
+    assert m["decisions"]["legacy"] == 1
+    assert m["decisions"]["human"] == 0
+    assert m["decisions"]["human_reviews"] == 1
+    assert m["decisions"]["human_interventions"] == 1
+    assert m["duration_seconds"] > 0
 
 
 def test_light_weight_skips_fix_and_verify2(tmp_path):

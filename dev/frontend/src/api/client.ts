@@ -893,7 +893,11 @@ export interface WorkflowMetrics {
   gates: { total: number; pending: number };
   decisions: {
     total: number;
+    recorded?: number;
+    legacy?: number;
     human: number;
+    human_reviews?: number;
+    human_interventions?: number;
     rejected: number;
     pending_human: number;
     rework_rate: number;

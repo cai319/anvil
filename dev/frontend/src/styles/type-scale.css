@@ -2645,3 +2645,9 @@ details.replay-event-body > div { margin-top: 4px; }
 }
 .replay-side-block .muted { color: var(--text-on-paper-muted); }
 .replay-side-block .muted.mono { color: var(--text-on-paper-muted); }
+.replay-metric-note {
+  margin: 5px 0 0;
+  font-size: var(--fs-hint);
+  line-height: 1.35;
+  color: var(--text-on-paper-muted);
+}

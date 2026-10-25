@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, type WorkflowDossier } from "../api/client";
 import { PageHeader } from "../components/ui";
 import { Icon } from "../components/Icon";
-import { formatDateTime } from "../time";
+import { formatDateTime, formatDuration } from "../time";
 
 /**
  * Execution dossier: a read-only, exportable snapshot of one workflow
@@ -94,10 +94,13 @@ export function ExecutionDossier({ id }: { id: string }) {
 
       <div className="dossier-metrics">
         <div><span>步骤</span><strong>{m.steps.done}/{m.steps.total}</strong></div>
+        <div><span>总耗时</span><strong>{formatDuration(m.duration_seconds)}</strong></div>
         <div><span>最大深度</span><strong>{m.steps.max_depth}</strong></div>
         <div><span>审核门</span><strong>{m.gates.total}</strong></div>
         <div><span>决策</span><strong>{m.decisions.total}</strong></div>
-        <div><span>人工干预</span><strong>{m.decisions.human}</strong></div>
+        <div><span>人工干预</span>
+          <strong>{m.decisions.human_interventions ?? m.decisions.human}</strong>
+        </div>
         <div><span>打回</span><strong>{m.decisions.rejected}</strong></div>
         <div><span>人工等待</span>
           <strong>{Math.round((m.waiting.human_seconds + m.waiting.pending_human_seconds) / 60)} 分</strong>

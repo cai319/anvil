@@ -4,7 +4,7 @@ import { RoleSessions } from "./RoleSessions";
 import { ApplyTemplateModal } from "./ApplyTemplateModal";
 import { WorkflowGraph } from "./WorkflowGraph";
 import { roleStatusFromWorkflow } from "../workflowStatus";
-import { formatClock, formatDateTime } from "../time";
+import { formatClock, formatDateTime, formatDuration } from "../time";
 import { roleLiveDot, roleLiveState, stateClassForDot } from "../roleLive";
 import { useRoleRuntimes } from "../useRoleRuntimes";
 import { usePanelLayout } from "../usePanelLayout";
@@ -201,6 +201,7 @@ function WorkflowSummary({ workflow, taskStatus, metrics, diff }: {
       {metrics && (
         <div className="wf-metrics">
           <span title="最大依赖深度">深度 {metrics.steps.max_depth}</span>
+          <span title="执行总耗时">耗时 {formatDuration(metrics.duration_seconds)}</span>
           <span title="人工审核门">审核门 {metrics.gates.total}（待 {metrics.gates.pending}）</span>
           <span title="决策与返工">决策 {metrics.decisions.total} · 打回 {metrics.decisions.rejected}</span>
           <span title="人工等待时间">
