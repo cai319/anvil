@@ -90,10 +90,11 @@ function computeLayers(nodes: VisualNode[]): Map<string, number> {
   return layers;
 }
 
-export function WorkflowGraph({ workflow, roles, busy, onOpenReview, onRetry }: {
+export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenReview, onRetry }: {
   workflow: Workflow;
   roles: Role[];
   busy: boolean;
+  readOnly?: boolean;
   onOpenReview: (step: WorkflowStep) => void;
   onRetry: (step: WorkflowStep) => void;
 }) {
@@ -438,7 +439,7 @@ export function WorkflowGraph({ workflow, roles, busy, onOpenReview, onRetry }: 
               {" "}· {roleName(activeGroup.current.role_slug)}
             </div>
           ) : null}
-          {activeStep
+          {!readOnly && activeStep
             && (activeStep.status === "failed" || activeStep.status === "rejected") && (
             <button className="small" disabled={busy}
               onClick={() => onRetry(activeStep)}>重试当前步骤</button>
@@ -543,7 +544,7 @@ export function WorkflowGraph({ workflow, roles, busy, onOpenReview, onRetry }: 
           {selectedStep.summary && <div className="muted">提交摘要：{selectedStep.summary}</div>}
           <div className="wf-actions">
             {selectedStep.run_id && <a href={`/runs/${selectedStep.run_id}`}>查看会话</a>}
-            {(selectedStep.gate && selectedStep.status === "submitted"
+            {!readOnly && (selectedStep.gate && selectedStep.status === "submitted"
               || selectedStep.kind === "decision"
               && (selectedStep.status === "submitted" || selectedStep.status === "running")) && (
               <button className="small primary" disabled={busy}
@@ -551,7 +552,7 @@ export function WorkflowGraph({ workflow, roles, busy, onOpenReview, onRetry }: 
                 {selectedStep.kind === "decision" ? "查看决策材料" : "审查证据"}
               </button>
             )}
-            {(selectedStep.status === "failed" || selectedStep.status === "rejected") && (
+            {!readOnly && (selectedStep.status === "failed" || selectedStep.status === "rejected") && (
               <button className="small" disabled={busy} onClick={() => onRetry(selectedStep)}>重试</button>
             )}
           </div>

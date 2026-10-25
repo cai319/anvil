@@ -1,12 +1,15 @@
 """Workflow 端点：任务工作流查询、角色步骤提交、人工 gate 审核/重试。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..services.tasks import ConflictError
+from ..services import dossier as dossier_service
+from ..services import metrics as metrics_service
 from ..services import reviews as review_service
+from ..services import weights as weight_service
 from . import events
 
 router = APIRouter()
@@ -32,6 +35,109 @@ def get_workflow(wid: str, conn=Depends(get_db)):
     if wf is None:
         raise HTTPException(status_code=404, detail="workflow not found")
     return wf
+
+
+@router.get("/workflows/{wid}/metrics")
+def get_metrics(wid: str, conn=Depends(get_db)):
+    try:
+        return metrics_service.compute(conn, wid)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="workflow not found")
+
+
+@router.get("/workflows/{wid}/graph")
+def get_graph(wid: str, mode: str = "actual", conn=Depends(get_db)):
+    try:
+        if mode == "planned":
+            return metrics_service.planned_graph(conn, wid)
+        if mode == "diff":
+            return metrics_service.graph_diff(conn, wid)
+        return metrics_service.actual_graph(conn, wid)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="workflow not found")
+
+
+@router.get("/workflows/{wid}/dossier")
+def get_dossier(wid: str, format: str = "json", conn=Depends(get_db)):
+    payload = dossier_service.get(conn, wid)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="workflow not found")
+    if format == "md":
+        body = dossier_service.render_md(payload)
+        return Response(
+            content=body, media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition":
+                     f'attachment; filename="dossier-{wid[:8]}.md"'})
+    return payload
+
+
+@router.post("/workflows/{wid}/dossier/rebuild")
+def rebuild_dossier(wid: str, conn=Depends(get_db),
+                    auth: Auth = Depends(require_human)):
+    payload = dossier_service.persist(conn, wid)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="workflow not found")
+    return payload
+
+
+@router.get("/tasks/{tid}/dossier")
+def get_task_dossier(tid: str, workflow_id: str | None = None,
+                     format: str = "json", conn=Depends(get_db)):
+    wid = workflow_id
+    if wid is None:
+        row = conn.execute(
+            "SELECT id FROM workflows WHERE task_id=? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1", (tid,)).fetchone()
+        wid = row["id"] if row else None
+    if wid is None:
+        raise HTTPException(status_code=404, detail="task has no workflow")
+    return get_dossier(wid, format=format, conn=conn)
+
+
+@router.post("/tasks/{tid}/workflow/restart")
+def restart_workflow(tid: str, body: dict, conn=Depends(get_db),
+                     auth: Auth = Depends(require_human)):
+    """Terminate the current execution and start a new one with the same definition."""
+    row = conn.execute(
+        "SELECT id FROM workflows WHERE task_id=? AND status='running' "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1", (tid,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="task has no running workflow")
+    wf = services.workflow.get_workflow(conn, row["id"])
+    definition = (wf or {}).get("definition") or {}
+    if not definition:
+        raise HTTPException(status_code=409, detail="workflow has no definition")
+    try:
+        new_wf = services.workflow.create_workflow(
+            conn, tid, definition, created_by="human",
+            enforce_role_coverage=False, restart_running=True,
+            restart_reason=body.get("reason") or "人工调整流程强度后重新执行",
+            restart_note=body.get("note"))
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    events.publish("task", {"id": tid, "kind": "workflow_restarted"})
+    return new_wf
+
+
+@router.post("/tasks/{tid}/workflow-weight")
+def set_workflow_weight(tid: str, body: dict, conn=Depends(get_db),
+                        auth: Auth = Depends(require_human)):
+    try:
+        return weight_service.set_task_weight(
+            conn, tid, body.get("weight"), body.get("reason"))
+    except LookupError:
+        raise HTTPException(status_code=404, detail="task not found")
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.delete("/tasks/{tid}/workflow-weight")
+def clear_workflow_weight(tid: str, conn=Depends(get_db),
+                          auth: Auth = Depends(require_human)):
+    try:
+        return weight_service.set_task_weight(conn, tid, None)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="task not found")
 
 
 def _assert_workflow_task(conn, wid: str, auth: Auth) -> dict:

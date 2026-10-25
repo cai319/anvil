@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
-from . import ledger, reviews
+from . import dossier, ledger, reviews, weights
 
 RUN_ACTIVE = ("created", "projecting", "running")
 STEP_DONE = ("approved", "skipped")
@@ -539,7 +539,8 @@ def _join_instructions(spec: dict, context: str, extra: str = "") -> str:
 
 
 def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict,
-                         slices: list[dict], existing_ids: set[str]) -> list[dict]:
+                         slices: list[dict], existing_ids: set[str],
+                         weight: str = "standard") -> list[dict]:
     """按 loop 模板把运行期切片展开成每片小闭环。
 
     生成 ID：<plan_step>.<slice_id>.<phase>，便于决策步骤按切片前缀汇总。
@@ -564,6 +565,8 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
             raise ConflictError("generated workflow step missing id")
         if sid in seen:
             raise ConflictError(f"duplicate workflow step id: {sid}")
+        if weight == "strict" and str(step.get("kind") or "task") == "task":
+            step.setdefault("evidence_required", True)
         seen.add(sid)
         steps.append(step)
         return sid
@@ -858,7 +861,8 @@ def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
             raise ConflictError("workflow has no loop template")
 
         generated = _dynamic_slice_steps(
-            conn, step_id, loop, slices, {s["step_id"] for s in wf["steps"]})
+            conn, step_id, loop, slices, {s["step_id"] for s in wf["steps"]},
+            weight=str(wf.get("weight") or "standard"))
         _validate_generated_deps(generated, {s["step_id"] for s in wf["steps"]})
         last_decide = None
         for raw_step in generated:
@@ -866,7 +870,8 @@ def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
                 "INSERT INTO workflow_steps (workflow_id, step_id, title, role_slug, "
                 "instructions, depends_on_json, acceptance_json, gate, reviewer, contract, "
                 "kind, on_reject_json, max_rework, rework_count, source_step_id, slice_key, "
-                "status, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "evidence_required, status, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (wid, raw_step["id"], raw_step.get("title") or raw_step["id"],
                  raw_step.get("role") or "", raw_step.get("instructions") or "",
                  jdumps(raw_step.get("depends_on") or []),
@@ -877,6 +882,7 @@ def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
                  jdumps(raw_step.get("on_reject") or []),
                  int(raw_step.get("max_rework") or 0), 0,
                  raw_step.get("source_step_id"), raw_step.get("slice_key"),
+                 1 if raw_step.get("evidence_required") else 0,
                  "pending", now),
             )
             if str(raw_step.get("kind") or "task") == "decision":
@@ -1048,8 +1054,8 @@ def _terminate_running_workflow(conn: sqlite3.Connection, wid: str, reason: str,
         "SELECT task_id, execution_no FROM workflows WHERE id=?", (wid,)).fetchone()
     conn.execute(
         "UPDATE workflows SET status='terminated', termination_reason=?, terminated_at=?, "
-        "updated_at=? WHERE id=?",
-        (reason, now, now, wid),
+        "finished_at=?, updated_at=? WHERE id=?",
+        (reason, now, now, now, wid),
     )
     if wf:
         ledger.emit(
@@ -1057,6 +1063,7 @@ def _terminate_running_workflow(conn: sqlite3.Connection, wid: str, reason: str,
             execution_no=wf["execution_no"], actor_type="human",
             payload={"reason": reason},
         )
+        dossier.persist(conn, wid, commit=False)
 
 
 def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
@@ -1089,6 +1096,8 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
     seed_block = definition.get("template_seed") if isinstance(definition.get("template_seed"), dict) else {}
     template_id = template_block.get("id") or seed_block.get("template_id")
     template_version = template_block.get("version") or seed_block.get("version")
+    weight, weight_source, weight_reason = weights.resolve(conn, task_id, definition)
+    wf_hash = weights.definition_hash(definition)
 
     wid = new_id()
     now = now_iso()
@@ -1119,10 +1128,12 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
     conn.execute(
         "INSERT INTO workflows (id, task_id, definition_json, status, created_by, "
         "created_at, approved_at, updated_at, template_id, template_version, "
-        "previous_workflow_id, execution_no) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "previous_workflow_id, execution_no, weight, weight_source, weight_reason, "
+        "definition_hash) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (wid, task_id, jdumps(definition), "running", created_by, now, now, now,
-         template_id, template_version, previous_workflow_id, execution_no),
+         template_id, template_version, previous_workflow_id, execution_no,
+         weight, weight_source, weight_reason, wf_hash),
     )
     ledger.emit(
         conn, "execution.started", task_id=task_id, workflow_id=wid,
@@ -1130,7 +1141,9 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
         actor_type="human" if str(created_by).startswith("human") else "role",
         actor=created_by,
         payload={"previous_workflow_id": previous_workflow_id,
-                 "template_id": template_id, "template_version": template_version},
+                 "template_id": template_id, "template_version": template_version,
+                 "weight": weight, "weight_source": weight_source,
+                 "definition_hash": wf_hash},
     )
     for sid, role, kind, reviewer, gate, on_reject, max_rework, meta in plan:
         s = raw[sid]
@@ -1148,7 +1161,8 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
              kind, jdumps(on_reject), max_rework, 0,
              meta["decision_authority"], meta["risk_level"], meta["reversible"],
              jdumps(meta["escalate"]), meta["decision_question"],
-             jdumps(meta["decision_options"]), meta["evidence_required"],
+             jdumps(meta["decision_options"]),
+             1 if (meta["evidence_required"] or (weight == "strict" and kind == "task")) else 0,
              jdumps(meta["scope_paths"]), "pending", now),
         )
     conn.execute(
@@ -1206,6 +1220,8 @@ def list_for_task(conn: sqlite3.Connection, task_id: str) -> list[dict]:
         """SELECT w.id, w.task_id, w.status, w.created_by, w.created_at, w.updated_at,
                   w.termination_reason, w.terminated_at, w.previous_workflow_id,
                   w.execution_no, w.template_id, w.template_version,
+                  w.weight, w.weight_source, w.weight_reason, w.definition_hash,
+                  w.finished_at,
                   COUNT(s.step_id) AS step_count,
                   SUM(CASE WHEN s.status='approved' THEN 1 ELSE 0 END) AS approved_count
              FROM workflows w
@@ -1215,7 +1231,14 @@ def list_for_task(conn: sqlite3.Connection, task_id: str) -> list[dict]:
             ORDER BY w.execution_no DESC, w.created_at DESC""",
         (task_id,),
     ).fetchall()
-    return [dict(r) for r in rows]
+    from . import metrics as metrics_service
+
+    out = []
+    for row in rows:
+        item = dict(row)
+        item["metrics"] = metrics_service.compute(conn, item["id"])
+        out.append(item)
+    return out
 
 
 def _steps(conn: sqlite3.Connection, wid: str) -> list[dict]:
@@ -1231,6 +1254,7 @@ def _steps(conn: sqlite3.Connection, wid: str) -> list[dict]:
         d["max_rework"] = int(d.get("max_rework") or 0)
         d["rework_count"] = int(d.get("rework_count") or 0)
         d["reversible"] = bool(d.get("reversible", 1))
+        d["evidence_required"] = bool(d.get("evidence_required"))
         d["evidence"] = jloads(d.get("evidence_json") or "[]", [])
         d["decision_options"] = jloads(d.get("decision_options_json") or "[]", [])
         d["escalate"] = jloads(d.get("escalate_json") or "[]", [])
@@ -1935,6 +1959,7 @@ def review_step(conn: sqlite3.Connection, wid: str, step_id: str, approve: bool,
         override_reason=override_reason,
     )
     conn.commit()
+    _finalize_if_done(conn, wid)
     return get_workflow(conn, wid)  # type: ignore[return-value]
 
 
@@ -2048,7 +2073,9 @@ def _finalize_if_done(conn: sqlite3.Connection, wid: str) -> None:
     if not all(s["status"] in STEP_DONE for s in wf["steps"]):
         return
     now = now_iso()
-    conn.execute("UPDATE workflows SET status='done', updated_at=? WHERE id=?", (now, wid))
+    conn.execute(
+        "UPDATE workflows SET status='done', finished_at=?, updated_at=? WHERE id=?",
+        (now, now, wid))
     conn.execute(
         "UPDATE tasks SET status='in_review', lease_expires_at=NULL, updated_at=? "
         "WHERE id=? AND status IN ('in_progress','todo')", (now, wf["task_id"]))
@@ -2057,6 +2084,7 @@ def _finalize_if_done(conn: sqlite3.Connection, wid: str) -> None:
         execution_no=wf.get("execution_no"), actor_type="system", actor="workflow",
         payload={"steps": len(wf.get("steps") or [])},
     )
+    dossier.persist(conn, wid, commit=False)
     from . import roles as roles_service
     sender = roles_service.notification_sender(
         conn, wf["task_id"], wf.get("created_by"))

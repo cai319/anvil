@@ -53,6 +53,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     knowledge_repos_locked INTEGER NOT NULL DEFAULT 0,
     description      TEXT,
     acceptance_json  TEXT NOT NULL DEFAULT '[]',
+    workflow_weight  TEXT,                          -- 人工覆盖：light|standard|strict
+    workflow_weight_source TEXT,
+    workflow_weight_reason TEXT,
     assignee         TEXT,
     lease_expires_at TEXT,
     claimed_at       TEXT,
@@ -109,7 +112,12 @@ CREATE TABLE IF NOT EXISTS workflows (
     termination_reason TEXT,
     terminated_at   TEXT,
     previous_workflow_id TEXT,
-    execution_no    INTEGER NOT NULL DEFAULT 1
+    execution_no    INTEGER NOT NULL DEFAULT 1,
+    weight          TEXT NOT NULL DEFAULT 'standard', -- light|standard|strict
+    weight_source   TEXT NOT NULL DEFAULT 'default',  -- cindy|human|heuristic|default
+    weight_reason   TEXT,
+    definition_hash TEXT,
+    finished_at     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS workflow_steps (
@@ -384,6 +392,21 @@ CREATE INDEX IF NOT EXISTS idx_decisions_task
     ON decisions(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_decisions_packet
     ON decisions(packet_id);
+
+-- 终态执行档案（planned vs actual、决策、证据、指标、token），不可变快照。
+CREATE TABLE IF NOT EXISTS workflow_dossiers (
+    workflow_id       TEXT PRIMARY KEY,
+    task_id           TEXT NOT NULL,
+    execution_no      INTEGER NOT NULL DEFAULT 1,
+    weight            TEXT,
+    status            TEXT NOT NULL,
+    definition_hash   TEXT,
+    dossier_json      TEXT NOT NULL,
+    digest            TEXT,
+    created_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dossiers_task
+    ON workflow_dossiers(task_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS audit (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -842,7 +865,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE runs ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
-    for col in ("plan_first INTEGER NOT NULL DEFAULT 0", "planner TEXT"):
+    for col in ("plan_first INTEGER NOT NULL DEFAULT 0", "planner TEXT",
+                "workflow_weight TEXT", "workflow_weight_source TEXT",
+                "workflow_weight_reason TEXT"):
         try:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col}")
         except sqlite3.OperationalError:
@@ -868,7 +893,10 @@ def init_schema(conn: sqlite3.Connection) -> None:
     for col in ("template_id TEXT", "template_version INTEGER",
                 "termination_reason TEXT", "terminated_at TEXT",
                 "previous_workflow_id TEXT",
-                "execution_no INTEGER NOT NULL DEFAULT 1"):
+                "execution_no INTEGER NOT NULL DEFAULT 1",
+                "weight TEXT NOT NULL DEFAULT 'standard'",
+                "weight_source TEXT NOT NULL DEFAULT 'default'",
+                "weight_reason TEXT", "definition_hash TEXT", "finished_at TEXT"):
         try:
             conn.execute(f"ALTER TABLE workflows ADD COLUMN {col}")
         except sqlite3.OperationalError:

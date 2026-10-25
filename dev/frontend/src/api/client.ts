@@ -215,8 +215,29 @@ export const api = {
     authFetch(`${BASE}/runs?task_id=${encodeURIComponent(taskId)}`).then((r) => json<Run[]>(r)),
   getTaskWorkflow: (taskId: string): Promise<Workflow> =>
     authFetch(`${BASE}/tasks/${taskId}/workflow`).then((r) => json<Workflow>(r)),
+  getWorkflow: (wid: string): Promise<Workflow> =>
+    authFetch(`${BASE}/workflows/${wid}`).then((r) => json<Workflow>(r)),
   listTaskWorkflows: (taskId: string): Promise<WorkflowHistoryItem[]> =>
     authFetch(`${BASE}/tasks/${taskId}/workflows`).then((r) => json<WorkflowHistoryItem[]>(r)),
+  getWorkflowMetrics: (wid: string): Promise<WorkflowMetrics> =>
+    authFetch(`${BASE}/workflows/${wid}/metrics`).then((r) => json<WorkflowMetrics>(r)),
+  getWorkflowGraph: (wid: string, mode: "planned" | "actual" | "diff"): Promise<WorkflowGraphResponse> =>
+    authFetch(`${BASE}/workflows/${wid}/graph?mode=${mode}`).then((r) => json<WorkflowGraphResponse>(r)),
+  getWorkflowDossier: (wid: string): Promise<WorkflowDossier> =>
+    authFetch(`${BASE}/workflows/${wid}/dossier`).then((r) => json<WorkflowDossier>(r)),
+  rebuildWorkflowDossier: (wid: string): Promise<WorkflowDossier> =>
+    req("POST", `/workflows/${wid}/dossier/rebuild`, {}).then((r) => json<WorkflowDossier>(r)),
+  downloadWorkflowDossier: async (wid: string, format: "json" | "md"): Promise<Blob> => {
+    const res = await authFetch(`${BASE}/workflows/${wid}/dossier?format=${format}`);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return res.blob();
+  },
+  setTaskWorkflowWeight: (taskId: string, weight: WorkflowWeight, reason?: string): Promise<TaskWeightResult> =>
+    req("POST", `/tasks/${taskId}/workflow-weight`, { weight, reason }).then((r) => json<TaskWeightResult>(r)),
+  clearTaskWorkflowWeight: (taskId: string): Promise<TaskWeightResult> =>
+    req("DELETE", `/tasks/${taskId}/workflow-weight`).then((r) => json<TaskWeightResult>(r)),
+  restartTaskWorkflow: (taskId: string, reason?: string, note?: string): Promise<Workflow> =>
+    req("POST", `/tasks/${taskId}/workflow/restart`, { reason, note }).then((r) => json<Workflow>(r)),
   reviewWorkflowStep: (wid: string, sid: string, approve: boolean, feedback?: string,
     opts?: { rework_targets?: string[]; reasons?: string[]; packet_id?: string; override_reason?: string }): Promise<Workflow> =>
     req("POST", `/workflows/${wid}/steps/${sid}/review`, {
@@ -823,6 +844,100 @@ export interface Workflow {
   previous_workflow_id?: string | null;
   termination_reason?: string | null;
   terminated_at?: string | null;
+  weight?: WorkflowWeight;
+  weight_source?: string;
+  weight_reason?: string | null;
+  definition_hash?: string | null;
+  finished_at?: string | null;
+}
+
+export type WorkflowWeight = "light" | "standard" | "strict";
+
+export interface WorkflowMetrics {
+  workflow_id: string;
+  task_id: string;
+  execution_no: number;
+  status: Workflow["status"];
+  weight: WorkflowWeight;
+  weight_source: string;
+  created_at: string | null;
+  finished_at: string | null;
+  duration_seconds: number;
+  steps: {
+    total: number;
+    done: number;
+    running: number;
+    submitted: number;
+    failed: number;
+    max_depth: number;
+    parallel_roles: number;
+    generated_slices: number;
+    by_status: Record<string, number>;
+  };
+  gates: { total: number; pending: number };
+  decisions: {
+    total: number;
+    human: number;
+    rejected: number;
+    pending_human: number;
+    rework_rate: number;
+  };
+  waiting: { human_seconds: number; pending_human_seconds: number };
+  evidence: { packets: number };
+  tokens: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_read_tokens?: number;
+    cache_creation_tokens?: number;
+    records?: number;
+  };
+}
+
+export interface WorkflowGraphNode {
+  step_id: string;
+  title: string;
+  role_slug: string;
+  depends_on: string[];
+  kind: string;
+  gate: boolean;
+  decision_authority: string;
+  status?: string;
+  run_id?: string | null;
+  slice_key?: string | null;
+  source_step_id?: string | null;
+  rework_count?: number;
+  origin: string;
+}
+
+export interface WorkflowGraphResponse {
+  mode: "planned" | "actual" | "diff";
+  workflow_id: string;
+  nodes?: WorkflowGraphNode[];
+  added?: WorkflowGraphNode[];
+  missing?: WorkflowGraphNode[];
+  changed?: { step_id: string; field: string; planned: unknown; actual: unknown }[];
+}
+
+export interface WorkflowDossier {
+  workflow: Record<string, unknown>;
+  metrics: WorkflowMetrics;
+  steps: WorkflowStep[];
+  packets: ReviewPacket[];
+  planned: WorkflowGraphResponse;
+  actual: WorkflowGraphResponse;
+  diff: WorkflowGraphResponse;
+  event_counts: Record<string, number>;
+  digest: string;
+  generated_at: string;
+}
+
+export interface TaskWeightResult {
+  task_id: string;
+  weight: WorkflowWeight | null;
+  requires_restart: boolean;
+  running_workflow_id: string | null;
+  running_execution_no: number | null;
+  running_weight: WorkflowWeight | null;
 }
 
 export interface WorkflowHistoryItem {
@@ -840,6 +955,12 @@ export interface WorkflowHistoryItem {
   template_version: number | null;
   step_count: number;
   approved_count: number | null;
+  weight?: WorkflowWeight;
+  weight_source?: string;
+  weight_reason?: string | null;
+  definition_hash?: string | null;
+  finished_at?: string | null;
+  metrics?: WorkflowMetrics;
 }
 
 export interface TemplateRoleSlot {

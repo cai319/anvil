@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Task, type TimelineEvent, type Workflow, type WorkflowHistoryItem, type WorkflowStep, type WorkflowTemplate } from "../api/client";
+import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Task, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight } from "../api/client";
 import { RoleSessions } from "./RoleSessions";
 import { ApplyTemplateModal } from "./ApplyTemplateModal";
 import { WorkflowGraph } from "./WorkflowGraph";
@@ -16,6 +16,12 @@ import { GateReviewDrawer } from "../components/GateReviewDrawer";
 const stepAuthority = (st: WorkflowStep): "ai" | "human" | "joint" =>
   st.decision_authority
   || (st.gate ? "human" : st.kind === "decision" ? "ai" : "human");
+
+const WEIGHT_META: Record<WorkflowWeight, { label: string; hint: string }> = {
+  light: { label: "轻量", hint: "小范围、可逆、少量角色" },
+  standard: { label: "标准", hint: "默认流程强度" },
+  strict: { label: "严格", hint: "高风险、证据必填、关键节点人工确认" },
+};
 
 const STATUS_LABEL: Record<Task["status"], string> = {
   todo: "待办",
@@ -37,10 +43,120 @@ const RUN_LABEL: Record<string, string> = {
   suspended: "已挂起",
 };
 
+function WorkflowWeightDialog({ taskId, current, onClose, onApplied }: {
+  taskId: string;
+  current: Workflow | null;
+  onClose: () => void;
+  onApplied: (workflow?: Workflow) => void;
+}) {
+  const [weight, setWeight] = useState<WorkflowWeight>(current?.weight || "standard");
+  const [reason, setReason] = useState(current?.weight_reason || "");
+  const [result, setResult] = useState<Awaited<ReturnType<typeof api.setTaskWorkflowWeight>> | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const running = current?.status === "running";
+
+  const save = async () => {
+    setBusy(true); setError(null);
+    try {
+      const out = await api.setTaskWorkflowWeight(taskId, weight, reason);
+      setResult(out);
+      if (!out.requires_restart) {
+        onApplied();
+        onClose();
+      }
+    } catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
+  };
+
+  const restart = async () => {
+    if (!window.confirm(
+      "将终止当前执行并创建新的执行。旧执行、步骤和产物保留在历史中，不会中途替换。确定继续？")) return;
+    setBusy(true); setError(null);
+    try {
+      const wf = await api.restartTaskWorkflow(
+        taskId, reason.trim() || "人工调整流程强度后重新执行");
+      onApplied(wf);
+      onClose();
+    } catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
+  };
+
+  const clear = async () => {
+    setBusy(true); setError(null);
+    try {
+      const out = await api.clearTaskWorkflowWeight(taskId);
+      setResult(out);
+      if (!out.requires_restart) {
+        onApplied();
+        onClose();
+      }
+    } catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="modal wf-weight-modal" role="dialog" aria-modal="true">
+        <div className="modal-head">
+          <h2>调整流程强度</h2>
+          <button className="modal-close" onClick={onClose} aria-label="关闭">
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+        {error && <p className="error">{error}</p>}
+        <p className="muted">
+          当前执行：{current?.weight ? WEIGHT_META[current.weight].label : "未设置"}
+          {current?.weight_source ? `（${current.weight_source}）` : ""}
+          {running ? " · 运行中，修改只对下一次执行生效" : ""}
+        </p>
+        <div className="wf-weight-options">
+          {(Object.keys(WEIGHT_META) as WorkflowWeight[]).map((key) => (
+            <label key={key} className={`wf-weight-option ${weight === key ? "is-active" : ""}`}>
+              <input type="radio" name="wf-weight" checked={weight === key}
+                onChange={() => setWeight(key)} />
+              <strong>{WEIGHT_META[key].label}</strong>
+              <span className="muted">{WEIGHT_META[key].hint}</span>
+            </label>
+          ))}
+        </div>
+        <label className="field">
+          <span>选择依据（可选）</span>
+          <input value={reason} onChange={(e) => setReason(e.target.value)}
+            placeholder="例如：仅文档改动，可逆；或涉及支付，必须严格" />
+        </label>
+        {result?.requires_restart && (
+          <div className="wf-weight-restart-note">
+            <p>
+              已保存为下一次执行使用。当前第 {result.running_execution_no} 次执行仍为
+              {result.running_weight ? WEIGHT_META[result.running_weight].label : "原强度"}。
+              需要立即生效时，可终止并重新执行。
+            </p>
+            <button className="small danger" disabled={busy} onClick={restart}>
+              终止并重新执行
+            </button>
+          </div>
+        )}
+        <div className="modal-actions">
+          {current?.weight_source === "human" && (
+            <button className="small" disabled={busy} onClick={clear}>清除人工设置</button>
+          )}
+          <button className="small" disabled={busy} onClick={onClose}>取消</button>
+          <button className="primary" disabled={busy} onClick={save}>
+            {busy ? "保存中…" : "保存"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** 工作流概览：状态、完成度、步骤状态计数，规则/验证矩阵默认收起。 */
-function WorkflowSummary({ workflow, taskStatus }: {
+function WorkflowSummary({ workflow, taskStatus, metrics, diff }: {
   workflow: Workflow;
   taskStatus: Task["status"];
+  metrics: WorkflowMetrics | null;
+  diff: WorkflowGraphResponse | null;
 }) {
   const total = workflow.steps.length;
   const approved = workflow.steps.filter((s) => s.status === "approved").length;
@@ -62,6 +178,13 @@ function WorkflowSummary({ workflow, taskStatus }: {
     <div className={`wf-summary is-${workflow.status}`}>
       <div className="wf-summary-main">
         <span className="wf-summary-state">{stateLabel}</span>
+        {workflow.weight && (
+          <span className={`wf-weight is-${workflow.weight}`}
+            title={workflow.weight_reason || WEIGHT_META[workflow.weight].hint}>
+            {WEIGHT_META[workflow.weight].label}
+            <small>{workflow.weight_source === "human" ? "人工" : ""}</small>
+          </span>
+        )}
         <div className="wf-summary-progress">
           <span className="wf-summary-bar"><i style={{ width: `${percent}%` }} /></span>
           <span className="wf-summary-count"><strong>{approved}</strong> / {total} 步完成</span>
@@ -75,6 +198,45 @@ function WorkflowSummary({ workflow, taskStatus }: {
           ))}
         </div>
       </div>
+      {metrics && (
+        <div className="wf-metrics">
+          <span title="最大依赖深度">深度 {metrics.steps.max_depth}</span>
+          <span title="人工审核门">审核门 {metrics.gates.total}（待 {metrics.gates.pending}）</span>
+          <span title="决策与返工">决策 {metrics.decisions.total} · 打回 {metrics.decisions.rejected}</span>
+          <span title="人工等待时间">
+            人工等待 {Math.round((metrics.waiting.human_seconds
+              + metrics.waiting.pending_human_seconds) / 60)} 分钟
+          </span>
+          <span title="Token 使用量">
+            Token {(metrics.tokens.input_tokens ?? 0) + (metrics.tokens.output_tokens ?? 0)}
+          </span>
+          {metrics.steps.generated_slices > 0 && (
+            <span>切片 {metrics.steps.generated_slices} 步</span>
+          )}
+          {diff && (
+            <details className="wf-diff">
+              <summary>
+                计划 vs 实际：新增 {(diff.added?.length ?? 0)} · 变更 {(diff.changed?.length ?? 0)}
+              </summary>
+              <div className="wf-diff-list">
+                {(diff.added ?? []).length === 0 && <span className="muted">没有计划外节点。</span>}
+                {(diff.added ?? []).map((n) => (
+                  <span key={n.step_id} className="wf-diff-item">
+                    + <span className="mono">{n.step_id}</span> {n.title}
+                    {n.source_step_id ? `（由 ${n.source_step_id} 展开）` : ""}
+                  </span>
+                ))}
+                {(diff.changed ?? []).map((c, i) => (
+                  <span key={`${c.step_id}-${c.field}-${i}`} className="wf-diff-item">
+                    ~ <span className="mono">{c.step_id}</span> {c.field}：
+                    {String(c.planned)} → {String(c.actual)}
+                  </span>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
       {(feedbackRules.length > 0 || verification.length > 0) && (
         <details className="wf-summary-rules">
           <summary>
@@ -430,6 +592,11 @@ export function TaskDetail({ id }: { id: string }) {
   const autoScrollingRef = useRef(false);  // 程序化滚动期间忽略 onScroll 的“用户滚动”判定
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [workflowHistory, setWorkflowHistory] = useState<WorkflowHistoryItem[]>([]);
+  const [viewingWorkflow, setViewingWorkflow] = useState<Workflow | null>(null);
+  const [workflowMetrics, setWorkflowMetrics] = useState<WorkflowMetrics | null>(null);
+  const [graphDiff, setGraphDiff] = useState<WorkflowGraphResponse | null>(null);
+  const [showWeight, setShowWeight] = useState(false);
+  const [dossierBusy, setDossierBusy] = useState(false);
   const [reviewStep, setReviewStep] = useState<WorkflowStep | null>(null);
   const [children, setChildren] = useState<Task[]>([]);
   const [wfView, setWfView] = useState<"graph" | "list">("graph");
@@ -440,10 +607,29 @@ export function TaskDetail({ id }: { id: string }) {
   const { slugs: liveSlugs, runtimes: roleRuntimes } = useRoleRuntimes(task);
   const panel = usePanelLayout({ storageKey: "task" });
 
+  const displayWorkflow = viewingWorkflow ?? workflow;
+  const isViewingHistory = Boolean(viewingWorkflow);
+
   const refreshWorkflow = () => {
     api.getTaskWorkflow(id).then(setWorkflow).catch(() => setWorkflow(null));
     api.listTaskWorkflows(id).then(setWorkflowHistory).catch(() => setWorkflowHistory([]));
   };
+
+  useEffect(() => {
+    if (!displayWorkflow) {
+      setWorkflowMetrics(null);
+      setGraphDiff(null);
+      return;
+    }
+    let alive = true;
+    api.getWorkflowMetrics(displayWorkflow.id)
+      .then((m) => alive && setWorkflowMetrics(m))
+      .catch(() => alive && setWorkflowMetrics(null));
+    api.getWorkflowGraph(displayWorkflow.id, "diff")
+      .then((d) => alive && setGraphDiff(d))
+      .catch(() => alive && setGraphDiff(null));
+    return () => { alive = false; };
+  }, [displayWorkflow?.id]);
 
   const refreshChildren = () =>
     api.listTaskChildren(id).then(setChildren).catch(() => []);
@@ -857,9 +1043,10 @@ export function TaskDetail({ id }: { id: string }) {
       : "closed";
 
   const isReviewable = (st: WorkflowStep) =>
-    (st.gate && st.status === "submitted")
-    || (st.kind === "decision"
-      && (st.status === "submitted" || st.status === "running"));
+    !isViewingHistory && (
+      (st.gate && st.status === "submitted")
+      || (st.kind === "decision"
+        && (st.status === "submitted" || st.status === "running")));
 
   const renderStepRow = (st: WorkflowStep) => {
     const cls = statusClass(st.status);
@@ -896,7 +1083,7 @@ export function TaskDetail({ id }: { id: string }) {
               {st.kind === "decision" ? "人工决策" : "审查"}
             </button>
           )}
-          {(st.status === "failed" || st.status === "rejected") && (
+          {!isViewingHistory && (st.status === "failed" || st.status === "rejected") && (
             <button className="small" onClick={() => act(async () => {
               const w = await api.retryWorkflowStep(workflow!.id, st.step_id);
               setWorkflow(w);
@@ -1427,15 +1614,35 @@ export function TaskDetail({ id }: { id: string }) {
           <div className="wf-template-actions">
             <button className="small" disabled={busy || task.status === "done" || task.status === "closed"}
               onClick={() => setShowApplyTemplate(true)}>套用模板</button>
-            {workflow && (
+            {displayWorkflow && (
               <button className="small" disabled={busy}
                 onClick={async () => {
                   setBusy(true); setError(null);
                   try {
-                    await api.importWorkflowTemplate("workflow", workflow.id, task.title);
+                    await api.importWorkflowTemplate("workflow", displayWorkflow.id, task.title);
                     window.location.href = "/templates";
                   } catch (e) { setError(String(e)); setBusy(false); }
                 }}>保存为模板</button>
+            )}
+            {displayWorkflow && (
+              <>
+                <button className="small" disabled={busy}
+                  onClick={() => setShowWeight(true)}>调整流程强度</button>
+                <button className="small" disabled={dossierBusy}
+                  onClick={async () => {
+                    setDossierBusy(true); setError(null);
+                    try {
+                      const blob = await api.downloadWorkflowDossier(displayWorkflow.id, "md");
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = `dossier-${displayWorkflow.id.slice(0, 8)}.md`;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    } catch (e) { setError(String(e)); }
+                    finally { setDossierBusy(false); }
+                  }}>{dossierBusy ? "导出中…" : "导出执行档案"}</button>
+              </>
             )}
             <span className="wf-template-actions-divider" />
             <span className="muted">规划种子：{task.plan_seed?.name || "无"}</span>
@@ -1456,12 +1663,23 @@ export function TaskDetail({ id }: { id: string }) {
                 onClick={() => act(() => api.clearPlanSeed(id))}>清除种子</button>
             )}
           </div>
-          {!workflow && (
+          {!displayWorkflow && (
             <p className="muted">还没有工作流。多角色任务派发后，Cindy 会生成步骤状态机并在此展示；也可以直接套用已发布模板。</p>
           )}
-          {workflow && (
+          {displayWorkflow && (
             <>
-              <WorkflowSummary workflow={workflow} taskStatus={task.status} />
+              <WorkflowSummary workflow={displayWorkflow} taskStatus={task.status}
+                metrics={workflowMetrics} diff={graphDiff} />
+              {isViewingHistory && (
+                <div className="wf-history-banner">
+                  <span>
+                    正在查看第 {displayWorkflow.execution_no || 1} 次执行（只读）
+                  </span>
+                  <button className="small primary" onClick={() => setViewingWorkflow(null)}>
+                    回到当前执行
+                  </button>
+                </div>
+              )}
               {workflowHistory.length > 1 && (
                 <details className="wf-history">
                   <summary>
@@ -1470,20 +1688,34 @@ export function TaskDetail({ id }: { id: string }) {
                   </summary>
                   <div className="wf-history-list">
                     {workflowHistory.map((item) => (
-                      <div key={item.id} className={`wf-history-row is-${item.status}`}>
+                      <button key={item.id} type="button"
+                        className={`wf-history-row is-${item.status} ${viewingWorkflow?.id === item.id ? "is-selected" : ""}`}
+                        onClick={() => act(async () => {
+                          setViewingWorkflow(await api.getWorkflow(item.id));
+                        })}>
                         <span className="wf-history-no">第 {item.execution_no} 次</span>
                         <span className={`status status-${item.status === "done" ? "done" : item.status === "running" ? "in_progress" : "closed"}`}>
                           {item.status === "done" ? "已完成" : item.status === "running" ? "执行中"
                             : item.status === "terminated" ? "已终止" : "失败"}
                         </span>
+                        {item.weight && (
+                          <span className={`wf-weight is-${item.weight}`}>
+                            {WEIGHT_META[item.weight].label}
+                          </span>
+                        )}
                         <span className="muted">{formatDateTime(item.created_at)}</span>
                         <span className="muted">
                           {item.approved_count || 0}/{item.step_count} 步完成
                         </span>
+                        {item.metrics && (
+                          <span className="muted">
+                            决策 {item.metrics.decisions.total} · 打回 {item.metrics.decisions.rejected}
+                          </span>
+                        )}
                         {item.termination_reason && (
                           <span className="wf-history-reason">原因：{item.termination_reason}</span>
                         )}
-                      </div>
+                      </button>
                     ))}
                   </div>
                 </details>
@@ -1496,20 +1728,21 @@ export function TaskDetail({ id }: { id: string }) {
               </div>
               {wfView === "graph" ? (
                 <WorkflowGraph
-                  workflow={workflow}
+                  workflow={displayWorkflow}
                   roles={roles}
                   busy={busy}
+                  readOnly={isViewingHistory}
                   onOpenReview={(step) => setReviewStep(step)}
                   onRetry={(step) => act(async () => {
-                    setWorkflow(await api.retryWorkflowStep(workflow.id, step.step_id));
+                    setWorkflow(await api.retryWorkflowStep(workflow!.id, step.step_id));
                   })}
                 />
               ) : (
                 (() => {
-                  const loops = summarizeLoops(workflow.steps);
+                  const loops = summarizeLoops(displayWorkflow.steps);
                   const loopBySource = new Map(loops.map((l) => [l.sourceStepId, l]));
                   const rendered = new Set<string>();
-                  const rows = workflow.steps.flatMap((st) => {
+                  const rows = displayWorkflow.steps.flatMap((st) => {
                     if (isDynamicStep(st)) return [];
                     const row = renderStepRow(st);
                     const loop = loopBySource.get(st.step_id);
@@ -1556,6 +1789,18 @@ export function TaskDetail({ id }: { id: string }) {
           sid={reviewStep.step_id}
           onClose={() => setReviewStep(null)}
           onDone={(wf) => { setWorkflow(wf); refreshWorkflow(); }}
+        />
+      )}
+      {showWeight && (
+        <WorkflowWeightDialog
+          taskId={id}
+          current={workflow}
+          onClose={() => setShowWeight(false)}
+          onApplied={(wf) => {
+            if (wf) setWorkflow(wf);
+            setViewingWorkflow(null);
+            refreshWorkflow();
+          }}
         />
       )}
       {showApplyTemplate && (
