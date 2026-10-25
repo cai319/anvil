@@ -4,7 +4,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-from ..util import now_iso
+from ..util import jdumps, now_iso
 
 
 def record(conn: sqlite3.Connection, role: str | None, task_id: str | None,
@@ -25,9 +25,37 @@ def record(conn: sqlite3.Connection, role: str | None, task_id: str | None,
     conn.commit()
 
 
+def reset_at(conn: sqlite3.Connection) -> str | None:
+    row = conn.execute(
+        "SELECT value FROM settings WHERE key='token_reset_at'").fetchone()
+    return row["value"] if row and row["value"] else None
+
+
+def reset(conn: sqlite3.Connection) -> dict:
+    """Reset the displayed global counter without deleting usage history."""
+    previous = reset_at(conn)
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO settings (key, value, updated_at) VALUES ('token_reset_at', ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        (now, now))
+    conn.execute(
+        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
+        "VALUES (?,?,?,?,?)",
+        ("human", None, "tokens.reset",
+         jdumps({"previous_reset_at": previous, "reset_at": now}), now))
+    conn.commit()
+    return {"reset_at": now, "previous_reset_at": previous}
+
+
 def summary(conn: sqlite3.Connection, scope: str | None = None,
-            date_from: str | None = None, date_to: str | None = None) -> dict:
+            date_from: str | None = None, date_to: str | None = None,
+            since_reset: bool = False) -> dict:
     clauses, params = [], []
+    reset = reset_at(conn) if since_reset else None
+    if reset:
+        clauses.append("recorded_at >= ?")
+        params.append(reset)
     if scope:
         clauses.append("role_slug=?")
         params.append(scope)
@@ -65,4 +93,5 @@ def summary(conn: sqlite3.Connection, scope: str | None = None,
     today_row = next((d for d in by_day if d["day"] == today_key), None)
     return {"scope": scope, **agg(total_row),
             "today_total_tokens": today_row["total_tokens"] if today_row else 0,
+            "reset_at": reset,
             "by_role": by_role, "by_day": by_day}

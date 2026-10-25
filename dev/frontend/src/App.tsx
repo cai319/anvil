@@ -20,6 +20,7 @@ import { TaskDetail } from "./pages/TaskDetail";
 import { Tooling } from "./pages/Tooling";
 import { ExecutionDossier } from "./pages/ExecutionDossier";
 import { TaskReplay } from "./pages/TaskReplay";
+import { TokenResetDialog } from "./components/TokenResetDialog";
 
 type Route =
   | { page: "lobby" }
@@ -159,6 +160,7 @@ function fmtTokens(n: number): string {
 
 function TopStatus() {
   const [frozen, setFrozen] = useState(false);
+  const [showReset, setShowReset] = useState(false);
   const [tokens, setTokens] = useState<{ total: number; input: number; output: number } | null>(null);
 
   const refresh = () => {
@@ -191,14 +193,27 @@ function TopStatus() {
       >
         {frozen ? "已冻结 · 点击解除" : "全场冻结"}
       </button>
-      <span className="chip" title="累计 Token 消耗（输入含 cache；来自 CLI result.usage）">
+      <button
+        type="button"
+        className="chip token-chip"
+        title="累计 Token 消耗（输入含 cache；点击清零计数，需要二次确认）"
+        aria-label="Token 累计计数，点击清零"
+        onClick={() => setShowReset(true)}
+      >
         Token {tokens == null ? "—" : fmtTokens(tokens.total)}
         {tokens && (
           <span className="muted">
             （入 {fmtTokens(tokens.input)} / 出 {fmtTokens(tokens.output)}）
           </span>
         )}
-      </span>
+      </button>
+      {showReset && (
+        <TokenResetDialog
+          currentTotal={tokens?.total ?? null}
+          onClose={() => setShowReset(false)}
+          onConfirmed={refresh}
+        />
+      )}
     </>
   );
 }

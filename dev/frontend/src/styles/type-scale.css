@@ -2676,3 +2676,10 @@ details.replay-event-body > div { margin-top: 4px; }
   border-bottom: 1px dotted color-mix(in srgb, currentColor 45%, transparent);
   width: fit-content;
 }
+.token-chip {
+  font: inherit;
+  cursor: pointer;
+}
+.token-chip:hover { border-color: var(--yellow); color: var(--text-on-ink); }
+.token-chip:focus-visible { outline: 2px solid var(--yellow); outline-offset: 2px; }
+.token-reset-modal { width: min(520px, 94vw); }

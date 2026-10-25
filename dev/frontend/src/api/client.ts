@@ -414,9 +414,12 @@ export const api = {
   getTokens: (): Promise<{
     input_tokens: number; output_tokens: number; total_tokens: number;
     today_total_tokens: number;
+    reset_at?: string | null;
     by_role: { role: string; input_tokens: number; output_tokens: number; total_tokens: number }[];
     by_day: { day: string; input_tokens: number; output_tokens: number; total_tokens: number }[];
   }> => authFetch(`${BASE}/tokens`).then((r) => json(r)),
+  resetTokens: (): Promise<{ reset_at: string; previous_reset_at: string | null }> =>
+    req("POST", "/tokens/reset").then((r) => json(r)),
   getBudget: (): Promise<{
     role: string | null;
     input_tokens: number; output_tokens: number; total_tokens: number;

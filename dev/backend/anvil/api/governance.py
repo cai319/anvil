@@ -64,7 +64,15 @@ def token_summary(scope: str | None = None,
                   date_from: str | None = Query(default=None, alias="from"),
                   date_to: str | None = Query(default=None, alias="to"),
                   conn=Depends(get_db)):
-    return tokens_service.summary(conn, scope=scope, date_from=date_from, date_to=date_to)
+    return tokens_service.summary(
+        conn, scope=scope, date_from=date_from, date_to=date_to,
+        since_reset=scope is None)
+
+
+@router.post("/tokens/reset")
+def reset_tokens(conn=Depends(get_db), auth: Auth = Depends(require_human)):
+    """Reset the global token counter; history remains in token_usage."""
+    return tokens_service.reset(conn)
 
 
 @router.get("/audit")
