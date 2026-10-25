@@ -840,6 +840,8 @@ export interface TaskKnowledge {
   workspace_id?: string | null;
   workspace_name?: string | null;
   task_archived_at?: string | null;
+  hit_count?: number;
+  last_hit_at?: string | null;
   parent_task_id: string | null;
   source_subtask_id: string | null;
   origin: "task" | "subtask";
@@ -868,7 +870,10 @@ export interface RoleKnowledgeIndex {
   task_id: string | null;
   role_counts: Record<string, number>;
   task_counts: Record<string, number>;
-  recent: { id: string; path: string; kind: string; repo: string | null; updated_at: string | null }[];
+  recent: {
+    id: string; path: string; kind: string; repo: string | null;
+    updated_at: string | null; hit_count?: number; last_hit_at?: string | null;
+  }[];
   total_role: number;
   total_task: number;
 }
@@ -906,9 +911,28 @@ export interface KnowledgeStats {
     tasks_with_knowledge: number;
     tasks_total: number;
     coverage: number;
+    hits: number;
+    used: number;
+    zero_hit: number;
+    hit_rate: number;
   };
-  lessons: { pending: number; approved: number };
-  role_knowledge: { notes_total: number; roles_with_notes: number; usage_tracked: boolean };
+  lessons: {
+    pending: number;
+    approved: number;
+    hits: number;
+    used: number;
+    zero_hit: number;
+    hit_rate: number;
+  };
+  role_knowledge: {
+    notes_total: number;
+    roles_with_notes: number;
+    hits: number;
+    used: number;
+    zero_hit: number;
+    hit_rate: number;
+    usage_tracked: boolean;
+  };
   generated_at: string;
   note: string;
 }
@@ -926,6 +950,8 @@ export interface KnowledgeHit {
   updated_at?: string | null;
   created_at?: string | null;
   confidence?: number;
+  hit_count?: number;
+  last_hit_at?: string | null;
 }
 
 export type RunStatus =
@@ -1501,6 +1527,8 @@ export interface Lesson {
   source_role: string | null;
   repo: string;
   status: "pending" | "approved" | "rejected";
+  hit_count?: number;
+  last_hit_at?: string | null;
   created_at: string;
   approved_at: string | null;
 }

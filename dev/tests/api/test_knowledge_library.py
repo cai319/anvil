@@ -5,6 +5,9 @@ import sqlite3
 
 import pytest
 
+from anvil import db
+from anvil.services import knowledge, memory
+
 from tests.conftest import API, human_headers, role_payload, runtime_payload, task_payload
 
 pytestmark = pytest.mark.usefixtures("client")
@@ -274,11 +277,67 @@ async def test_knowledge_stats_cover_usage_and_coverage(client, app):
     assert channel["tasks"] == 1
     assert body["task_knowledge"]["active"] == 1
     assert body["task_knowledge"]["tasks_with_knowledge"] == 1
-    assert body["role_knowledge"]["usage_tracked"] is False
+    assert body["task_knowledge"]["hit_rate"] == 0.0
+    assert "hit_rate" in body["lessons"]
+    assert body["role_knowledge"]["usage_tracked"] is True
     assert "hit_count" in body["note"]
 
     denied = await client.get(f"{API}/knowledge/stats", headers=_agent_headers(app))
     assert denied.status_code == 403
+
+
+async def test_role_and_lesson_hit_recording(client, app):
+    await _seed(client)
+    conn = db.open_conn(app.state.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO notes (id, role_slug, path, content, created_at, kind, scope, "
+            "updated_at, status) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("N-HIT", "qa-role", "notes/hit.md", "role hit note",
+             "2026-10-25T00:00:00+00:00", "note", "role",
+             "2026-10-25T00:00:00+00:00", "active"),
+        )
+        conn.commit()
+        knowledge.record_hits(conn, ["N-HIT"])
+        row = conn.execute(
+            "SELECT hit_count, last_hit_at FROM notes WHERE id='N-HIT'"
+        ).fetchone()
+        assert row["hit_count"] == 1
+        assert row["last_hit_at"]
+    finally:
+        conn.close()
+
+    index = await client.get(
+        f"{API}/me/knowledge/index?role=qa-role", headers=human_headers()
+    )
+    assert index.status_code == 200, index.text
+    recent = index.json()["recent"]
+    assert any(item["id"] == "N-HIT" and item["hit_count"] == 1 for item in recent)
+
+    created = await client.post(
+        f"{API}/lessons/pending",
+        json={"content": "lesson hit test", "tags": [], "repo": "shared"},
+        headers=human_headers(),
+    )
+    assert created.status_code == 201, created.text
+    lesson_id = created.json()["id"]
+    approved = await client.post(
+        f"{API}/lessons/{lesson_id}/approve", json={}, headers=human_headers()
+    )
+    assert approved.status_code == 200, approved.text
+    conn = db.open_conn(app.state.db_path)
+    try:
+        memory.record_lesson_hits(conn, [lesson_id])
+        row = conn.execute(
+            "SELECT hit_count, last_hit_at FROM lessons WHERE id=?", (lesson_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["hit_count"] == 1
+    assert row["last_hit_at"]
+    lessons = await client.get(f"{API}/lessons?status=approved", headers=human_headers())
+    item = next(x for x in lessons.json() if x["id"] == lesson_id)
+    assert item["hit_count"] == 1
 
 
 async def test_delete_channel_unbinds_tasks(client):

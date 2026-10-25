@@ -91,6 +91,12 @@ function LessonDetailModal({ lesson, roles, error, onClose, onApprove, onReject,
           <dd><LessonTags tags={lesson.tags} /></dd>
           <dt>仓库</dt>
           <dd className="mono">{lesson.repo || "shared"}</dd>
+          <dt>命中</dt>
+          <dd>
+            {lesson.status === "approved"
+              ? `${lesson.hit_count ?? 0} 次${lesson.last_hit_at ? ` · 最近 ${formatDateTime(lesson.last_hit_at)}` : ""}`
+              : "批准后开始统计"}
+          </dd>
           <dt>来源任务</dt>
           <dd>
             {lesson.source_task
@@ -231,6 +237,13 @@ function LessonList({ lessons, roles, empty, dateKey, onOpen, onDelete }: {
               <span className="lesson-row-meta">
                 <LessonTags tags={lesson.tags} />
                 <span>repo={lesson.repo || "shared"}</span>
+                {lesson.status === "approved" && (
+                  <span className="knowledge-record-hits"
+                    title="共享经验被加入 CIC / one-shot 上下文的次数">
+                    {lesson.hit_count ? `命中 ${lesson.hit_count} 次` : "未命中"}
+                    {lesson.last_hit_at ? ` · 最近命中 ${formatDateTime(lesson.last_hit_at)}` : ""}
+                  </span>
+                )}
               </span>
             </span>
             <span className="lesson-row-date">{formatDateTime(lesson[dateKey]) || "—"}</span>

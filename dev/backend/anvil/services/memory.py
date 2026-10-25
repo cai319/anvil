@@ -434,6 +434,8 @@ def context_for_task(conn: sqlite3.Connection, role: str, task: dict | None,
         merged.append(hit)
         if len(merged) >= 8:
             break
+    if merged:
+        knowledge_service.record_hits(conn, [hit["id"] for hit in merged])
     notes_text = knowledge_service.format_hits(
         merged, max_item_chars=800, max_total_chars=4000)
     channel_knowledge = ""
@@ -450,13 +452,16 @@ def context_for_task(conn: sqlite3.Connection, role: str, task: dict | None,
             pass
     lessons = shared_lessons(conn, tags, repo=task.get("repo"), repos=repos, limit=8)
     lesson_lines: list[str] = []
+    lesson_ids: list[str] = []
     used = 0
     for lesson in lessons:
         line = f"- {str(lesson.get('content') or '')[:600]}"
         if used + len(line) + 1 > 2000:
             break
         lesson_lines.append(line)
+        lesson_ids.append(lesson["id"])
         used += len(line) + 1
+    record_lesson_hits(conn, lesson_ids)
     return {
         "memory": read_memory_file(role),
         # 保留键位以兼容 project_instruction 调用方；按计划投影不注入任务快照。
@@ -468,6 +473,21 @@ def context_for_task(conn: sqlite3.Connection, role: str, task: dict | None,
         "knowledge_repos": repos or [],
         "retrieval_scope": scope.get("mode"),
     }
+
+
+def record_lesson_hits(conn: sqlite3.Connection, lesson_ids: list[str]) -> int:
+    """记录共享经验被实际加入上下文的命中；列表浏览/搜索不应调用。"""
+    ids = list(dict.fromkeys(str(x) for x in lesson_ids if x))
+    if not ids:
+        return 0
+    now = now_iso()
+    for lesson_id in ids:
+        conn.execute(
+            "UPDATE lessons SET hit_count=COALESCE(hit_count,0)+1, last_hit_at=? WHERE id=?",
+            (now, lesson_id),
+        )
+    conn.commit()
+    return len(ids)
 
 
 # ---- shared lessons（升格审批） -------------------------------------------

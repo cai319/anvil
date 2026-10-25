@@ -93,9 +93,12 @@ def library_stats(conn: sqlite3.Connection) -> dict:
         })
     channels.sort(key=lambda item: (-item["approved"], item["workspace_name"]))
 
-    task_active = conn.execute(
-        "SELECT COUNT(*) FROM task_knowledge WHERE status='active'"
-    ).fetchone()[0]
+    task_rows = conn.execute(
+        "SELECT hit_count FROM task_knowledge WHERE status='active'"
+    ).fetchall()
+    task_active = len(task_rows)
+    task_hits = sum(int(r["hit_count"] or 0) for r in task_rows)
+    task_used = sum(1 for r in task_rows if int(r["hit_count"] or 0) > 0)
     tasks_with_knowledge = conn.execute(
         "SELECT COUNT(DISTINCT task_id) FROM task_knowledge WHERE status='active'"
     ).fetchone()[0]
@@ -107,9 +110,18 @@ def library_stats(conn: sqlite3.Connection) -> dict:
         r["status"]: int(r["n"])
         for r in conn.execute("SELECT status, COUNT(*) AS n FROM lessons GROUP BY status")
     }
-    role_notes_total = conn.execute(
-        "SELECT COUNT(*) FROM notes WHERE scope='role' AND status='active'"
-    ).fetchone()[0]
+    lesson_rows = conn.execute(
+        "SELECT hit_count FROM lessons WHERE status='approved'"
+    ).fetchall()
+    lesson_hits = sum(int(r["hit_count"] or 0) for r in lesson_rows)
+    lesson_used = sum(1 for r in lesson_rows if int(r["hit_count"] or 0) > 0)
+
+    role_rows = conn.execute(
+        "SELECT hit_count FROM notes WHERE scope='role' AND status='active'"
+    ).fetchall()
+    role_notes_total = len(role_rows)
+    role_hits = sum(int(r["hit_count"] or 0) for r in role_rows)
+    role_used = sum(1 for r in role_rows if int(r["hit_count"] or 0) > 0)
     roles_with_notes = conn.execute(
         "SELECT COUNT(DISTINCT role_slug) FROM notes WHERE scope='role' AND status='active'"
     ).fetchone()[0]
@@ -125,20 +137,32 @@ def library_stats(conn: sqlite3.Connection) -> dict:
             "tasks_with_knowledge": int(tasks_with_knowledge),
             "tasks_total": int(tasks_total),
             "coverage": _rate(int(tasks_with_knowledge), int(tasks_total)),
+            "hits": int(task_hits),
+            "used": int(task_used),
+            "zero_hit": int(task_active - task_used),
+            "hit_rate": _rate(int(task_used), int(task_active)),
         },
         "lessons": {
             "pending": lesson_counts.get("pending", 0),
             "approved": lesson_counts.get("approved", 0),
+            "hits": int(lesson_hits),
+            "used": int(lesson_used),
+            "zero_hit": int(len(lesson_rows) - lesson_used),
+            "hit_rate": _rate(int(lesson_used), len(lesson_rows)),
         },
         "role_knowledge": {
             "notes_total": int(role_notes_total),
             "roles_with_notes": int(roles_with_notes),
-            "usage_tracked": False,
+            "hits": int(role_hits),
+            "used": int(role_used),
+            "zero_hit": int(role_notes_total - role_used),
+            "hit_rate": _rate(int(role_used), int(role_notes_total)),
+            "usage_tracked": True,
         },
         "generated_at": now,
         "note": (
             "hit_count 统计知识被检索命中并加入 CIC/one-shot 上下文的次数，"
-            "代表暴露/使用机会，不等同于任务收益；目前仅频道知识接入该计数，"
-            "任务/角色/共享经验未追踪。收益需结合返工、评审驳回、周期和 token 成本的试点对照评估。"
+            "代表暴露/使用机会，不等同于任务收益；频道/任务/角色/共享经验均已接入该计数。"
+            "收益需结合返工、评审驳回、周期和 token 成本的试点对照评估。"
         ),
     }

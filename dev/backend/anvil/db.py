@@ -256,6 +256,7 @@ CREATE TABLE IF NOT EXISTS lessons (
     source_role TEXT,                             -- 提出者：角色 slug / human / NULL（旧数据）
     repo        TEXT NOT NULL DEFAULT 'shared',  -- 归属共享仓库（shared = 全局经验）
     last_hit_at TEXT,
+    hit_count   INTEGER NOT NULL DEFAULT 0,      -- 被检索命中并进入上下文的次数
     status      TEXT NOT NULL DEFAULT 'pending',  -- pending|approved|rejected
     created_at  TEXT NOT NULL,
     approved_at TEXT
@@ -667,6 +668,8 @@ CREATE TABLE IF NOT EXISTS task_knowledge (
     tags_json      TEXT NOT NULL DEFAULT '[]',
     source_role    TEXT,
     status         TEXT NOT NULL DEFAULT 'active', -- active|archived
+    hit_count      INTEGER NOT NULL DEFAULT 0,
+    last_hit_at    TEXT,
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
 );
@@ -746,7 +749,9 @@ CREATE TABLE IF NOT EXISTS notes (
     confidence    REAL NOT NULL DEFAULT 0.5,
     updated_at    TEXT,
     source        TEXT NOT NULL DEFAULT 'agent',
-    content_hash  TEXT
+    content_hash  TEXT,
+    hit_count     INTEGER NOT NULL DEFAULT 0,
+    last_hit_at   TEXT
 );
 """
 
@@ -1079,6 +1084,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _rebuild_memory_fts_once(conn)
     _reset_legacy_token_usage_once(conn)
     _migrate_channel_knowledge_v1(conn)
+    _migrate_knowledge_hits_v1(conn)
     conn.commit()
 
 
@@ -1257,6 +1263,26 @@ def _migrate_channel_knowledge_v1(conn: sqlite3.Connection) -> None:
     _ensure_workspace_knowledge_fts(conn)
     _ensure_task_knowledge_fts(conn)
     _set_setting(conn, "schema.channel_knowledge_v1", "1")
+    conn.commit()
+
+
+def _migrate_knowledge_hits_v1(conn: sqlite3.Connection) -> None:
+    """单条知识命中计数：notes/lessons/task_knowledge 增加 hit_count/last_hit_at。"""
+    if _setting(conn, "schema.knowledge_hits_v1"):
+        return
+    column_specs = [
+        ("notes", "hit_count INTEGER NOT NULL DEFAULT 0"),
+        ("notes", "last_hit_at TEXT"),
+        ("lessons", "hit_count INTEGER NOT NULL DEFAULT 0"),
+        ("task_knowledge", "hit_count INTEGER NOT NULL DEFAULT 0"),
+        ("task_knowledge", "last_hit_at TEXT"),
+    ]
+    for table, spec in column_specs:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {spec}")
+        except sqlite3.OperationalError:
+            pass
+    _set_setting(conn, "schema.knowledge_hits_v1", "1")
     conn.commit()
 
 

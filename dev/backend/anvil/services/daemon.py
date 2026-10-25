@@ -1683,6 +1683,8 @@ class DaemonManager:
                 conn, role, query, task_id=task_id, scope="auto",
                 limit=5, snippet_chars=600, repo_scope="bound_or_shared",
                 repos=repos) if query else []
+            if hits:
+                knowledge_service.record_hits(conn, [hit["id"] for hit in hits])
             hit_text = knowledge_service.format_hits(
                 hits, max_item_chars=600, max_total_chars=4000)
             if hit_text:
@@ -1725,6 +1727,8 @@ class DaemonManager:
                 conn, role, "", task_id=None, scope="role",
                 limit=5, snippet_chars=300, repo_scope="bound_or_shared",
                 repos=repos)
+            if hits:
+                knowledge_service.record_hits(conn, [hit["id"] for hit in hits])
             hit_text = knowledge_service.format_hits(
                 hits, max_item_chars=400, max_total_chars=1800)
             if hit_text:
@@ -1737,6 +1741,7 @@ class DaemonManager:
             conn, tags, limit=8, repo=(task["repo"] if task else None),
             repos=repos)
         if lessons:
+            memory_service.record_lesson_hits(conn, [x["id"] for x in lessons])
             lesson_lines = [f"- {str(x.get('content') or '')[:500]}" for x in lessons]
             blocks.append({
                 "priority": 60, "order": 60, "cap": 1500, "min": 200,

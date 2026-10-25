@@ -131,6 +131,11 @@ export function TaskKnowledgeRow({ card }: { card: TaskKnowledge }) {
           )}
           {archived && <span className="chip">任务已归档</span>}
           {card.source_role && <span className="muted">来源：{card.source_role}</span>}
+          <span className="knowledge-record-hits"
+            title="任务知识被加入 CIC / one-shot 上下文的次数">
+            {card.hit_count ? `命中 ${card.hit_count} 次` : "未命中"}
+            {card.last_hit_at ? ` · 最近命中 ${formatDateTime(card.last_hit_at)}` : ""}
+          </span>
         </span>
         <span className="knowledge-record-tldr">{card.tldr}</span>
         <details className="knowledge-record-details">

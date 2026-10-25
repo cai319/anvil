@@ -103,6 +103,11 @@ export function RoleKnowledgeTab({ roles, onTotal }: {
                     <span className="chip">{NOTE_KIND_LABEL[hit.kind] ?? hit.kind}</span>
                     {hit.repo && <span>repo={hit.repo}</span>}
                     {hit.updated_at && <span>{formatDateTime(hit.updated_at)}</span>}
+                    <span className="knowledge-record-hits"
+                      title="角色知识被检索命中并加入上下文的次数">
+                      {hit.hit_count ? `命中 ${hit.hit_count} 次` : "未命中"}
+                      {hit.last_hit_at ? ` · 最近命中 ${formatDateTime(hit.last_hit_at)}` : ""}
+                    </span>
                   </span>
                   <span className="knowledge-record-tldr">{hit.snippet}</span>
                 </div>
@@ -132,6 +137,11 @@ export function RoleKnowledgeTab({ roles, onTotal }: {
                       <span className="chip">{NOTE_KIND_LABEL[note.kind] ?? note.kind}</span>
                       {note.repo && <span>repo={note.repo}</span>}
                       {note.updated_at && <span>{formatDateTime(note.updated_at)}</span>}
+                      <span className="knowledge-record-hits"
+                        title="角色知识被检索命中并加入上下文的次数">
+                        {note.hit_count ? `命中 ${note.hit_count} 次` : "未命中"}
+                        {note.last_hit_at ? ` · 最近命中 ${formatDateTime(note.last_hit_at)}` : ""}
+                      </span>
                     </span>
                   </div>
                 </li>

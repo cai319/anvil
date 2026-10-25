@@ -5,6 +5,9 @@ import sqlite3
 
 import pytest
 
+from anvil import config, db
+from anvil.services import task_knowledge
+
 from tests.conftest import API, auth_headers, human_headers, role_payload, runtime_payload, task_payload
 
 pytestmark = pytest.mark.usefixtures("client")
@@ -112,6 +115,27 @@ async def test_deep_aggregation(client, app):
     ).json()
     assert direct == []
     assert [k["source_subtask_id"] for k in deep] == ["T-GC"]
+
+
+async def test_render_increments_single_card_hits(client, app, monkeypatch):
+    await _seed(client)
+    await _task(client, "T-HIT", assignees=["qa-role"])
+    created = await _knowledge(client, "T-HIT", _agent_headers(app))
+    assert created.status_code == 201, created.text
+    kid = created.json()["id"]
+    monkeypatch.setattr(config, "TASK_KNOWLEDGE_ENABLED", True)
+    conn = db.open_conn(app.state.db_path)
+    try:
+        assert "任务共享知识" in task_knowledge.render_for_task(conn, "T-HIT")
+        task_knowledge.render_for_task(conn, "T-HIT")
+        row = conn.execute(
+            "SELECT hit_count, last_hit_at FROM task_knowledge WHERE id=?", (kid,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert row["hit_count"] == 2
+    assert row["last_hit_at"]
 
 
 async def test_delete_task_archives_knowledge(client, app):

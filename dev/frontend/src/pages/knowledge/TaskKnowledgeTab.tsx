@@ -60,7 +60,7 @@ export function TaskKnowledgeTab({ channels, onTotal }: {
         </span>
       </div>
       <p className="muted knowledge-scope-note">
-        任务知识用于任务内共享；目前不追踪单条命中次数。
+        任务知识用于任务内共享；进入 CIC / one-shot 上下文时计入命中，列表浏览不计。
       </p>
       {error && <p className="error">{error}</p>}
       {loading ? (

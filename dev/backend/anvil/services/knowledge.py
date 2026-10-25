@@ -304,6 +304,8 @@ def _row_hit(row, snippet: str, score: float, why: list[str],
         "repo": row["repo"], "module": row["module"],
         "confidence": row["confidence"], "created_at": row["created_at"],
         "updated_at": row["updated_at"] or row["created_at"],
+        "hit_count": row["hit_count"] if "hit_count" in row.keys() else 0,
+        "last_hit_at": row["last_hit_at"] if "last_hit_at" in row.keys() else None,
         "content": row["content"],
         "score": round(float(score), 6),
         "bm25": row["bm25"] if "bm25" in row.keys() else None,
@@ -687,7 +689,7 @@ def knowledge_index(conn: sqlite3.Connection, role_slug: str,
             "AND scope='task' AND task_id=? GROUP BY kind",
             (role_slug, task_id)).fetchall()}
     top = conn.execute(
-        "SELECT id, path, kind, repo, updated_at FROM notes "
+        "SELECT id, path, kind, repo, updated_at, hit_count, last_hit_at FROM notes "
         "WHERE role_slug=? AND scope='role' "
         "ORDER BY COALESCE(updated_at, created_at) DESC LIMIT 8",
         (role_slug,)).fetchall()
@@ -711,6 +713,21 @@ def _format_hit(hit: dict, max_chars: int = 500) -> str:
     if hit.get("updated_at"):
         meta += f" · {str(hit['updated_at'])[:19]}"
     return f"- [{meta}] {str(hit.get('snippet') or '')[:max_chars]} (path: {hit.get('path')})"
+
+
+def record_hits(conn: sqlite3.Connection, note_ids: list[str]) -> int:
+    """记录角色知识被实际加入上下文的命中；UI 搜索不应调用。"""
+    ids = list(dict.fromkeys(str(x) for x in note_ids if x))
+    if not ids:
+        return 0
+    now = now_iso()
+    for note_id in ids:
+        conn.execute(
+            "UPDATE notes SET hit_count=COALESCE(hit_count,0)+1, last_hit_at=? WHERE id=?",
+            (now, note_id),
+        )
+    conn.commit()
+    return len(ids)
 
 
 def format_hits(hits: list[dict], *, max_item_chars: int = 500,

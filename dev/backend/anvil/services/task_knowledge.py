@@ -151,6 +151,8 @@ def render_for_task(conn: sqlite3.Connection, task_id: str, *,
     cards = list_for_task(conn, task_id, include_subtasks=True)
     lines: list[str] = []
     used = 0
+    now = now_iso()
+    hit_ids: list[str] = []
     for card in cards:
         origin = (f"来自子任务 {card['source_subtask_id']}"
                   if card.get("source_subtask_id") else "任务共享")
@@ -158,9 +160,17 @@ def render_for_task(conn: sqlite3.Connection, task_id: str, *,
         if used + len(line) + 1 > budget_chars:
             break
         lines.append(line)
+        hit_ids.append(card["id"])
         used += len(line) + 1
     if not lines:
         return ""
+    for knowledge_id in hit_ids:
+        conn.execute(
+            "UPDATE task_knowledge SET hit_count=COALESCE(hit_count,0)+1, "
+            "last_hit_at=? WHERE id=?",
+            (now, knowledge_id),
+        )
+    conn.commit()
     return "## 任务共享知识\n" + "\n".join(lines)
 
 
