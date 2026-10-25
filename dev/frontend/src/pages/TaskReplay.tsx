@@ -13,6 +13,9 @@ import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
 import { formatClock, formatDateTime, formatDuration, secondsBetween } from "../time";
 import { STATUS_META } from "../workflowGroups";
+import { METRIC_TIPS } from "../metricsHelp";
+
+const fmt = (value?: number) => (value ?? 0).toLocaleString("en-US");
 
 /** A read-only replay of a task's complete activity stream and workflow state. */
 
@@ -388,41 +391,43 @@ export function TaskReplay({ id }: { id: string }) {
           {metrics && (
             <div className="replay-side-block replay-metrics">
               <span className="page-kicker">FINAL METRICS</span>
-              <div><span>步骤</span><strong>{metrics.steps.done}/{metrics.steps.total}</strong></div>
-              <div title="任务创建到最后更新的墙钟时间">
+              <div title={METRIC_TIPS.steps}>
+                <span>步骤</span><strong>{metrics.steps.done}/{metrics.steps.total}</strong>
+              </div>
+              <div title={METRIC_TIPS.taskDuration}>
                 <span>任务总耗时</span>
                 <strong>{formatDuration(secondsBetween(task.created_at, task.updated_at))}</strong>
               </div>
-              <div title="workflow 创建到完成/终止">
+              <div title={METRIC_TIPS.workflowDuration}>
                 <span>工作流耗时</span><strong>{formatDuration(metrics.duration_seconds)}</strong>
               </div>
-              <div title="工作流耗时扣除纯等待人工介入的时间">
+              <div title={METRIC_TIPS.activeDuration}>
                 <span>工作流有效执行</span>
                 <strong>{formatDuration(metrics.active_duration_seconds
                   ?? Math.max(0, metrics.duration_seconds
                     - (metrics.waiting.excluded_seconds ?? 0)))}</strong>
               </div>
-              <div title="没有角色在推进、纯等待人工审核的时长（区间去重）">
+              <div title={METRIC_TIPS.humanWait}>
                 <span>工作流人工等待</span>
                 <strong>{formatDuration(metrics.waiting.excluded_seconds ?? 0)}</strong>
               </div>
-              <div title="workflow gate 步骤数；任务最终评审不计入审核门">
+              <div title={METRIC_TIPS.gates}>
                 <span>审核门</span><strong>{metrics.gates.total}</strong>
               </div>
-              <div title={metrics.decisions.legacy
-                ? "历史执行没有不可变决策记录，决策数按决策步骤状态与返工次数推算"
-                : "不可变决策记录数"}>
+              <div title={METRIC_TIPS.decisions}>
                 <span>决策</span><strong>{metrics.decisions.total}</strong>
               </div>
-              <div title="workflow 人工决策 + 任务最终人工评审">
+              <div title={METRIC_TIPS.humanInterventions}>
                 <span>人工干预</span>
                 <strong>{metrics.decisions.human_interventions ?? metrics.decisions.human}</strong>
               </div>
-              <div><span>返工</span><strong>{metrics.decisions.rejected}</strong></div>
-              <div title={`任务所有 run：输入 ${metrics.tokens.task_input_tokens ?? 0} + 输出 ${metrics.tokens.task_output_tokens ?? 0} + 缓存读取 ${metrics.tokens.task_cache_read_tokens ?? 0} + 缓存写入 ${metrics.tokens.task_cache_creation_tokens ?? 0}`}>
+              <div title={METRIC_TIPS.rework}>
+                <span>返工</span><strong>{metrics.decisions.rejected}</strong>
+              </div>
+              <div title={`${METRIC_TIPS.taskTokens}\n\n当前构成：输入 ${fmt(metrics.tokens.task_input_tokens)} + 输出 ${fmt(metrics.tokens.task_output_tokens)} + 缓存读取 ${fmt(metrics.tokens.task_cache_read_tokens)} + 缓存写入 ${fmt(metrics.tokens.task_cache_creation_tokens)}`}>
                 <span>任务 Token</span><strong>{tokenTask.toLocaleString("en-US")}</strong>
               </div>
-              <div title={`仅 workflow 步骤关联的 run：输入 ${metrics.tokens.input_tokens ?? 0} + 输出 ${metrics.tokens.output_tokens ?? 0} + 缓存读取 ${metrics.tokens.cache_read_tokens ?? 0} + 缓存写入 ${metrics.tokens.cache_creation_tokens ?? 0}`}>
+              <div title={`${METRIC_TIPS.executionTokens}\n\n当前构成：输入 ${fmt(metrics.tokens.input_tokens)} + 输出 ${fmt(metrics.tokens.output_tokens)} + 缓存读取 ${fmt(metrics.tokens.cache_read_tokens)} + 缓存写入 ${fmt(metrics.tokens.cache_creation_tokens)}`}>
                 <span>执行 Token</span><strong>{tokenExec.toLocaleString("en-US")}</strong>
               </div>
               {metrics.gates.total === 0 && (

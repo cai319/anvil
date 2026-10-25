@@ -2669,3 +2669,10 @@ details.replay-event-body > div { margin-top: 4px; }
 .replay-intro, .replay-end { color: var(--text-on-paper-muted); }
 .replay-intro strong { color: var(--text-on-paper); }
 .replay-intro .muted { color: var(--text-on-paper-muted); }
+.replay-metrics > div[title],
+.dossier-metrics > div[title] { cursor: help; }
+.replay-metrics > div[title] > span:first-child,
+.dossier-metrics > div[title] > span:first-child {
+  border-bottom: 1px dotted color-mix(in srgb, currentColor 45%, transparent);
+  width: fit-content;
+}

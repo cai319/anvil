@@ -3,6 +3,7 @@ import { api, type WorkflowDossier } from "../api/client";
 import { PageHeader } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { formatDateTime, formatDuration } from "../time";
+import { METRIC_TIPS } from "../metricsHelp";
 
 /**
  * Execution dossier: a read-only, exportable snapshot of one workflow
@@ -93,38 +94,51 @@ export function ExecutionDossier({ id }: { id: string }) {
       {error && <p className="error">{error}</p>}
 
       <div className="dossier-metrics">
-        <div><span>步骤</span><strong>{m.steps.done}/{m.steps.total}</strong></div>
-        <div title="workflow 创建到完成/终止">
+        <div title={METRIC_TIPS.steps}>
+          <span>步骤</span><strong>{m.steps.done}/{m.steps.total}</strong>
+        </div>
+        <div title={METRIC_TIPS.workflowDuration}>
           <span>工作流耗时</span><strong>{formatDuration(m.duration_seconds)}</strong>
         </div>
-        <div title="扣除纯等待人工介入的时间">
+        <div title={METRIC_TIPS.activeDuration}>
           <span>有效执行</span>
           <strong>{formatDuration(m.active_duration_seconds
             ?? Math.max(0, m.duration_seconds - (m.waiting.excluded_seconds ?? 0)))}</strong>
         </div>
-        <div title="没有角色在推进、纯等待人工审核的时长（区间去重）">
+        <div title={METRIC_TIPS.humanWait}>
           <span>工作流人工等待</span><strong>{formatDuration(m.waiting.excluded_seconds ?? 0)}</strong>
         </div>
-        <div><span>最大深度</span><strong>{m.steps.max_depth}</strong></div>
-        <div><span>审核门</span><strong>{m.gates.total}</strong></div>
-        <div><span>决策</span><strong>{m.decisions.total}</strong></div>
-        <div><span>人工干预</span>
+        <div title={METRIC_TIPS.maxDepth}>
+          <span>最大深度</span><strong>{m.steps.max_depth}</strong>
+        </div>
+        <div title={METRIC_TIPS.gates}>
+          <span>审核门</span><strong>{m.gates.total}</strong>
+        </div>
+        <div title={METRIC_TIPS.decisions}>
+          <span>决策</span><strong>{m.decisions.total}</strong>
+        </div>
+        <div title={METRIC_TIPS.humanInterventions}>
+          <span>人工干预</span>
           <strong>{m.decisions.human_interventions ?? m.decisions.human}</strong>
         </div>
-        <div><span>打回</span><strong>{m.decisions.rejected}</strong></div>
-        <div title="仅 workflow 步骤关联 run：输入 + 输出 + 缓存读取 + 缓存写入">
+        <div title={METRIC_TIPS.rework}>
+          <span>打回</span><strong>{m.decisions.rejected}</strong>
+        </div>
+        <div title={METRIC_TIPS.executionTokens}>
           <span>执行 Token</span>
           <strong>{(m.tokens.total_tokens
             ?? (m.tokens.input_tokens ?? 0) + (m.tokens.output_tokens ?? 0)
           ).toLocaleString("en-US")}</strong>
         </div>
-        <div title="该任务所有 run（含规划、最终验收与未挂步骤的会话）">
+        <div title={METRIC_TIPS.taskTokens}>
           <span>任务 Token</span>
           <strong>{(m.tokens.task_total_tokens
             ?? (m.tokens.task_input_tokens ?? 0) + (m.tokens.task_output_tokens ?? 0)
           ).toLocaleString("en-US")}</strong>
         </div>
-        <div><span>切片步骤</span><strong>{m.steps.generated_slices}</strong></div>
+        <div title={METRIC_TIPS.generatedSlices}>
+          <span>切片步骤</span><strong>{m.steps.generated_slices}</strong>
+        </div>
       </div>
 
       <section className="dossier-section">
