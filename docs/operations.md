@@ -107,7 +107,7 @@ cd C:\path\to\aliceAgent\dev\dist\anvil-dist
   `notes/`（写成 `notes/foo.md` 也会规范化为 `foo.md`）。
 - `anvil knowledge search "<关键词>" [--task ID] [--kind ...] [--tags ...]` 按角色/任务
   scope 检索；不传 `--task` 时只返回 role-scoped 知识。
-- `anvil knowledge index [--task ID]` 查看各 kind 计数与最近笔记。
+- `anvil knowledge index|list [--task ID]` 查看各 kind 计数与最近笔记（`list` 为别名）。
 - `anvil knowledge reindex [--dry-run] [--prune]` 扫描角色 `notes/**/*.md` 重建索引；
   直接编辑文件后使用。`--prune` 会删除磁盘上已不存在的文件的索引行。
 - 任务快照（`notes/knowledge/<task>/`）只对同一任务可见；普通 `notes/` 是 role scope，

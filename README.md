@@ -238,8 +238,8 @@ anvil task claim $ANVIL_TASK_ID
 anvil task heartbeat
 anvil inbox check $ANVIL_TASK_ID
 anvil inbox commit $ANVIL_TASK_ID --up-to <id>
-anvil task comment $ANVIL_TASK_ID "进展"
-anvil task mention $ANVIL_TASK_ID --to <role> "请确认接口"
+anvil task comment $ANVIL_TASK_ID "进展"          # 也可用 --message "进展"
+anvil task mention $ANVIL_TASK_ID --to <role> "请确认接口"  # 也可用 --message
 anvil task submit $ANVIL_TASK_ID "完成摘要"
 anvil step submit <workflow-id> <step-id> --summary "步骤完成"
 anvil step plan <workflow-id> <plan-step-id> --file slices.json

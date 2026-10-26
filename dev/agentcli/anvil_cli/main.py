@@ -218,10 +218,13 @@ def task_cmd(
     assignees: str = typer.Option(None, "--assignees",
                                   help="团队角色（create / assign 用；逗号分隔；assign 仅限现有角色）"),
     summary: str = typer.Option(None, "--summary", help="submit 摘要"),
+    message: str = typer.Option(None, "--message", "-m",
+                                help="comment/mention 正文（等价位置参数 body）"),
     paths: str = typer.Option(None, "--paths", help="认领范围路径（逗号分隔）"),
     force: bool = typer.Option(False, "--force", help="delete 强制；comment/mention 知情越过 held"),
     expect_activity: int = typer.Option(None, "--expect-activity",
                                         help="Held Draft：发送时依据的最新活动 id"),
+    kind: str = typer.Option(None, "--kind", help="knowledge-write 的知识类型"),
     tldr: str = typer.Option(None, "--tldr", help="knowledge-write 的一句话摘要"),
     fields: str = typer.Option(None, "--fields", help="knowledge-write 的字段 JSON"),
     knowledge_id: str = typer.Option(None, "--id", help="knowledge-delete 的知识 id"),
@@ -237,6 +240,10 @@ def task_cmd(
     if action in needs_target and not tid:
         typer.echo(f"task {action} 需要任务 id", err=True)
         raise typer.Exit(2)
+    if message is not None and action not in ("comment", "mention"):
+        typer.echo(f"task {action} 不支持 --message；请用位置参数或对应选项", err=True)
+        raise typer.Exit(2)
+    body_text = body if body is not None else message
     method, path, payload = "GET", "/api/v1/tasks", None
     params = None
     if action == "list":
@@ -290,18 +297,18 @@ def task_cmd(
     elif action == "submit":
         method, path, payload = "POST", f"/api/v1/tasks/{tid}/submit", {"summary": summary or body}
     elif action == "comment":
-        if body and "@" in body:
+        if body_text and "@" in body_text:
             typer.echo(
                 "warning: 评论中的 @ 只是文本，不会唤醒角色；请改用 "
                 "`anvil task mention <task-id> --to <role> \"...\"`。", err=True)
-        payload = {"body": body}
+        payload = {"body": body_text}
         if expect_activity:
             payload["expect_activity_id"] = expect_activity
         if force:
             payload["force"] = True
         method, path = "POST", f"/api/v1/tasks/{tid}/comment"
     elif action == "mention":
-        payload = {"target": to, "message": body}
+        payload = {"target": to, "message": body_text}
         if expect_activity:
             payload["expect_activity_id"] = expect_activity
         if force:
@@ -473,7 +480,7 @@ def knowledge_cmd(
                                       help="card-validate 按 approve 必填项校验"),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    """anvil knowledge <search|show|index|reindex|repo-list|repo-show|repo-suggest|card-template|card-validate> ..."""
+    """anvil knowledge <search|show|index|list|reindex|repo-list|repo-show|repo-suggest|card-template|card-validate> ..."""
     if action == "search":
         params = {
             "q": query or "", "scope": scope, "limit": limit,
@@ -517,7 +524,7 @@ def knowledge_cmd(
         if role:
             params["role"] = role
         _emit(_call("GET", f"/api/v1/me/knowledge/{note_id}", params=params), json_out)
-    elif action == "index":
+    elif action in ("index", "list"):
         params = {}
         if task or DEFAULT_TASK:
             params["task_id"] = task or DEFAULT_TASK
@@ -558,7 +565,12 @@ def knowledge_cmd(
         if result.get("errors"):
             raise typer.Exit(3)
     else:
-        typer.echo("unknown knowledge action: " + action, err=True)
+        typer.echo(
+            f"unknown knowledge action: {action}\n"
+            "可用动作: search, show, index (别名 list), reindex, repo-list, "
+            "repo-show, repo-suggest, card-template, card-validate",
+            err=True,
+        )
         raise typer.Exit(2)
 
 

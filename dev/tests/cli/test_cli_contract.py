@@ -37,6 +37,7 @@ CONTRACT = {
     "knowledge show": (["knowledge", "show", "--id", "n1"], "GET",
                        f"{API}/me/knowledge/n1"),
     "knowledge index": (["knowledge", "index"], "GET", f"{API}/me/knowledge/index"),
+    "knowledge list": (["knowledge", "list"], "GET", f"{API}/me/knowledge/index"),
     "knowledge reindex": (["knowledge", "reindex"], "POST",
                           f"{API}/me/knowledge/reindex"),
     "lesson propose": (["lesson", "propose", "x"], "POST", f"{API}/lessons/pending"),
@@ -73,10 +74,16 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     forced_status = 200
     requests: list[tuple[str, str]] = []
+    bodies: list[dict | None] = []
 
     def _handle(self) -> None:
         n = int(self.headers.get("Content-Length", 0) or 0)
-        self.rfile.read(n) if n else None
+        raw = self.rfile.read(n) if n else b""
+        try:
+            parsed = json.loads(raw) if raw else None
+        except json.JSONDecodeError:
+            parsed = None
+        type(self).bodies.append(parsed)
         type(self).requests.append((self.command, urlsplit(self.path).path))
         body = json.dumps({"ok": True}).encode()
         self.send_response(type(self).forced_status)
@@ -94,6 +101,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 @pytest.fixture
 def mock_backend():
     _Handler.requests = []
+    _Handler.bodies = []
     _Handler.forced_status = 200
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -124,6 +132,36 @@ def test_command_maps_to_endpoint(name, mock_backend):
     r = _run(args, mock_backend)
     assert r.returncode == EXIT["ok"], f"{name}: stderr={r.stderr!r}"
     assert (method, path) in _Handler.requests, f"{name}: 实际请求 {_Handler.requests}"
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+def test_unknown_knowledge_action_shows_supported_actions():
+    """拼错 action 时给出可用动作，避免 Agent 只拿到一句 unknown 后盲试。"""
+    env = {**os.environ, "ANVIL_ENDPOINT": "http://127.0.0.1:1"}
+    r = subprocess.run(
+        [ANVIL_BIN, "knowledge", "bogus"], env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert r.returncode == EXIT["usage"]
+    assert "unknown knowledge action: bogus" in r.stderr
+    assert "search" in r.stderr and "list" in r.stderr
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+def test_task_comment_accepts_message_option(mock_backend):
+    """comment 除位置参数外接受 --message，避免 Agent 凭直觉传参失败。"""
+    r = _run(["task", "comment", "T-0001", "--message", "hello"], mock_backend)
+    assert r.returncode == EXIT["ok"], r.stderr
+    assert _Handler.bodies[-1] == {"body": "hello"}
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+def test_task_mention_accepts_message_option(mock_backend):
+    """mention 同样接受 --message 作为正文。"""
+    r = _run(["task", "mention", "T-0001", "--to", "qa-role",
+              "--message", "hi"], mock_backend)
+    assert r.returncode == EXIT["ok"], r.stderr
+    assert _Handler.bodies[-1] == {"target": "qa-role", "message": "hi"}
 
 
 @pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
