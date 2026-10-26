@@ -23,4 +23,21 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // React Flow 只在模板/工作流图页面使用；拆出独立 vendor chunk，
+        // 避免单个入口包超过 Vite 500 kB 告警阈值，也便于浏览器缓存。
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (id.includes("@xyflow")) return "vendor-flow";
+          // react-dom 依赖 scheduler；react 生态放同一 chunk，避免循环 chunk。
+          if (/node_modules\/(react|react-dom|scheduler|react-is|use-sync-external-store)\//.test(id)) {
+            return "vendor-react";
+          }
+          return "vendor";
+        },
+      },
+    },
+  },
 });

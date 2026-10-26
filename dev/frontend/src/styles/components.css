@@ -2,6 +2,7 @@
 
 /* ===== 文本上下文 ===== */
 .muted { color: var(--text-on-ink-muted); }
+.page-loading { padding: 24px 4px; }
 .card .muted,
 .role-card .muted,
 .run-card .muted,

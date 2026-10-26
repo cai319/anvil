@@ -1,26 +1,45 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { api, subscribeEvents } from "./api/client";
 import { installLinkInterceptor, setRouteListener } from "./router";
 import { APP_VERSION } from "./version";
 import { Icon, type IconName } from "./components/Icon";
-import { ActivityHistory } from "./pages/ActivityHistory";
-import { AgentSessions } from "./pages/AgentSessions";
-import { Channels } from "./pages/Channels";
-import { Decompose } from "./pages/Decompose";
-import { WorkflowTemplates } from "./pages/WorkflowTemplates";
-import { Governance } from "./pages/Governance";
-import { Inbox } from "./pages/Inbox";
-import { Knowledge } from "./pages/Knowledge";
-import { Lobby } from "./pages/Lobby";
-import { Reminders } from "./pages/Reminders";
-import { Roles } from "./pages/Roles";
-import { Runtimes } from "./pages/Runtimes";
-import { RunSession } from "./pages/RunSession";
-import { TaskDetail } from "./pages/TaskDetail";
-import { Tooling } from "./pages/Tooling";
-import { ExecutionDossier } from "./pages/ExecutionDossier";
-import { TaskReplay } from "./pages/TaskReplay";
 import { TokenResetDialog } from "./components/TokenResetDialog";
+
+// 路由级懒加载：首屏只加载外壳；页面与 React Flow 等重依赖按需下载。
+const ActivityHistory = lazy(() => import("./pages/ActivityHistory")
+  .then((m) => ({ default: m.ActivityHistory })));
+const AgentSessions = lazy(() => import("./pages/AgentSessions")
+  .then((m) => ({ default: m.AgentSessions })));
+const Channels = lazy(() => import("./pages/Channels")
+  .then((m) => ({ default: m.Channels })));
+const Decompose = lazy(() => import("./pages/Decompose")
+  .then((m) => ({ default: m.Decompose })));
+const WorkflowTemplates = lazy(() => import("./pages/WorkflowTemplates")
+  .then((m) => ({ default: m.WorkflowTemplates })));
+const Governance = lazy(() => import("./pages/Governance")
+  .then((m) => ({ default: m.Governance })));
+const Inbox = lazy(() => import("./pages/Inbox")
+  .then((m) => ({ default: m.Inbox })));
+const Knowledge = lazy(() => import("./pages/Knowledge")
+  .then((m) => ({ default: m.Knowledge })));
+const Lobby = lazy(() => import("./pages/Lobby")
+  .then((m) => ({ default: m.Lobby })));
+const Reminders = lazy(() => import("./pages/Reminders")
+  .then((m) => ({ default: m.Reminders })));
+const Roles = lazy(() => import("./pages/Roles")
+  .then((m) => ({ default: m.Roles })));
+const Runtimes = lazy(() => import("./pages/Runtimes")
+  .then((m) => ({ default: m.Runtimes })));
+const RunSession = lazy(() => import("./pages/RunSession")
+  .then((m) => ({ default: m.RunSession })));
+const TaskDetail = lazy(() => import("./pages/TaskDetail")
+  .then((m) => ({ default: m.TaskDetail })));
+const Tooling = lazy(() => import("./pages/Tooling")
+  .then((m) => ({ default: m.Tooling })));
+const ExecutionDossier = lazy(() => import("./pages/ExecutionDossier")
+  .then((m) => ({ default: m.ExecutionDossier })));
+const TaskReplay = lazy(() => import("./pages/TaskReplay")
+  .then((m) => ({ default: m.TaskReplay })));
 
 type Route =
   | { page: "lobby" }
@@ -337,6 +356,7 @@ export default function App() {
         </header>
 
         <main className={`content ${route.page === "task" ? "content-task" : route.page === "replay" ? "content-replay" : (route.page === "roles" || route.page === "channels") ? "content-roles" : route.page === "lobby" ? "content-lobby" : route.page === "tooling" ? "content-tooling" : route.page === "governance" ? "content-governance" : route.page === "reminders" ? "content-reminders" : route.page === "knowledge" ? "content-knowledge" : route.page === "templates" ? "content-templates" : ""}`}>
+          <Suspense fallback={<p className="muted page-loading" role="status">加载中…</p>}>
           {route.page === "inbox" ? (
             <Inbox key={`inbox-${pageKey}`} />
           ) : route.page === "activity" ? (
@@ -372,6 +392,7 @@ export default function App() {
           ) : (
             <Lobby key={`lobby-${pageKey}`} />
           )}
+          </Suspense>
         </main>
       </div>
 
