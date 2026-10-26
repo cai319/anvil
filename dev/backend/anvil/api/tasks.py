@@ -340,13 +340,39 @@ def cancel_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(require_hum
 
 
 @router.post("/{tid}/reopen", response_model=TaskOut)
-def reopen_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(require_human)):
+def reopen_task(tid: str, request: Request, conn=Depends(get_db),
+                auth: Auth = Depends(require_human)):
     try:
         result = services.tasks.reopen(conn, tid, auth.role)
     except LookupError:
         raise HTTPException(status_code=404, detail="task not found")
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    if result["status"] == "in_progress":
+        # 重开即接回原执行：立即唤醒挂起/空闲的步骤 run，不等 10 分钟 watchdog。
+        orch = getattr(request.app.state, "orchestrator", None)
+        if orch:
+            from ..services import daemon as daemon_service
+            mgr = daemon_service.get_manager()
+            for item in services.workflow.resume_runs_for_task(conn, tid):
+                if item.get("run_status") == "running":
+                    # 常驻进程仍在忙（或排队中）时不要打断；空闲/失联才 resume。
+                    if mgr is None:
+                        continue
+                    try:
+                        st = mgr.status(item["role_slug"])
+                    except Exception:  # noqa: BLE001
+                        st = {}
+                    if st.get("switching"):
+                        continue
+                    if st.get("alive") and (
+                            st.get("status") == "busy"
+                            or int(st.get("queue_len") or 0) > 0):
+                        continue
+                try:
+                    orch.pump(request.app.state.db_path, item["run_id"], "resume", {})
+                except Exception:  # noqa: BLE001 —— 唤醒失败由 scheduler 兜底
+                    pass
     events.publish("task", {"id": tid, "status": result["status"]})
     return result
 

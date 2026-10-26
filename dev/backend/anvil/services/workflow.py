@@ -1639,6 +1639,25 @@ def _advance_locked(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
     return {"started": started, "waiting_human": waiting_human, "done": all_done}
 
 
+def resume_runs_for_task(conn: sqlite3.Connection, task_id: str) -> list[dict]:
+    """重开任务后需要立即唤醒的步骤 run。
+
+    包含 suspended，以及常驻会话仍标记 running 但可能已空闲的 run；
+    调用方需进一步检查进程 busy 状态，避免打断正在工作的角色。
+    """
+    rows = conn.execute(
+        """SELECT s.run_id, s.step_id, s.role_slug, w.id AS workflow_id,
+                  r.status AS run_status, r.native_session_id
+             FROM workflows w
+             JOIN workflow_steps s ON s.workflow_id = w.id
+             JOIN runs r ON r.id = s.run_id
+            WHERE w.task_id=? AND w.status='running' AND s.status='running'
+              AND (r.status='suspended'
+                   OR (r.status='running' AND r.native_session_id LIKE 'rs:%'))""",
+        (task_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def renew_step_lease_for_run(conn: sqlite3.Connection, run_id: str | None,
                              ttl_seconds: float | None = None) -> bool:
     """任务心跳顺带续租当前步骤 lease；run/step 不匹配或已非 running 时不动。"""

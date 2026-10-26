@@ -76,8 +76,9 @@
   支持 `.anvilignore`（仓库根 / 数据目录）与 Anvil 投影产物豁免。
 - 四层闸门口径：角色级（已有）、运行时级、系统级、每日 Token 预算；`GET/PUT /budget`。
 - `POST /tasks/{id}/cancel|reopen`，`GET /tasks/{id}/diff|config-snapshot|bids|activities`。
-  cancel 保留 run/会话；reopen 按最新 workflow 接回：`running → in_progress`（继续原执行，
-  不重新规划）、`done → in_review`、无 workflow / `terminated|failed → todo`。
+  cancel 保留 run/会话；reopen 按最新 workflow 接回：`running → in_progress`（立即
+  resume 挂起/空闲的步骤 run，继续原执行，不重新规划）、`done → in_review`、
+  无 workflow / `terminated|failed → todo`。
 - 任务列表按 type/tag 过滤；审计按 role/action/时间过滤；Token 聚合 `GET /tokens`。
 
 ### 记忆、知识与演化
