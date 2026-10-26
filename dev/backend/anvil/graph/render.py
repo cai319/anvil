@@ -22,6 +22,7 @@ ATTACHMENT_BUDGET = (
 # §7.4 注入给 Agent 的协议说明（约 400 token）。
 PROTOCOL = (
     "你在 Anvil 环境中运行。当前环境变量 ANVIL_TASK_ID 指示你被分配的任务。\n"
+    "CLI 用法不确定时先运行 `anvil <command> -h`（含动作、参数与示例），不要凭直觉猜命令。\n"
     "第一步必须执行 `anvil task claim $ANVIL_TASK_ID` 认领任务（否则无法提交）。\n"
     "再执行 `anvil task show $ANVIL_TASK_ID` 读取完整要求。\n"
     "在当前工作目录（cwd）中完成你的产出（写代码/文档/测试）。\n"
@@ -63,6 +64,8 @@ REPLY_PROTOCOL = (
 STEP_PROTOCOL = (
     "你正在执行一个任务工作流中的「步骤」，不是整个任务。步骤说明里给出了工作流 ID、步骤 ID、"
     "你的角色、依赖、验收标准与具体指令。\n"
+    "CLI 用法不确定时先运行 `anvil <command> -h`（含动作、参数与示例）；"
+    "参数错误会返回 error + hint，按提示修正，不要盲试。\n"
     "先执行 `anvil task show $ANVIL_TASK_ID` 了解任务背景，然后按步骤说明完成产出。\n"
     "## 实时同步（必须遵守）\n"
     "· 开始步骤时立即执行 `anvil task comment $ANVIL_TASK_ID \"开始步骤 <步骤ID>：<计划>\"`。\n"
@@ -91,8 +94,12 @@ STEP_PROTOCOL = (
     "然后 @ 目标角色认领。**不要 claim 你拆给别人的子任务**——单负责人任务一旦被 claim 就是排他的；"
     "若你已 claim 但要让别人执行，先 `anvil task unclaim <id>` 再 @对方。"
     "子任务不进大厅，只在父任务的「子任务」页签展示。\n"
-    "· 需要扩展团队：`anvil role expand --brief \"<一句话定位>\"` 创建新 agent"
-    "（继承你的 runtime；每日配额有限，human 会在任务会话收到通知）。\n"
+    "· 需要扩展团队：先 `anvil role list` 查看已有角色；确需新角色时先 "
+    "`anvil role propose --task $ANVIL_TASK_ID --file roles.json` 提交提案 @human，"
+    "human 反馈/批准后再 `anvil role expand --brief \"<定位>\"` 创建（继承你的 runtime；"
+    "每日配额有限）。\n"
+    "· 角色已存在、任务已有 assignees 时，用 `anvil task assign <id> --assignees <role>` "
+    "加入；命令会自动提交追加提案 @human，批准后重试即可。不要绕过提案直接改写 Roster。\n"
     "## 会话上下文（按需重置）\n"
     "· 唤醒消息可能在任务切换或上下文占用较高时给出会话统计。若当前任务与上一次上下文无关，"
     "或占用过高，先执行 `anvil self reset-context --task $ANVIL_TASK_ID --reason \"...\"`；"

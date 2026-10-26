@@ -130,14 +130,15 @@ def assign_roles(tid: str, body: dict, conn=Depends(get_db),
     return result
 
 
-@router.post("/{tid}/assign-existing", response_model=TaskOut)
+@router.post("/{tid}/assign-existing")
 def assign_existing_roles(tid: str, body: dict, request: Request,
                           conn=Depends(get_db), auth: Auth = Depends(get_auth)):
-    """规划者自行绑定**现有角色**（非重大决策，不需要 human 审批）。
+    """规划者追加**现有角色**；已有 Roster 时先提交角色追加提案给 human。
 
-    仅允许任务 planner 或内置 onboarding 助理在任务尚无 assignees 时调用；
-    只能绑定角色库中已存在且启用的角色，不能创建角色。创建新角色仍需
-    role_suggestion + human 审批（HITL）。
+    - 空 Roster：planner/onboarding 可直接绑定，不需要 HITL。
+    - 已有 Roster：只追加新角色（不替换、不移除）；新增项必须来自 human 已批准的
+      `role_suggestion`（apply_mode=authorize）提案。没有批准时自动创建/更新提案并
+      @human，返回 202；human 反馈/批准后 planner 重试本接口即可。
     """
     task = services.tasks.get(conn, tid)
     if task is None:
@@ -152,11 +153,7 @@ def assign_existing_roles(tid: str, body: dict, request: Request,
     if agent != planner and not services.roles.is_onboarding(conn, agent):
         raise HTTPException(
             status_code=403,
-            detail="only the task planner or onboarding assistant can bind an initial roster")
-    if task.get("assignees"):
-        raise HTTPException(
-            status_code=409,
-            detail="task already has assignees; changing an existing roster requires human /assign")
+            detail="only the task planner or onboarding assistant can bind a roster")
     roles = [str(r).strip() for r in (body.get("roles") or []) if str(r).strip()]
     if not roles:
         raise HTTPException(status_code=422, detail="roles is required")
@@ -169,20 +166,45 @@ def assign_existing_roles(tid: str, body: dict, request: Request,
         if services.roles.is_onboarding(conn, slug):
             raise HTTPException(
                 status_code=409, detail=f"onboarding assistant {slug} cannot join tasks")
-    result = services.tasks.assign_roles(conn, tid, roles)
+
+    existing = list(task.get("assignees") or [])
+    existing_set = set(existing)
+    added = [r for r in roles if r not in existing_set]
+    if existing and added:
+        authorized = services.board.authorized_assignee_additions(conn, tid)
+        missing = [r for r in added if r not in authorized]
+        if missing:
+            draft = services.board.propose_assignee_additions(
+                conn, tid, agent, missing,
+                reason=str(body.get("reason") or "").strip() or None)
+            events.publish("task", {"id": tid, "kind": "assign_proposed", "by": agent})
+            return JSONResponse(status_code=202, content={
+                "status": "pending_review",
+                "task_id": tid,
+                "draft_id": draft.get("id"),
+                "requested_assignees": missing,
+                "message": "任务已有 assignees；角色追加提案已提交给 human。"
+                           "human 反馈/批准后，重新执行 anvil task assign。",
+            })
+
+    result = (services.tasks.add_assignees(conn, tid, roles) if existing
+              else services.tasks.assign_roles(conn, tid, roles))
     summary = "、".join(roles)
     from ..util import jdumps, now_iso
     conn.execute(
         "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
         "VALUES (?,?,?,?,?)",
         (tid, agent, "comment",
-         jdumps({"body": f"基于现有角色库绑定任务 Roster：{summary}。"}), now_iso()),
+         jdumps({"body": (f"在现有 Roster 上追加角色：{summary}。" if existing
+                          else f"基于现有角色库绑定任务 Roster：{summary}。")}),
+         now_iso()),
     )
     conn.execute(
         "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
         "VALUES (?,?,?,?,?)",
         (agent, tid, "task.assign_existing",
-         jdumps({"roles": roles, "planner": planner}), now_iso()),
+         jdumps({"roles": roles, "added": added, "existing": existing,
+                 "planner": planner}), now_iso()),
     )
     conn.commit()
     events.publish("task", {"id": tid, "kind": "assign", "by": agent})

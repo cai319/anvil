@@ -12,7 +12,183 @@ from typing import Any
 import httpx
 import typer
 
-app = typer.Typer(help="Anvil 本地多 Agent 编排服务 CLI", no_args_is_help=True)
+try:  # Typer 0.27+ 内置 click；旧版本仍用外部 click
+    from typer._click.core import Exit as ClickExit
+    from typer._click.exceptions import UsageError as ClickUsageError
+except ImportError:  # pragma: no cover - 兼容 typer<0.27
+    from click.exceptions import Exit as ClickExit
+    from click.exceptions import UsageError as ClickUsageError
+
+HELP_CTX = {"help_option_names": ["-h", "--help"], "max_content_width": 100}
+
+MAIN_EPILOG = """\b
+常用流程:
+  anvil task list                     查看任务
+  anvil task show <id>                查看任务详情
+  anvil task claim <id>               认领任务（工作流步骤不要 claim）
+  anvil task comment <id> "进展"      同步进展（不唤醒）
+  anvil step show <workflow-id>       查看工作流步骤
+  anvil step submit <wf> <step> --summary "完成"
+  anvil role list                     查看已有角色
+
+规则:
+  · 工作流步骤用 anvil step，不要用 task claim/submit 代替。
+  · 身份由 ANVIL_TOKEN / ANVIL_TASK_ID 环境变量决定；不要伪造角色。
+  · 删除、审批、重置等人类操作需要 human token。
+  · 退出码: 0 成功 / 1 通用失败 / 2 参数错误 / 3 状态冲突 / 4 无权限。
+  · 每个命令都支持 -h / --help，例如 anvil task -h。
+"""
+
+TASK_EPILOG = """\b
+动作:
+  list [--type T] [--tag T]             列出任务
+  show <id>                             查看任务详情
+  create --title "..." [--assignee r]   创建任务或子任务
+  assign <id> --assignees a,b           追加角色；已有 Roster 时自动提案 @human
+  claim | unclaim <id>                  认领/释放（工作流步骤不要 claim）
+  submit <id> "摘要"                    提交任务（不是工作流步骤）
+  comment <id> "正文"                   评论，不唤醒任何人
+  mention <id> --to <role> "正文"       @提及并唤醒目标角色
+  archive | unarchive <id>              归档/取消归档（human）
+  knowledge-list <id>                   任务共享知识
+  knowledge-write <id> --title --tldr --kind
+  knowledge-delete <id> --id <kid>      删除任务知识（human）
+
+示例:
+  anvil task create "修复登录超时" --assignee developer --workspace W-1
+  anvil task comment $ANVIL_TASK_ID "已完成接口联调"
+  anvil task mention $ANVIL_TASK_ID --to tester "请复跑回归"
+
+提示: 工作流任务先看 `anvil step show <workflow-id>`；步骤操作不要用 task claim/submit。
+任务已有 assignees 时，assign 只追加新角色，并先自动提交提案 @human；批准后重试即可。
+"""
+
+STEP_EPILOG = """\b
+典型顺序:
+  anvil step show <workflow-id>                 查看步骤状态
+  anvil step plan <wf> <plan-step> --file plan.json
+  anvil step submit <wf> <step> --summary "完成"
+  anvil step decide <wf> <decision-step> --approve --feedback "通过"
+  anvil step escalate <wf> <decision-step> --reason "证据不足"
+
+规则:
+  · 只对 running 步骤操作；409 时先用 step show 确认状态，不要反复重试。
+  · plan_slices 用 step plan；decision 用 step decide；普通步骤用 step submit。
+  · 工作流步骤不要 task claim / task submit，也不要在切片里指定角色。
+"""
+
+KNOWLEDGE_EPILOG = """\b
+动作:
+  search "关键词" --task ID             检索自己的角色/任务知识
+  show --id <note-id>                   查看一条笔记/知识
+  index | list                          角色知识计数与最近笔记
+  reindex --dry-run                     文件变更后重建索引
+  repo-list                             知识仓库列表
+  repo-show --repo <name>               仓库详情
+  repo-suggest "任务标题"               推荐知识仓库
+  card-template --kind convention       知识卡模板
+  card-validate --file card.json        校验知识卡
+
+示例:
+  anvil knowledge search "登录 超时" --task $ANVIL_TASK_ID --limit 5
+  anvil knowledge list
+  anvil knowledge card-template --kind sop
+"""
+
+NOTE_EPILOG = """\b
+示例:
+  anvil note write notes/login-timeout.md --content-file /tmp/n.md \\
+    --kind module_knowledge --scope role --tags auth,timeout
+  anvil note write notes/task.md --content-file /tmp/n.md --scope task \\
+    --task $ANVIL_TASK_ID --practice-task $ANVIL_TASK_ID --practice-run $ANVIL_RUN_ID
+
+规则:
+  · 文件是真相层；写入会同步文件与索引。
+  · 角色知识必须有成功实践与提炼证据；无证据只能写 draft。
+  · 不要直接导入其他角色的 notes；参考可以，写入自己的知识库必须经过实践。
+"""
+
+SELF_EPILOG = """\b
+动作:
+  show | whoami                       当前身份、任务与会话
+  edit-instruction --file <path>      修改自己的指令（human 审批）
+  propose --field <f> --file <path>   提交角色演化提案
+  reset-context --task <id>           清空当前任务上下文
+
+规则:
+  · 身份来自 ANVIL_TOKEN / ANVIL_AGENT_SLUG；不要伪造角色。
+  · 上下文接近上限或切换任务时先 reset-context，避免旧上下文污染。
+"""
+
+REMINDER_EPILOG = """\b
+示例:
+  anvil reminder add --in 30m --prompt "检查构建结果"
+  anvil reminder add --cron "0 9 * * *" --prompt "每日站会"
+  anvil reminder list
+  anvil reminder remove <id>
+  anvil reminder fire-now <id>
+
+规则: 定时提醒 run 没有任务（task=None），不要 claim/submit；按提示维护知识库后退出。
+"""
+
+LESSON_EPILOG = """\b
+示例:
+  anvil lesson propose "评审前先复算证据哈希" --tags review,evidence
+  anvil lesson propose "跨角色交接只认 step submit 的冻结 hash" --repo shared
+
+规则: 共享经验进入 human 审批队列；任务结论留在 task snapshot，不要写这里。
+"""
+
+WORKSPACE_EPILOG = """\b
+示例:
+  anvil workspace list
+  anvil workspace create main --repo gomoku
+  anvil workspace knowledge list <workspace-id>
+  anvil workspace knowledge propose <id> --title "..." --tldr "..." --kind convention
+  anvil workspace knowledge approve <id> <knowledge-id>    # human
+
+规则: 频道是任务归属 + 知识作用域，不是聊天室；任务通过 `task create --workspace` 绑定。
+"""
+
+ROLE_EPILOG = """\b
+示例:
+  anvil role list --json
+  anvil role list | python3 -c "import sys,json; print([r['slug'] for r in json.load(sys.stdin)])"
+  anvil role propose --task $ANVIL_TASK_ID --file /tmp/roles.json
+  anvil role expand --brief "需要一个安全评审角色" --task $ANVIL_TASK_ID
+
+规则:
+  · role propose 先提交提案 @human；批准后再 role expand 创建、task assign 加入任务。
+  · role expand 继承你的 runtime/permission_mode，新角色为普通 member。
+  · 每日扩展配额有限；创建后会在关联任务 @human。
+"""
+
+class GuidedTyper(typer.Typer):
+    """Typer 参数错误统一追加 --help 提示，减少 Agent 凭直觉猜命令。"""
+
+    def __call__(self, *args, **kwargs):
+        kwargs.setdefault("standalone_mode", False)
+        try:
+            return super().__call__(*args, **kwargs)
+        except ClickUsageError as exc:
+            exc.show()
+            typer.echo("hint: 运行 `anvil <command> -h` 查看完整用法与示例。",
+                       err=True)
+            raise SystemExit(exc.exit_code)
+        except ClickExit as exc:
+            raise SystemExit(exc.exit_code)
+
+
+app = GuidedTyper(help="Anvil 本地多 Agent 编排服务 CLI", no_args_is_help=True,
+                  context_settings=HELP_CTX, epilog=MAIN_EPILOG)
+
+
+def _usage_error(message: str, hint: str | None = None) -> None:
+    """统一的参数错误：一行原因 + 一行可执行提示，退出码 2。"""
+    typer.echo(f"error: {message}", err=True)
+    if hint:
+        typer.echo(f"hint: {hint}", err=True)
+    raise typer.Exit(2)
 
 ENDPOINT = os.environ.get("ANVIL_ENDPOINT", "http://127.0.0.1:7317")
 # 手动运行时（未注入 ANVIL_TOKEN）也带一个非空 session 头，满足本地轻校验；
@@ -50,15 +226,43 @@ def _exit_for(status: int) -> int:
     return 1
 
 
+def _server_hint(status: int) -> str | None:
+    if status in (400, 422):
+        return "参数不合法；运行 `anvil <command> --help` 查看用法与示例。"
+    if status == 401:
+        return "会话缺失或过期；检查 ANVIL_TOKEN 是否与后端一致。"
+    if status == 403:
+        return "权限不足；人类操作需 human token，角色操作需对应 run token。"
+    if status == 404:
+        return "目标不存在或不属于当前任务；检查 id 是否正确。"
+    if status == 409:
+        return "状态冲突；先用 task show / step show 确认当前状态，不要盲目重试。"
+    if status >= 500:
+        return "后端内部错误；查看 anvil 服务端日志。"
+    return None
+
+
 def _call(method: str, path: str, body: Any = None, params: dict | None = None) -> Any:
     try:
         with _client() as c:
             r = c.request(method, path, json=body, params=params, headers=_headers())
     except httpx.HTTPError as exc:
-        typer.echo(f"error: {exc}", err=True)
+        typer.echo(f"error: 无法连接后端: {exc}", err=True)
+        typer.echo("hint: 确认后端已启动（cd dev/backend && python run_server.py），"
+                   "或设置 ANVIL_ENDPOINT。", err=True)
         raise typer.Exit(1)
     if r.status_code >= 300:
-        typer.echo(r.text, err=True)
+        detail = r.text
+        try:
+            payload = r.json()
+            if isinstance(payload, dict):
+                detail = payload.get("detail") or payload.get("message") or r.text
+        except ValueError:
+            pass
+        typer.echo(f"error: {detail}", err=True)
+        hint = _server_hint(r.status_code)
+        if hint:
+            typer.echo(f"hint: {hint}", err=True)
         raise typer.Exit(_exit_for(r.status_code))
     if not r.content:
         return None
@@ -134,7 +338,8 @@ def _role_exists(slug: str) -> bool:
         return False
 
 
-@app.command("self")
+@app.command("self", help="当前身份、会话与自我维护。", epilog=SELF_EPILOG,
+              short_help="身份/会话：show/reset-context")
 def self_cmd(
     action: str = typer.Argument("show"),
     file: str = typer.Option(None, "--file", help="instruction / proposal 内容文件"),
@@ -150,23 +355,24 @@ def self_cmd(
         _emit(_call("GET", "/api/v1/me"), json_out)
     elif action == "edit-instruction":
         if not file:
-            typer.echo("self edit-instruction 需要 --file", err=True)
-            raise typer.Exit(2)
+            _usage_error(
+                "self edit-instruction 需要 --file",
+                "传入本地文件路径；例如 `anvil self edit-instruction --file /tmp/instruction.md`。")
         try:
             content = open(file, encoding="utf-8").read()
         except OSError as exc:
-            typer.echo(f"error: {exc}", err=True)
-            raise typer.Exit(2)
+            _usage_error(f"无法读取 --file: {exc}", "检查文件路径与读权限。")
         _emit(_call("POST", "/api/v1/me/instruction", {"content": content}), json_out)
     elif action == "propose":
         if not field or not file:
-            typer.echo("self propose 需要 --field 与 --file", err=True)
-            raise typer.Exit(2)
+            _usage_error(
+                "self propose 需要 --field 与 --file",
+                "例如 `anvil self propose --field responsibilities --file /tmp/proposal.json`；"
+                "文件内容必须是 JSON。")
         try:
             proposed = json.loads(open(file, encoding="utf-8").read())
         except (OSError, json.JSONDecodeError) as exc:
-            typer.echo(f"error: {exc}", err=True)
-            raise typer.Exit(2)
+            _usage_error(f"无法读取提案 JSON: {exc}", "检查 --file 路径与 JSON 语法。")
         _emit(_call("POST", "/api/v1/proposals", {
             "field": field, "proposed": proposed,
             "rationale": rationale, "risk": risk,
@@ -174,14 +380,16 @@ def self_cmd(
     elif action == "reset-context":
         tid = task or DEFAULT_TASK
         if not tid:
-            typer.echo("self reset-context 需要 --task 或 $ANVIL_TASK_ID", err=True)
-            raise typer.Exit(2)
+            _usage_error(
+                "self reset-context 需要任务 id",
+                "传 --task <id>，或设置 ANVIL_TASK_ID。")
         _emit(_call("POST", "/api/v1/me/session/reset", {
             "task_id": tid, "reason": reason or "",
         }), json_out)
     else:
-        typer.echo(f"unknown self action: {action}", err=True)
-        raise typer.Exit(2)
+        _usage_error(
+            f"unknown self action: {action}",
+            "可用动作: show/edit-instruction/propose/reset-context。运行 `anvil self -h`。")
 
 
 @app.command("whoami")
@@ -193,44 +401,76 @@ def whoami_cmd(json_out: bool = typer.Option(False, "--json", help="输出 JSON"
 # ---- task ---------------------------------------------------------------
 
 
-@app.command("task")
+@app.command("task",
+              help="任务操作入口（动作与示例见下方）。",
+              epilog=TASK_EPILOG,
+              short_help="任务：列表/创建/认领/评论/提交/知识")
 def task_cmd(
     action: str = typer.Argument("list"),
     target: str = typer.Argument(None),
     body: str = typer.Argument(None),
-    on: str = typer.Option(None, "--on", help="依赖的任务 id"),
-    to: str = typer.Option(None, "--to", help="@提及的目标角色"),
-    type_: str = typer.Option(None, "--type", help="任务类型"),
-    tag: str = typer.Option(None, "--tag", help="按标签过滤 list"),
-    tags: str = typer.Option(None, "--tags", help="create 的标签（逗号分隔）"),
-    repo: str = typer.Option(None, "--repo", help="create 的执行仓库（单值）"),
-    workspace: str = typer.Option(None, "--workspace", help="create 的频道/workspace id"),
-    base_branch: str = typer.Option(None, "--base-branch", help="create 的基线分支"),
-    plan_first: bool = typer.Option(False, "--plan-first", help="创建后先由 planner 规划"),
-    planner: str = typer.Option(None, "--planner", help="create 的 planner 角色"),
+    type_: str = typer.Option(None, "--type", help="list 过滤：任务类型",
+                              rich_help_panel="查询 / 创建"),
+    tag: str = typer.Option(None, "--tag", help="list 过滤：标签",
+                            rich_help_panel="查询 / 创建"),
+    tags: str = typer.Option(None, "--tags", help="create：标签（逗号分隔）",
+                             rich_help_panel="查询 / 创建"),
+    repo: str = typer.Option(None, "--repo", help="create：执行仓库（单值）",
+                             rich_help_panel="查询 / 创建"),
+    workspace: str = typer.Option(None, "--workspace", help="create：频道/workspace id",
+                                  rich_help_panel="查询 / 创建"),
+    base_branch: str = typer.Option(None, "--base-branch", help="create：基线分支",
+                                    rich_help_panel="查询 / 创建"),
+    plan_first: bool = typer.Option(False, "--plan-first",
+                                    help="create：先由 planner 规划",
+                                    rich_help_panel="查询 / 创建"),
+    planner: str = typer.Option(None, "--planner", help="create：planner 角色",
+                                rich_help_panel="查询 / 创建"),
     knowledge_repos: str = typer.Option(
-        None, "--knowledge-repos", help="create 的知识仓库（逗号分隔；人工指定会加锁）"),
-    parent: str = typer.Option(None, "--parent", help="父任务 id"),
-    title: str = typer.Option(None, "--title", help="任务标题（create 用）"),
-    description: str = typer.Option(None, "--description", help="任务描述（create 用）"),
+        None, "--knowledge-repos", help="create：知识仓库（逗号分隔；人工指定会加锁）",
+        rich_help_panel="查询 / 创建"),
+    parent: str = typer.Option(None, "--parent", help="父任务 id（create 子任务）",
+                               rich_help_panel="查询 / 创建"),
+    title: str = typer.Option(None, "--title", help="create：任务标题",
+                              rich_help_panel="查询 / 创建"),
+    description: str = typer.Option(None, "--description", help="create：任务描述",
+                                    rich_help_panel="查询 / 创建"),
     assignee: str = typer.Option(None, "--assignee",
-                                 help="子任务执行角色（create 用；单负责人）"),
+                                 help="create：单负责人角色",
+                                 rich_help_panel="查询 / 创建"),
     assignees: str = typer.Option(None, "--assignees",
-                                  help="团队角色（create / assign 用；逗号分隔；assign 仅限现有角色）"),
-    summary: str = typer.Option(None, "--summary", help="submit 摘要"),
+                                  help="create/assign：团队角色（逗号分隔；assign 仅限现有角色）",
+                                  rich_help_panel="查询 / 创建"),
+    on: str = typer.Option(None, "--on", help="block：依赖的任务 id",
+                           rich_help_panel="执行 / 协作"),
+    to: str = typer.Option(None, "--to", help="mention：目标角色或 human",
+                           rich_help_panel="执行 / 协作"),
+    summary: str = typer.Option(None, "--summary", help="submit：摘要",
+                                rich_help_panel="执行 / 协作"),
     message: str = typer.Option(None, "--message", "-m",
-                                help="comment/mention 正文（等价位置参数 body）"),
-    paths: str = typer.Option(None, "--paths", help="认领范围路径（逗号分隔）"),
-    force: bool = typer.Option(False, "--force", help="delete 强制；comment/mention 知情越过 held"),
+                                help="comment/mention：正文（等价位置参数 body）",
+                                rich_help_panel="执行 / 协作"),
+    paths: str = typer.Option(None, "--paths", help="claim：认领范围路径（逗号分隔）",
+                              rich_help_panel="执行 / 协作"),
+    force: bool = typer.Option(False, "--force",
+                               help="delete 强制；comment/mention 知情越过 held",
+                               rich_help_panel="执行 / 协作"),
     expect_activity: int = typer.Option(None, "--expect-activity",
-                                        help="Held Draft：发送时依据的最新活动 id"),
-    kind: str = typer.Option(None, "--kind", help="knowledge-write 的知识类型"),
-    tldr: str = typer.Option(None, "--tldr", help="knowledge-write 的一句话摘要"),
-    fields: str = typer.Option(None, "--fields", help="knowledge-write 的字段 JSON"),
-    knowledge_id: str = typer.Option(None, "--id", help="knowledge-delete 的知识 id"),
+                                        help="Held Draft：发送时依据的最新活动 id",
+                                        rich_help_panel="执行 / 协作"),
+    kind: str = typer.Option(None, "--kind", help="knowledge-write：知识类型",
+                             rich_help_panel="任务知识"),
+    tldr: str = typer.Option(None, "--tldr", help="knowledge-write：一句话摘要",
+                             rich_help_panel="任务知识"),
+    fields: str = typer.Option(None, "--fields", help="knowledge-write：字段 JSON",
+                               rich_help_panel="任务知识"),
+    knowledge_id: str = typer.Option(None, "--id", help="knowledge-delete：知识 id",
+                                     rich_help_panel="任务知识"),
     include_subtasks: bool = typer.Option(False, "--include-subtasks",
-                                         help="knowledge-list 包含直接子任务知识"),
-    json_out: bool = typer.Option(False, "--json", help="输出 JSON"),
+                                         help="knowledge-list：包含直接子任务知识",
+                                         rich_help_panel="任务知识"),
+    json_out: bool = typer.Option(False, "--json", help="输出 JSON",
+                                  rich_help_panel="输出"),
 ):
     """anvil task <list|show|create|assign|claim|unclaim|heartbeat|submit|comment|mention|cancel|reopen|delete|block|archive|unarchive|knowledge-list|knowledge-write|knowledge-delete> …"""
     tid = target or DEFAULT_TASK
@@ -238,11 +478,14 @@ def task_cmd(
                     "cancel", "reopen", "delete", "block", "assign", "archive", "unarchive",
                     "knowledge-list", "knowledge-write", "knowledge-delete"}
     if action in needs_target and not tid:
-        typer.echo(f"task {action} 需要任务 id", err=True)
-        raise typer.Exit(2)
+        _usage_error(
+            f"task {action} 需要任务 id",
+            "传入 <id>，或设置 ANVIL_TASK_ID；例如 `anvil task show T-0001`。")
     if message is not None and action not in ("comment", "mention"):
-        typer.echo(f"task {action} 不支持 --message；请用位置参数或对应选项", err=True)
-        raise typer.Exit(2)
+        _usage_error(
+            f"task {action} 不支持 --message",
+            "comment/mention 用位置参数或 --message；submit 用 --summary；"
+            "create 用 --description。运行 `anvil task -h` 查看示例。")
     body_text = body if body is not None else message
     method, path, payload = "GET", "/api/v1/tasks", None
     params = None
@@ -284,8 +527,9 @@ def task_cmd(
     elif action == "assign":
         roles = [x.strip() for x in (assignees or "").split(",") if x.strip()]
         if not roles:
-            typer.echo("task assign 需要 --assignees a,b（仅限现有角色）", err=True)
-            raise typer.Exit(2)
+            _usage_error(
+                "task assign 需要 --assignees a,b",
+                "只接受已存在的角色；例如 `anvil task assign T-0001 --assignees pm,tester`。")
         method, path, payload = "POST", f"/api/v1/tasks/{tid}/assign-existing", {"roles": roles}
     elif action == "claim":
         p = {"paths": [x.strip() for x in paths.split(",")]} if paths else {}
@@ -308,6 +552,11 @@ def task_cmd(
             payload["force"] = True
         method, path = "POST", f"/api/v1/tasks/{tid}/comment"
     elif action == "mention":
+        if not to:
+            _usage_error(
+                "task mention 需要 --to <role|human>",
+                "例如 `anvil task mention T-0001 --to tester \"请复核\"`；"
+                "@ 文本不会唤醒角色。")
         payload = {"target": to, "message": body_text}
         if expect_activity:
             payload["expect_activity_id"] = expect_activity
@@ -323,6 +572,10 @@ def task_cmd(
         if force:
             params = {"force": "true"}
     elif action == "block":
+        if not on:
+            _usage_error(
+                "task block 需要 --on <task-id>",
+                "例如 `anvil task block T-0002 --on T-0001` 表示 T-0002 依赖 T-0001。")
         method, path, payload = "POST", f"/api/v1/tasks/{tid}/deps", {"depends_on": [on]}
     elif action == "archive":
         method, path, payload = "POST", f"/api/v1/tasks/{tid}/archive", {}
@@ -333,28 +586,49 @@ def task_cmd(
         params = {"include_subtasks": "true"} if include_subtasks else None
     elif action == "knowledge-write":
         if not (title and tldr and kind):
-            typer.echo("task knowledge-write 需要 --title --tldr --kind", err=True)
-            raise typer.Exit(2)
+            _usage_error(
+                "task knowledge-write 缺少必填参数",
+                "需要 --title、--tldr、--kind；例如 "
+                "`anvil task knowledge-write T-0001 --title \"登录超时\" "
+                "--tldr \"token 过期未刷新\" --kind task_finding`。")
         parsed_fields: dict = {}
         if fields:
             try:
                 parsed_fields = json.loads(fields)
             except json.JSONDecodeError as exc:
-                typer.echo(f"--fields 必须是 JSON 对象: {exc}", err=True)
-                raise typer.Exit(2)
+                _usage_error(f"--fields 不是合法 JSON: {exc}",
+                             "传 JSON 对象，例如 --fields '{\"finding\":\"...\"}'。")
+            if not isinstance(parsed_fields, dict):
+                _usage_error("--fields 必须是 JSON 对象",
+                             "不要传数组或字符串；例如 --fields '{\"finding\":\"...\"}'。")
         payload = {"title": title, "tldr": tldr, "kind": kind, "fields": parsed_fields}
         if tags:
             payload["tags"] = [x.strip() for x in tags.split(",") if x.strip()]
         method, path = "POST", f"/api/v1/tasks/{tid}/knowledge"
     elif action == "knowledge-delete":
         if not knowledge_id:
-            typer.echo("task knowledge-delete 需要 --id <knowledge-id>", err=True)
-            raise typer.Exit(2)
+            _usage_error(
+                "task knowledge-delete 需要 --id <knowledge-id>",
+                "先 `anvil task knowledge-list <task-id>` 找到 id，再删除。")
         method, path, payload = "DELETE", f"/api/v1/tasks/{tid}/knowledge/{knowledge_id}", None
     else:
-        typer.echo(f"unknown task action: {action}", err=True)
-        raise typer.Exit(2)
-    _emit(_call(method, path, payload, params), json_out)
+        _usage_error(
+            f"unknown task action: {action}",
+            "可用动作: list/show/create/assign/claim/unclaim/heartbeat/submit/"
+            "comment/mention/cancel/reopen/delete/block/archive/unarchive/"
+            "knowledge-list/knowledge-write/knowledge-delete。运行 `anvil task -h` 查看示例。")
+    result = _call(method, path, payload, params)
+    if action == "assign" and isinstance(result, dict) \
+            and result.get("status") == "pending_review":
+        if json_out:
+            _emit(result, True)
+        else:
+            typer.echo(result.get("message") or "角色追加提案已提交，等待 human 审批。")
+            if result.get("draft_id"):
+                typer.echo(f"提案 id: {result['draft_id']}；"
+                           "human 反馈/批准后重新执行本命令。")
+        return
+    _emit(result, json_out)
 
 
 # ---- memory / note / lesson ---------------------------------------------
@@ -392,7 +666,8 @@ def memory_cmd(
         raise typer.Exit(2)
 
 
-@app.command("note")
+@app.command("note", help="写入角色笔记（文件为真相，实践门控）。", epilog=NOTE_EPILOG,
+              short_help="角色笔记：写入（实践门控）")
 def note_cmd(
     action: str = typer.Argument("write"),
     path: str = typer.Argument(None),
@@ -454,31 +729,54 @@ def note_cmd(
         raise typer.Exit(2)
 
 
-@app.command("knowledge")
+@app.command("knowledge", help="知识检索、索引与知识卡。", epilog=KNOWLEDGE_EPILOG,
+              short_help="知识：检索/索引/仓库/知识卡")
 def knowledge_cmd(
     action: str = typer.Argument("search"),
     query: str = typer.Argument(None),
-    note_id: str = typer.Option(None, "--id", help="show 的 note id"),
-    task: str = typer.Option(None, "--task", help="任务 id（默认 $ANVIL_TASK_ID）"),
-    scope: str = typer.Option("auto", "--scope", help="auto|role|task"),
-    kind: str = typer.Option(None, "--kind", help="逗号分隔 kind"),
-    tags: str = typer.Option(None, "--tags", help="逗号分隔标签"),
-    repo: str = typer.Option(None, "--repo"),
-    repos: str = typer.Option(None, "--repos", help="限定知识仓库（逗号分隔）"),
-    module: str = typer.Option(None, "--module"),
-    include_snapshots: bool = typer.Option(False, "--include-snapshots"),
-    include_unclassified: bool = typer.Option(False, "--include-unclassified"),
-    limit: int = typer.Option(8, "--limit"),
-    role: str = typer.Option(None, "--role", help="human 浏览角色知识时指定角色"),
-    self_only: bool = typer.Option(False, "--self", help="reindex 当前角色"),
-    all_roles: bool = typer.Option(False, "--all", help="reindex 所有角色（human）"),
-    dry_run: bool = typer.Option(False, "--dry-run"),
-    prune: bool = typer.Option(False, "--prune"),
-    fields: str = typer.Option(None, "--fields", help="card-validate 的字段 JSON"),
-    file: str = typer.Option(None, "--file", help="card-validate 的知识卡 JSON 文件"),
+    note_id: str = typer.Option(None, "--id", help="show：笔记 id",
+                                rich_help_panel="检索"),
+    task: str = typer.Option(None, "--task", help="任务 id（默认 $ANVIL_TASK_ID）",
+                             rich_help_panel="检索"),
+    scope: str = typer.Option("auto", "--scope", help="auto|role|task",
+                              rich_help_panel="检索"),
+    kind: str = typer.Option(None, "--kind", help="过滤 kind（逗号分隔）",
+                             rich_help_panel="检索"),
+    tags: str = typer.Option(None, "--tags", help="过滤标签（逗号分隔）",
+                             rich_help_panel="检索"),
+    repo: str = typer.Option(None, "--repo", help="过滤单个知识仓库",
+                             rich_help_panel="检索"),
+    repos: str = typer.Option(None, "--repos", help="限定知识仓库（逗号分隔）",
+                              rich_help_panel="检索"),
+    module: str = typer.Option(None, "--module", help="过滤模块",
+                               rich_help_panel="检索"),
+    include_snapshots: bool = typer.Option(False, "--include-snapshots",
+                                           help="包含任务快照",
+                                           rich_help_panel="检索"),
+    include_unclassified: bool = typer.Option(False, "--include-unclassified",
+                                              help="包含未分类笔记",
+                                              rich_help_panel="检索"),
+    limit: int = typer.Option(8, "--limit", help="最多返回条数",
+                              rich_help_panel="检索"),
+    role: str = typer.Option(None, "--role", help="human 浏览角色知识时指定角色",
+                             rich_help_panel="索引 / 角色"),
+    self_only: bool = typer.Option(False, "--self", help="reindex 当前角色",
+                                   rich_help_panel="索引 / 角色"),
+    all_roles: bool = typer.Option(False, "--all", help="reindex 所有角色（human）",
+                                   rich_help_panel="索引 / 角色"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="reindex 只预览不写入",
+                                 rich_help_panel="索引 / 角色"),
+    prune: bool = typer.Option(False, "--prune", help="reindex 清理磁盘已删除文件的行",
+                               rich_help_panel="索引 / 角色"),
+    fields: str = typer.Option(None, "--fields", help="card-validate：字段 JSON",
+                               rich_help_panel="知识卡"),
+    file: str = typer.Option(None, "--file", help="card-validate：知识卡 JSON 文件",
+                             rich_help_panel="知识卡"),
     for_approval: bool = typer.Option(False, "--for-approval",
-                                      help="card-validate 按 approve 必填项校验"),
-    json_out: bool = typer.Option(False, "--json"),
+                                      help="card-validate：按 approve 必填项校验",
+                                      rich_help_panel="知识卡"),
+    json_out: bool = typer.Option(False, "--json", help="输出 JSON",
+                                  rich_help_panel="输出"),
 ):
     """anvil knowledge <search|show|index|list|reindex|repo-list|repo-show|repo-suggest|card-template|card-validate> ..."""
     if action == "search":
@@ -501,14 +799,16 @@ def knowledge_cmd(
     elif action == "repo-show":
         name = repo or query
         if not name:
-            typer.echo("knowledge repo-show 需要 --repo <name>", err=True)
-            raise typer.Exit(2)
+            _usage_error(
+                "knowledge repo-show 需要仓库名",
+                "传 --repo <name>，或 `anvil knowledge repo-list` 先查看可用仓库。")
         from urllib.parse import quote
         _emit(_call("GET", f"/api/v1/knowledge/repos/{quote(name, safe='')}"), json_out)
     elif action == "repo-suggest":
         if not query:
-            typer.echo("knowledge repo-suggest 需要任务标题", err=True)
-            raise typer.Exit(2)
+            _usage_error(
+                "knowledge repo-suggest 需要任务标题",
+                "例如 `anvil knowledge repo-suggest \"修复登录超时\"`。")
         _emit(_call("POST", "/api/v1/knowledge/repos/suggest", {
             "title": query,
             "tags": [x.strip() for x in tags.split(",")] if tags else [],
@@ -516,8 +816,9 @@ def knowledge_cmd(
         }), json_out)
     elif action == "show":
         if not note_id:
-            typer.echo("knowledge show 需要 --id <note-id>", err=True)
-            raise typer.Exit(2)
+            _usage_error(
+                "knowledge show 需要 --id <note-id>",
+                "先用 `anvil knowledge search \"关键词\"` 或 `anvil knowledge list` 找到 id。")
         params = {}
         if task or DEFAULT_TASK:
             params["task_id"] = task or DEFAULT_TASK
@@ -550,11 +851,12 @@ def knowledge_cmd(
                 with open(file, encoding="utf-8") as fh:
                     payload = json.load(fh)
             except (OSError, json.JSONDecodeError) as exc:
-                typer.echo(f"无法读取知识卡文件: {exc}", err=True)
-                raise typer.Exit(2)
+                _usage_error(f"无法读取知识卡文件: {exc}",
+                             "检查 --file 路径与 JSON 语法；模板用 "
+                             "`anvil knowledge card-template --kind <kind>`。")
         if not isinstance(payload, dict):
-            typer.echo("知识卡文件必须是 JSON 对象", err=True)
-            raise typer.Exit(2)
+            _usage_error("知识卡文件必须是 JSON 对象",
+                         "顶层必须是对象；模板用 `anvil knowledge card-template`。")
         if kind:
             payload["kind"] = kind
         if fields:
@@ -565,16 +867,14 @@ def knowledge_cmd(
         if result.get("errors"):
             raise typer.Exit(3)
     else:
-        typer.echo(
-            f"unknown knowledge action: {action}\n"
-            "可用动作: search, show, index (别名 list), reindex, repo-list, "
-            "repo-show, repo-suggest, card-template, card-validate",
-            err=True,
-        )
-        raise typer.Exit(2)
+        _usage_error(
+            f"unknown knowledge action: {action}",
+            "可用动作: search/show/index/list/reindex/repo-list/repo-show/"
+            "repo-suggest/card-template/card-validate。运行 `anvil knowledge -h` 查看示例。")
 
 
-@app.command("lesson")
+@app.command("lesson", help="提议一条共享经验（human 审批）。", epilog=LESSON_EPILOG,
+              short_help="共享经验：propose")
 def lesson_cmd(
     action: str = typer.Argument("propose"),
     text: str = typer.Argument(None),
@@ -584,19 +884,26 @@ def lesson_cmd(
 ):
     """anvil lesson propose <text> [--tags a,b] [--repo name]"""
     if action == "propose":
+        if not text:
+            _usage_error(
+                "lesson propose 需要经验正文",
+                "例如 `anvil lesson propose \"评审前先复算证据哈希\" --tags review`。")
         _emit(_call("POST", "/api/v1/lessons/pending", {
             "content": text,
             "tags": [t.strip() for t in tags.split(",")] if tags else [],
             "repo": repo,
         }), json_out)
     else:
-        raise typer.Exit(2)
+        _usage_error(
+            f"unknown lesson action: {action}",
+            "只支持 propose；例如 `anvil lesson propose \"...\"`。")
 
 
 # ---- reminder / ws ------------------------------------------------------
 
 
-@app.command("reminder")
+@app.command("reminder", help="定时提醒（cron / 延时 / 条件）。", epilog=REMINDER_EPILOG,
+              short_help="定时提醒：add/list/remove/fire-now")
 def reminder_cmd(
     action: str = typer.Argument("list"),
     target: str = typer.Argument(None, help="remove 时的 reminder id"),
@@ -610,6 +917,10 @@ def reminder_cmd(
     """anvil reminder <add|list|remove|fire-now>"""
     role_slug = role or AGENT_SLUG or None
     if action == "add":
+        if sum(bool(x) for x in (in_, when, cron)) != 1:
+            _usage_error(
+                "reminder add 需要且只能指定 --in / --when / --cron 之一",
+                "示例: --in 30m、--when <task-id>、--cron \"0 9 * * *\"。")
         payload: dict[str, Any] = {"role_slug": role_slug, "prompt": prompt}
         if in_:
             seconds = _parse_duration(in_)
@@ -624,16 +935,18 @@ def reminder_cmd(
         _emit(_call("GET", "/api/v1/reminders", params={"role_slug": role_slug} if role_slug else None), json_out)
     elif action == "remove":
         if not target:
-            typer.echo("reminder remove 需要 id", err=True)
-            raise typer.Exit(2)
+            _usage_error("reminder remove 需要 id",
+                         "先 `anvil reminder list` 查看 id，再 `anvil reminder remove <id>`。")
         _emit(_call("DELETE", f"/api/v1/reminders/{target}"), json_out)
     elif action == "fire-now":
         if not target:
-            typer.echo("reminder fire-now 需要 id", err=True)
-            raise typer.Exit(2)
+            _usage_error("reminder fire-now 需要 id",
+                         "先 `anvil reminder list` 查看 id，再 `anvil reminder fire-now <id>`。")
         _emit(_call("POST", f"/api/v1/reminders/{target}/fire-now", {}), json_out)
     else:
-        raise typer.Exit(2)
+        _usage_error(
+            f"unknown reminder action: {action}",
+            "可用动作: add/list/remove/fire-now。运行 `anvil reminder -h` 查看示例。")
 
 
 def _parse_duration(text: str) -> int:
@@ -643,8 +956,8 @@ def _parse_duration(text: str) -> int:
         unit = text[-1].lower()
         return int(float(text[:-1]) * units[unit])
     except (KeyError, ValueError, IndexError):
-        typer.echo(f"无法解析时长: {text}（示例：30m / 2h / 1d）", err=True)
-        raise typer.Exit(2)
+        _usage_error(f"无法解析时长: {text}",
+                     "使用 <数字><单位>，单位支持 s/m/h/d；例如 30m、2h、1d。")
 
 
 @app.command("ws")
@@ -659,15 +972,29 @@ def ws_cmd(
     elif action == "diff":
         _emit(_call("GET", f"/api/v1/workspaces/{ws_id}/diff"), json_out)
     else:
-        raise typer.Exit(2)
+        _usage_error(
+            f"unknown ws action: {action}",
+            "可用动作: status/diff；例如 `anvil ws status 0`。")
 
 
 # ---- workspace（频道）与频道知识 ------------------------------------------
 
 
-workspace_app = typer.Typer(help="频道（任务归属 + 知识作用域 + 资产）")
+workspace_app = typer.Typer(help="频道（任务归属 + 知识作用域 + 资产）",
+                            context_settings=HELP_CTX, epilog=WORKSPACE_EPILOG)
 app.add_typer(workspace_app, name="workspace")
-ws_knowledge_app = typer.Typer(help="频道知识卡（Agent 只能 propose，human 批准）")
+ws_knowledge_app = typer.Typer(help="频道知识卡（Agent 只能 propose，human 批准）",
+                               context_settings=HELP_CTX, epilog="""\b
+示例:
+  anvil workspace knowledge list W-1 --status proposed
+  anvil workspace knowledge propose W-1 --title "发布门禁" --tldr "P0 全过才可发布" \\
+    --kind convention --authority normative
+  anvil workspace knowledge approve W-1 K-1 --expected-version 1    # human
+  anvil workspace knowledge harvest W-1 T-1
+  anvil workspace knowledge review W-1
+
+规则: Agent 写入为 proposed；approve 需要 human；harvest 只接受 done/closed 任务。
+""")
 workspace_app.add_typer(ws_knowledge_app, name="knowledge")
 
 
@@ -677,11 +1004,11 @@ def _fields_json(raw: str | None) -> dict:
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
-        typer.echo(f"--fields 必须是 JSON 对象: {exc}", err=True)
-        raise typer.Exit(2)
+        _usage_error(f"--fields 不是合法 JSON: {exc}",
+                     "传 JSON 对象，例如 --fields '{\"rule\":\"...\"}'。")
     if not isinstance(value, dict):
-        typer.echo("--fields 必须是 JSON 对象", err=True)
-        raise typer.Exit(2)
+        _usage_error("--fields 必须是 JSON 对象",
+                     "不要传数组或字符串；例如 --fields '{\"rule\":\"...\"}'。")
     return value
 
 
@@ -784,8 +1111,88 @@ def ws_knowledge_review(
 # ---- role（Agent 自行扩展团队）--------------------------------------------
 
 
-role_app = typer.Typer(help="角色扩展（Agent 创建新 agent）")
+role_app = typer.Typer(help="角色（列出现有角色 / Agent 创建新 agent）",
+                       context_settings=HELP_CTX, epilog=ROLE_EPILOG)
 app.add_typer(role_app, name="role")
+
+
+@role_app.command("list")
+def role_list(json_out: bool = typer.Option(False, "--json")):
+    """列出当前系统中的角色（slug、名称、状态、画像）。"""
+    _emit(_call("GET", "/api/v1/roles"), json_out)
+
+
+@role_app.command("propose", epilog="""\b
+roles.json:
+  {"rationale":"缺少安全审计能力",
+   "suggested_roles":[{"slug":"security-auditor","display_name":"安全审计员",
+     "description":"负责代码安全审计","responsibilities":["审计代码"],
+     "capabilities":{"security-audit":0.9}}]}
+
+示例:
+  anvil role propose --task $ANVIL_TASK_ID --file /tmp/roles.json
+  anvil role propose --task T-0001 --file /tmp/roles.json --json
+
+流程: 提案 @human → human 反馈/批准 → Cindy 执行 role expand 创建 → task assign 加入任务。
+""")
+def role_propose(
+    file: str = typer.Option(..., "--file", help="角色提案 JSON 文件"),
+    task: str = typer.Option(DEFAULT_TASK, "--task", help="关联任务 id"),
+    goal: str = typer.Option(None, "--goal", help="提案目标一句话"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """提交新角色提案给 human；批准后再创建并加入任务。"""
+    if not task:
+        _usage_error("role propose 需要任务 id",
+                     "传 --task <id> 或设置 ANVIL_TASK_ID。")
+    try:
+        with open(file, encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        _usage_error(f"无法读取角色提案: {exc}",
+                     "检查 --file 路径与 JSON 语法；格式见 `anvil role propose -h`。")
+    if isinstance(payload, list):
+        roles = payload
+        rationale = goal or "角色追加提案"
+    elif isinstance(payload, dict):
+        roles = payload.get("suggested_roles") or payload.get("roles") or []
+        rationale = goal or str(payload.get("rationale") or "角色追加提案")
+    else:
+        _usage_error("角色提案必须是 JSON 对象或数组",
+                     "格式见 `anvil role propose -h`。")
+    if not isinstance(roles, list) or not roles:
+        _usage_error("角色提案缺少 suggested_roles",
+                     "格式见 `anvil role propose -h`。")
+    normalized = []
+    for item in roles:
+        if not isinstance(item, dict):
+            _usage_error("suggested_roles 的每一项必须是对象",
+                         "至少包含 slug 与 display_name。")
+        slug = str(item.get("slug") or "").strip()
+        display = str(item.get("display_name") or "").strip()
+        if not slug or not display:
+            _usage_error("每个角色需要 slug 与 display_name",
+                         "格式见 `anvil role propose -h`。")
+        normalized.append({**item, "slug": slug, "display_name": display})
+    tree = {"apply_mode": "authorize", "rationale": rationale,
+            "requested_assignees": [r["slug"] for r in normalized],
+            "suggested_roles": normalized}
+    draft = _call("POST", "/api/v1/board/drafts", {
+        "goal": rationale, "source_task": task, "kind": "role_suggestion",
+        "tree": tree,
+    }) or {}
+    draft_id = str(draft.get("id") or "")
+    summary = "、".join(r["slug"] for r in normalized)
+    _call("POST", f"/api/v1/tasks/{task}/mention", {
+        "target": "human",
+        "message": f"角色提案已提交（{summary}，draft {draft_id or '?'}）。"
+                   "请审批或反馈；批准后再创建并加入任务。",
+    })
+    if json_out:
+        _emit(draft, True)
+    else:
+        typer.echo(f"角色提案已提交：{draft_id or '?'}（{summary}），等待 human 审批。")
+        typer.echo("批准后执行 role expand 创建角色，再 task assign 加入任务。")
 
 
 @role_app.command("expand")
@@ -805,7 +1212,8 @@ def role_expand(
 # ---- action（Action Cards：Agent 准备，人类执行）---------------------------
 
 
-action_app = typer.Typer(help="Action Cards（危险操作先申请，人类批准后执行）")
+action_app = typer.Typer(help="Action Cards（危险操作先申请，人类批准后执行）",
+                         context_settings=HELP_CTX)
 app.add_typer(action_app, name="action")
 
 
@@ -844,7 +1252,7 @@ def action_list(
 # ---- inbox（Agent 拉模式收件箱）-------------------------------------------
 
 
-inbox_app = typer.Typer(help="Agent 收件箱（拉模式）")
+inbox_app = typer.Typer(help="Agent 收件箱（拉模式）", context_settings=HELP_CTX)
 app.add_typer(inbox_app, name="inbox")
 
 
@@ -885,11 +1293,18 @@ def inbox_commit(
 # ---- step（工作流步骤）----------------------------------------------------
 
 
-step_app = typer.Typer(help="工作流步骤")
+step_app = typer.Typer(help="工作流步骤（show/plan/submit/decide/escalate）",
+                       context_settings=HELP_CTX, epilog=STEP_EPILOG)
 app.add_typer(step_app, name="step")
 
 
-@step_app.command("submit")
+@step_app.command("submit", epilog="""\b
+示例:
+  anvil step submit WF-1 S2 --summary "接口完成" --evidence-file /tmp/evidence.json
+  anvil step submit WF-1 S2 --summary "修复完成" --changed-paths src/auth.ts,src/api.ts
+
+规则: 只对 running 步骤提交；不要用 task submit。409 时先 `anvil step show WF-1`。
+""")
 def step_submit(
     workflow_id: str = typer.Argument(..., help="工作流 ID"),
     step_id: str = typer.Argument(..., help="步骤 ID（如 S1）"),
@@ -903,8 +1318,16 @@ def step_submit(
     """提交当前工作流步骤（完成后必须调用；不要用 task submit）。"""
     body: dict = {"summary": summary, "changed_paths": _csv(changed_paths)}
     if evidence_file:
-        with open(evidence_file, encoding="utf-8") as fh:
-            body["evidence"] = json.load(fh)
+        try:
+            with open(evidence_file, encoding="utf-8") as fh:
+                body["evidence"] = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            _usage_error(f"无法读取 --evidence-file: {exc}",
+                         "传 JSON 数组文件；例如 "
+                         "[{\"kind\":\"test\",\"ref\":\"pytest tests/ -q\",\"label\":\"全绿\"}]。")
+        if not isinstance(body["evidence"], list):
+            _usage_error("--evidence-file 顶层必须是 JSON 数组",
+                         "例如 [{\"kind\":\"file\",\"ref\":\"src/auth.ts\"}]。")
     out = _call("POST", f"/api/v1/workflows/{workflow_id}/steps/{step_id}/submit", body)
     if json_out:
         _emit(out, True)
@@ -916,7 +1339,13 @@ def _csv(value: str) -> list[str]:
     return [x.strip() for x in value.split(",") if x.strip()]
 
 
-@step_app.command("decide")
+@step_app.command("decide", epilog="""\b
+示例:
+  anvil step decide WF-1 S6 --approve --feedback "证据充分，通过"
+  anvil step decide WF-1 S6 --reject --feedback "缺少回归证据" --rework-targets S3,S4
+
+规则: 必须且只能给 --approve 或 --reject；reject 未指定范围时只重做当前步骤。
+""")
 def step_decide(
     workflow_id: str = typer.Argument(..., help="工作流 ID"),
     step_id: str = typer.Argument(..., help="decision 步骤 ID"),
@@ -935,8 +1364,9 @@ def step_decide(
 ):
     """决策角色通过或打回 decision 步骤（只能二选一）。"""
     if approve == reject:
-        typer.echo("必须且只能给 --approve 或 --reject", err=True)
-        raise typer.Exit(2)
+        _usage_error(
+            "必须且只能给 --approve 或 --reject",
+            "例如 `anvil step decide WF-1 S6 --approve --feedback \"通过\"`。")
     body = {
         "approve": approve,
         "feedback": feedback,
@@ -953,7 +1383,13 @@ def step_decide(
         typer.echo(f"决策步骤 {step_id} 已{'提交' if approve else '打回重做'}")
 
 
-@step_app.command("escalate")
+@step_app.command("escalate", epilog="""\b
+示例:
+  anvil step escalate WF-1 S6 --reason "高风险发布，证据不足" --proposed-decision reject
+  anvil step escalate WF-1 S6 --reason "需要人工确认" --triggers risk,compliance
+
+规则: 只用于 decision 步骤；升级后 packet 留给自然人最终决定。
+""")
 def step_escalate(
     workflow_id: str = typer.Argument(..., help="工作流 ID"),
     step_id: str = typer.Argument(..., help="decision 步骤 ID"),
@@ -977,7 +1413,13 @@ def step_escalate(
         typer.echo(f"决策步骤 {step_id} 已升级人工")
 
 
-@step_app.command("packet")
+@step_app.command("packet", epilog="""\b
+示例:
+  anvil step packet WF-1 S6
+  anvil step packet WF-1 S6 --json
+
+用于查看 gate/decision 的 review packet、证据与历史决策。
+""")
 def step_packet(
     workflow_id: str = typer.Argument(..., help="工作流 ID"),
     step_id: str = typer.Argument(..., help="步骤 ID"),
@@ -1001,7 +1443,20 @@ def step_packet(
         typer.echo(f"决策：{d.get('decider')} {d.get('decision')} {d.get('feedback') or ''}")
 
 
-@step_app.command("plan")
+@step_app.command("plan", epilog="""\b
+plan.json 最小结构:
+  {"rationale":"按模块切片",
+   "slices":[{"id":"auth","title":"认证模块",
+              "scope_paths":["src/auth/**"],"objective":"...",
+              "instructions":"...","acceptance":["..."],
+              "execute_steps":[{"id":"static","title":"静态审计",
+                                "instructions":"..."}]}]}
+
+示例:
+  anvil step plan WF-1 S1 --file /tmp/plan.json
+
+规则: 切片只描述范围/粒度/轮次，不得指定角色或 loop 阶段；角色由 Cindy 的 loop 模板定义。
+""")
 def step_plan(
     workflow_id: str = typer.Argument(..., help="工作流 ID"),
     step_id: str = typer.Argument(..., help="plan_slices 步骤 ID"),
@@ -1009,8 +1464,15 @@ def step_plan(
     json_out: bool = typer.Option(False, "--json"),
 ):
     """提交切片计划（plan_slices 步骤）：服务端按 loop 模板生成每片小闭环。"""
-    with open(file, encoding="utf-8") as f:
-        plan = json.load(f)
+    try:
+        with open(file, encoding="utf-8") as f:
+            plan = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        _usage_error(f"无法读取切片计划: {exc}",
+                     "检查 --file 路径与 JSON 语法；最小结构见 `anvil step plan -h`。")
+    if not isinstance(plan, dict) or not isinstance(plan.get("slices"), list):
+        _usage_error("切片计划必须是包含 slices 数组的 JSON 对象",
+                     "最小结构见 `anvil step plan -h`；空项目可用 \"slices\": []。")
     out = _call("POST", f"/api/v1/workflows/{workflow_id}/steps/{step_id}/plan", plan)
     if json_out:
         _emit(out, True)
@@ -1019,7 +1481,13 @@ def step_plan(
     typer.echo(f"切片计划已提交：生成 {len(generated)} 个切片步骤")
 
 
-@step_app.command("show")
+@step_app.command("show", epilog="""\b
+示例:
+  anvil step show WF-1
+  anvil step show WF-1 --json
+
+输出每个步骤的状态、角色、依赖与 summary；卡住时先看这里。
+""")
 def step_show(
     workflow_id: str = typer.Argument(..., help="工作流 ID"),
     json_out: bool = typer.Option(False, "--json"),
@@ -1051,7 +1519,7 @@ def step_show(
 # ---- lease（step/path 租约与路径预留）------------------------------------
 
 
-lease_app = typer.Typer(help="执行租约与路径预留")
+lease_app = typer.Typer(help="执行租约与路径预留", context_settings=HELP_CTX)
 app.add_typer(lease_app, name="lease")
 
 
@@ -1110,7 +1578,7 @@ def lease_release(
 # ---- board（P1-0 计划先行：工作流草案）------------------------------------
 
 
-board_app = typer.Typer(help="工作流草案（计划先行）")
+board_app = typer.Typer(help="工作流草案（计划先行）", context_settings=HELP_CTX)
 app.add_typer(board_app, name="board")
 
 

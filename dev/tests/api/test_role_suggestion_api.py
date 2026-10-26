@@ -241,3 +241,148 @@ async def test_assign_existing_rejects_unknown_role(client, tmp_path, monkeypatc
         headers=auth_headers("pm"),
     )
     assert r.status_code == 409, r.text
+
+
+async def _roster_env(client, tmp_path, monkeypatch, tid: str = "T-ADD"):
+    monkeypatch.setattr(config, "AGENTS_DIR", tmp_path / "agents")
+    await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
+    for slug in ("dev", "pm", "designer", "tester"):
+        await client.post(f"{API}/roles", json=role_payload(slug), headers=auth_headers())
+    await client.post(
+        f"{API}/tasks",
+        json={**task_payload(id=tid, assignees=["dev"]), "planner": "pm"},
+        headers=auth_headers(),
+    )
+
+
+async def test_role_addition_to_existing_roster_creates_proposal(client, tmp_path, monkeypatch):
+    """已有 Roster 时 planner 不直接改写，而是自动提交提案 @human。"""
+    await _roster_env(client, tmp_path, monkeypatch)
+
+    r = await client.post(
+        f"{API}/tasks/T-ADD/assign-existing",
+        json={"roles": ["dev", "designer"], "reason": "需要 UI 设计能力"},
+        headers=auth_headers("pm"),
+    )
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["status"] == "pending_review"
+    assert body["requested_assignees"] == ["designer"]
+
+    task = (await client.get(f"{API}/tasks/T-ADD", headers=auth_headers())).json()
+    assert task["assignees"] == ["dev"]
+    drafts = (await client.get(f"{API}/board/drafts", params={"source_task": "T-ADD"},
+                               headers=auth_headers())).json()
+    draft = drafts[0]
+    assert draft["kind"] == "role_suggestion" and draft["status"] == "pending"
+    assert draft["tree"]["apply_mode"] == "authorize"
+    assert draft["tree"]["requested_assignees"] == ["designer"]
+
+    inbox = (await client.get(f"{API}/inbox", headers=human_headers())).json()
+    assert any("角色追加提案" in i["title"] for i in inbox["items"])
+
+
+async def test_approved_role_addition_appends_without_replacing(client, tmp_path, monkeypatch):
+    """human 批准后 planner 再 assign：只追加新角色，保留原有 Roster。"""
+    await _roster_env(client, tmp_path, monkeypatch)
+    r = await client.post(
+        f"{API}/tasks/T-ADD/assign-existing",
+        json={"roles": ["dev", "designer"]},
+        headers=auth_headers("pm"),
+    )
+    draft_id = r.json()["draft_id"]
+
+    r = await client.post(f"{API}/board/drafts/approve",
+                          json={"draft_ids": [draft_id]}, headers=human_headers())
+    assert r.status_code == 200, r.text
+    task = (await client.get(f"{API}/tasks/T-ADD", headers=auth_headers())).json()
+    assert task["assignees"] == ["dev"], "批准只授权，不替 planner 绑定"
+
+    r = await client.post(
+        f"{API}/tasks/T-ADD/assign-existing",
+        json={"roles": ["dev", "designer"]},
+        headers=auth_headers("pm"),
+    )
+    assert r.status_code == 200, r.text
+    assert set(r.json()["assignees"]) == {"dev", "designer"}
+
+
+async def test_rejected_role_addition_feedback_reaches_planner(client, tmp_path, monkeypatch):
+    """human 驳回时反馈给 planner；planner 修改后可再次提交新提案。"""
+    await _roster_env(client, tmp_path, monkeypatch)
+    r = await client.post(
+        f"{API}/tasks/T-ADD/assign-existing",
+        json={"roles": ["designer"]},
+        headers=auth_headers("pm"),
+    )
+    draft_id = r.json()["draft_id"]
+    r = await client.post(f"{API}/board/drafts/reject",
+                          json={"draft_id": draft_id, "feedback": "请补充职责范围"},
+                          headers=human_headers())
+    assert r.status_code == 200, r.text
+
+    inbox = (await client.get(f"{API}/me/inbox", params={"task_id": "T-ADD"},
+                              headers=auth_headers("pm"))).json()
+    assert any("角色追加提案被驳回" in i["text"] for i in inbox["items"])
+
+    r = await client.post(
+        f"{API}/tasks/T-ADD/assign-existing",
+        json={"roles": ["designer"], "reason": "已补充职责范围"},
+        headers=auth_headers("pm"),
+    )
+    assert r.status_code == 202, r.text
+    assert r.json()["draft_id"] != draft_id
+    assert r.json()["status"] == "pending_review"
+
+
+async def test_authorize_proposal_can_precede_role_creation(client, tmp_path, monkeypatch):
+    """允许先提案、批准后由 planner 创建角色，再绑定任务。"""
+    await _roster_env(client, tmp_path, monkeypatch)
+    tree = {
+        "apply_mode": "authorize",
+        "rationale": "缺少审计能力",
+        "requested_assignees": ["new-auditor"],
+        "suggested_roles": [{
+            "slug": "new-auditor", "display_name": "新审计员",
+            "description": "负责安全审计", "responsibilities": ["审计代码"],
+        }],
+    }
+    r = await client.post(f"{API}/board/drafts", headers=auth_headers("pm"), json={
+        "goal": "补充审计角色", "source_task": "T-ADD", "kind": "role_suggestion",
+        "tree": tree,
+    })
+    assert r.status_code == 201, r.text
+    draft_id = r.json()["id"]
+
+    r = await client.post(f"{API}/board/drafts/approve",
+                          json={"draft_ids": [draft_id]}, headers=human_headers())
+    assert r.status_code == 200, r.text
+    assert (await client.get(f"{API}/roles/new-auditor",
+                             headers=auth_headers())).status_code == 404
+
+    r = await client.post(f"{API}/roles",
+                          json={"slug": "new-auditor", "display_name": "新审计员"},
+                          headers=human_headers())
+    assert r.status_code == 201, r.text
+    r = await client.post(
+        f"{API}/tasks/T-ADD/assign-existing",
+        json={"roles": ["dev", "new-auditor"]},
+        headers=auth_headers("pm"),
+    )
+    assert r.status_code == 200, r.text
+    assert set(r.json()["assignees"]) == {"dev", "new-auditor"}
+
+
+async def test_assign_existing_existing_role_is_noop(client, tmp_path, monkeypatch):
+    """重复绑定已有角色不产生提案、不改 Roster。"""
+    await _roster_env(client, tmp_path, monkeypatch)
+    r = await client.post(
+        f"{API}/tasks/T-ADD/assign-existing",
+        json={"roles": ["dev"]},
+        headers=auth_headers("pm"),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["assignees"] == ["dev"]
+    drafts = (await client.get(f"{API}/board/drafts", params={"source_task": "T-ADD"},
+                               headers=auth_headers())).json()
+    assert drafts == []

@@ -415,10 +415,15 @@
   单负责人任务一旦被 claim 就是排他的，需先 `anvil task unclaim` 才能转交。
   子任务**不进入大厅**，只在父任务详情新增的「子任务」页签展示（状态/认领角色/直达）。
 - **API**：`GET /tasks?parent_id=` 过滤子任务。
-- **Agent 自行扩展团队**：`POST /roles/expand` / `anvil role expand --brief "..."`：
+- **角色查询与扩展团队**：`GET /roles` / `anvil role list` 查看当前系统已有角色；
+  `POST /roles/expand` / `anvil role expand --brief "..."`：
   创建新 agent 并**继承创建者的 runtime/permission_mode**；新角色为普通 member，不能设置 tools/高权限字段；
   每日配额 `ANVIL_AGENT_ROLE_EXPAND_DAILY`（默认 3）、总角色上限 `ANVIL_MAX_ROLES`（默认 20）；
   创建动作写 audit `role_expand`，并在关联任务里 @human 通知。
+- **角色提案与追加**：`anvil role propose` / `role_suggestion`（`apply_mode=authorize`）
+  先提案 @human；批准只授权，planner 再 `role expand` 创建并 `task assign` 绑定。
+  `assign-existing` 只追加、不替换已有 assignees；未获批准的追加自动生成提案并 @human，
+  不会因“已有 assignees”直接拒绝。
 - **协议**：`PROTOCOL` / `STEP_PROTOCOL` / `REPLY_PROTOCOL` 均要求拆分给其他角色的子任务用
   `--assignee` / `--assignees` 显式指派，创建者不要 claim；已 claim 需先 unclaim 再交接。
   同时保留「扩展团队 → role expand」指引。

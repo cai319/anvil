@@ -102,6 +102,9 @@ cd C:\path\to\aliceAgent\dev\dist\anvil-dist
 
 ### 知识库索引与检索
 
+完整命令、参数与错误处理见 [cli-reference.md](cli-reference.md)；每个命令也可用
+`anvil <command> -h` 查看动作列表、必填参数与示例。
+
 - 文件是真相，`notes` 表与 `notes_fts` 只是索引；`anvil note write` 会同步写文件与索引。
 - 同一 path 只保留一行索引：append 累积文件正文后 upsert，`--replace` 覆盖；路径相对
   `notes/`（写成 `notes/foo.md` 也会规范化为 `foo.md`）。

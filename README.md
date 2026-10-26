@@ -246,6 +246,7 @@ anvil step plan <workflow-id> <plan-step-id> --file slices.json
 anvil step decide <workflow-id> <decision-step-id> --approve|--reject --feedback "结论"
 anvil board draft --task $ANVIL_TASK_ID --goal "..." --tree-file wf.json --kind workflow
 anvil self reset-context --task $ANVIL_TASK_ID --reason "..."
+anvil role list [--json]
 anvil role expand --brief "需要一个安全评审角色"
 anvil action prepare --kind task.cancel --task $ANVIL_TASK_ID --reason "..."
 
@@ -509,6 +510,7 @@ anvil init --with-roles
 ## 9. 文档
 
 - [design.md](design.md)：架构、数据模型、工作流引擎、上下文与模型策略
+- [docs/cli-reference.md](docs/cli-reference.md)：CLI 命令、参数、规则、错误处理与示例
 - [docs/v1.30-channel-knowledge.md](docs/v1.30-channel-knowledge.md)：频道、知识作用域、知识卡、归档与效果评估方案
 - [docs/operations.md](docs/operations.md)：打包、备份/迁移/重置、卸载
 - [docs/troubleshooting.md](docs/troubleshooting.md)：详细排查

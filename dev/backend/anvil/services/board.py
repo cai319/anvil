@@ -187,6 +187,147 @@ def list_drafts(conn: sqlite3.Connection, workspace_id: str | None = None,
     return out
 
 
+def _authorized_slugs(tree: dict) -> list[str]:
+    raw = tree.get("requested_assignees")
+    if not isinstance(raw, list):
+        raw = tree.get("suggested_roles") or []
+    out: list[str] = []
+    for item in raw:
+        slug = str(item.get("slug") or "").strip() if isinstance(item, dict) else str(item).strip()
+        if slug:
+            out.append(slug)
+    return list(dict.fromkeys(out))
+
+
+def authorized_assignee_additions(conn: sqlite3.Connection, task_id: str) -> set[str]:
+    """返回 human 已批准、但由 planner 自行创建/绑定的角色白名单。"""
+    out: set[str] = set()
+    rows = conn.execute(
+        "SELECT tree_json FROM board_drafts WHERE source_task=? "
+        "AND kind='role_suggestion' AND status='approved'", (task_id,)).fetchall()
+    for row in rows:
+        tree = jloads(row["tree_json"], {})
+        if str(tree.get("apply_mode") or "") == "authorize":
+            out.update(_authorized_slugs(tree))
+    return out
+
+
+def propose_assignee_additions(conn: sqlite3.Connection, task_id: str, agent: str,
+                               roles: list[str], reason: str | None = None) -> dict:
+    """任务已有 Roster 时的角色追加提案：复用 role_suggestion，等待 human 审批。
+
+    批准只授权 planner 自行创建/绑定，不替 planner 创建角色（apply_mode=authorize）。
+    同一任务已有 pending 提案时合并角色并提示 human，避免重复草案。
+    """
+    from . import roles as roles_service
+    from . import tasks as tasks_service
+
+    requested = list(dict.fromkeys(str(r).strip() for r in roles if str(r).strip()))
+    entries = []
+    for slug in requested:
+        role = roles_service.get(conn, slug) or {}
+        entries.append({"slug": slug,
+                        "display_name": role.get("display_name") or slug,
+                        "reason": reason or "planner 请求追加任务角色"})
+    reason = reason or f"追加任务角色：{', '.join(requested)}"
+
+    pending = None
+    for row in conn.execute(
+        "SELECT id, tree_json FROM board_drafts WHERE source_task=? "
+        "AND kind='role_suggestion' AND status='pending' ORDER BY created_at DESC",
+        (task_id,)
+    ).fetchall():
+        tree = jloads(row["tree_json"], {})
+        if str(tree.get("apply_mode") or "") == "authorize":
+            pending = (row["id"], tree)
+            break
+
+    if pending:
+        draft_id, tree = pending
+        merged = list(dict.fromkeys([*_authorized_slugs(tree), *requested]))
+        prior = {str(x.get("slug") or "").strip(): x
+                 for x in (tree.get("suggested_roles") or []) if isinstance(x, dict)}
+        merged_entries = []
+        for slug in merged:
+            role = roles_service.get(conn, slug) or {}
+            entry = {**(prior.get(slug) or {}),
+                     **next((e for e in entries if e["slug"] == slug), {})}
+            entry["slug"] = slug
+            entry["display_name"] = (role.get("display_name")
+                                     or entry.get("display_name") or slug)
+            entry["reason"] = (entry.get("reason") or reason
+                               or "planner 请求追加任务角色")
+            merged_entries.append(entry)
+        tree = {**tree, "apply_mode": "authorize", "rationale": reason,
+                "requested_assignees": merged, "suggested_roles": merged_entries}
+        conn.execute("UPDATE board_drafts SET tree_json=? WHERE id=?",
+                     (jdumps(tree), draft_id))
+        revised = True
+    else:
+        tree = {"apply_mode": "authorize", "rationale": reason,
+                "requested_assignees": requested, "suggested_roles": entries}
+        draft = create_draft(conn, goal=reason, tree=tree,
+                             created_by=f"agent:{agent}", source_task=task_id,
+                             kind="role_suggestion")
+        draft_id = draft["id"]
+        revised = False
+
+    sender = roles_service.notification_sender(conn, task_id, f"agent:{agent}")
+    tasks_service.mention(
+        conn, task_id, sender, "human",
+        f"角色追加提案{'已更新' if revised else '已提交'}：{', '.join(requested)}。"
+        "请审批或反馈；批准后再执行 task assign。")
+    return get_draft(conn, draft_id)  # type: ignore[return-value]
+
+
+def _approve_assignee_authorization(conn: sqlite3.Connection, draft: dict,
+                                    task: dict, tree: dict) -> tuple[dict | None, str | None]:
+    """批准「角色追加授权」：不创建/不绑定，只授权 planner 后续自行 assign。"""
+    from . import roles as roles_service
+    from . import tasks as tasks_service
+
+    requested = _authorized_slugs(tree)
+    if not requested:
+        raise ConflictError("role addition proposal has no requested roles")
+    entries = {str(item.get("slug") or "").strip(): item
+               for item in (tree.get("suggested_roles") or [])
+               if isinstance(item, dict)}
+    for slug in requested:
+        role = roles_service.get(conn, slug)
+        if role is None:
+            # 允许“先提案、批准后再创建”：提案必须带足够的角色画像供 human 审阅。
+            entry = entries.get(slug) or {}
+            if not (entry.get("display_name") or entry.get("description")
+                    or entry.get("responsibilities")):
+                raise ConflictError(
+                    f"role {slug} does not exist; proposal needs display_name/description")
+            continue
+        if not role.get("enabled", True):
+            raise ConflictError(f"role {slug} is disabled")
+
+    now = now_iso()
+    summary = "、".join(requested)
+    conn.execute("UPDATE board_drafts SET status='approved', decided_at=? WHERE id=?",
+                 (now, draft["id"]))
+    task_id = task["id"]
+    conn.execute(
+        "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (task_id, "human", "comment",
+         jdumps({"body": f"已批准角色追加：{summary}。由 planner 创建/绑定。"}), now),
+    )
+    creator = str(draft.get("created_by") or "").strip()
+    if creator.startswith("agent:"):
+        creator = creator[6:]
+    target = creator or str(task.get("planner") or "")
+    if target:
+        tasks_service.mention(
+            conn, task_id, "human", target,
+            f"角色追加提案已批准：{summary}。请执行 role expand（如需）并 "
+            f"`anvil task assign {task_id} --assignees {','.join(requested)}`。")
+    return None, f"authorized only; planner must create/bind: {summary}"
+
+
 def _approve_role_suggestion(conn: sqlite3.Connection, draft: dict,
                              by: str) -> tuple[dict | None, str | None]:
     from .. import config
@@ -200,6 +341,8 @@ def _approve_role_suggestion(conn: sqlite3.Connection, draft: dict,
         raise ConflictError("role_suggestion source_task not found")
 
     tree = draft.get("tree") or {}
+    if str(tree.get("apply_mode") or "") == "authorize":
+        return _approve_assignee_authorization(conn, draft, task, tree)
     suggested = tree.get("suggested_roles") or tree.get("roles") or []
     if not isinstance(suggested, list) or not suggested:
         raise ConflictError("role_suggestion has no suggested_roles")
@@ -411,6 +554,17 @@ def reject(conn: sqlite3.Connection, draft_id: str, by: str = "human",
                 (task_id, "human", "comment",
                  jdumps({"body": f"角色建议被驳回：{feedback}"}), now),
             )
+        tree = draft.get("tree") or {}
+        if str(tree.get("apply_mode") or "") == "authorize":
+            creator = str(draft.get("created_by") or "").strip()
+            if creator.startswith("agent:"):
+                creator = creator[6:]
+            target = creator or str((task or {}).get("planner") or "")
+            if target:
+                tasks_service.mention(
+                    conn, task_id, "human", target,
+                    f"角色追加提案被驳回：{feedback or '请调整后重新提交'}。"
+                    "修改后重新提交提案（role propose 或 task assign）即可。")
     conn.commit()
     return {"draft": get_draft(conn, draft_id), "replan": replan, "blocked": blocked}
 

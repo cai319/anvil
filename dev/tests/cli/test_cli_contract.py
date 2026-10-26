@@ -41,6 +41,7 @@ CONTRACT = {
     "knowledge reindex": (["knowledge", "reindex"], "POST",
                           f"{API}/me/knowledge/reindex"),
     "lesson propose": (["lesson", "propose", "x"], "POST", f"{API}/lessons/pending"),
+    "role list": (["role", "list"], "GET", f"{API}/roles"),
     "self show": (["self", "show"], "GET", f"{API}/me"),
     "self reset-context": (["self", "reset-context", "--task", "T-0001"],
                            "POST", f"{API}/me/session/reset"),
@@ -145,6 +146,64 @@ def test_unknown_knowledge_action_shows_supported_actions():
     assert r.returncode == EXIT["usage"]
     assert "unknown knowledge action: bogus" in r.stderr
     assert "search" in r.stderr and "list" in r.stderr
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+def test_usage_errors_include_actionable_hint():
+    """参数错误必须给 hint，避免 Agent 只看到一句 error 后盲试。"""
+    env = {**os.environ, "ANVIL_ENDPOINT": "http://127.0.0.1:1", "ANVIL_TASK_ID": ""}
+    cases = [
+        (["task", "show"], "ANVIL_TASK_ID"),
+        (["task", "bogus"], "anvil task -h"),
+        (["task", "mention", "T-0001"], "--to"),
+        (["knowledge", "bogus"], "anvil knowledge -h"),
+    ]
+    for args, needle in cases:
+        r = subprocess.run([ANVIL_BIN, *args], env=env,
+                           capture_output=True, text=True, timeout=30)
+        assert r.returncode == EXIT["usage"], (args, r.stderr)
+        assert "error:" in r.stderr and "hint:" in r.stderr, (args, r.stderr)
+        assert needle in r.stderr, (args, r.stderr)
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+def test_typer_usage_error_appends_hint():
+    """Typer 生成的缺参/错参错误也要追加 --help 提示。"""
+    r = subprocess.run([ANVIL_BIN, "step", "plan"], capture_output=True,
+                       text=True, timeout=30)
+    assert r.returncode == EXIT["usage"]
+    assert "Missing argument" in r.stderr
+    assert "hint:" in r.stderr and "anvil <command> -h" in r.stderr
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+def test_help_contains_rules_and_examples():
+    """--help 必须能直接指导执行，而不是只列参数名。"""
+    cases = [
+        (["task", "-h"], ["示例:", "knowledge-write", "anvil task create"]),
+        (["step", "plan", "-h"], ["plan.json", "slices", "不得指定角色"]),
+        (["role", "-h"], ["role list", "role expand"]),
+    ]
+    for args, needles in cases:
+        r = subprocess.run([ANVIL_BIN, *args], capture_output=True,
+                           text=True, timeout=30)
+        assert r.returncode == 0, r.stderr
+        for needle in needles:
+            assert needle in r.stdout, (args, needle, r.stdout)
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+def test_role_propose_creates_draft_and_mentions_human(mock_backend, tmp_path):
+    """role propose = 提交 role_suggestion 草案 + @human，不直接创建角色。"""
+    p = tmp_path / "roles.json"
+    p.write_text(json.dumps({"suggested_roles": [
+        {"slug": "auditor", "display_name": "审计员", "description": "负责审计"}
+    ]}, ensure_ascii=False), encoding="utf-8")
+    r = _run(["role", "propose", "--task", "T-0001", "--file", str(p)], mock_backend)
+    assert r.returncode == EXIT["ok"], r.stderr
+    assert ("POST", f"{API}/board/drafts") in _Handler.requests
+    assert ("POST", f"{API}/tasks/T-0001/mention") in _Handler.requests
+    assert "等待 human 审批" in r.stdout
 
 
 @pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
