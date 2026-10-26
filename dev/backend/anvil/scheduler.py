@@ -22,6 +22,7 @@ from .platform import factory
 from .services import daemon as daemon_service
 from .services import governance, leases, runs as runs_service, tasks as tasks_service
 from .services import workflow as workflow_service
+from .util import now_iso
 
 
 def _elapsed_seconds(started_at: str | None) -> float:
@@ -72,6 +73,7 @@ class Scheduler:
             self._pump_created(conn)
             self._monitor(conn)
             self._reap_dead_runs(conn)
+            self._reap_orphaned_step_runs(conn)
             self._reap_stalled_phases(conn)
             self._reconcile(conn)
         finally:
@@ -127,7 +129,7 @@ class Scheduler:
         for row in expired:
             workflow_service.fail_step(
                 conn, row["workflow_id"], row["step_id"],
-                "lease_expired", "environment")
+                "lease_expired", "environment", failure_class="lease_expired")
         for wf in conn.execute("SELECT id FROM workflows WHERE status='running'").fetchall():
             wid = wf["id"]
 
@@ -146,7 +148,8 @@ class Scheduler:
         for r in rows:
             fc = r["failure_class"] or r["rs"]
             category = "environment" if fc in ("platform_timeout", "spawn_error") else "agent_error"
-            workflow_service.fail_step(conn, r["workflow_id"], r["step_id"], fc, category)
+            workflow_service.fail_step(conn, r["workflow_id"], r["step_id"], fc, category,
+                                       failure_class=fc)
         self._nudge_stalled(conn)
 
     @staticmethod
@@ -254,7 +257,8 @@ class Scheduler:
             if int(r["nudge_count"] or 0) >= config.STEP_MAX_NUDGES:
                 workflow_service.fail_step(
                     conn, r["workflow_id"], r["step_id"],
-                    f"步骤停滞：{r['nudge_count']} 次唤醒后仍未提交", "environment")
+                    f"步骤停滞：{r['nudge_count']} 次唤醒后仍未提交", "environment",
+                    failure_class="step_stalled")
                 continue
             try:
                 self.orchestrator.pump(self.db_path, r["run_id"], "resume", {})
@@ -393,6 +397,26 @@ class Scheduler:
             changed = True
         if changed:
             conn.commit()
+
+    def _reap_orphaned_step_runs(self, conn) -> None:
+        """步骤已重排/结束，但关联 run 仍活跃 → 结束孤儿 run。
+
+        fail_step 会把步骤重置为 pending 并清空 run_id；若旧 run 仍是
+        created/projecting/running，advance 会认为该角色忙而永远跳过该步骤。
+        这里兜底清理历史残留与异常窗口，保证重派不被僵尸 run 阻塞。
+        """
+        rows = conn.execute(
+            """SELECT r.id, r.status AS run_status
+                 FROM runs r
+                 LEFT JOIN workflow_steps s
+                   ON s.workflow_id=r.workflow_id AND s.step_id=r.step_id
+                WHERE r.status IN ('created','projecting','running')
+                  AND r.workflow_id IS NOT NULL AND r.step_id IS NOT NULL
+                  AND (s.step_id IS NULL OR s.status != 'running' OR s.run_id != r.id)"""
+        ).fetchall()
+        for row in rows:
+            runs_service.set_status(conn, row["id"], "failed", ended_at=now_iso(),
+                                    failure_class="orphaned_step_run")
 
     def _reap_stalled_phases(self, conn) -> None:
         """run 卡在 projecting（编排器在 project→spawn 之间崩溃）→ 周期自愈。

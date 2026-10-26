@@ -145,6 +145,36 @@ def test_fail_step_auto_requeues_without_human(conn):
         "SELECT 1 FROM activities WHERE task_id='T1' AND kind='mention'").fetchone() is None
 
 
+def test_fail_step_ends_bound_run_so_advance_can_redispatch(conn):
+    """失败重排必须结束关联 run：残留 running 会占住角色，advance 永远不重派。"""
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    wf_service.advance(conn, wf["id"], starter=lambda *a: {"id": "r1"})
+    conn.execute(
+        "INSERT INTO runs (id, role_slug, task_id, status, step_id, workflow_id, started_at) "
+        "VALUES ('r1','dev','T1','running','S1',?,?)", (wf["id"], now_iso()))
+    conn.commit()
+
+    wf_service.fail_step(conn, wf["id"], "S1", "lease_expired", "environment")
+    run = conn.execute("SELECT status, ended_at FROM runs WHERE id='r1'").fetchone()
+    assert run["status"] == "failed"
+    assert run["ended_at"]
+
+    # 退避窗口结束后，同一角色必须能被重新派发（旧 run 不再是活跃 run）。
+    conn.execute(
+        "UPDATE workflow_steps SET next_retry_at='2000-01-01T00:00:00+00:00' "
+        "WHERE workflow_id=? AND step_id='S1'", (wf["id"],))
+    conn.commit()
+    started = []
+    wf_service.advance(conn, wf["id"],
+                       starter=lambda *a: started.append(a) or {"id": "r2"})
+    assert len(started) == 1
+    step = next(s for s in wf_service.get_workflow(conn, wf["id"])["steps"]
+                if s["step_id"] == "S1")
+    assert step["status"] == "running"
+    assert step["run_id"] == "r2"
+
+
 def test_fail_step_exhausted_marks_failed_without_human(conn, monkeypatch):
     """恢复预算耗尽后判失败，但只留非阻塞 comment，不产生待回复的 @human。"""
     monkeypatch.setattr(config, "AUTO_RECOVER_MAX_ATTEMPTS", 1)

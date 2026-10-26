@@ -2070,8 +2070,31 @@ def _retry_backoff_seconds(attempt: int) -> float:
     return min(cap, base * (2 ** max(0, int(attempt) - 1)))
 
 
+def _end_run_for_step(conn: sqlite3.Connection, wf: dict, step: dict, *,
+                      now: str, failure_class: str | None = None) -> None:
+    """步骤失败/重排时结束其关联 run，避免残留 running 占住角色、阻断 advance 重派。"""
+    run_id = step.get("run_id")
+    if not run_id:
+        return
+    row = conn.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
+    if row is None or row["status"] in ("completed", "failed", "abandoned"):
+        return
+    conn.execute(
+        "UPDATE runs SET status='failed', ended_at=?, "
+        "failure_class=COALESCE(?, failure_class) WHERE id=?",
+        (now, failure_class, run_id))
+    ledger.emit(
+        conn, "run.status_changed", task_id=wf["task_id"], workflow_id=wf["id"],
+        execution_no=wf.get("execution_no"), step_id=step["step_id"], run_id=run_id,
+        actor_type="system", actor="workflow",
+        payload={"status": "failed", "prev": row["status"]},
+        mirror_activity=True, activity_kind="run", activity_role=step["role_slug"],
+    )
+
+
 def fail_step(conn: sqlite3.Connection, wid: str, step_id: str, reason: str,
-              category: str = "agent_error") -> None:
+              category: str = "agent_error",
+              failure_class: str | None = None) -> None:
     """run 失败/失联：先指数退避自动重试，不 @human；预算耗尽才判失败并留非阻塞通知。
 
     业界实践（Kubernetes restart backoff / Temporal activity retry / GitHub Actions
@@ -2085,6 +2108,9 @@ def fail_step(conn: sqlite3.Connection, wid: str, step_id: str, reason: str,
     if step is None or step["status"] != "running":
         return
     now = now_iso()
+    # 先结束旧 run 再清 run_id：否则旧 run 仍是活跃态，advance 会一直跳过该角色。
+    _end_run_for_step(conn, wf, step, now=now,
+                      failure_class=failure_class or category)
     recovery = int(step.get("recovery_count") or 0) + 1
     max_attempts = max(1, int(config.AUTO_RECOVER_MAX_ATTEMPTS))
     if config.AUTO_RECOVER_ENABLED and recovery <= max_attempts:

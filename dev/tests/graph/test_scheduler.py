@@ -213,6 +213,40 @@ def test_reap_suspends_run_not_currently_processed(tmp_path, monkeypatch):
     assert mgr.fresh == []  # 进程还活着，不要丢弃健康上下文
 
 
+def test_reap_orphaned_step_run(tmp_path, monkeypatch):
+    """步骤已重排但旧 run 仍活跃 → 结束孤儿 run，解除对同角色的派发阻塞。"""
+    env = make_env(tmp_path, monkeypatch)
+    conn = open_conn(env["db_path"])
+    old = "2026-01-01T00:00:00+00:00"
+    conn.execute(
+        "INSERT INTO tasks (id,title,status,scope_paths_json,acceptance_json,created_at,updated_at) "
+        "VALUES ('T-O','t','in_progress','[]','[]',?,?)", (old, old))
+    conn.execute(
+        "INSERT INTO workflows (id,task_id,definition_json,status,created_at,updated_at) "
+        "VALUES ('W-O','T-O','{}','running',?,?)", (old, old))
+    conn.execute(
+        "INSERT INTO workflow_steps (workflow_id,step_id,title,role_slug,status,run_id,updated_at) "
+        "VALUES ('W-O','S1','待重排','dev','pending',NULL,?)", (old,))
+    conn.execute(
+        "INSERT INTO workflow_steps (workflow_id,step_id,title,role_slug,status,run_id,updated_at) "
+        "VALUES ('W-O','S2','执行中','dev','running','R-A',?)", (old,))
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,started_at,step_id,workflow_id) "
+        "VALUES ('R-O','dev','T-O','running',?,'S1','W-O')", (old,))
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,started_at,step_id,workflow_id) "
+        "VALUES ('R-A','dev','T-O','running',?,'S2','W-O')", (old,))
+    conn.commit()
+
+    Scheduler(env["db_path"], env["orch"])._reap_orphaned_step_runs(conn)
+
+    orphan = conn.execute("SELECT status, ended_at FROM runs WHERE id='R-O'").fetchone()
+    active = conn.execute("SELECT status FROM runs WHERE id='R-A'").fetchone()
+    assert orphan["status"] == "failed" and orphan["ended_at"]
+    assert active["status"] == "running"
+    conn.close()
+
+
 def test_reap_stalled_projecting_run(tmp_path, monkeypatch):
     """projecting 卡住（编排器崩溃窗口）：无会话重投 wake，有会话修正为 running。"""
     env = make_env(tmp_path, monkeypatch)

@@ -52,6 +52,10 @@
   效果评估只展示总体命中覆盖率、累计命中、零命中、治理待处理、任务知识覆盖率；
   频道/任务/角色/共享经验的具体条目行内展示单条命中次数与最近命中。
   删除频道时同步解绑任务/草案，任务进入 `#无主题`。
+- v1.30.8 调度与 CLI 修复：`fail_step` 重排前结束关联 run；scheduler 每轮回收
+  孤儿 step run（`orphaned_step_run`），避免僵尸 run 占住角色导致 plan_slices 长期
+  pending。CLI 兼容 `knowledge list`、`task comment/mention --message`，补齐
+  `task knowledge-write --kind`。
 - 注入默认 `CHANNEL_KNOWLEDGE_ENABLED=0`，按频道试点后再开启；任务知识默认开启。
 
 ### 多角色团队任务（2026-10-18 修正）
