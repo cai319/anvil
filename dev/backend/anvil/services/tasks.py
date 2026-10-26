@@ -594,15 +594,29 @@ def cancel(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
 
 
 def reopen(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
-    """重新打开已人工终止的任务：closed → todo，清空认领信息。"""
+    """重新打开已人工终止的任务，并接回已有执行。
+
+    - 最新工作流 running → 任务回到 in_progress，由调度器继续原执行，
+      不重新规划、不重新生成工作流。
+    - 最新工作流 done → 任务进入 in_review，等待最终人工评审。
+    - 无工作流 / 已 terminated/failed → todo，由人类决定重新派发或规划。
+    """
     t = get(conn, tid)
     if t is None:
         raise LookupError(tid)
     _assert_can_reopen(t)
+    latest = conn.execute(
+        "SELECT status FROM workflows WHERE task_id=? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1", (tid,)).fetchone()
+    status = "todo"
+    if latest and latest["status"] == "running":
+        status = "in_progress"
+    elif latest and latest["status"] == "done":
+        status = "in_review"
     conn.execute(
-        "UPDATE tasks SET status='todo', assignee=NULL, claimed_at=NULL, "
+        "UPDATE tasks SET status=?, assignee=NULL, claimed_at=NULL, "
         "lease_expires_at=NULL, archived_at=NULL, updated_at=? WHERE id=?",
-        (now_iso(), tid),
+        (status, now_iso(), tid),
     )
     conn.execute(
         "UPDATE task_role_claims SET status='pending', summary=NULL, run_id=NULL, "

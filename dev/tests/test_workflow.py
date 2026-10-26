@@ -216,6 +216,29 @@ def test_advance_respects_retry_backoff(conn):
     assert len(started) == 1
 
 
+def test_reopen_resumes_running_workflow_without_replan(conn):
+    """人工终止后重开：接回运行中的执行，任务回到 in_progress。"""
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    wf_service.advance(conn, wf["id"], starter=lambda *a: {"id": "r1"})
+    tasks_service.cancel(conn, "T1")
+    reopened = tasks_service.reopen(conn, "T1")
+    assert reopened["status"] == "in_progress"
+    current = wf_service.get_workflow(conn, wf["id"])
+    assert current and current["status"] == "running"
+
+
+def test_reopen_done_workflow_goes_to_review(conn):
+    """终止期间工作流已完成：重开进入最终评审，不重新规划。"""
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    conn.execute("UPDATE workflows SET status='done' WHERE id=?", (wf["id"],))
+    conn.commit()
+    tasks_service.cancel(conn, "T1")
+    reopened = tasks_service.reopen(conn, "T1")
+    assert reopened["status"] == "in_review"
+
+
 def _insert_role(conn, slug: str, kind: str = "member") -> None:
     now = now_iso()
     conn.execute(

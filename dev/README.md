@@ -66,4 +66,4 @@ v1.30 起明确区分三个容易混淆的概念：
 ## 当前实现状态
 
 详见 `implementation-status.md`（各里程碑的已实现 / 未实现清单）。当前自动化测试：
-**559 passed + 43 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行）。
+**561 passed + 43 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行）。

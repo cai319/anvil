@@ -106,6 +106,9 @@ anvil task knowledge-delete <id> --id <knowledge-id>   # human
   @human（返回 202 / `pending_review`）；human 反馈或批准后重新执行同一命令即可。
   批准只授权 planner，角色仍由 planner 创建/绑定，不会替换已有 assignees。
 - `archive` 只接受 `done/closed` 任务；归档任务仍在频道/`#无主题` 中可见。
+- `cancel` → `reopen` 会接回最新执行：workflow 仍 `running` → 任务回到 `in_progress`
+  并继续原步骤，**不重新规划**；workflow 已 `done` → `in_review`；无 workflow 或
+  workflow `terminated/failed` → `todo`，再决定是否重新派发/规划。
 - `knowledge-write` 的 `--kind` 例如 `task_finding`；`--fields` 必须是 JSON 对象。
 
 ## 5. 工作流步骤：`anvil step`

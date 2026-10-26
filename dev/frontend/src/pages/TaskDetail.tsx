@@ -1490,7 +1490,8 @@ export function TaskDetail({ id }: { id: string }) {
                 >指派并执行</button>
               </>
             )}
-            {(task.status === "todo" || task.status === "in_progress") && (
+            {(task.status === "todo" || task.status === "in_progress")
+              && !(workflow && workflow.status === "running") && (
               <button
                 className="primary"
                 disabled={busy}
