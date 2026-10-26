@@ -54,7 +54,9 @@
   删除频道时同步解绑任务/草案，任务进入 `#无主题`。
 - v1.30.8 调度与 CLI 修复：`fail_step` 重排前结束关联 run；scheduler 每轮回收
   孤儿 step run（`orphaned_step_run`），避免僵尸 run 占住角色导致 plan_slices 长期
-  pending。CLI 兼容 `knowledge list`、`task comment/mention --message`，补齐
+  pending。步骤 lease 在 run 存活（running/suspended）期间由 scheduler 自动续租，
+  `task heartbeat` 同步续租当前步骤，避免长步骤误报 `lease_expired`。
+  CLI 兼容 `knowledge list`、`task comment/mention --message`，补齐
   `task knowledge-write --kind`。
 - 注入默认 `CHANNEL_KNOWLEDGE_ENABLED=0`，按频道试点后再开启；任务知识默认开启。
 

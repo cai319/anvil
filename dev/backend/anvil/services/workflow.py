@@ -1639,6 +1639,29 @@ def _advance_locked(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
     return {"started": started, "waiting_human": waiting_human, "done": all_done}
 
 
+def renew_step_lease_for_run(conn: sqlite3.Connection, run_id: str | None,
+                             ttl_seconds: float | None = None) -> bool:
+    """任务心跳顺带续租当前步骤 lease；run/step 不匹配或已非 running 时不动。"""
+    if not run_id:
+        return False
+    row = conn.execute(
+        "SELECT workflow_id, step_id FROM runs WHERE id=?", (run_id,)).fetchone()
+    if row is None or not row["workflow_id"] or not row["step_id"]:
+        return False
+    step = conn.execute(
+        "SELECT status, run_id, lease_id FROM workflow_steps "
+        "WHERE workflow_id=? AND step_id=?",
+        (row["workflow_id"], row["step_id"])).fetchone()
+    if step is None or step["status"] != "running" \
+            or str(step["run_id"] or "") != str(run_id):
+        return False
+    try:
+        leases.renew(conn, step["lease_id"], ttl_seconds=ttl_seconds)
+    except ConflictError:
+        return False
+    return True
+
+
 def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
                 summary: str | None, run_id: str | None = None,
                 evidence: list | None = None,

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import threading
 import time
 
@@ -219,7 +221,7 @@ def _insert_role(conn, slug: str, kind: str = "member") -> None:
     conn.execute(
         "INSERT INTO roles (slug, display_name, home_path, definition_json, "
         "created_at, updated_at, enabled) VALUES (?,?,?,?,?,?,1)",
-        (slug, slug, f"/tmp/{slug}", json.dumps({"kind": kind}), now, now))
+        (slug, slug, os.path.join(tempfile.gettempdir(), slug), json.dumps({"kind": kind}), now, now))
     conn.commit()
 
 

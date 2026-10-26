@@ -276,7 +276,7 @@ Windows 用户环境变量可通过「系统属性 → 环境变量」删除，�
 清理临时日志：
 
 ```bash
-rm -f /tmp/anvil-*.log                   # macOS
+rm -f "${TMPDIR:-/tmp}"/anvil-*.log      # macOS / Linux
 ```
 
 ```powershell

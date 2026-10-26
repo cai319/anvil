@@ -167,5 +167,5 @@ P0（可靠性地基）──必须最先，其余一切建立在其上
 ## 附：调研来源
 
 - **multica**：multica.ai（docs/concepts、squads、triggering-agents、security-model 等）+ github.com/multica-ai/multica（VISION.md、README）——调研报告全文见会话记录
-- **raft**：raft.build（官网、文档）——完整调研报告：`/tmp/raft-build-research.md`
-- **业界实践**（第三路，已完成）：Anthropic 工程博客（multi-agent research system / building effective agents / context engineering / writing tools / CC best practices）、Claude Code docs（sub-agents / agent-teams）、LangGraph、CrewAI（crews/tasks/memory）、AutoGen（teams/termination/HITL）、OpenAI Agents SDK（multi_agent/handoffs/human_in_the_loop）、MetaGPT（arXiv:2308.00352）、Magentic-One（arXiv:2411.04468）、MAST（arXiv:2503.13657）、More Agents Is All You Need（arXiv:2402.05120）、Cognition、A2A——完整报告：`/tmp/anvil_research/multi_agent_best_practices_zh.md`
+- **raft**：raft.build（官网、文档）——完整调研报告：`<临时目录>/raft-build-research.md`
+- **业界实践**（第三路，已完成）：Anthropic 工程博客（multi-agent research system / building effective agents / context engineering / writing tools / CC best practices）、Claude Code docs（sub-agents / agent-teams）、LangGraph、CrewAI（crews/tasks/memory）、AutoGen（teams/termination/HITL）、OpenAI Agents SDK（multi_agent/handoffs/human_in_the_loop）、MetaGPT（arXiv:2308.00352）、Magentic-One（arXiv:2411.04468）、MAST（arXiv:2503.13657）、More Agents Is All You Need（arXiv:2402.05120）、Cognition、A2A——完整报告：`<临时目录>/anvil_research/multi_agent_best_practices_zh.md`

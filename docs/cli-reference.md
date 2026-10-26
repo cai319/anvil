@@ -26,6 +26,19 @@
   或 `action prepare`。
 - 共享 token 只代表 human，不能冒充 Agent 角色。
 
+### 1.1 文件参数与临时目录
+
+需要 `--file` / `--content-file` / `--evidence-file` / `--tree-file` 的命令，
+优先使用**当前工作目录的相对路径**（如 `plan.json`、`roles.json`），或绝对路径。
+
+- macOS / Linux：可用 `$TMPDIR` 或 `/tmp`（如 `/tmp/plan.json`）。
+- Windows：用 `%TEMP%`（cmd）或 `$env:TEMP`（PowerShell），例如
+  `%TEMP%\plan.json`、`$env:TEMP\plan.json`；**Windows 没有 `/tmp`**。
+- 不要写死 `/tmp`；跨平台脚本用 Python `tempfile.gettempdir()` 获取临时目录。
+- Agent 在自己的 cwd 写文件即可，不必强制使用系统临时目录。
+- Shell 语法：示例中的 `$ANVIL_TASK_ID` 在 PowerShell 写作 `$env:ANVIL_TASK_ID`，
+  cmd 写作 `%ANVIL_TASK_ID%`；其余命令参数相同。
+
 ## 2. 退出码
 
 | 码 | 含义 | 典型处理 |
@@ -137,6 +150,8 @@ anvil step packet <wf> <step> [--json]
 规则：
 
 - 只对 `running` 步骤操作；返回 409 时先 `anvil step show <wf>`，不要反复重试。
+- 步骤 lease 在 run 存活期间由 scheduler 自动续租；长步骤仍应定期
+  `anvil task heartbeat`（它同时续租任务与当前步骤 lease）。
 - `plan_slices` 用 `step plan`，`decision` 用 `step decide`，普通步骤用 `step submit`。
 - 切片只描述范围/粒度/轮次，**不得指定角色或 loop 阶段**；角色由 Cindy 的 loop 模板定义。
 - 不是工作流任务时才用 `anvil task submit`。

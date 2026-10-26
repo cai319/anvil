@@ -6,6 +6,9 @@
 """
 from __future__ import annotations
 
+import os
+import tempfile
+
 import pytest
 
 from tests.conftest import API, auth_headers, human_headers, role_payload, runtime_payload
@@ -123,7 +126,7 @@ async def test_role_runtime_reports_busy_task_queue_and_contexts(client, app):
             "(role_slug, task_key, session_id, cwd, workspace_path, status, "
             " context_tokens, last_active_at, created_at, updated_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            ("qa-role", task_id, "sid-a", "/tmp/a", "/tmp/a", "idle",
+            ("qa-role", task_id, "sid-a", os.path.join(tempfile.gettempdir(), "a"), os.path.join(tempfile.gettempdir(), "a"), "idle",
              1234, now, now, now),
         )
         conn.execute(

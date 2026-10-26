@@ -37,6 +37,8 @@ MAIN_EPILOG = """\b
   · 删除、审批、重置等人类操作需要 human token。
   · 退出码: 0 成功 / 1 通用失败 / 2 参数错误 / 3 状态冲突 / 4 无权限。
   · 每个命令都支持 -h / --help，例如 anvil task -h。
+  · 文件参数用当前目录相对路径或绝对路径；Windows 临时目录用 %TEMP%，
+    不要写死 /tmp（macOS/Linux 的 /tmp 在 Windows 不存在）。
 """
 
 TASK_EPILOG = """\b
@@ -97,9 +99,9 @@ KNOWLEDGE_EPILOG = """\b
 
 NOTE_EPILOG = """\b
 示例:
-  anvil note write notes/login-timeout.md --content-file /tmp/n.md \\
+  anvil note write notes/login-timeout.md --content-file note-content.md \\
     --kind module_knowledge --scope role --tags auth,timeout
-  anvil note write notes/task.md --content-file /tmp/n.md --scope task \\
+  anvil note write notes/task.md --content-file note-content.md --scope task \\
     --task $ANVIL_TASK_ID --practice-task $ANVIL_TASK_ID --practice-run $ANVIL_RUN_ID
 
 规则:
@@ -154,7 +156,7 @@ ROLE_EPILOG = """\b
 示例:
   anvil role list --json
   anvil role list | python3 -c "import sys,json; print([r['slug'] for r in json.load(sys.stdin)])"
-  anvil role propose --task $ANVIL_TASK_ID --file /tmp/roles.json
+  anvil role propose --task $ANVIL_TASK_ID --file roles.json
   anvil role expand --brief "需要一个安全评审角色" --task $ANVIL_TASK_ID
 
 规则:
@@ -357,7 +359,7 @@ def self_cmd(
         if not file:
             _usage_error(
                 "self edit-instruction 需要 --file",
-                "传入本地文件路径；例如 `anvil self edit-instruction --file /tmp/instruction.md`。")
+                "传入本地文件路径；例如 `anvil self edit-instruction --file instruction.md`。")
         try:
             content = open(file, encoding="utf-8").read()
         except OSError as exc:
@@ -367,7 +369,7 @@ def self_cmd(
         if not field or not file:
             _usage_error(
                 "self propose 需要 --field 与 --file",
-                "例如 `anvil self propose --field responsibilities --file /tmp/proposal.json`；"
+                "例如 `anvil self propose --field responsibilities --file proposal.json`；"
                 "文件内容必须是 JSON。")
         try:
             proposed = json.loads(open(file, encoding="utf-8").read())
@@ -1130,8 +1132,8 @@ roles.json:
      "capabilities":{"security-audit":0.9}}]}
 
 示例:
-  anvil role propose --task $ANVIL_TASK_ID --file /tmp/roles.json
-  anvil role propose --task T-0001 --file /tmp/roles.json --json
+  anvil role propose --task $ANVIL_TASK_ID --file roles.json
+  anvil role propose --task T-0001 --file roles.json --json
 
 流程: 提案 @human → human 反馈/批准 → Cindy 执行 role expand 创建 → task assign 加入任务。
 """)
@@ -1300,7 +1302,7 @@ app.add_typer(step_app, name="step")
 
 @step_app.command("submit", epilog="""\b
 示例:
-  anvil step submit WF-1 S2 --summary "接口完成" --evidence-file /tmp/evidence.json
+  anvil step submit WF-1 S2 --summary "接口完成" --evidence-file evidence.json
   anvil step submit WF-1 S2 --summary "修复完成" --changed-paths src/auth.ts,src/api.ts
 
 规则: 只对 running 步骤提交；不要用 task submit。409 时先 `anvil step show WF-1`。
@@ -1453,7 +1455,7 @@ plan.json 最小结构:
                                 "instructions":"..."}]}]}
 
 示例:
-  anvil step plan WF-1 S1 --file /tmp/plan.json
+  anvil step plan WF-1 S1 --file plan.json
 
 规则: 切片只描述范围/粒度/轮次，不得指定角色或 loop 阶段；角色由 Cindy 的 loop 模板定义。
 """)

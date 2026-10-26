@@ -207,6 +207,17 @@ def test_role_propose_creates_draft_and_mentions_human(mock_backend, tmp_path):
 
 
 @pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+def test_help_has_no_unix_only_temp_paths():
+    """示例不能写死 /tmp；Windows 没有该目录。"""
+    for args in (["task", "-h"], ["step", "plan", "-h"],
+                 ["role", "propose", "-h"], ["note", "-h"]):
+        r = subprocess.run([ANVIL_BIN, *args], capture_output=True,
+                           text=True, timeout=30)
+        assert r.returncode == 0, r.stderr
+        assert "/tmp/" not in r.stdout, (args, "/tmp example in help")
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
 def test_task_comment_accepts_message_option(mock_backend):
     """comment 除位置参数外接受 --message，避免 Agent 凭直觉传参失败。"""
     r = _run(["task", "comment", "T-0001", "--message", "hello"], mock_backend)

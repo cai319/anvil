@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import tempfile
 
 import pytest
 
@@ -354,8 +356,9 @@ def test_legacy_roles_table_gets_avatar_column(tmp_path):
     raw.execute(
         "INSERT INTO roles (slug, display_name, avatar_color, home_path, "
         "definition_json, created_at, updated_at, enabled) "
-        "VALUES ('legacy-role', 'Legacy Role', '#123456', '/tmp/legacy', "
-        "'{}', '2020-01-01T00:00:00+00:00', '2020-01-01T00:00:00+00:00', 1)"
+        "VALUES ('legacy-role', 'Legacy Role', '#123456', ?, "
+        "'{}', '2020-01-01T00:00:00+00:00', '2020-01-01T00:00:00+00:00', 1)",
+        (os.path.join(tempfile.gettempdir(), "legacy"),)
     )
     raw.commit()
     raw.close()

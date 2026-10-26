@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 
 import pytest
 
@@ -119,7 +121,7 @@ async def test_human_mention_cindy_starts_planner_run(client, app, seeded):
         conn.execute(
             "INSERT INTO roles (slug, display_name, home_path, definition_json, "
             "created_at, updated_at, enabled) VALUES (?,?,?,?,?,?,1)",
-            ("cindy", "Cindy", "/tmp/cindy",
+            ("cindy", "Cindy", os.path.join(tempfile.gettempdir(), "cindy"),
              json.dumps({"kind": "onboarding"}), now, now))
         conn.commit()
         workflow_service.create_workflow(conn, "T-HUMAN-CINDY", {
@@ -149,8 +151,9 @@ async def test_mention_pseudo_role_never_wakes(client, app, seeded):
         conn.execute(
             "INSERT INTO roles (slug, display_name, home_path, definition_json, "
             "created_at, updated_at, enabled) VALUES "
-            "('workflow','Workflow','/tmp/workflow','{}','2026-01-01T00:00:00+00:00',"
-            "'2026-01-01T00:00:00+00:00',1)")
+            "('workflow','Workflow',?,'{}','2026-01-01T00:00:00+00:00',"
+            "'2026-01-01T00:00:00+00:00',1)",
+            (os.path.join(tempfile.gettempdir(), "workflow"),))
         conn.commit()
     finally:
         conn.close()

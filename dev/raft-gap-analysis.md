@@ -1,7 +1,7 @@
 # Anvil × Raft.build 功能差异与优化建议
 
 **日期**：2026-10-19（P0 已于同日修复，见 `implementation-status.md`）
-**对照材料**：`/tmp/raft-build-research.md`（Raft 官网/docs/博客一手调研）、《Anvil 实现状态》（`implementation-status.md`）与当前源码。
+**对照材料**：`<临时目录>/raft-build-research.md`（Raft 官网/docs/博客一手调研）、《Anvil 实现状态》（`implementation-status.md`）与当前源码。
 **结论一句话**：Anvil 在**结构化交付**（工作流、依赖、gate、diff/scope、成本闸门）上比 Raft 更硬；Raft 在**协作世界与上下文工程**（Inbox 拉模式、Held Draft、Constructed Initial Context、验证矩阵、action card）上明显更成熟。后续优化应优先补齐「上下文经济」与「信任/边界」两类能力，而不是照搬聊天产品形态。
 
 ---
@@ -193,5 +193,5 @@ P3 Cleaner / trace / mutation / judge 评测
 
 ## 附：主要来源
 
-- Raft 调研报告：`/tmp/raft-build-research.md`（含 docs.raft.build、官方博客与用例链接）
+- Raft 调研报告：`<临时目录>/raft-build-research.md`（含 docs.raft.build、官方博客与用例链接）
 - 本项目：`design.md`、`dev/implementation-status.md`、`dev/optimization-roadmap.md`

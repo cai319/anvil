@@ -22,7 +22,7 @@ from .platform import factory
 from .services import daemon as daemon_service
 from .services import governance, leases, runs as runs_service, tasks as tasks_service
 from .services import workflow as workflow_service
-from .util import now_iso
+from .util import ConflictError, now_iso
 
 
 def _elapsed_seconds(started_at: str | None) -> float:
@@ -119,6 +119,7 @@ class Scheduler:
 
     def _advance_workflows(self, conn) -> None:
         """推进所有 running workflow：依赖满足且角色空闲的步骤创建 run。"""
+        self._renew_step_leases(conn)
         leases.reap_expired(conn)
         # A holder that never renewed loses the step; the retry path re-dispatches
         # with a new fence so a zombie run cannot submit.
@@ -396,6 +397,29 @@ class Scheduler:
             runs_service.set_status(conn, row["id"], "suspended")
             changed = True
         if changed:
+            conn.commit()
+
+    def _renew_step_leases(self, conn) -> None:
+        """步骤仍在执行（run running/suspended）时续租，避免长步骤 lease_expired。
+
+        lease 是 fencing 凭证，不是执行超时；只要 run 还活着就应续租。
+        真正的卡死由 monitor（进程/运行超时）与 step watchdog（nudge 上限）处理。
+        """
+        rows = conn.execute(
+            """SELECT s.lease_id
+                 FROM workflow_steps s
+                 JOIN runs r ON r.id=s.run_id
+                 JOIN leases l ON l.id=s.lease_id AND l.status='active'
+                WHERE s.status='running' AND r.status IN ('running','suspended')"""
+        ).fetchall()
+        renewed = False
+        for row in rows:
+            try:
+                leases.renew(conn, row["lease_id"], commit=False)
+                renewed = True
+            except ConflictError:
+                continue
+        if renewed:
             conn.commit()
 
     def _reap_orphaned_step_runs(self, conn) -> None:

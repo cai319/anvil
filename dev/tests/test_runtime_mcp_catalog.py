@@ -1,6 +1,9 @@
 """运行时 MCP 目录介绍：固定读取 runtime catalog 配置，不探测外部进程。"""
 from __future__ import annotations
 
+import os
+import tempfile
+
 from anvil.db import connect
 from anvil.services import runtime, tooling
 
@@ -56,8 +59,8 @@ def test_mcp_catalog_entry_without_description_keeps_only_hint():
     entry = runtime._mcp_catalog_entry(
         "macro-registry", {
             "type": "stdio",
-            "command": "/tmp/.venv/bin/python",
-            "args": ["/tmp/macro_cli.py", "serve"],
+            "command": os.path.join(tempfile.gettempdir(), ".venv", "bin", "python"),
+            "args": [os.path.join(tempfile.gettempdir(), "macro_cli.py"), "serve"],
         })
     assert entry["description"] == ""
     assert entry["hint"] == "python macro_cli.py"

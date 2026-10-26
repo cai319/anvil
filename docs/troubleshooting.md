@@ -258,6 +258,7 @@ reader 遇到解码/管道异常时会记录完整 traceback 到 `role-session.l
 | 等模型/工具返回（run=`running`，进程 busy） | 只做 liveness 检查；超过 run 级 timeout（默认 3600s）才重置会话并自动恢复 |
 | 进程已死、run 仍 `running` | 60s 宽限期后转 `suspended` + 下次用全新 CIC 会话 |
 | 租约到期（任务/角色 claim） | 有非终态 run 且仍活着 → 自动续租；确认失联才回收 |
+| 步骤 lease 到期（长步骤超过 TTL） | run 仍 `running/suspended` → scheduler 每轮续租；`anvil task heartbeat` 也续租当前步骤；run 结束/失联才回收 |
 
 > 调度器不会每 5 秒就动一次等待中的角色；它只处理明确异常（死进程、僵尸 run、
 > 卡住的 projecting、到期的退避重试）。等待中的正常会话由事件（mention 回复）唤醒。

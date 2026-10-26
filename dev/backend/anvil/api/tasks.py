@@ -504,7 +504,10 @@ def unclaim_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth))
 def heartbeat_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     _assert_session_task(conn, auth, tid)
     try:
-        return services.tasks.heartbeat(conn, tid, auth.role)
+        result = services.tasks.heartbeat(conn, tid, auth.role)
+        if auth.run_id:
+            services.workflow.renew_step_lease_for_run(conn, auth.run_id)
+        return result
     except LookupError:
         raise HTTPException(status_code=404, detail="task not found")
 
