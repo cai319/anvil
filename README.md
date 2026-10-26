@@ -29,10 +29,14 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **上下文与模型窗口**：自动识别实际模型与窗口；支持 `model_pool` / 窗口下限；角色可自主重置上下文。
 - **任务与工作流**：任务板、认领/租约、多角色协作；Cindy 先规划 workflow，人类批准后按依赖执行。
 - **切片闭环**：`plan_slices + loop`。Cindy 定义 loop 的角色/阶段；运行期切片只决定粒度与轮数，不能覆盖角色。
-- **记忆与知识**：`MEMORY.md` + FTS5 + 共享 lessons（80 条上限）+ 提案审批。
-- **频道与知识作用域**：频道承载任务归属、领域 repo 与知识资产；频道约定对绑定任务是“约束”、
-  对只引用 knowledge repo 的任务是“参考”；任务知识在参与角色间共享，角色知识经成功实践门控。
-  知识卡支持审批、版本、过期/复核与冲突检测；任务可归档。
+- **记忆与知识**：`MEMORY.md` + FTS5 + 四层知识作用域（global / channel / task / role）+
+  知识卡模板、审批、版本、过期/复核/冲突检测；角色知识必须经过“成功实践 + 提炼”门控。
+- **频道与任务归档**：频道承载任务归属、领域 repo、knowledge repo 与参与角色；频道约定对绑定
+  任务是“约束”、对只引用 knowledge repo 的任务是“参考”；未绑定频道的任务进入内置「#无主题」。
+  任务可按终态归档，归档任务在所属频道任务页签或「#无主题」中查看。
+- **知识库与效果评估**：`/knowledge` 统一浏览频道知识、任务知识、角色知识、共享经验、演化提案
+  和总体效果评估；具体知识条目显示单条命中次数/最近命中，评估页展示命中覆盖率、零命中、
+  治理待处理与任务知识覆盖率。
 - **HITL**：评审、审批、删除、重置等只接受自然人身份，Agent 令牌返回 403。
 - **可观测**：SSE 事件、审计、运行日志、Token 统计、全场冻结。
 
@@ -120,12 +124,17 @@ anvil init --with-roles
 ### 3.2 创建并派发任务
 
 1. 任务大厅 → **新建任务**；
-2. 选择参与成员（可多选；也可以不选，让 Cindy 先建议角色）；
-3. 点击 **派发**：
+2. 可选「所属频道」：频道提供任务归属、默认 repo / knowledge repo 与参与角色偏好；留空则进入
+   内置「#无主题」。顶层任务可显式覆盖 repo，子任务继承父任务结构标记且不可覆盖；
+3. 选择参与成员（可多选；也可以不选，让 Cindy 先建议角色）；
+4. 点击 **派发**：
    - **0 角色**：Cindy 评估缺口，必要时提交角色建议；
    - **1 角色**：直接唤醒执行；
    - **多角色**：Cindy 设计 workflow，草案进入收件箱；
-4. 人类在收件箱批准草案后，步骤按依赖自动执行；最终由人类评审。
+5. 人类在收件箱批准草案后，步骤按依赖自动执行；最终由人类评审。
+
+任务大厅默认只显示未归档任务；完成/终止的任务可在任务详情归档，归档后在所属频道任务页签
+或「#无主题」查看，也可在详情页取消归档。
 
 ### 3.3 工作流与切片
 
@@ -174,12 +183,13 @@ anvil init --with-roles
   预算；真正的 API 溢出会按最后成功上下文自适应收紧窗口后重试，超过
   `ANVIL_CONTEXT_RESET_MAX_RETRIES` 次则交给步骤自动恢复队列（不 @human）。因此不会再以
   `prompt is too long` 的形式失败。
-- **长期知识（按角色隔离）**：换会话/重置前，Anvil 会把当前任务的工作流步骤摘要、最近结论与
+- **长期知识（按作用域隔离）**：换会话/重置前，Anvil 会把当前任务的工作流步骤摘要、最近结论与
   交接自动写成 `notes/knowledge/<task-id>/<时间>-<触发>.md`，并写入 FTS 索引。新会话的 CIC 会
-  注入本角色 `MEMORY.md` 尾部、按任务检索到的相关记忆、工作流决策和最近知识快照；角色也可用
-  `anvil memory append "关键结论..."` 主动沉淀长期知识。`MEMORY.md`、`notes/`、知识快照与
-  FTS 检索都按 `role_slug` 严格隔离；跨角色共享只通过人工批准的 lessons（`anvil lesson
-  propose`）这一显式通道。
+  注入本角色 `MEMORY.md` 尾部、按任务检索到的相关记忆、工作流决策、任务共享知识、频道知识
+  和最近知识快照；角色也可用 `anvil memory append "关键结论..."` 主动沉淀长期知识。
+  `MEMORY.md`、`notes/` 和个人知识按 `role_slug` 隔离；任务知识在同一任务的参与角色间共享；
+  频道知识对绑定该频道的任务是约束、对其他引用其 knowledge repo 的任务是参考；跨角色共享
+  还可通过人工批准的 lessons（`anvil lesson propose`）。角色不能直接导入他人的 notes。
 - 常驻进程已死但 run 仍卡在 `running` 时，调度器在 `ANVIL_RUN_DEAD_GRACE_SECONDS`
   （默认 60 秒）后强制转为 `suspended`，并标记下一次唤醒使用全新 CIC 会话；
   步骤看门狗随后续跑。
@@ -238,6 +248,17 @@ anvil board draft --task $ANVIL_TASK_ID --goal "..." --tree-file wf.json --kind 
 anvil self reset-context --task $ANVIL_TASK_ID --reason "..."
 anvil role expand --brief "需要一个安全评审角色"
 anvil action prepare --kind task.cancel --task $ANVIL_TASK_ID --reason "..."
+
+# 频道 / 任务 / 知识卡
+anvil workspace knowledge list <workspace-id>
+anvil workspace knowledge propose <workspace-id> --title "..." --tldr "..." --kind convention --fields '{"rule":"..."}'
+anvil workspace knowledge approve <workspace-id> <knowledge-id>
+anvil workspace knowledge harvest <workspace-id> <task-id>
+anvil task knowledge-list $ANVIL_TASK_ID --include-subtasks
+anvil task knowledge-write $ANVIL_TASK_ID --title "..." --tldr "..." --kind task_finding --fields '{"finding":"..."}'
+anvil task archive <task-id>
+anvil knowledge card-template --kind convention
+anvil knowledge card-validate --file card.json --for-approval
 ```
 
 退出码：`0` 成功；`1` 通用失败；`2` 参数错误；`3` 状态冲突；`4` 无权限。
@@ -250,6 +271,30 @@ anvil action prepare --kind task.cancel --task $ANVIL_TASK_ID --reason "..."
 | 任务配置了 `repo` | 独立 worktree：`data/worktrees/<run_id>/`，分支 `agent/<slug>/<task>` |
 
 运行日志：`data/agents/<slug>/logs/run-<run_id>.log`。
+
+### 3.8 知识库与效果评估
+
+「知识库」页面按作用域提供六个页签：
+
+- **频道知识**：跨频道浏览/筛选，待批准卡可直接批准/拒绝；
+- **任务知识**：任务参与角色共享的知识，只读审计；
+- **角色知识**：按角色查看最近笔记或搜索 notes，仅作人工审计，不导入他人知识；
+- **共享经验**：lessons 的提案、审批与删除；
+- **演化提案**：角色自我演化建议的审批；
+- **效果评估**：只展示总体指标，不展示单条明细。
+
+单条知识的命中信息直接显示在对应条目行内：
+
+```text
+命中 N 次 · 最近命中 YYYY-MM-DD HH:mm
+```
+
+- `hit_count` 表示该条知识被检索命中并进入 CIC/one-shot 上下文的次数；
+- 列表浏览、页面搜索本身不计命中；
+- 它只代表“暴露/使用机会”，不等于任务收益；收益仍需结合返工、评审驳回、周期和 token 成本评估。
+
+效果评估页的总体指标包括：知识利用率（命中覆盖）、累计命中、零命中、过期/复核/冲突、
+任务知识覆盖率。任务归档后，终态任务的共享知识仍在任务知识页签中可见（标记为归档）。
 
 ## 4. 配置
 
@@ -464,5 +509,6 @@ anvil init --with-roles
 ## 9. 文档
 
 - [design.md](design.md)：架构、数据模型、工作流引擎、上下文与模型策略
+- [docs/v1.30-channel-knowledge.md](docs/v1.30-channel-knowledge.md)：频道、知识作用域、知识卡、归档与效果评估方案
 - [docs/operations.md](docs/operations.md)：打包、备份/迁移/重置、卸载
 - [docs/troubleshooting.md](docs/troubleshooting.md)：详细排查

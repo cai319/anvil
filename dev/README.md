@@ -5,7 +5,7 @@ Anvil 是一个本地运行的多 Agent 编排服务：纳管运行时（Claude 
 
 - **backend/** — FastAPI 后端（状态存 SQLite，文件是真相层）
 - **agentcli/** — `anvil` 命令行（Typer），走同一套 REST API（`X-Anvil-Session` 鉴权）
-- **frontend/** — React + TypeScript（大厅 + 任务详情 + 角色工坊）
+- **frontend/** — React + TypeScript（大厅 + 任务详情 + 频道 + 知识库 + 角色工坊）
 
 ## 目录约定
 
@@ -57,11 +57,13 @@ v1.30 起明确区分三个容易混淆的概念：
 
 知识作用域为 `global / channel / task / role`：频道约定对**绑定该频道**的任务是“约束”，
 对只引用其 knowledge repo 的任务是“参考”；任务知识在参与角色间共享；角色知识私有，
-必须通过成功实践 + 提炼写入（无证据只能写 draft）。
+必须通过成功实践 + 提炼写入（无证据只能写 draft）。`/knowledge` 页面按六个页签统一浏览
+频道知识、任务知识、角色知识、共享经验、演化提案与总体效果评估；单条命中次数显示在
+对应知识条目行内，页面浏览不计命中。
 
 设计细节见 `../docs/v1.30-channel-knowledge.md`。
 
 ## 当前实现状态
 
 详见 `implementation-status.md`（各里程碑的已实现 / 未实现清单）。当前自动化测试：
-**540 passed + 33 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行）。
+**549 passed + 33 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行）。
