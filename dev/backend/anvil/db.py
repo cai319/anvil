@@ -680,7 +680,8 @@ CREATE INDEX IF NOT EXISTS idx_workspace_knowledge_repo_status
     ON workspace_knowledge(repo, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_knowledge_harvest
     ON workspace_knowledge(workspace_id, source_task_id, kind, content_hash)
-    WHERE source_task_id IS NOT NULL AND content_hash IS NOT NULL;
+    WHERE source_task_id IS NOT NULL AND content_hash IS NOT NULL
+      AND supersedes_id IS NULL;
 CREATE INDEX IF NOT EXISTS idx_task_knowledge_task_status
     ON task_knowledge(task_id, status);
 CREATE INDEX IF NOT EXISTS idx_task_knowledge_parent_status
@@ -1248,9 +1249,6 @@ def _migrate_channel_knowledge_v1(conn: sqlite3.Connection) -> None:
         "ON workspace_knowledge(workspace_id, status, kind, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_workspace_knowledge_repo_status "
         "ON workspace_knowledge(repo, status)",
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_knowledge_harvest "
-        "ON workspace_knowledge(workspace_id, source_task_id, kind, content_hash) "
-        "WHERE source_task_id IS NOT NULL AND content_hash IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS idx_task_knowledge_task_status "
         "ON task_knowledge(task_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_task_knowledge_parent_status "
@@ -1260,6 +1258,19 @@ def _migrate_channel_knowledge_v1(conn: sqlite3.Connection) -> None:
             conn.execute(stmt)
         except sqlite3.OperationalError:
             pass
+    # v2：唯一索引只约束“收割行”（supersedes_id IS NULL），
+    # 允许对已批准卡生成同内容但改元数据的新提案。
+    if not _setting(conn, "schema.workspace_knowledge_harvest_v2"):
+        try:
+            conn.execute("DROP INDEX IF EXISTS idx_workspace_knowledge_harvest")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_knowledge_harvest "
+                "ON workspace_knowledge(workspace_id, source_task_id, kind, content_hash) "
+                "WHERE source_task_id IS NOT NULL AND content_hash IS NOT NULL "
+                "AND supersedes_id IS NULL")
+        except sqlite3.OperationalError:
+            pass
+        _set_setting(conn, "schema.workspace_knowledge_harvest_v2", "1")
     _ensure_workspace_knowledge_fts(conn)
     _ensure_task_knowledge_fts(conn)
     _set_setting(conn, "schema.channel_knowledge_v1", "1")

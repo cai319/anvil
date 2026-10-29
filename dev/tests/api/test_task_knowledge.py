@@ -87,6 +87,21 @@ async def test_subtask_knowledge_is_marked_and_aggregated(client, app):
     assert own_only == []
 
 
+async def test_delete_requires_matching_task(client, app):
+    """DELETE 的 tid 必须与知识卡所属任务一致。"""
+    await _seed(client)
+    await _task(client, "T-OWN-A")
+    await _task(client, "T-OWN-B", assignees=["qa-role"])
+    card = (await _knowledge(client, "T-OWN-B", _agent_headers(app))).json()
+    deleted = await client.delete(
+        f"{API}/tasks/T-OWN-A/knowledge/{card['id']}", headers=human_headers())
+    assert deleted.status_code == 404
+    remaining = (
+        await client.get(f"{API}/tasks/T-OWN-B/knowledge", headers=human_headers())
+    ).json()
+    assert card["id"] in {k["id"] for k in remaining}
+
+
 async def test_agent_must_be_task_participant(client, app):
     await _seed(client)
     await _task(client, "T-PARENT2")
@@ -95,6 +110,22 @@ async def test_agent_must_be_task_participant(client, app):
         client, "T-CHILD2", _agent_headers(app, role="other-role", token="other-kb-token")
     )
     assert r.status_code == 403
+
+
+async def test_agent_must_be_participant_to_read(client, app):
+    """任务知识只对参与角色、planner/onboarding 与 human 可读。"""
+    await _seed(client)
+    await _task(client, "T-READ", assignees=["qa-role"])
+    r = await client.get(
+        f"{API}/tasks/T-READ/knowledge",
+        headers=_agent_headers(app, role="other-role", token="other-read-token"))
+    assert r.status_code == 403
+    ok = await client.get(
+        f"{API}/tasks/T-READ/knowledge",
+        headers=_agent_headers(app, role="qa-role", token="qa-read-token"))
+    assert ok.status_code == 200
+    human = await client.get(f"{API}/tasks/T-READ/knowledge", headers=human_headers())
+    assert human.status_code == 200
 
 
 async def test_deep_aggregation(client, app):

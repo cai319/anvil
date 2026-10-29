@@ -779,7 +779,8 @@ def _workflow_roles(definition: dict) -> set[str]:
 def _pending_draft_count(conn: sqlite3.Connection, task_id: str) -> int:
     return int(conn.execute(
         "SELECT COUNT(*) AS n FROM board_drafts WHERE source_task=? AND status='pending' "
-        "AND COALESCE(kind,'tasks')='workflow'", (task_id,)).fetchone()["n"])
+        "AND COALESCE(kind,'tasks') IN ('workflow','workflow_revision')",
+        (task_id,)).fetchone()["n"])
 
 
 def preview_apply(conn: sqlite3.Connection, task_id: str, tid: str,
@@ -849,13 +850,14 @@ def apply_to_task(conn: sqlite3.Connection, task_id: str, tid: str,
             "task already has a running workflow; workflow replacement is not allowed. "
             "Confirm restart_running to terminate the current execution and restart from step 1.")
     pending = _pending_draft_count(conn, task_id)
-    if pending and mode == "direct" and not reject_pending_drafts:
+    if pending and not reject_pending_drafts:
         raise ConflictError("task has pending workflow drafts; reject_pending_drafts required")
     if pending and reject_pending_drafts:
         now = now_iso()
         conn.execute(
             "UPDATE board_drafts SET status='rejected', decided_at=? "
-            "WHERE source_task=? AND status='pending' AND COALESCE(kind,'tasks')='workflow'",
+            "WHERE source_task=? AND status='pending' "
+            "AND COALESCE(kind,'tasks') IN ('workflow','workflow_revision')",
             (now, task_id))
     # 映射到的新角色如果尚未绑定到任务，按人类确认补绑。
     bound = set(task.get("assignees") or [])

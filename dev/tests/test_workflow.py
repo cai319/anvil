@@ -216,6 +216,26 @@ def test_advance_respects_retry_backoff(conn):
     assert len(started) == 1
 
 
+def test_explain_dispatch_reports_pending_blockers(conn):
+    """pending 步骤未激活时，诊断应给出依赖、角色忙、活跃 run、lease 等原因。"""
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "a", "role": "dev"},
+        {"id": "S2", "title": "b", "role": "dev", "depends_on": ["S1"]},
+        {"id": "S3", "title": "c", "role": "qa"},
+    ]})
+    conn.execute(
+        "INSERT INTO runs (id, role_slug, task_id, status, started_at) "
+        "VALUES ('r-qa','qa','T1','created',?)", (now_iso(),))
+    conn.commit()
+    wf_service.advance(conn, wf["id"], starter=lambda *a: {"id": "r1"})
+    current = wf_service.get_workflow(conn, wf["id"])
+    diag = wf_service.explain_dispatch(conn, current)
+    reasons = {p["step_id"]: p["reasons"] for p in diag["pending"]}
+    assert any(x.startswith("dependency=S1:") for x in reasons["S2"])
+    assert any(x.startswith("role_busy_step=S1:") for x in reasons["S2"])
+    assert any(x.startswith("active_run=r-qa:created") for x in reasons["S3"])
+
+
 def test_reopen_resumes_running_workflow_without_replan(conn):
     """人工终止后重开：接回运行中的执行，任务回到 in_progress。"""
     wf = wf_service.create_workflow(conn, "T1", {"steps": [
@@ -282,6 +302,15 @@ def test_notification_sender_prefers_assignee_creator(conn):
     assert roles_service.notification_sender(conn, "T1", "orchestrator") == "cindy"
 
 
+def test_create_workflow_rejects_terminal_task(conn):
+    """done/closed 任务不能被批准启动新 workflow。"""
+    conn.execute("UPDATE tasks SET status='closed' WHERE id='T1'")
+    conn.commit()
+    with pytest.raises(ConflictError):
+        wf_service.create_workflow(conn, "T1", {"steps": [
+            {"id": "S1", "title": "x", "role": "dev"}]})
+
+
 def test_retry_prompt_includes_recovery_reason(conn):
     """自动恢复重跑时，步骤提示要带上次失败原因，避免 agent 重复踩坑。"""
     wf = wf_service.create_workflow(conn, "T1", {"steps": [
@@ -297,11 +326,24 @@ def test_retry_prompt_includes_recovery_reason(conn):
     assert "自动恢复" in prompt and "platform_timeout" in prompt
 
 
+def test_human_retry_rejects_non_failed_step(conn):
+    """只有 failed/rejected 步骤可以人工重试，避免把已批准/运行中步骤打回。"""
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' WHERE workflow_id=? AND step_id='S1'",
+        (wf["id"],))
+    conn.commit()
+    with pytest.raises(ConflictError):
+        wf_service.retry_step(conn, wf["id"], "S1")
+
+
 def test_human_retry_resets_recovery_budget(conn):
     wf = wf_service.create_workflow(conn, "T1", {"steps": [
         {"id": "S1", "title": "x", "role": "dev"}]})
     conn.execute(
-        "UPDATE workflow_steps SET recovery_count=5, next_retry_at='2999-01-01T00:00:00+00:00' "
+        "UPDATE workflow_steps SET status='failed', recovery_count=5, "
+        "next_retry_at='2999-01-01T00:00:00+00:00' "
         "WHERE workflow_id=? AND step_id='S1'", (wf["id"],))
     conn.commit()
     wf_service.retry_step(conn, wf["id"], "S1")

@@ -122,6 +122,32 @@ async def test_note_draft_is_not_searchable(client, app):
     assert row is not None and row[0] == "draft"
 
 
+async def test_updating_active_note_does_not_downgrade(client, app):
+    """无证据写入不能覆盖已验证笔记：应拒绝，且原知识保持可检索。"""
+    await _seed(client)
+    r = await client.post(
+        f"{API}/me/notes",
+        json={"path": "stable.md", "content": "已验证知识 v1",
+              "kind": "note", "scope": "role"},
+        headers=auth_headers(),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "active"
+
+    headers = _agent_headers(app, token="practice-update-token")
+    r = await client.post(
+        f"{API}/me/notes",
+        json={"path": "stable.md", "content": "未验证的 v2 补充",
+              "kind": "note", "scope": "role"},
+        headers=headers,
+    )
+    assert r.status_code == 422, r.text
+    hits = (await client.get(
+        f"{API}/me/knowledge/search?q=已验证知识", headers=headers)).json()
+    assert hits.get("results")
+    assert all("未验证的 v2" not in h["content"] for h in hits["results"])
+
+
 async def test_note_with_practice_is_active(client, app):
     await _seed(client)
     await _done_task(client, "T-NOTE")

@@ -263,6 +263,20 @@ reader 遇到解码/管道异常时会记录完整 traceback 到 `role-session.l
 > 调度器不会每 5 秒就动一次等待中的角色；它只处理明确异常（死进程、僵尸 run、
 > 卡住的 projecting、到期的退避重试）。等待中的正常会话由事件（mention 回复）唤醒。
 
+**工作流停在 approved 之后，下一步不激活**
+
+先运行 `anvil step show <workflow-id>`；每个 `pending` 步骤下方会列出未激活原因：
+
+| 原因 | 处理 |
+|---|---|
+| `dependency=<step>:<status>` | 上游未 approved/skipped；先完成或修复上游 |
+| `retry_backoff_until=...` | 自动恢复退避中；等到时间或人工重试该步骤 |
+| `role_busy_step=<step>:<status>` | 同角色还有 running/submitted 步骤；等其结束/审批 |
+| `active_run=<run>:created/projecting/running` | 该角色有其它活跃 run（可能僵尸）；等 run 结束或清理 |
+| `lease_held=...` | 旧步骤 lease 未释放；等 TTL 到期或人工释放 |
+| `governance=...` | 全场冻结、Token 预算或并发闸门；先解除限制 |
+| `ready` | 依赖与闸门都满足；检查 scheduler 是否在运行（5s 内应派发） |
+
 **`request too large (max 32mb)`**
 
 - 现象：`Request too large (max 32mb): accumulated images and attachments in the

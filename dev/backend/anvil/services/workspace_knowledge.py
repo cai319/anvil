@@ -301,19 +301,39 @@ def create(conn: sqlite3.Connection, workspace_id: str, *,
            supersedes_id: str | None = None,
            actor: str | None = "human",
            origin: str = "human",
-           status: str | None = None) -> dict:
+           status: str | None = None,
+           dedupe: bool = True) -> dict:
     if kind not in knowledge_card.KINDS:
         raise ConflictError(f"unknown knowledge kind: {kind}")
     fields = knowledge_card.normalize_fields(fields)
     body_md = knowledge_card.render_markdown(title, tldr, kind, fields)
     digest = knowledge_card.content_hash(title, tldr, body_md)
-    if source_task_id:
+    if supersedes_id:
+        superseded = get(conn, supersedes_id)
+        if superseded is None or superseded.get("workspace_id") != workspace_id:
+            raise ConflictError(
+                "supersedes_id must reference a knowledge card in the same workspace")
+    if source_task_id and dedupe:
         existing = conn.execute(
             "SELECT * FROM workspace_knowledge WHERE workspace_id=? AND source_task_id=? "
-            "AND kind=? AND content_hash=? LIMIT 1",
+            "AND kind=? AND content_hash=? AND supersedes_id IS NULL LIMIT 1",
             (workspace_id, source_task_id, kind, digest),
         ).fetchone()
         if existing is not None:
+            if existing["status"] in ("rejected", "deprecated", "expired"):
+                if existing["status"] != "rejected":
+                    successor = conn.execute(
+                        "SELECT * FROM workspace_knowledge WHERE workspace_id=? "
+                        "AND source_task_id=? AND kind=? AND content_hash=? "
+                        "AND supersedes_id=? AND status='approved' "
+                        "ORDER BY created_at DESC LIMIT 1",
+                        (workspace_id, source_task_id, kind, digest,
+                         existing["id"])).fetchone()
+                    if successor is not None:
+                        return _row(successor)  # type: ignore[return-value]
+                raise ConflictError(
+                    f"same content already exists as {existing['status']} "
+                    f"({existing['id']}); modify it before resubmitting")
             return _row(existing)  # type: ignore[return-value]
     authority = authority or _default_authority(kind)
     if authority not in ("normative", "reference"):
@@ -398,6 +418,7 @@ def update(conn: sqlite3.Connection, knowledge_id: str, *,
             expires_at=expires_at if expires_at is not None else old.get("expires_at"),
             related=related if related is not None else old["related"],
             supersedes_id=old["id"], actor=actor, origin="human", status="proposed",
+            dedupe=False,
         )
     new_kind = kind or old["kind"]
     new_fields = fields if fields is not None else old["fields"]
@@ -467,7 +488,8 @@ def approve(conn: sqlite3.Connection, knowledge_id: str, *,
     superseded = approved.get("supersedes_id")
     if superseded:
         old = get(conn, superseded)
-        if old is not None and old["status"] != "deprecated":
+        if (old is not None and old.get("workspace_id") == approved.get("workspace_id")
+                and old["status"] != "deprecated"):
             conn.execute(
                 "UPDATE workspace_knowledge SET status='deprecated', version=version+1, "
                 "updated_at=? WHERE id=? AND version=?",

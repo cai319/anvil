@@ -145,6 +145,28 @@ async def test_meeple_bound_role_is_used_when_mapping_missing(client, seeded):
 
 
 @pytest.mark.asyncio
+async def test_draft_apply_with_pending_draft_does_not_mutate_assignees(client, seeded):
+    """已有待审草案时，模板草案模式必须失败且不改任务花名册。"""
+    template = await _published_template(client)
+    pending = await client.post(f"{API}/board/drafts", headers=auth_headers("pm"), json={
+        "goal": "已有草案", "source_task": "T-TPL", "kind": "workflow",
+        "tree": {"steps": [{"id": "S1", "title": "旧草案", "role": "developer"}]},
+    })
+    assert pending.status_code == 201, pending.text
+
+    r = await client.post(f"{API}/tasks/T-TPL/workflow/from-template",
+                          headers=human_headers(), json={
+        "template_id": template["id"], "version": 1,
+        "role_mapping": {"executor": "tester"}, "mode": "draft",
+        "acknowledge_uncovered": True,
+    })
+    assert r.status_code == 409, r.text
+
+    task = (await client.get(f"{API}/tasks/T-TPL", headers=human_headers())).json()
+    assert "tester" not in (task.get("assignees") or [])
+
+
+@pytest.mark.asyncio
 async def test_running_workflow_draft_requires_restart(client, seeded):
     await client.post(f"{API}/tasks", json=task_payload(
         id="T-BRD", assignees=["developer"]), headers=auth_headers())

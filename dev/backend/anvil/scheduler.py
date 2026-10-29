@@ -131,7 +131,10 @@ class Scheduler:
             workflow_service.fail_step(
                 conn, row["workflow_id"], row["step_id"],
                 "lease_expired", "environment", failure_class="lease_expired")
-        for wf in conn.execute("SELECT id FROM workflows WHERE status='running'").fetchall():
+        for wf in conn.execute(
+                "SELECT w.id FROM workflows w JOIN tasks t ON t.id=w.task_id "
+                "WHERE w.status='running' AND t.status NOT IN ('done','closed') "
+                "AND t.archived_at IS NULL").fetchall():
             wid = wf["id"]
 
             def starter(role, task_id, prompt, step, _wid=wid):
@@ -215,17 +218,25 @@ class Scheduler:
                       s.started_at
                  FROM workflow_steps s
                  JOIN workflows w ON w.id = s.workflow_id
+                 JOIN tasks t ON t.id = w.task_id
                  LEFT JOIN runs r ON r.id = s.run_id
-                WHERE s.status='running'"""
+                WHERE s.status='running' AND t.status NOT IN ('done','closed')
+                  AND t.archived_at IS NULL"""
         ).fetchall()
         for r in rows:
             rs = r["run_status"]
             # run 丢失/已结束但步骤仍 running：重置为 pending，让 advance 重新启动
             if rs is None or rs == "completed":
+                step_row = conn.execute(
+                    "SELECT lease_id FROM workflow_steps WHERE workflow_id=? AND step_id=?",
+                    (r["workflow_id"], r["step_id"])).fetchone()
                 conn.execute(
                     "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, "
-                    "next_retry_at=NULL, updated_at=? WHERE workflow_id=? AND step_id=?",
+                    "next_retry_at=NULL, lease_id=NULL, fence_token=0, updated_at=? "
+                    "WHERE workflow_id=? AND step_id=?",
                     (now.isoformat(), r["workflow_id"], r["step_id"]))
+                leases.release(conn, step_row["lease_id"] if step_row else None,
+                               commit=False)
                 conn.commit()
                 continue
             if rs != "suspended":

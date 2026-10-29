@@ -155,9 +155,49 @@ anvil step packet <wf> <step> [--json]
 - 只对 `running` 步骤操作；返回 409 时先 `anvil step show <wf>`，不要反复重试。
 - 步骤 lease 在 run 存活期间由 scheduler 自动续租；长步骤仍应定期
   `anvil task heartbeat`（它同时续租任务与当前步骤 lease）。
+- `anvil step show <wf>` 会在每个 `pending` 步骤下打印未激活原因：
+  `dependency`、`retry_backoff_until`、`role_busy_step`、`active_run`、
+  `lease_held`、`governance`（冻结/预算/并发）；`ready` 表示下一轮调度即可派发。
+- `anvil step show <wf>` 还会显示待审批的增量修订（`pending_revision`）及影响摘要。
 - `plan_slices` 用 `step plan`，`decision` 用 `step decide`，普通步骤用 `step submit`。
 - 切片只描述范围/粒度/轮次，**不得指定角色或 loop 阶段**；角色由 Cindy 的 loop 模板定义。
 - 不是工作流任务时才用 `anvil task submit`。
+
+## 5.1 工作流增量修订：`anvil workflow revise`
+
+```bash
+anvil workflow revise <wf> --file revision.json --preview   # 仅分析影响
+anvil workflow revise <wf> --file revision.json             # 创建修订草案，@human
+```
+
+`revision.json` 顶层可写 `rationale` 与 `intent`：
+
+```json
+{
+  "rationale": "切片角色反馈：认证模块还需补一轮",
+  "intent": {
+    "add_slices": [
+      {"id": "auth2", "title": "认证补充", "scope_paths": ["src/auth/**"],
+       "execute_steps": [{"id": "static", "title": "补充审计"}]}
+    ],
+    "remove_slices": ["pay2"],
+    "update_slices": [{"id": "pay", "patch": {"title": "...", "acceptance": ["..."]}}],
+    "patch_steps": [{"step_id": "F1", "fields": {"instructions": "..."}}]
+  }
+}
+```
+
+规则：
+
+- 只有 task planner / Cindy 与 human 能调用；执行角色只能 `task mention --to cindy` 反馈。
+- 后端重新计算影响，**不要自行判断 safe**：
+  `safe_loop`/`safe_future` → 提交修订草案，human 批准后原地应用、不重启；
+  `requires_restart` → 不要提交修订草案，改为完整 workflow 草案 + @human 说明受影响步骤；
+  `stale`/`invalid` → 重新 `step show` 后再判断。
+- v1 只能改未来（pending）切片和 pending 静态步骤；改 loop 阶段/角色、增删静态步骤、
+  重排切片、修改 running/submitted/approved 步骤都会 `requires_restart`。
+- 同一 workflow 同时只允许一个待审修订；有待审完整 workflow 草案时也会 409。
+- 详细设计见 `docs/workflow-revision.md`。
 
 ## 6. 知识：`anvil knowledge`
 
@@ -196,6 +236,8 @@ anvil note write notes/<path>.md --content-file <file> \
 
 - 文件是真相层；写入会同步文件与索引。
 - 角色知识必须有成功实践 + 提炼证据；无证据只能写 draft，不进入检索/CIC。
+- 已 active 的笔记不能被无证据写入覆盖（返回 422）：补充 `--practice-task`/`--outcome`
+  等证据，或把未验证内容写到新的草稿路径。
 - 参考其他角色知识可以，写入自己的知识库必须经过自己的实践。
 
 ## 8. 角色：`anvil role`

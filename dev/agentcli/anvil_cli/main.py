@@ -261,6 +261,8 @@ def _call(method: str, path: str, body: Any = None, params: dict | None = None) 
                 detail = payload.get("detail") or payload.get("message") or r.text
         except ValueError:
             pass
+        if isinstance(detail, (dict, list)):
+            detail = json.dumps(detail, ensure_ascii=False)
         typer.echo(f"error: {detail}", err=True)
         hint = _server_hint(r.status_code)
         if hint:
@@ -1295,6 +1297,67 @@ def inbox_commit(
 # ---- step（工作流步骤）----------------------------------------------------
 
 
+REVISE_EPILOG = """\b
+示例:
+  anvil workflow revise WF-1 --file revision.json --preview
+  anvil workflow revise WF-1 --file revision.json
+
+revision.json 只描述变更 intent（add_slices/remove_slices/update_slices/
+patch_steps）；后端会重新计算影响。安全修订进入收件箱等 human 批准，
+requires_restart 时请改交完整 workflow 草案，由 human 决定是否重启。
+"""
+
+workflow_app = typer.Typer(
+    help="运行中 workflow 的增量修订（不重启执行）",
+    context_settings=HELP_CTX,
+    epilog=REVISE_EPILOG)
+app.add_typer(workflow_app, name="workflow")
+
+
+@workflow_app.command("revise", epilog=REVISE_EPILOG)
+def workflow_revise(
+    workflow_id: str = typer.Argument(..., help="工作流 ID"),
+    file: str = typer.Option(..., "--file", help="修订 intent JSON 文件"),
+    preview: bool = typer.Option(False, "--preview", help="只分析影响，不创建草案"),
+    rationale: str = typer.Option(None, "--rationale", help="修订原因/目标"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """提交或预览运行中 workflow 的增量修订。"""
+    try:
+        with open(file, encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        _usage_error(f"无法读取修订文件: {exc}",
+                     "检查 --file 路径与 JSON 语法；示例见 `anvil workflow revise -h`。")
+    if not isinstance(payload, dict):
+        _usage_error("修订文件必须是 JSON 对象",
+                     "顶层包含 intent；示例见 `anvil workflow revise -h`。")
+    intent = payload.get("intent") if isinstance(payload.get("intent"), dict) else payload
+    reason = rationale or payload.get("rationale") or payload.get("goal")
+    if preview:
+        out = _call("POST", f"/api/v1/workflows/{workflow_id}/revisions/preview",
+                    {"intent": intent})
+        if json_out:
+            _emit(out, True)
+            return
+        typer.echo(f"classification: {out.get('classification')}  "
+                   f"safe: {out.get('safe')}")
+        typer.echo(out.get("summary") or "")
+        for item in out.get("blocked_by") or []:
+            typer.echo(f"  blocked {item.get('step_id')}: "
+                       f"{item.get('status')} · {item.get('reason')}")
+        return
+    draft = _call("POST", f"/api/v1/workflows/{workflow_id}/revisions",
+                  {"intent": intent, "rationale": reason}) or {}
+    impact = (draft.get("tree") or {}).get("impact") or {}
+    if json_out:
+        _emit(draft, True)
+    else:
+        typer.echo(f"修订草案已提交：{draft.get('id')}（等待 human 批准）")
+        typer.echo(impact.get("summary") or "")
+        typer.echo("批准后原地应用，不重启当前执行。")
+
+
 step_app = typer.Typer(help="工作流步骤（show/plan/submit/decide/escalate）",
                        context_settings=HELP_CTX, epilog=STEP_EPILOG)
 app.add_typer(step_app, name="step")
@@ -1488,7 +1551,8 @@ def step_plan(
   anvil step show WF-1
   anvil step show WF-1 --json
 
-输出每个步骤的状态、角色、依赖与 summary；卡住时先看这里。
+输出每个步骤的状态、角色、依赖与 summary；pending 步骤下方会给出未被激活的原因
+（依赖未完成、退避、角色忙、活跃 run、lease 未释放、治理闸门等）。
 """)
 def step_show(
     workflow_id: str = typer.Argument(..., help="工作流 ID"),
@@ -1499,6 +1563,20 @@ def step_show(
     if json_out:
         _emit(out, True)
         return
+    dispatch = out.get("dispatch") or {}
+    typer.echo(f"工作流 {workflow_id}  状态 {out.get('status')}  "
+               f"更新 {out.get('updated_at') or '-'}")
+    if dispatch.get("note"):
+        typer.echo(f"注意：{dispatch['note']}")
+    revision = out.get("pending_revision")
+    if revision:
+        impact = revision.get("impact") or {}
+        typer.echo(f"待审批修订：{revision.get('draft_id')} · "
+                   f"{impact.get('classification')} · {impact.get('summary')}")
+    reasons_by_step = {
+        item["step_id"]: item.get("reasons") or []
+        for item in dispatch.get("pending") or []
+    }
     for st in out.get("steps", []):
         gate = " [gate]" if st.get("gate") else ""
         kind = ""
@@ -1516,6 +1594,10 @@ def step_show(
         typer.echo(
             f"{st['step_id']:4s} {st['status']:10s} {st['role_slug']:12s} "
             f"{st['title']}{gate}{kind}{slice_info}{rework}{on_reject}")
+        if st.get("status") == "pending":
+            reasons = reasons_by_step.get(st["step_id"]) or []
+            if reasons:
+                typer.echo(f"     ↳ {'; '.join(reasons)}")
 
 
 # ---- lease（step/path 租约与路径预留）------------------------------------

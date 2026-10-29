@@ -905,8 +905,9 @@ def reindex_notes(conn: sqlite3.Connection, role_slug: str, *,
             "INSERT INTO notes (id, role_slug, path, content, created_at, kind, scope, "
             "task_id, source_task, tags_json, repo, module, confidence, updated_at, "
             "source, content_hash, title, tldr, fields_json, practice_task_id, "
-            "practice_run_id, outcome, verified_at, status, source_knowledge_json) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "practice_run_id, outcome, verified_at, status, source_knowledge_json, "
+            "hit_count, last_hit_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (hashlib.sha1(f"{role_slug}:{rel}:{inferred['content_hash']}".encode())
              .hexdigest()[:16], role_slug, rel, body, inferred["updated_at"],
              inferred["kind"], inferred["scope"], inferred["task_id"],
@@ -919,7 +920,9 @@ def reindex_notes(conn: sqlite3.Connection, role_slug: str, *,
              old["outcome"] if old is not None else None,
              old["verified_at"] if old is not None else None,
              old["status"] if old is not None else "active",
-             old["source_knowledge_json"] if old is not None else "[]"))
+             old["source_knowledge_json"] if old is not None else "[]",
+             old["hit_count"] if old is not None else 0,
+             old["last_hit_at"] if old is not None else None))
     if prune and not dry_run:
         for rel, old in existing.items():
             if rel not in seen:

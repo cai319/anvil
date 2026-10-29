@@ -256,6 +256,29 @@ PLANNING_PROTOCOL = (
     "禁止：不要实现具体步骤；不要 submit 主任务；不要自行创建角色；草案被驳回时按人工意见修订后重新提交。"
 )
 
+# 增量修订协议：执行角色反馈 loop 需要调整时，先判断能否原地修订，避免整任务重启。
+REVISION_PROTOCOL = (
+    "## workflow 增量修订（收到执行角色反馈后必须先判断）\n"
+    "执行角色反馈 loop 需要调整（增加/删减切片、调整未来切片的范围或验收、补充 pending 步骤说明）时，"
+    "不要直接提交完整 workflow 草案——human 批准后会终止当前执行并从头重跑。按以下步骤：\n"
+    "1. 执行 `anvil step show <workflow-id> --json` 读取当前 workflow、切片与步骤状态。\n"
+    "2. 把反馈结构化为 revision JSON：{\"rationale\":\"...\",\"intent\":{"
+    "\"add_slices\":[{\"id\":\"...\",\"title\":\"...\",\"scope_paths\":[...],"
+    "\"execute_steps\":[{\"id\":\"static\",\"title\":\"...\"}]}],"
+    "\"remove_slices\":[\"<切片id>\"],"
+    "\"update_slices\":[{\"id\":\"<切片id>\",\"patch\":{\"title\":\"...\",\"acceptance\":[...]}}],"
+    "\"patch_steps\":[{\"step_id\":\"S2\",\"fields\":{\"instructions\":\"...\"}}]}}。\n"
+    "3. 先预览：`anvil workflow revise <workflow-id> --file revision.json --preview`。\n"
+    "4. classification=safe_loop/safe_future：去掉 --preview 再执行一次提交修订草案，"
+    "并 @human 说明「不重启、只改未来步骤」；批准后原地应用。\n"
+    "5. classification=requires_restart：**不要**提交修订草案；按 PLANNING_PROTOCOL 的 A 提交完整 workflow 草案，"
+    "并在 @human 消息中列出受影响步骤（running/submitted/approved）与重启原因，由人类决定重启或放弃。\n"
+    "6. classification=stale/invalid：重新读取状态后再判断，不要盲目重试。\n"
+    "v1 只支持调整未来（pending）切片与 pending 静态步骤；改 loop 阶段/角色、增删静态步骤、"
+    "重排切片、修改 running/submitted/approved 步骤一律 requires_restart。"
+    "修订被驳回时读取 human feedback，调整后重新提交，不要静默忽略。\n"
+)
+
 _BEGIN = "<!-- ANVIL:BEGIN -->"
 _END = "<!-- ANVIL:END -->"
 _MANAGED = re.compile(re.escape(_BEGIN) + r".*?" + re.escape(_END), re.DOTALL)

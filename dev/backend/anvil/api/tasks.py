@@ -236,7 +236,20 @@ def get_task(tid: str, conn=Depends(get_db)):
 
 @router.get("/{tid}/knowledge")
 def list_task_knowledge(tid: str, include_subtasks: bool = False, deep: bool = False,
-                        conn=Depends(get_db)):
+                        conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    task = services.tasks.get(conn, tid)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
+    if is_real_agent:
+        allowed = (
+            services.tasks.is_task_participant(conn, tid, auth.role)
+            or task.get("planner") == auth.role
+            or services.roles.is_onboarding(conn, auth.role)
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=403, detail="agent is not a participant of this task")
     try:
         return services.task_knowledge.list_for_task(
             conn, tid, include_subtasks=include_subtasks, deep=deep)
@@ -269,7 +282,8 @@ def create_task_knowledge(tid: str, body: dict, conn=Depends(get_db),
 @router.delete("/{tid}/knowledge/{kid}", status_code=204)
 def delete_task_knowledge(tid: str, kid: str, conn=Depends(get_db),
                           auth: Auth = Depends(require_human)):
-    services.task_knowledge.delete(conn, kid)
+    if not services.task_knowledge.delete(conn, kid, task_id=tid):
+        raise HTTPException(status_code=404, detail="knowledge not found")
     return None
 
 
@@ -673,9 +687,10 @@ def mention_task(tid: str, body: dict, request: Request, conn=Depends(get_db), a
                     assignees=_assignee_slugs(conn, tid),
                     extra_constraint=(
                         f"{sender} 通过 @{target} 指示：\n{message}\n\n"
-                        "请按你的规划职责判断下一步：需要时提交/修订 workflow 草案；"
-                        "不需要时直接回复并说明理由。角色分配只能由 planner 在 "
-                        "workflow/loop 模板中定义。"),
+                        "请按你的规划职责判断下一步：能用增量修订表达时先用 "
+                        "`anvil workflow revise --preview` 判断并提交修订草案；"
+                        "否则提交/修订完整 workflow 草案；不需要时直接回复并说明理由。"
+                        "角色分配只能由 planner 在 workflow/loop 模板中定义。"),
                     replace_active=True,
                 )
                 events.publish("task", {"id": tid, "kind": "plan", "planner": target})

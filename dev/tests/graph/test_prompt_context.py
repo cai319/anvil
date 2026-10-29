@@ -73,7 +73,8 @@ def test_step_prompt_uses_agent_inbox_and_stays_small(conn):
 
 def test_projected_protocol_matches_run_kind(conn):
     planner = runs_service.create_run(conn, "cindy", "T1", prompt="[anvil:plan]\n请规划")
-    assert nodes._protocol_for_run(conn, planner) == render.PLANNING_PROTOCOL
+    assert nodes._protocol_for_run(conn, planner) == (
+        render.PLANNING_PROTOCOL + "\n\n" + render.REVISION_PROTOCOL)
 
     step = runs_service.create_run(conn, "developer", "T1", prompt="步骤说明",
                                    step_id="S1", workflow_id="wf-1")

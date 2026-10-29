@@ -39,6 +39,34 @@ def test_tick_dispatches_and_spawns(tmp_path, monkeypatch):
     assert any(r["task_id"] == "T-D" and r["status"] == "running" for r in runs)
 
 
+def test_advance_skips_closed_task(tmp_path, monkeypatch):
+    """任务 closed 后不再为 running workflow 创建新 run。"""
+    from anvil.services import workflow as wf_service
+
+    env = make_env(tmp_path, monkeypatch)
+    conn = open_conn(env["db_path"])
+    conn.execute(
+        "INSERT INTO tasks (id, title, status, scope_paths_json, acceptance_json, created_at, updated_at) "
+        "VALUES ('T-CLOSED','t','todo','[]','[]','2026-01-01T00:00:00','2026-01-01T00:00:00')")
+    conn.commit()
+    wf = wf_service.create_workflow(conn, "T-CLOSED", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    conn.execute("UPDATE tasks SET status='closed' WHERE id='T-CLOSED'")
+    conn.commit()
+    conn.close()
+
+    Scheduler(env["db_path"], env["orch"]).tick_once()
+
+    runs = _runs(env)
+    assert not any(r["task_id"] == "T-CLOSED" for r in runs)
+    conn = open_conn(env["db_path"])
+    step = conn.execute(
+        "SELECT status FROM workflow_steps WHERE workflow_id=? AND step_id='S1'",
+        (wf["id"],)).fetchone()
+    conn.close()
+    assert step["status"] == "pending"
+
+
 def test_monitor_detects_exit(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "AUTO_DISPATCH", True)  # 显式开启自动派发
     env = make_env(tmp_path, monkeypatch)

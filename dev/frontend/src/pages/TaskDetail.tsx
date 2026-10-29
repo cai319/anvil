@@ -185,6 +185,11 @@ function WorkflowSummary({ workflow, taskStatus, metrics, diff }: {
     <div className={`wf-summary is-${workflow.status}`}>
       <div className="wf-summary-main">
         <span className="wf-summary-state">{stateLabel}</span>
+        {workflow.pending_revision && (
+          <span className="chip" title={workflow.pending_revision.impact?.summary || "待审批的增量修订"}>
+            待审修订
+          </span>
+        )}
         {workflow.weight && (
           <span className={`wf-weight is-${workflow.weight}`}
             title={workflow.weight_reason || WEIGHT_META[workflow.weight].hint}>
@@ -1569,6 +1574,16 @@ export function TaskDetail({ id }: { id: string }) {
                       {"服务端按 loop 模板为每片生成 execute -> verify -> fix -> verify2 -> decide 小闭环。"}
                     </div>
                   )}
+                  {d.kind === "workflow_revision" && d.tree?.impact && (
+                    <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                      <strong>{d.tree.impact.classification}</strong>
+                      {" · "}{d.tree.impact.summary}
+                      {(d.tree.impact.blocked_by?.length ?? 0) > 0 && (
+                        <> · 阻塞：{d.tree.impact.blocked_by!
+                          .map((b) => `${b.step_id || "?"}(${b.status || "?"})`).join("、")}</>
+                      )}
+                    </div>
+                  )}
                   {d.tree?.steps?.length ? (
                     <ul className="muted" style={{ margin: "6px 0", paddingLeft: 18 }}>
                       {d.tree.steps.map((s, i) => (
@@ -1602,10 +1617,31 @@ export function TaskDetail({ id }: { id: string }) {
                       className="primary small"
                       disabled={busy}
                       onClick={() => act(async () => {
-                        await api.approveDraft([d.id]);
+                        if (d.kind === "workflow_revision") {
+                          if (!window.confirm(
+                            `应用工作流增量修订？\n${d.tree?.impact?.summary || ""}\n`
+                            + "当前执行会继续，不会终止或从头重跑。",
+                          )) return;
+                          await api.approveDraft([d.id]);
+                        } else if (d.kind === "workflow" && workflow?.status === "running") {
+                          if (!window.confirm(
+                            "任务当前有运行中的执行。批准后会终止当前执行并从头重新开始，"
+                            + "旧执行保留为历史。确定继续？",
+                          )) return;
+                          const reason = window.prompt("请输入重新执行的原因（可留空）：", "");
+                          if (reason === null) return;
+                          await api.approveDraft([d.id], {
+                            restart_running: true,
+                            restart_reason: reason.trim() || undefined,
+                          });
+                        } else {
+                          await api.approveDraft([d.id]);
+                        }
                         await api.listDrafts(id).then(setDrafts).catch(() => {});
                       })}
-                    >{d.kind === "workflow" ? "批准并启动工作流" : "批准并落板（子任务按依赖自动派发）"}</button>
+                    >{d.kind === "workflow_revision" ? "应用修订（不重启）"
+                      : d.kind === "workflow" ? "批准并启动工作流"
+                        : "批准并落板（子任务按依赖自动派发）"}</button>
                   </div>
                 </div>
               ))}

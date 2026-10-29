@@ -171,12 +171,18 @@ def create_workspace_knowledge(ws_id: str, body: dict, conn=Depends(get_db),
         raise HTTPException(status_code=409, detail=str(exc))
 
 
+def _workspace_knowledge_or_404(conn, ws_id: str, kid: str) -> dict:
+    card = services.workspace_knowledge.get(conn, kid)
+    if card is None or card.get("workspace_id") != ws_id:
+        raise HTTPException(status_code=404, detail="knowledge not found")
+    return card
+
+
 @router.patch("/workspaces/{ws_id}/knowledge/{kid}")
 def update_workspace_knowledge(ws_id: str, kid: str, body: dict,
                                conn=Depends(get_db),
                                auth: Auth = Depends(require_human)):
-    if services.workspace.get_channel(conn, ws_id) is None:
-        raise HTTPException(status_code=404, detail="workspace not found")
+    _workspace_knowledge_or_404(conn, ws_id, kid)
     try:
         return services.workspace_knowledge.update(
             conn, kid,
@@ -203,6 +209,7 @@ def update_workspace_knowledge(ws_id: str, kid: str, body: dict,
 def approve_workspace_knowledge(ws_id: str, kid: str, body: dict | None = None,
                                 conn=Depends(get_db),
                                 auth: Auth = Depends(require_human)):
+    _workspace_knowledge_or_404(conn, ws_id, kid)
     try:
         return services.workspace_knowledge.approve(
             conn, kid, expected_version=(body or {}).get("expected_version"), actor=auth.role)
@@ -216,6 +223,7 @@ def approve_workspace_knowledge(ws_id: str, kid: str, body: dict | None = None,
 def reject_workspace_knowledge(ws_id: str, kid: str, body: dict | None = None,
                                conn=Depends(get_db),
                                auth: Auth = Depends(require_human)):
+    _workspace_knowledge_or_404(conn, ws_id, kid)
     try:
         return services.workspace_knowledge.reject(
             conn, kid, expected_version=(body or {}).get("expected_version"), actor=auth.role)
@@ -229,6 +237,7 @@ def reject_workspace_knowledge(ws_id: str, kid: str, body: dict | None = None,
 def resolve_workspace_knowledge_conflicts(ws_id: str, kid: str,
                                           conn=Depends(get_db),
                                           auth: Auth = Depends(require_human)):
+    _workspace_knowledge_or_404(conn, ws_id, kid)
     try:
         return services.workspace_knowledge.resolve_conflicts(
             conn, kid, actor=auth.role)
@@ -239,6 +248,7 @@ def resolve_workspace_knowledge_conflicts(ws_id: str, kid: str,
 @router.delete("/workspaces/{ws_id}/knowledge/{kid}", status_code=204)
 def delete_workspace_knowledge(ws_id: str, kid: str, conn=Depends(get_db),
                                auth: Auth = Depends(require_human)):
+    _workspace_knowledge_or_404(conn, ws_id, kid)
     services.workspace_knowledge.delete(conn, kid)
     return None
 

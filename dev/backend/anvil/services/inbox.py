@@ -174,6 +174,15 @@ def _drafts(conn: sqlite3.Connection) -> list[dict]:
                 ],
             })
             title = f"角色建议 — {r['goal']}"
+        elif kind == "workflow_revision":
+            impact = tree.get("impact") or {}
+            detail = f"by {r['created_by']} · {impact.get('summary') or '增量修订'}"
+            meta["workflow_revision"] = {
+                "draft_id": r["id"],
+                "base_workflow_id": tree.get("base_workflow_id"),
+                "impact": impact,
+            }
+            title = f"工作流修订 — {r['goal']}"
         elif kind == "workflow":
             n = len(tree.get("steps") or [])
             detail = f"by {r['created_by']} · {n} 个步骤 · 批准后按依赖自动派发"

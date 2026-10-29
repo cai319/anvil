@@ -541,16 +541,17 @@ def _join_instructions(spec: dict, context: str, extra: str = "") -> str:
 
 def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict,
                          slices: list[dict], existing_ids: set[str],
-                         weight: str = "standard") -> list[dict]:
+                         weight: str = "standard",
+                         previous_decide: str | None = None) -> list[dict]:
     """按 loop 模板把运行期切片展开成每片小闭环。
 
     生成 ID：<plan_step>.<slice_id>.<phase>，便于决策步骤按切片前缀汇总。
+    `previous_decide` 用于增量修订：新切片从已有最后一片的 decide 之后续接。
     """
     from . import roles as roles_service
 
     steps: list[dict] = []
     seen: set[str] = set(existing_ids)
-    previous_decide: str | None = None
 
     execute_default = str(_loop_spec(loop, "execute").get("role") or "").strip()
     verify_default = str(_loop_spec(loop, "verify").get("role") or "").strip()
@@ -852,14 +853,15 @@ def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
         if applied:
             conn.commit()
             return get_workflow(conn, wid)  # type: ignore[return-value]
-        # 新 workflow 草案待审时，禁止继续按旧 loop 展开切片；等待 Cindy 的新版本获批。
+        # workflow/修订草案待审时，禁止继续按旧 loop 展开切片；等待审批结果。
         pending = conn.execute(
-            "SELECT 1 FROM board_drafts WHERE source_task=? AND kind='workflow' "
+            "SELECT 1 FROM board_drafts WHERE source_task=? "
+            "AND kind IN ('workflow','workflow_revision') "
             "AND status='pending' LIMIT 1", (wf["task_id"],)).fetchone()
         if pending:
             raise ConflictError(
-                "a workflow revision is pending approval; wait for it before submitting "
-                "the slice plan (loop roles are owned by the planner)")
+                "a workflow draft or revision is pending approval; wait for it before "
+                "submitting the slice plan (loop roles are owned by the planner)")
         if step["status"] != "running":
             raise ConflictError(f"step {step_id} is {step['status']}, expected running")
 
@@ -1092,6 +1094,14 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
     运行中的 workflow 不允许被中途替换。需要换流程时，human 显式确认
     `restart_running=True`：旧执行被标记为 terminated 并保留历史，新执行从第一步重新开始。
     """
+    task_row = conn.execute(
+        "SELECT status, archived_at FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if task_row is None:
+        raise LookupError(task_id)
+    if task_row["status"] in ("done", "closed") or task_row["archived_at"]:
+        raise ConflictError(
+            "task is terminal; reopen it before creating a new workflow")
+
     definition = normalize_definition(conn, definition)
     steps = definition.get("steps") or definition.get("children") or []
     if not steps:
@@ -1514,6 +1524,652 @@ def _step_activity(conn: sqlite3.Connection, task_id: str, role: str | None,
 _ADVANCE_LOCK = threading.Lock()
 
 
+def explain_dispatch(conn: sqlite3.Connection, wf: dict) -> dict:
+    """诊断 pending 步骤为何没有被 advance 激活（只读，不改变状态）。"""
+    from . import governance
+
+    steps = wf.get("steps") or []
+    by_id = {s["step_id"]: s for s in steps}
+    pending: list[dict] = []
+    if wf.get("status") != "running":
+        return {"workflow_status": wf.get("status"), "pending": pending,
+                "note": "workflow is not running; advance will not dispatch"}
+    task = conn.execute("SELECT * FROM tasks WHERE id=?", (wf["task_id"],)).fetchone()
+    now = now_iso()
+    for s in steps:
+        if s.get("status") != "pending":
+            continue
+        reasons: list[str] = []
+        retry_at = s.get("next_retry_at")
+        if retry_at and str(retry_at) > now:
+            reasons.append(f"retry_backoff_until={retry_at}")
+        for dep in s.get("depends_on") or []:
+            up = by_id.get(dep)
+            if up is None:
+                reasons.append(f"dependency_missing={dep}")
+            elif up.get("status") not in STEP_DONE:
+                reasons.append(f"dependency={dep}:{up.get('status')}")
+        if s.get("kind") == "decision" and reviews.authority_of(s) == "human":
+            reasons.append("human_authority_decision=awaiting_human")
+        role = s.get("role_slug")
+        if not role:
+            reasons.append("no_role")
+        else:
+            busy = conn.execute(
+                "SELECT step_id, status FROM workflow_steps WHERE workflow_id=? "
+                "AND role_slug=? AND status IN ('running','submitted') "
+                "AND step_id<>? LIMIT 1",
+                (wf["id"], role, s["step_id"])).fetchone()
+            if busy:
+                reasons.append(f"role_busy_step={busy['step_id']}:{busy['status']}")
+            run = conn.execute(
+                "SELECT id, status, task_id, step_id FROM runs WHERE role_slug=? "
+                "AND status IN ('created','projecting','running') "
+                "ORDER BY started_at DESC LIMIT 1", (role,)).fetchone()
+            if run:
+                reasons.append(
+                    f"active_run={run['id']}:{run['status']}"
+                    f":task={run['task_id'] or '-'}:step={run['step_id'] or '-'}")
+            if task is not None:
+                try:
+                    governance.check_claim_allowed(conn, dict(task), role)
+                except ConflictError as exc:
+                    reasons.append(f"governance={exc}")
+            lease = conn.execute(
+                "SELECT id, holder, expires_at FROM leases WHERE resource_type='step' "
+                "AND resource_key=? AND status='active'",
+                (f"{wf['id']}:{s['step_id']}",)).fetchone()
+            if lease:
+                reasons.append(
+                    f"lease_held={lease['id']}:holder={lease['holder'] or '-'}"
+                    f":expires={lease['expires_at']}")
+        pending.append({
+            "step_id": s["step_id"], "role_slug": role,
+            "reasons": reasons or ["ready"],
+        })
+    return {"workflow_status": wf.get("status"), "pending": pending}
+
+
+class RevisionConflict(ConflictError):
+    """修订被拒绝；附带结构化影响报告，供 API/UI 展示。"""
+
+    def __init__(self, impact: dict):
+        super().__init__(str(impact.get("summary") or impact.get("classification")
+                             or "workflow revision conflict"))
+        self.impact = impact
+
+
+def _step_is_mutable(step: dict) -> bool:
+    return (step.get("status") == "pending"
+            and not step.get("run_id") and not step.get("lease_id"))
+
+
+def _slice_last_step(steps: list[dict], plan_step_id: str) -> str | None:
+    if not steps:
+        return None
+    for step in reversed(steps):
+        if step.get("step_id") == f"{plan_step_id}.{step.get('slice_key')}.decide":
+            return step["step_id"]
+    return steps[-1]["step_id"]
+
+
+def _step_fields_from_patch(fields: dict) -> dict:
+    allowed = {
+        "title", "instructions", "acceptance", "contract", "role_slug",
+        "depends_on", "scope_paths", "evidence_required",
+    }
+    unknown = sorted(set(fields) - allowed)
+    if unknown:
+        raise ConflictError(f"unsupported step fields in revision: {', '.join(unknown)}")
+    return fields
+
+
+def _revision_context(conn: sqlite3.Connection, wf: dict, intent: dict) -> tuple[dict, dict]:
+    """计算修订后的切片/步骤结构；返回 (state, impact)。
+
+    state 只在 impact.safe=True 时可用于 apply；impact 始终可直接返回给 API/UI。
+    """
+    if not isinstance(intent, dict):
+        return {}, {"classification": "invalid", "safe": False,
+                    "summary": "revision intent must be an object",
+                    "blocked_by": [], "affected_steps": []}
+    if wf.get("status") != "running":
+        return {}, {"classification": "invalid", "safe": False,
+                    "summary": f"workflow is {wf.get('status')}, not running",
+                    "blocked_by": [], "affected_steps": []}
+    task_row = conn.execute(
+        "SELECT status, archived_at FROM tasks WHERE id=?",
+        (wf["task_id"],)).fetchone()
+    if (task_row is None or task_row["status"] in ("done", "closed")
+            or task_row["archived_at"]):
+        return {}, {"classification": "invalid", "safe": False,
+                    "summary": "task is not active; reopen it before revising",
+                    "blocked_by": [], "affected_steps": []}
+    plan_step = next((s for s in wf["steps"] if s.get("kind") == "plan_slices"), None)
+    if plan_step is None or plan_step.get("status") != "approved":
+        return {}, {"classification": "invalid", "safe": False,
+                    "summary": "workflow has no approved plan_slices step",
+                    "blocked_by": [], "affected_steps": []}
+    plan = jloads(plan_step.get("plan_json") or "{}", {})
+    slices = plan.get("slices") if isinstance(plan, dict) else None
+    if not isinstance(slices, list) or not slices:
+        return {}, {"classification": "invalid", "safe": False,
+                    "summary": "plan has no slices; use a full workflow draft",
+                    "blocked_by": [], "affected_steps": []}
+    loop = (wf.get("definition") or {}).get("loop")
+    if not isinstance(loop, dict):
+        return {}, {"classification": "invalid", "safe": False,
+                    "summary": "workflow has no loop template",
+                    "blocked_by": [], "affected_steps": []}
+
+    by_slice: dict[str, list[dict]] = {}
+    for step in wf["steps"]:
+        if step.get("source_step_id") == plan_step["step_id"]:
+            by_slice.setdefault(str(step.get("slice_key") or ""), []).append(step)
+    for raw in slices:
+        sid = str(raw.get("id") or "")
+        if not sid or sid not in by_slice:
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": f"slice {sid or '?'} has no generated steps",
+                        "blocked_by": [], "affected_steps": []}
+
+    mutable_flags = [
+        all(_step_is_mutable(s) for s in by_slice[str(raw.get("id"))])
+        for raw in slices
+    ]
+    last_locked = max((i for i, ok in enumerate(mutable_flags) if not ok), default=-1)
+    mutable_from = last_locked + 1
+    stable_slices = slices[:mutable_from]
+    mutable_slices = slices[mutable_from:]
+    stable_ids = {st["step_id"] for st in wf["steps"]
+                  if st.get("source_step_id") != plan_step["step_id"]}
+    stable_ids.update(
+        st["step_id"] for raw in stable_slices
+        for st in by_slice.get(str(raw.get("id")), []))
+    old_last_decide = _slice_last_step(
+        by_slice[str(slices[-1].get("id"))], plan_step["step_id"])
+    last_stable_decide = (
+        _slice_last_step(by_slice[str(stable_slices[-1].get("id"))],
+                         plan_step["step_id"]) if stable_slices else None)
+
+    blocked: list[dict] = []
+
+    def block(step_id: str | None, status: str, reason: str) -> None:
+        blocked.append({"step_id": step_id, "status": status, "reason": reason})
+
+    add_slices = intent.get("add_slices") or []
+    remove_ids = [str(x) for x in (intent.get("remove_slices") or [])]
+    updates = intent.get("update_slices") or []
+    patch_steps = intent.get("patch_steps") or []
+    if not isinstance(add_slices, list) or not isinstance(updates, list) \
+            or not isinstance(patch_steps, list):
+        return {}, {"classification": "invalid", "safe": False,
+                    "summary": "revision lists must be arrays",
+                    "blocked_by": [], "affected_steps": []}
+    has_slices = bool(add_slices or remove_ids or updates)
+
+    old_ids = [str(raw.get("id")) for raw in slices]
+    for sid in remove_ids + [str((u or {}).get("id") or "") for u in updates
+                             if isinstance(u, dict)]:
+        if sid not in old_ids:
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": f"slice {sid} does not exist",
+                        "blocked_by": [], "affected_steps": []}
+        idx = old_ids.index(sid)
+        if idx < mutable_from:
+            raw_steps = by_slice.get(sid, [])
+            status = raw_steps[0].get("status") if raw_steps else "unknown"
+            block(sid, status, "slice has started or completed")
+    new_ids = [str((raw or {}).get("id") or "") for raw in add_slices
+               if isinstance(raw, dict)]
+    if any(not sid for sid in new_ids):
+        return {}, {"classification": "invalid", "safe": False,
+                    "summary": "added slice needs an id",
+                    "blocked_by": [], "affected_steps": []}
+    if len(set(new_ids)) != len(new_ids) or any(sid in old_ids for sid in new_ids):
+        return {}, {"classification": "invalid", "safe": False,
+                    "summary": "duplicate slice id in revision",
+                    "blocked_by": [], "affected_steps": []}
+    role_keys = {"role", "execute_role", "verify_role", "fix_role",
+                 "verify2_role", "decision_role", "lead_role", "reviewer"}
+    for raw in add_slices:
+        if isinstance(raw, dict) and role_keys.intersection(raw):
+            block(str(raw.get("id") or "?"), "new", "slice role fields are owned by the loop template")
+    for item in updates:
+        if isinstance(item, dict) and role_keys.intersection(item.get("patch") or {}):
+            block(str(item.get("id") or "?"), "update", "slice role fields are owned by the loop template")
+
+    # 构建新的尾部切片：update 合并整片 spec，remove 删除，add 追加。
+    # 仅 patch 静态步骤时不重建切片，避免无谓重置 pending 步骤的调度状态。
+    if has_slices:
+        tail = [dict(raw) for raw in mutable_slices]
+        remove_set = set(remove_ids)
+        tail = [raw for raw in tail if str(raw.get("id")) not in remove_set]
+        for item in updates:
+            if not isinstance(item, dict):
+                continue
+            sid = str(item.get("id") or "")
+            patch = item.get("patch") or {}
+            if not isinstance(patch, dict):
+                return {}, {"classification": "invalid", "safe": False,
+                            "summary": f"slice {sid} patch must be an object",
+                            "blocked_by": [], "affected_steps": []}
+            if "id" in patch and str(patch["id"]) != sid:
+                return {}, {"classification": "invalid", "safe": False,
+                            "summary": "update_slices cannot change slice id; "
+                                       "remove and add a new slice instead",
+                            "blocked_by": [], "affected_steps": []}
+            for raw in tail:
+                if str(raw.get("id")) == sid:
+                    raw.update(patch)
+        tail.extend([dict(raw) for raw in add_slices if isinstance(raw, dict)])
+        new_slices = [dict(raw) for raw in stable_slices] + tail
+        if not new_slices:
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": "revision cannot remove all slices",
+                        "blocked_by": [], "affected_steps": []}
+
+        # 续接稳定前缀；生成尾部步骤用于校验/后续 apply。
+        try:
+            generated = _dynamic_slice_steps(
+                conn, plan_step["step_id"], loop, tail, stable_ids,
+                weight=str(wf.get("weight") or "standard"),
+                previous_decide=last_stable_decide)
+            _validate_generated_deps(generated, stable_ids)
+        except ConflictError as exc:
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": str(exc), "blocked_by": [], "affected_steps": []}
+    else:
+        tail = []
+        generated = []
+        new_slices = [dict(raw) for raw in slices]
+
+    # 静态下游：切片变更时只能改 pending；active/settled 说明最终步骤已经开跑。
+    static_steps = [s for s in wf["steps"]
+                    if not s.get("source_step_id") and s["step_id"] != plan_step["step_id"]]
+    old_tail_decide = old_last_decide
+    if has_slices and old_tail_decide:
+        for st in static_steps:
+            if old_tail_decide in (st.get("depends_on") or []) and not _step_is_mutable(st):
+                block(st["step_id"], st.get("status") or "unknown",
+                      "downstream static step already started")
+
+    # patch 只允许 pending 静态步骤；切片步骤通过 slice intent 修改。
+    patched: dict[str, dict] = {}
+    by_id = {s["step_id"]: s for s in wf["steps"]}
+    for item in patch_steps:
+        if not isinstance(item, dict):
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": "step patch must be an object",
+                        "blocked_by": [], "affected_steps": []}
+        sid = str(item.get("step_id") or "")
+        step = by_id.get(sid)
+        if step is None:
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": f"step {sid} does not exist",
+                        "blocked_by": [], "affected_steps": []}
+        if step.get("source_step_id"):
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": f"step {sid} belongs to a slice; use update_slices",
+                        "blocked_by": [], "affected_steps": []}
+        if not _step_is_mutable(step):
+            block(sid, step.get("status") or "unknown",
+                  "only pending steps without run/lease can be patched")
+            continue
+        fields = item.get("fields") or {}
+        if not isinstance(fields, dict):
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": f"step {sid} fields must be an object",
+                        "blocked_by": [], "affected_steps": []}
+        try:
+            _step_fields_from_patch(fields)
+        except ConflictError as exc:
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": str(exc), "blocked_by": [], "affected_steps": []}
+        if "role_slug" in fields:
+            from . import roles as roles_service
+            role_slug = str(fields["role_slug"])
+            role = roles_service.get(conn, role_slug)
+            if role is None or not role.get("enabled", True) \
+                    or roles_service.is_onboarding(conn, role["slug"]):
+                return {}, {"classification": "invalid", "safe": False,
+                            "summary": f"invalid step role {fields['role_slug']}",
+                            "blocked_by": [], "affected_steps": []}
+            bound = {row["role_slug"] for row in conn.execute(
+                "SELECT role_slug FROM task_assignees WHERE task_id=?",
+                (wf["task_id"],))}
+            task_row = conn.execute(
+                "SELECT assignee FROM tasks WHERE id=?", (wf["task_id"],)).fetchone()
+            if task_row and task_row["assignee"]:
+                bound.add(task_row["assignee"])
+            participating = {
+                str(s.get("role_slug") or "") for s in wf["steps"]}
+            participating.update(
+                str(spec.get("role") or "") for spec in loop.values()
+                if isinstance(spec, dict))
+            if bound and role_slug not in bound and role_slug not in participating:
+                return {}, {"classification": "invalid", "safe": False,
+                            "summary": f"step {sid} role {role_slug} is not bound "
+                                       "to the task or current workflow",
+                            "blocked_by": [], "affected_steps": []}
+        if "depends_on" in fields:
+            deps = [str(x) for x in (fields["depends_on"] or [])]
+            final_ids = ((set(stable_ids) | {g["id"] for g in generated})
+                         if has_slices
+                         else {s["step_id"] for s in wf["steps"]})
+            missing = [d for d in deps if d not in final_ids]
+            if missing:
+                return {}, {"classification": "invalid", "safe": False,
+                            "summary": f"step {sid} depends on missing {missing[0]}",
+                            "blocked_by": [], "affected_steps": []}
+            fields = {**fields, "depends_on": deps}
+        patched[sid] = fields
+
+    old_mutable_ids = ([
+        st["step_id"] for raw in mutable_slices
+        for st in by_slice.get(str(raw.get("id")), [])] if has_slices else [])
+
+    if blocked:
+        return {}, {"classification": "requires_restart", "safe": False,
+                    "summary": "修订影响已开始/已完成的步骤，需重启或放弃",
+                    "blocked_by": blocked,
+                    "affected_steps": sorted({x["step_id"] for x in blocked if x["step_id"]})}
+
+    # 预览阶段校验 patch/切片后的完整依赖图与 on_reject 目标，避免批准后才失败。
+    final_ids = ((set(stable_ids) | {g["id"] for g in generated})
+                 if has_slices else {s["step_id"] for s in wf["steps"]})
+    old_mutable = set(old_mutable_ids)
+    # 与 apply 一致：静态下游从旧最后 decide 改挂到新最后 decide。
+    new_last_decide = last_stable_decide
+    for g in generated:
+        if str(g.get("kind") or "task") == "decision":
+            new_last_decide = g["id"]
+    final_deps: dict[str, list[str]] = {}
+    final_on_reject: dict[str, list[str]] = {}
+    for s in wf["steps"]:
+        if s["step_id"] in old_mutable:
+            continue
+        fields = patched.get(s["step_id"]) or {}
+        deps = (fields["depends_on"] if "depends_on" in fields
+                else list(s.get("depends_on") or []))
+        if (has_slices and "depends_on" not in fields and old_last_decide
+                and new_last_decide):
+            deps = [new_last_decide if str(d) == str(old_last_decide) else d
+                    for d in deps]
+        final_deps[s["step_id"]] = [str(d) for d in deps]
+        final_on_reject[s["step_id"]] = [
+            str(t) for t in s.get("on_reject") or []]
+    for g in generated:
+        final_deps[g["id"]] = [str(d) for d in g.get("depends_on") or []]
+        final_on_reject[g["id"]] = [str(t) for t in g.get("on_reject") or []]
+    try:
+        _validate_dep_graph(final_ids, final_deps, final_on_reject)
+    except ConflictError as exc:
+        return {}, {"classification": "invalid", "safe": False,
+                    "summary": str(exc), "blocked_by": [], "affected_steps": []}
+
+    # 改静态步骤角色后，任务绑定的每个角色仍必须出现在 workflow 中。
+    patched_roles = {sid: str(fields["role_slug"]) for sid, fields in patched.items()
+                     if "role_slug" in fields}
+    if patched_roles:
+        definition = dict(wf.get("definition") or {})
+        dsteps = [
+            dict(s) if isinstance(s, dict) else s
+            for s in (definition.get("steps") or definition.get("children") or [])]
+        for dstep in dsteps:
+            if isinstance(dstep, dict) and str(dstep.get("id")) in patched_roles:
+                dstep["role"] = patched_roles[str(dstep.get("id"))]
+        definition["steps"] = dsteps
+        try:
+            validate_role_coverage(conn, wf.get("task_id"), definition)
+        except ConflictError as exc:
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": str(exc), "blocked_by": [],
+                        "affected_steps": sorted(patched_roles)}
+
+    affected = sorted(set(old_mutable_ids) | {g["id"] for g in generated}
+                      | set(patched))
+    classification = "safe_loop" if has_slices else "safe_future"
+    summary = []
+    if add_slices:
+        summary.append(f"追加 {len(add_slices)} 个切片")
+    if remove_ids:
+        summary.append(f"删除 {len(remove_ids)} 个切片")
+    if updates:
+        summary.append(f"修改 {len(updates)} 个切片")
+    if patched:
+        summary.append(f"修改 {len(patched)} 个未来步骤")
+    if not summary:
+        summary.append("无实际变更")
+    impact = {
+        "classification": classification, "safe": True,
+        "summary": "；".join(summary) + "；当前执行不受影响",
+        "blocked_by": [], "affected_steps": affected,
+        "diff": {"add_slices": add_slices, "remove_slices": remove_ids,
+                 "update_slices": updates, "patch_steps": list(patched)},
+    }
+    state = {
+        "impact": impact, "plan_step": plan_step, "plan": plan,
+        "old_slices": slices, "new_slices": new_slices,
+        "mutable_slices": mutable_slices, "generated": generated,
+        "old_mutable_ids": old_mutable_ids, "patched": patched,
+        "old_last_decide": old_last_decide, "last_stable_decide": last_stable_decide,
+        "static_steps": static_steps, "stable_slices": stable_slices,
+        "tail": tail, "has_slices": has_slices,
+    }
+    return state, impact
+
+
+def preview_revision(conn: sqlite3.Connection, wid: str, intent: dict) -> dict:
+    wf = get_workflow(conn, wid)
+    if wf is None:
+        raise LookupError(wid)
+    _state, impact = _revision_context(conn, wf, intent)
+    return impact
+
+
+def _validate_dep_graph(ids: set[str], deps: dict[str, list[str]],
+                        on_rejects: dict[str, list[str]]) -> None:
+    for sid, ds in deps.items():
+        for dep in ds:
+            if str(dep) not in ids:
+                raise ConflictError(f"step {sid} depends on missing step {dep}")
+    for sid, targets in on_rejects.items():
+        for target in targets:
+            if str(target) not in ids:
+                raise ConflictError(f"step {sid} on_reject missing {target}")
+    state: dict[str, int] = {}
+
+    def visit(sid: str, stack: list[str]) -> None:
+        if state.get(sid) == 1:
+            raise ConflictError("workflow revision creates a cycle: "
+                                + " -> ".join(stack + [sid]))
+        if state.get(sid) == 2:
+            return
+        state[sid] = 1
+        for dep in deps.get(sid, []):
+            visit(str(dep), stack + [sid])
+        state[sid] = 2
+
+    for sid in ids:
+        visit(sid, [])
+
+
+def _validate_runtime_graph(conn: sqlite3.Connection, wid: str) -> None:
+    rows = conn.execute(
+        "SELECT step_id, depends_on_json, on_reject_json FROM workflow_steps "
+        "WHERE workflow_id=?", (wid,)).fetchall()
+    _validate_dep_graph(
+        {r["step_id"] for r in rows},
+        {r["step_id"]: [str(d) for d in jloads(r["depends_on_json"], [])]
+         for r in rows},
+        {r["step_id"]: [str(t) for t in jloads(r["on_reject_json"], [])]
+         for r in rows},
+    )
+
+
+def _insert_revision_steps(conn: sqlite3.Connection, wid: str,
+                           generated: list[dict], now: str) -> None:
+    for raw_step in generated:
+        conn.execute(
+            "INSERT INTO workflow_steps (workflow_id, step_id, title, role_slug, "
+            "instructions, depends_on_json, acceptance_json, gate, reviewer, contract, "
+            "kind, on_reject_json, max_rework, rework_count, source_step_id, slice_key, "
+            "evidence_required, status, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (wid, raw_step["id"], raw_step.get("title") or raw_step["id"],
+             raw_step.get("role") or "", raw_step.get("instructions") or "",
+             jdumps(raw_step.get("depends_on") or []),
+             jdumps(raw_step.get("acceptance") or []),
+             1 if raw_step.get("gate") else 0,
+             raw_step.get("reviewer"), raw_step.get("contract"),
+             raw_step.get("kind") or "task",
+             jdumps(raw_step.get("on_reject") or []),
+             int(raw_step.get("max_rework") or 0), 0,
+             raw_step.get("source_step_id"), raw_step.get("slice_key"),
+             1 if raw_step.get("evidence_required") else 0,
+             "pending", now),
+        )
+
+
+def apply_revision(conn: sqlite3.Connection, wid: str, intent: dict,
+                   actor: str = "human", draft_id: str | None = None) -> dict:
+    """在运行中的 execution 内应用安全修订；不新建 execution、不终止 run。"""
+    # 与 advance 共用进程内锁：避免 scheduler 读到旧步骤后又在修订删改后写回。
+    with _ADVANCE_LOCK:
+        return _apply_revision_locked(conn, wid, intent, actor, draft_id)
+
+
+def _apply_revision_locked(conn: sqlite3.Connection, wid: str, intent: dict,
+                           actor: str, draft_id: str | None) -> dict:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        wf = get_workflow(conn, wid)
+        if wf is None:
+            raise LookupError(wid)
+        state, impact = _revision_context(conn, wf, intent)
+        if not impact.get("safe"):
+            raise RevisionConflict(impact)
+
+        plan_step = state["plan_step"]
+        old_ids = state["old_mutable_ids"]
+        if old_ids:
+            conn.execute(
+                "DELETE FROM workflow_steps WHERE workflow_id=? AND source_step_id=? "
+                "AND step_id IN (" + ",".join("?" * len(old_ids)) + ")",
+                (wid, plan_step["step_id"], *old_ids))
+        now = now_iso()
+        _insert_revision_steps(conn, wid, state["generated"], now)
+
+        # 静态下游从旧最后 decide 改挂到新最后 decide（仅切片变更时）。
+        new_last_decide = state["last_stable_decide"]
+        for g in state["generated"]:
+            if str(g.get("kind") or "task") == "decision":
+                new_last_decide = g["id"]
+        old_last = state["old_last_decide"]
+        if state["has_slices"] and old_last:
+            for st in state["static_steps"]:
+                deps = list(st.get("depends_on") or [])
+                if old_last not in deps:
+                    continue
+                new_deps = [new_last_decide if str(d) == str(old_last) else d
+                            for d in deps if new_last_decide or str(d) != str(old_last)]
+                conn.execute(
+                    "UPDATE workflow_steps SET depends_on_json=?, updated_at=? "
+                    "WHERE workflow_id=? AND step_id=?",
+                    (jdumps(new_deps), now, wid, st["step_id"]))
+
+        # pending 静态步骤 patch + 同步 definition（保证 planned graph/dossier 一致）。
+        definition = dict(wf.get("definition") or {})
+        definition_steps = (definition.get("steps")
+                            or definition.get("children") or [])
+        def_by_id = {str(s.get("id")): s for s in definition_steps
+                     if isinstance(s, dict)}
+        for sid, fields in state["patched"].items():
+            db_fields: dict = {}
+            if "title" in fields:
+                db_fields["title"] = str(fields["title"])
+            if "instructions" in fields:
+                db_fields["instructions"] = str(fields["instructions"])
+            if "acceptance" in fields:
+                db_fields["acceptance_json"] = jdumps(fields["acceptance"] or [])
+            if "contract" in fields:
+                db_fields["contract"] = str(fields["contract"]) or None
+            if "role_slug" in fields:
+                db_fields["role_slug"] = str(fields["role_slug"])
+            if "depends_on" in fields:
+                db_fields["depends_on_json"] = jdumps(fields["depends_on"] or [])
+            if "scope_paths" in fields:
+                db_fields["scope_paths_json"] = jdumps(fields["scope_paths"] or [])
+            if "evidence_required" in fields:
+                db_fields["evidence_required"] = 1 if fields["evidence_required"] else 0
+            if db_fields:
+                sets = ", ".join(f"{k}=?" for k in db_fields)
+                conn.execute(
+                    f"UPDATE workflow_steps SET {sets}, updated_at=? "
+                    "WHERE workflow_id=? AND step_id=?",
+                    (*db_fields.values(), now, wid, sid))
+                dstep = def_by_id.get(sid)
+                if dstep is not None:
+                    if "title" in fields:
+                        dstep["title"] = str(fields["title"])
+                    if "instructions" in fields:
+                        dstep["instructions"] = str(fields["instructions"])
+                    if "acceptance" in fields:
+                        dstep["acceptance"] = fields["acceptance"] or []
+                    if "contract" in fields:
+                        dstep["contract"] = str(fields["contract"]) or ""
+                    if "role_slug" in fields:
+                        dstep["role"] = str(fields["role_slug"])
+                    if "depends_on" in fields:
+                        dstep["depends_on"] = fields["depends_on"] or []
+                    if "scope_paths" in fields:
+                        dstep["scope_paths"] = fields["scope_paths"] or []
+                    if "evidence_required" in fields:
+                        dstep["evidence_required"] = bool(fields["evidence_required"])
+
+        _validate_runtime_graph(conn, wid)
+        plan = dict(state["plan"] or {})
+        plan["slices"] = state["new_slices"]
+        plan.setdefault("rationale", "workflow revision")
+        summary = f"切片计划：{len(state['new_slices'])} 片（修订）"
+        conn.execute(
+            "UPDATE workflow_steps SET plan_json=?, summary=?, updated_at=? "
+            "WHERE workflow_id=? AND step_id=?",
+            (jdumps(plan), summary, now, wid, plan_step["step_id"]))
+        new_hash = weights.definition_hash(definition)
+        conn.execute(
+            "UPDATE workflows SET definition_json=?, definition_hash=?, updated_at=? "
+            "WHERE id=?",
+            (jdumps(definition), new_hash, now, wid))
+        if draft_id:
+            conn.execute(
+                "UPDATE board_drafts SET status='approved', decided_at=? WHERE id=?",
+                (now, draft_id))
+        task_id = wf["task_id"]
+        conn.execute(
+            "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
+            "VALUES (?,?,?,?,?)",
+            (task_id, actor, "comment",
+             jdumps({"body": f"应用工作流修订：{impact['summary']}。"
+                             "当前执行继续，不重启。",
+                     "event": "workflow_revised", "workflow_id": wid,
+                     "draft_id": draft_id}), now))
+        ledger.emit(
+            conn, "workflow.revised", task_id=task_id, workflow_id=wid,
+            execution_no=wf.get("execution_no"),
+            actor_type="human" if actor == "human" else "role", actor=actor,
+            payload={"draft_id": draft_id, "impact": impact,
+                     "definition_hash": new_hash})
+        # 修订后 planned graph/dossier 与新步骤一起刷新（同一事务）。
+        dossier.persist(conn, wid, commit=False)
+        conn.commit()
+        return get_workflow(conn, wid)  # type: ignore[return-value]
+    except BaseException:
+        conn.rollback()
+        raise
+
+
 def advance(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
     """串行化工作流推进，避免 scheduler 与 API 同时通过“无活跃 run”检查。"""
     with _ADVANCE_LOCK:
@@ -1738,9 +2394,10 @@ def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
         # 审核门条目由收件箱聚合（kind=gate），这里只记时间线，不重复发 mention
         _step_activity(conn, wf["task_id"], role, step, "submitted", summary)
         conn.execute("UPDATE workflows SET updated_at=? WHERE id=?", (now, wid))
+        # 运行期可能已生成过空包；提交时必须用最终证据强制刷新。
         reviews.ensure_packet(conn, wf, {
             **step, "summary": summary, "evidence": normalized or step.get("evidence") or [],
-            "status": "submitted"}, created_by=role)
+            "status": "submitted"}, created_by=role, force=True)
     else:
         conn.execute(
             "UPDATE workflow_steps SET status='approved', ended_at=?, updated_at=? "
@@ -2081,7 +2738,14 @@ def retry_step(conn: sqlite3.Connection, wid: str, step_id: str) -> dict:
     """人工重试失败/驳回的步骤：重置为 pending，等待调度。"""
     now = now_iso()
     wf = get_workflow(conn, wid)
-    step = next((s for s in (wf or {}).get("steps", []) if s["step_id"] == step_id), None)
+    if wf is None:
+        raise LookupError(wid)
+    step = next((s for s in wf.get("steps") or [] if s["step_id"] == step_id), None)
+    if step is None:
+        raise LookupError(step_id)
+    if step["status"] not in ("failed", "rejected"):
+        raise ConflictError(
+            f"step {step_id} is {step['status']}; only failed/rejected steps can be retried")
     if step and step.get("kind") == "plan_slices":
         expanded = conn.execute(
             "SELECT 1 FROM workflow_steps WHERE workflow_id=? AND source_step_id=? LIMIT 1",

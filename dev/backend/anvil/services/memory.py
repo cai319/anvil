@@ -109,10 +109,15 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
     - 元数据只保留在文件头部的一份 `<!-- anvil: {...} -->` 注释里。
     """
     clean_path = knowledge_service.normalize_note_path(path)
-    rel_path = f"notes/.draft/{clean_path}" if status == "draft" else f"notes/{clean_path}"
     existing = conn.execute(
-        "SELECT id, content, created_at FROM notes "
+        "SELECT id, content, created_at, status, verified_at FROM notes "
         "WHERE role_slug=? AND path=?", (role, clean_path)).fetchone()
+    # 已验证笔记不能被无证据写入直接覆盖/降级：拒绝并提示改用草稿路径。
+    if existing is not None and existing["status"] == "active" and status != "active":
+        raise ValueError(
+            f"note {clean_path} is already active; provide successful practice "
+            "evidence, or write unverified content to a different draft path")
+    rel_path = f"notes/.draft/{clean_path}" if status == "draft" else f"notes/{clean_path}"
     if mode == "replace":
         body = content
     else:
@@ -156,7 +161,10 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
     text = body.strip()
     title = text.splitlines()[0][:80] if text else ""
     tldr = " ".join(text.split())[:200]
-    verified_at = now if status == "active" and (practice_task_id or practice_run_id) else None
+    verified_at = (
+        now if status == "active" and (practice_task_id or practice_run_id)
+        else (existing["verified_at"] if existing is not None and status == "active"
+              else None))
     values = (
         nid, role, clean_path, body, created_at, meta["kind"], meta["scope"],
         meta.get("task_id"), meta.get("source_task"),

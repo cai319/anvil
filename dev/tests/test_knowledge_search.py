@@ -190,6 +190,28 @@ def test_search_memory_merges_role_notes_but_not_other_task_rows(env):
     assert task_note["scope"] == "task" and snapshot["kind"] == "task_snapshot"
 
 
+def test_reindex_preserves_hit_stats(env):
+    """文件内容变化触发 reindex 时，命中统计不能被清零。"""
+    conn, _, _ = env
+    home = config.AGENTS_DIR / "dev" / "notes"
+    (home / "modules").mkdir(parents=True, exist_ok=True)
+    target = home / "modules" / "stats.md"
+    target.write_text("HITSTATUNIQUE v1", encoding="utf-8")
+    knowledge.reindex_notes(conn, "dev")
+    conn.execute(
+        "UPDATE notes SET hit_count=7, last_hit_at='2026-01-01T00:00:00+00:00' "
+        "WHERE role_slug='dev' AND path='modules/stats.md'")
+    conn.commit()
+
+    target.write_text("HITSTATUNIQUE v2 changed", encoding="utf-8")
+    knowledge.reindex_notes(conn, "dev")
+    row = conn.execute(
+        "SELECT hit_count, last_hit_at FROM notes "
+        "WHERE role_slug='dev' AND path='modules/stats.md'").fetchone()
+    assert row["hit_count"] == 7
+    assert row["last_hit_at"] == "2026-01-01T00:00:00+00:00"
+
+
 def test_reindex_reads_metadata_and_legacy_files(env):
     conn, _, _ = env
     home = config.AGENTS_DIR / "dev" / "notes"

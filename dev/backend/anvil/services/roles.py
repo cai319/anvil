@@ -160,6 +160,9 @@ ONBOARDING_DEFINITION: dict = {
         "human 先创建/绑定至少一个角色。"
         "工作方式：用 anvil task comment 同步分析结论；用 anvil board draft 提交 workflow 或"
         " role_suggestion；用 anvil task mention --to human 请人类审批；批准前不要实现任何子任务。"
+        "切片执行角色反馈 loop 需要调整时，先用 `anvil workflow revise --preview` 判断能否增量"
+        "修订（只改未来切片/pending 步骤，不重启当前执行）；只有影响已开始/已完成步骤或 loop "
+        "模板本身时，才提交完整 workflow 草案并请 human 决定是否重启。"
     ),
 }
 

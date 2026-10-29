@@ -992,8 +992,22 @@ export function isOnboardingRole(r: Role): boolean {
   return (r.definition as Record<string, unknown> | undefined)?.kind === "onboarding";
 }
 
+export interface RevisionImpact {
+  classification: "safe_loop" | "safe_future" | "requires_restart" | "stale" | "invalid";
+  safe: boolean;
+  summary: string;
+  affected_steps?: string[];
+  blocked_by?: { step_id?: string | null; status?: string; reason?: string }[];
+  diff?: Record<string, unknown>;
+}
+
 export interface InboxDraftMeta {
-  draft_kind?: "tasks" | "workflow" | "role_suggestion";
+  draft_kind?: "tasks" | "workflow" | "workflow_revision" | "role_suggestion";
+  workflow_revision?: {
+    draft_id: string;
+    base_workflow_id?: string;
+    impact?: RevisionImpact;
+  };
   assessment?: string;
   missing_capabilities?: string[];
   suggested_roles?: { slug: string; display_name?: string; description?: string }[];
@@ -1177,6 +1191,11 @@ export interface Workflow {
   weight_reason?: string | null;
   definition_hash?: string | null;
   finished_at?: string | null;
+  pending_revision?: {
+    draft_id: string;
+    impact?: RevisionImpact;
+    created_by?: string;
+  } | null;
 }
 
 export type WorkflowWeight = "light" | "standard" | "strict";
@@ -1445,10 +1464,16 @@ export interface BoardDraft {
   id: string;
   goal: string;
   status: "pending" | "approved" | "rejected";
-  kind?: "tasks" | "workflow" | "role_suggestion";
+  kind?: "tasks" | "workflow" | "workflow_revision" | "role_suggestion";
   created_by: string;
   source_task: string | null;
   tree: {
+    base_workflow_id?: string;
+    base_execution_no?: number;
+    base_updated_at?: string;
+    rationale?: string;
+    intent?: Record<string, unknown>;
+    impact?: RevisionImpact;
     leader?: string;
     tags?: string[];
     knowledge_repos?: (string | { repo: string; reason?: string })[];

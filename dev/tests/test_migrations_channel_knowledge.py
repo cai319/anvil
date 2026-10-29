@@ -90,6 +90,10 @@ def test_channel_knowledge_migration_and_idempotency(tmp_path):
         assert _table_exists(conn, "workspace_knowledge")
         assert _table_exists(conn, "workspace_knowledge_versions")
         assert _table_exists(conn, "task_knowledge")
+        idx = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' "
+            "AND name='idx_workspace_knowledge_harvest'").fetchone()
+        assert idx is not None and "supersedes_id IS NULL" in idx["sql"]
         assert "knowledge_repo" in _columns(conn, "workspaces")
         assert "archived_at" in _columns(conn, "tasks")
         assert {"title", "tldr", "fields_json", "status"} <= _columns(conn, "notes")

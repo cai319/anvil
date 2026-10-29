@@ -74,6 +74,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     """记录请求；按 forced_status 返回。"""
 
     forced_status = 200
+    forced_body: dict | None = None
     requests: list[tuple[str, str]] = []
     bodies: list[dict | None] = []
 
@@ -86,7 +87,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             parsed = None
         type(self).bodies.append(parsed)
         type(self).requests.append((self.command, urlsplit(self.path).path))
-        body = json.dumps({"ok": True}).encode()
+        payload = type(self).forced_body
+        body = json.dumps({"ok": True} if payload is None else payload).encode()
         self.send_response(type(self).forced_status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -104,6 +106,7 @@ def mock_backend():
     _Handler.requests = []
     _Handler.bodies = []
     _Handler.forced_status = 200
+    _Handler.forced_body = None
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
@@ -183,6 +186,7 @@ def test_help_contains_rules_and_examples():
         (["task", "-h"], ["示例:", "knowledge-write", "anvil task create"]),
         (["step", "plan", "-h"], ["plan.json", "slices", "不得指定角色"]),
         (["role", "-h"], ["role list", "role expand"]),
+        (["workflow", "revise", "-h"], ["revision.json", "--preview", "requires_restart"]),
     ]
     for args, needles in cases:
         r = subprocess.run([ANVIL_BIN, *args], capture_output=True,
@@ -266,3 +270,49 @@ def test_exit_code_usage_missing_arg():
         [ANVIL_BIN, "task", "claim"], env=env, capture_output=True, text=True, timeout=30
     )
     assert r.returncode == EXIT["usage"]
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+def test_workflow_revise_preview_maps_to_endpoint(mock_backend, tmp_path):
+    """修订预览只调用 preview 端点，不创建草案。"""
+    intent = {"add_slices": [{"id": "auth2", "title": "认证补充"}]}
+    p = tmp_path / "revision.json"
+    p.write_text(json.dumps({"rationale": "补切片", "intent": intent},
+                            ensure_ascii=False), encoding="utf-8")
+    r = _run(["workflow", "revise", "WF-1", "--file", str(p), "--preview"],
+             mock_backend)
+    assert r.returncode == EXIT["ok"], r.stderr
+    assert _Handler.requests == [
+        ("POST", f"{API}/workflows/WF-1/revisions/preview")]
+    assert _Handler.bodies[-1] == {"intent": intent}
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+def test_workflow_revise_creates_revision_draft(mock_backend, tmp_path):
+    """不带 --preview 时提交修订草案，并带上 rationale。"""
+    intent = {"patch_steps": [{"step_id": "F1", "fields": {"instructions": "x"}}]}
+    p = tmp_path / "revision.json"
+    p.write_text(json.dumps({"intent": intent}), encoding="utf-8")
+    r = _run(["workflow", "revise", "WF-1", "--file", str(p),
+              "--rationale", "补说明"], mock_backend)
+    assert r.returncode == EXIT["ok"], r.stderr
+    assert ("POST", f"{API}/workflows/WF-1/revisions") in _Handler.requests
+    assert _Handler.bodies[-1] == {"intent": intent, "rationale": "补说明"}
+    assert "不重启" in r.stdout
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+def test_step_show_prints_pending_revision(mock_backend):
+    """step show 要能看到待审批修订及影响摘要。"""
+    _Handler.forced_body = {
+        "status": "running",
+        "updated_at": "2026-10-29T10:00:00+00:00",
+        "steps": [],
+        "pending_revision": {
+            "draft_id": "D-REV",
+            "impact": {"classification": "safe_loop", "summary": "追加 1 个切片"},
+        },
+    }
+    r = _run(["step", "show", "WF-1"], mock_backend)
+    assert r.returncode == EXIT["ok"], r.stderr
+    assert "待审批修订：D-REV · safe_loop · 追加 1 个切片" in r.stdout

@@ -313,7 +313,7 @@ def _protocol_for_run(conn: sqlite3.Connection, run: dict) -> str:
         return render.STEP_PROTOCOL
     from ..services import planning as planning_service
     if prompt.startswith(planning_service.PLAN_MARKER):
-        return render.PLANNING_PROTOCOL
+        return render.PLANNING_PROTOCOL + "\n\n" + render.REVISION_PROTOCOL
     is_reply = prompt.startswith("[anvil:reply]")
     if not is_reply and run.get("task_id"):
         from ..services import workflow as workflow_service

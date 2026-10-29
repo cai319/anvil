@@ -235,8 +235,11 @@ def _workflow_summary(wf: dict) -> str:
     if slice_steps:
         lines.append(f"- 已展开切片步骤：{slice_steps} 个（按 loop 模板生成，未逐条列出）")
     lines.append(
-        "- 如需调整，请提交新的 workflow 草案；人工批准后会终止当前执行并重新开始，"
-        "不会中途替换正在运行的 workflow。")
+        "- 如需调整：能用增量修订表达（增删改未来切片、patch 仍 pending 的静态步骤）时，"
+        "先用 `anvil workflow revise <workflow-id> --file revision.json --preview` 判断；"
+        "safe 则提交修订草案，人工批准后原地应用、不重启。"
+        "只有影响 running/submitted/approved 步骤或 loop 模板本身时，才提交新的 workflow 草案"
+        "（人工批准后会终止当前执行并重新开始）。")
     return "\n".join(lines)
 
 
@@ -249,7 +252,7 @@ def start_planner_run(conn: sqlite3.Connection, db_path: str, orchestrator,
     replace_active=False：已有活跃 planner run 直接复用（首次派发幂等）。
     replace_active=True：先 abandon 旧 planner run，再新建（角色建议审批后的重规划）。
     """
-    from ..graph.render import PLANNING_PROTOCOL
+    from ..graph.render import PLANNING_PROTOCOL, REVISION_PROTOCOL
 
     if planner == roles_service.ONBOARDING_SLUG:
         roles_service.ensure_onboarding(conn)
@@ -272,6 +275,7 @@ def start_planner_run(conn: sqlite3.Connection, db_path: str, orchestrator,
     prompt = (
         PLAN_MARKER + "\n"
         + PLANNING_PROTOCOL
+        + "\n\n" + REVISION_PROTOCOL
         + "\n\n## 参与角色（Roster）\n"
         + render_roster(conn, task_id, roster)
     )

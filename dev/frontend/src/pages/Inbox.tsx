@@ -75,6 +75,15 @@ export function Inbox() {
 
   const approveDraftItem = (it: InboxItem, raw: string) => {
     const meta = it.meta;
+    if (meta?.draft_kind === "workflow_revision") {
+      const impact = meta.workflow_revision?.impact;
+      if (!window.confirm(
+        `应用工作流增量修订？\n${impact?.summary || ""}\n`
+        + "当前执行会继续，不会终止或从头重跑。",
+      )) return;
+      act(it.id, () => api.approveDraft([raw]));
+      return;
+    }
     if (meta?.draft_kind === "workflow" && meta.running_workflow) {
       if (!window.confirm(
         `任务当前有第 ${meta.running_execution_no || 1} 次执行正在运行。\n`
@@ -116,10 +125,21 @@ export function Inbox() {
             <button className="primary small" disabled={disabled}
               onClick={() => approveDraftItem(it, raw)}>
               {isRoleSuggestion ? "批准并创建角色"
-                : it.meta?.running_workflow ? "终止并重新执行" : "批准落板"}
+                : it.meta?.draft_kind === "workflow_revision" ? "应用修订（不重启）"
+                  : it.meta?.running_workflow ? "终止并重新执行" : "批准落板"}
             </button>
             <button className="small danger" disabled={disabled}
-              onClick={() => act(it.id, () => api.rejectDraftById(raw))}>驳回</button>
+              onClick={() => {
+                const editable = it.meta?.draft_kind === "workflow"
+                  || it.meta?.draft_kind === "workflow_revision";
+                let feedback: string | undefined;
+                if (editable) {
+                  const rawFeedback = window.prompt("驳回意见（会发给 Cindy）：", "");
+                  if (rawFeedback === null) return;
+                  feedback = rawFeedback.trim() || undefined;
+                }
+                act(it.id, () => api.rejectDraftById(raw, feedback));
+              }}>驳回</button>
             {it.meta?.draft_kind === "workflow" && (
               <a className="small" href={`/templates?draft=${encodeURIComponent(raw)}`}>
                 在模板工作台编辑
@@ -247,6 +267,16 @@ export function Inbox() {
                 </span>
               )}
               {it.meta?.binding_locked && <span className="repo-lock">已人工固定</span>}
+            </div>
+          )}
+          {it.meta?.workflow_revision?.impact && (
+            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+              <strong>{it.meta.workflow_revision.impact.classification}</strong>
+              {" · "}{it.meta.workflow_revision.impact.summary}
+              {(it.meta.workflow_revision.impact.blocked_by?.length ?? 0) > 0 && (
+                <> · 阻塞：{it.meta.workflow_revision.impact.blocked_by!
+                  .map((b) => `${b.step_id || "?"}(${b.status || "?"})`).join("、")}</>
+              )}
             </div>
           )}
           <div className="card-actions" style={{ gap: 6 }}>{renderActions(it)}</div>

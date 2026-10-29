@@ -57,7 +57,8 @@
   pending。步骤 lease 在 run 存活（running/suspended）期间由 scheduler 自动续租，
   `task heartbeat` 同步续租当前步骤，避免长步骤误报 `lease_expired`。
   CLI 兼容 `knowledge list`、`task comment/mention --message`，补齐
-  `task knowledge-write --kind`。
+  `task knowledge-write --kind`。`step show` 对 pending 步骤输出未激活原因
+  （依赖/退避/角色忙/活跃 run/lease/治理），并修复 watchdog 重置步骤时未释放 lease。
 - 注入默认 `CHANNEL_KNOWLEDGE_ENABLED=0`，按频道试点后再开启；任务知识默认开启。
 
 ### 多角色团队任务（2026-10-18 修正）
@@ -453,11 +454,54 @@
 ### 尚未实施（P3 其余）
 - trace coverage / mutation testing 接入、CIC 多模型 judge 评测、Activity Unread/Saved、DM UI。
 
+## Workflow 增量修订（2026-10-29）
+
+- 新增 `board_drafts.kind=workflow_revision`：Cindy 把执行角色反馈结构化为
+  `add_slices/remove_slices/update_slices/patch_steps`，后端 `preview_revision`
+  权威分类为 `safe_loop/safe_future/requires_restart/stale/invalid`；不信任 LLM 自评。
+- 安全修订经 human 批准后 `apply_revision` 在**原 execution 内**原地应用：
+  保留 running/submitted/approved 步骤与当前 run，不新建 execution、不写
+  `execution_no`；重新生成未来 pending 切片并重挂静态下游。
+- 影响 running/submitted/approved 步骤或其契约时拒绝创建修订草案（409 + impact），
+  Cindy 改走完整 workflow 草案，由 human 确认重启或放弃。
+- API：`POST /workflows/{wid}/revisions/preview`、`POST .../revisions`；
+  `GET /workflows/{wid}` 附 `pending_revision`；board approve/reject 支持修订草案
+  （reject 带 feedback 唤醒提交者）。
+- CLI：`anvil workflow revise <wf> --file revision.json [--preview]`；
+  `step show` 显示待审批修订。
+- UI：收件箱修订卡展示 impact，按钮「应用修订（不重启）」；任务详情同样展示待审修订，
+  完整 workflow 草案仍保留运行中重启确认。
+- 协议：`PLANNING_PROTOCOL` 注入 `REVISION_PROTOCOL`，Cindy 收到反馈先 `--preview`
+  再决定修订还是重规划；`_workflow_summary` 不再宣称“调整一定要重启”。
+- 文档：`docs/workflow-revision.md`。
+- 测试：`tests/test_workflow_revision.py`（18）、`tests/api/test_workflow_revision_api.py`（5）。
+- 并发/一致性：同一任务只允许一个待审 workflow/修订草案；审批事务内重新分类，
+  stale 返回 409 且零修改；patch 改角色会校验任务角色覆盖与依赖仍存在。
+- v1 限制：不做局部回滚重做、切片重排、loop 阶段/角色热替换、增删静态步骤。
+
+## 审查修复（2026-10-29）
+
+- **workflow 增量修订**：patch-only 不再误改静态下游依赖；仅切片变更时重挂；
+  closed/archived 任务禁止修订。
+- **终态任务**：scheduler 跳过 closed/done/archived 任务的 workflow 推进与停滞唤醒；
+  `create_workflow` 与 board approve 拒绝为终态任务启动执行；closed 任务必须 reopen。
+- **实践门控**：无证据写入不能覆盖/降级已 active 笔记（422 + 提示），原知识保持可检索；
+  reindex 重建 notes 时保留 `hit_count/last_hit_at`。
+- **频道知识**：去重只作用于收割行（`supersedes_id IS NULL`）；唯一索引 v2 允许已批准卡
+  生成同内容新提案；驳回/废弃卡需修改后重提，已废弃卡可返回已批准后继；
+  `supersedes_id` 必须同 workspace；知识子路由校验 `kid` 归属。
+- **任务知识**：GET 只允许参与角色、planner/onboarding 与 human；DELETE 校验 task 归属。
+- **审核包**：running 期 GET 生成的空包会在提交时用最终证据强制刷新。
+- **人工重试**：只允许 failed/rejected 步骤，避免打回 approved/submitted/running。
+- **模板套用**：先检查待审 workflow/修订草案，再追加 assignee，避免部分落地。
+- **未采纳**：agent 必须是 workspace participant 才能提频道知识——设计明确
+  participants 仅作派发偏好与展示，不是权限；频道知识由 human 审批兜底。
+
 ## 验证
 
 ```bash
 cd dev
-python3 -m pytest tests/ -q          # 242 passed, 21 skipped
+python3 -m pytest tests/ -q          # 605 passed, 46 skipped（2026-10-29）
 cd frontend && npm run build         # tsc + vite build
 ```
 

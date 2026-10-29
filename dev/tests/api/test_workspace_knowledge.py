@@ -132,6 +132,138 @@ async def test_approve_requires_full_fields_and_version(client, app):
     assert stale.status_code == 409
 
 
+async def test_approved_card_metadata_edit_creates_proposal(client):
+    """只改 tags/owner 等元数据也必须生成新提案，不能被去重吞掉。"""
+    await _seed(client)
+    ws = await _workspace(client)
+    original = (
+        await client.post(
+            f"{API}/workspaces/{ws['id']}/knowledge",
+            json={"title": "元数据编辑约定", "tldr": "只改标签也要生成新版本。",
+                  "kind": "convention", "fields": FULL_CONVENTION,
+                  "source_task_id": "T-META"},
+            headers=human_headers(),
+        )
+    ).json()
+    edited = await client.patch(
+        f"{API}/workspaces/{ws['id']}/knowledge/{original['id']}",
+        json={"tags": ["docs"], "expected_version": original["version"]},
+        headers=human_headers(),
+    )
+    assert edited.status_code == 200, edited.text
+    proposal = edited.json()
+    assert proposal["id"] != original["id"]
+    assert proposal["status"] == "proposed"
+    assert proposal["supersedes_id"] == original["id"]
+    assert proposal["tags"] == ["docs"]
+
+
+async def test_rejected_card_requires_content_change(client, app):
+    """被驳回的同内容卡不能原样重插；必须改内容后重新提案。"""
+    await _seed(client)
+    ws = await _workspace(client)
+    payload = {"title": "可重建约定", "tldr": "驳回后需修改内容再提案。",
+               "kind": "convention", "fields": FULL_CONVENTION,
+               "source_task_id": "T-REBUILD"}
+    first = (
+        await client.post(f"{API}/workspaces/{ws['id']}/knowledge", json=payload,
+                          headers=_agent_headers(app))
+    ).json()
+    rejected = await client.post(
+        f"{API}/workspaces/{ws['id']}/knowledge/{first['id']}/reject",
+        json={"expected_version": first["version"]}, headers=human_headers())
+    assert rejected.status_code == 200, rejected.text
+    again = await client.post(
+        f"{API}/workspaces/{ws['id']}/knowledge", json=payload,
+        headers=_agent_headers(app))
+    assert again.status_code == 409, again.text
+
+    changed = {**payload, "tldr": "修改后的摘要，允许重新提案。"}
+    second = await client.post(
+        f"{API}/workspaces/{ws['id']}/knowledge", json=changed,
+        headers=_agent_headers(app))
+    assert second.status_code == 201, second.text
+    assert second.json()["id"] != first["id"]
+
+
+async def test_supersedes_must_stay_in_same_workspace(client):
+    await _seed(client)
+    ws_a = await _workspace(client, repo="repo-a", knowledge_repo="kb-a")
+    ws_b = await _workspace(client, repo="repo-b", knowledge_repo="kb-b")
+    card_a = (
+        await client.post(
+            f"{API}/workspaces/{ws_a['id']}/knowledge",
+            json={"title": "A 的规范", "tldr": "A 的规范摘要。",
+                  "kind": "convention", "fields": FULL_CONVENTION},
+            headers=human_headers(),
+        )
+    ).json()
+    r = await client.post(
+        f"{API}/workspaces/{ws_b['id']}/knowledge",
+        json={"title": "B 的新规范", "tldr": "B 的新规范摘要。",
+              "kind": "convention", "fields": FULL_CONVENTION,
+              "supersedes_id": card_a["id"]},
+        headers=human_headers(),
+    )
+    assert r.status_code == 409, r.text
+
+
+async def test_knowledge_route_requires_matching_workspace(client):
+    """URL 中的 ws_id 必须与卡片所属 workspace 一致。"""
+    await _seed(client)
+    ws_a = await _workspace(client, repo="repo-a", knowledge_repo="kb-a")
+    ws_b = await _workspace(client, repo="repo-b", knowledge_repo="kb-b")
+    card_b = (
+        await client.post(
+            f"{API}/workspaces/{ws_b['id']}/knowledge",
+            json={"title": "B 的卡片", "tldr": "只在 B 中可见。",
+                  "kind": "convention", "fields": FULL_CONVENTION},
+            headers=human_headers(),
+        )
+    ).json()
+
+    deleted = await client.delete(
+        f"{API}/workspaces/{ws_a['id']}/knowledge/{card_b['id']}",
+        headers=human_headers())
+    assert deleted.status_code == 404
+    still_there = await client.get(
+        f"{API}/workspaces/{ws_b['id']}/knowledge?status=approved",
+        headers=human_headers())
+    assert card_b["id"] in {c["id"] for c in still_there.json()}
+
+
+async def test_reharvest_returns_approved_successor(client, app):
+    """旧卡已被新版本取代后，重复收割应返回新的已批准卡。"""
+    await _seed(client)
+    ws = await _workspace(client)
+    agent = _agent_headers(app, token="kb-chain-token")
+    payload = {"title": "链式修订约定", "tldr": "同内容新版本替代旧卡。",
+               "kind": "convention", "fields": FULL_CONVENTION,
+               "source_task_id": "T-CHAIN"}
+    first = (await client.post(
+        f"{API}/workspaces/{ws['id']}/knowledge", json=payload,
+        headers=agent)).json()
+    agree1 = await client.post(
+        f"{API}/workspaces/{ws['id']}/knowledge/{first['id']}/approve",
+        json={"expected_version": first["version"]}, headers=human_headers())
+    assert agree1.status_code == 200, agree1.text
+
+    proposal = (await client.patch(
+        f"{API}/workspaces/{ws['id']}/knowledge/{first['id']}",
+        json={"tags": ["docs"], "expected_version": agree1.json()["version"]},
+        headers=human_headers())).json()
+    agree2 = await client.post(
+        f"{API}/workspaces/{ws['id']}/knowledge/{proposal['id']}/approve",
+        json={"expected_version": proposal["version"]}, headers=human_headers())
+    assert agree2.status_code == 200, agree2.text
+
+    again = await client.post(
+        f"{API}/workspaces/{ws['id']}/knowledge", json=payload, headers=agent)
+    assert again.status_code == 201, again.text
+    assert again.json()["id"] == proposal["id"]
+    assert again.json()["status"] == "approved"
+
+
 async def test_harvest_from_done_task_is_idempotent(client):
     await _seed(client)
     ws = await _workspace(client)

@@ -50,6 +50,17 @@ async def test_approve_workflow_draft_creates_workflow_not_tasks(client, seeded)
     assert tasks[0]["status"] == "in_progress"
 
 
+async def test_approve_workflow_draft_on_closed_task_is_rejected(client, seeded):
+    did = await _draft(client)
+    cancelled = await client.post(
+        "/api/v1/tasks/T-WF/cancel", headers=human_headers())
+    assert cancelled.status_code == 200, cancelled.text
+    r = await client.post("/api/v1/board/drafts/approve", headers=human_headers(),
+                          json={"draft_ids": [did]})
+    assert r.status_code == 409, r.text
+    assert "terminal" in r.text
+
+
 async def test_step_submit_gate_and_review(client, seeded, app):
     wid = None
     did = await _draft(client)
@@ -262,6 +273,11 @@ async def test_slice_draft_expands_to_loop_and_serial_chain_is_rejected(client, 
     ]
     assert steps[-1]["kind"] == "decision"
     assert steps[-1]["on_reject"] == ["A.fix", "A.verify2"]
+
+    # 同一任务同时只允许一个待审 workflow 草案；先驳回再验证串行结构校验。
+    r = await client.post("/api/v1/board/drafts/reject", headers=human_headers(), json={
+        "draft_id": r.json()["id"], "feedback": "换串行草案验证校验"})
+    assert r.status_code == 200, r.text
 
     serial = {"steps": [
         {"id": f"S{i}", "title": f"step {i}", "role": ("pm", "developer")[i % 2],

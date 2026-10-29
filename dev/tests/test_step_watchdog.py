@@ -102,6 +102,29 @@ def test_nudge_resumes_when_target_role_is_idle(env):
     assert orch.pumped == [("R1", "resume")]
 
 
+def test_nudge_reset_releases_step_lease(env):
+    """run 已结束但步骤仍 running：重置 pending 时必须释放旧 lease。"""
+    from anvil.services import leases
+
+    conn, sched, orch, wid = env
+    lease = leases.acquire(conn, "step", f"{wid}:S1", holder="dev")
+    conn.execute(
+        "UPDATE workflow_steps SET lease_id=?, fence_token=? WHERE workflow_id=?",
+        (lease["id"], lease["fence"], wid))
+    conn.execute("UPDATE runs SET status='completed' WHERE id='R1'")
+    conn.commit()
+
+    sched._nudge_stalled(conn)
+
+    row = conn.execute(
+        "SELECT status, lease_id FROM workflow_steps WHERE workflow_id=?", (wid,)).fetchone()
+    assert row["status"] == "pending"
+    assert row["lease_id"] is None
+    lease_row = conn.execute("SELECT status FROM leases WHERE id=?",
+                             (lease["id"],)).fetchone()
+    assert lease_row["status"] == "released"
+
+
 def test_nudge_limit_requeues_for_auto_recovery(env):
     """唤醒次数用完不 @human，而是进入自动恢复队列（指数退避后重跑）。"""
     conn, sched, orch, wid = env

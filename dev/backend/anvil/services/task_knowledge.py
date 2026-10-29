@@ -184,7 +184,13 @@ def archive_for_task(conn: sqlite3.Connection, task_id: str) -> None:
     conn.commit()
 
 
-def delete(conn: sqlite3.Connection, knowledge_id: str) -> bool:
+def delete(conn: sqlite3.Connection, knowledge_id: str,
+           task_id: str | None = None) -> bool:
+    if task_id is not None:
+        row = conn.execute(
+            "SELECT task_id FROM task_knowledge WHERE id=?", (knowledge_id,)).fetchone()
+        if row is None or row["task_id"] != task_id:
+            return False
     cur = conn.execute("DELETE FROM task_knowledge WHERE id=?", (knowledge_id,))
     conn.commit()
     return cur.rowcount > 0

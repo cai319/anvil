@@ -17,12 +17,25 @@ from . import events
 router = APIRouter()
 
 
+def _attach_pending_revision(conn, wf: dict) -> dict:
+    drafts = services.board.list_drafts(conn, source_task=wf["task_id"])
+    rev = next((d for d in drafts if d.get("kind") == "workflow_revision"
+                and d.get("status") == "pending"), None)
+    if rev:
+        wf["pending_revision"] = {
+            "draft_id": rev["id"],
+            "impact": (rev.get("tree") or {}).get("impact") or {},
+            "created_by": rev.get("created_by"),
+        }
+    return wf
+
+
 @router.get("/tasks/{tid}/workflow")
 def get_task_workflow(tid: str, conn=Depends(get_db)):
     wf = services.workflow.get_for_task(conn, tid)
     if wf is None:
         raise HTTPException(status_code=404, detail="task has no workflow")
-    return wf
+    return _attach_pending_revision(conn, wf)
 
 
 @router.get("/tasks/{tid}/workflows")
@@ -36,7 +49,8 @@ def get_workflow(wid: str, conn=Depends(get_db)):
     wf = services.workflow.get_workflow(conn, wid)
     if wf is None:
         raise HTTPException(status_code=404, detail="workflow not found")
-    return wf
+    wf["dispatch"] = services.workflow.explain_dispatch(conn, wf)
+    return _attach_pending_revision(conn, wf)
 
 
 @router.get("/workflows/{wid}/metrics")
@@ -214,6 +228,50 @@ def _assert_workflow_task(conn, wid: str, auth: Auth) -> dict:
     return wf
 
 
+def _assert_revision_actor(conn, wf: dict, auth: Auth) -> None:
+    """只有任务 planner / onboarding 助理（Cindy）可提交修订；human 可预览。"""
+    if auth.role in (None, "human"):
+        return
+    task = services.tasks.get(conn, wf["task_id"]) or {}
+    planner = str(task.get("planner") or "")
+    if auth.role != planner and not services.roles.is_onboarding(conn, auth.role):
+        raise HTTPException(
+            status_code=403,
+            detail="only the task planner or onboarding assistant can submit revisions")
+
+
+@router.post("/workflows/{wid}/revisions/preview")
+def preview_workflow_revision(wid: str, body: dict, conn=Depends(get_db),
+                              auth: Auth = Depends(get_auth)):
+    wf = _assert_workflow_task(conn, wid, auth)
+    _assert_revision_actor(conn, wf, auth)
+    intent = body.get("intent") if isinstance(body.get("intent"), dict) else body
+    try:
+        return services.workflow.preview_revision(conn, wid, intent)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="workflow not found")
+
+
+@router.post("/workflows/{wid}/revisions", status_code=201)
+def create_workflow_revision(wid: str, body: dict, conn=Depends(get_db),
+                             auth: Auth = Depends(get_auth)):
+    wf = _assert_workflow_task(conn, wid, auth)
+    _assert_revision_actor(conn, wf, auth)
+    intent = body.get("intent") if isinstance(body.get("intent"), dict) else body
+    rationale = str(body.get("rationale") or body.get("goal") or "").strip()
+    try:
+        draft = services.board.create_revision_draft(
+            conn, wid, intent, rationale, auth.role or "human")
+    except services.workflow.RevisionConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "message": str(exc), "impact": exc.impact})
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    events.publish("task", {"id": wf["task_id"], "kind": "workflow_revision",
+                            "workflow_id": wid, "draft_id": draft.get("id")})
+    return draft
+
+
 @router.get("/workflows/{wid}/steps/{sid}/packet")
 def get_packet(wid: str, sid: str, conn=Depends(get_db)):
     """Gate/decision review packet + immutable decisions."""
@@ -363,9 +421,9 @@ def retry_step(wid: str, sid: str, conn=Depends(get_db),
     """人工重试失败/驳回的步骤。"""
     try:
         wf = services.workflow.retry_step(conn, wid, sid)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-    if wf is None:
-        raise HTTPException(status_code=404, detail="workflow not found")
     events.publish("task", {"id": wf["task_id"], "kind": "step_retry", "step": sid})
     return wf

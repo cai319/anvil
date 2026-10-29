@@ -85,7 +85,8 @@ def persist(conn: sqlite3.Connection, wid: str, *, commit: bool = True) -> dict 
         "status, definition_hash, dossier_json, digest, created_at) "
         "VALUES (?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(workflow_id) DO UPDATE SET dossier_json=excluded.dossier_json, "
-        "digest=excluded.digest, status=excluded.status, created_at=excluded.created_at",
+        "digest=excluded.digest, status=excluded.status, "
+        "definition_hash=excluded.definition_hash, created_at=excluded.created_at",
         (wid, wf["task_id"], wf.get("execution_no") or 1, wf.get("weight"),
          wf["status"], wf.get("definition_hash"), jdumps(payload),
          payload["digest"], now_iso()))

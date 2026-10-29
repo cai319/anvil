@@ -118,6 +118,10 @@ def approve_drafts(body: dict, request: Request, conn=Depends(get_db),
             restart_note=body.get("restart_note"),
         )
     except ConflictError as exc:
+        impact = getattr(exc, "impact", None)
+        if impact:
+            raise HTTPException(status_code=409, detail={
+                "message": str(exc), "impact": impact})
         raise HTTPException(status_code=409, detail=str(exc))
     seen_tasks: set[str] = set()
     for did in draft_ids:

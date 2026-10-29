@@ -9,7 +9,7 @@ import sqlite3
 
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
 
-DRAFT_KINDS = {"tasks", "workflow", "role_suggestion"}
+DRAFT_KINDS = {"tasks", "workflow", "workflow_revision", "role_suggestion"}
 
 # 工作流模板库（SOP 预设，MetaGPT 思路）：每条是一串「步骤」；步骤线性依赖上一步。
 # 步骤字段：title（前缀）、type、role（角色 slug）。
@@ -89,8 +89,19 @@ def create_draft(conn: sqlite3.Connection, goal: str, tree: dict,
     kind = str(kind or "tasks")
     if kind not in DRAFT_KINDS:
         raise ConflictError(f"unsupported draft kind: {kind}")
-    if kind in ("workflow", "role_suggestion") and not source_task:
+    if kind in ("workflow", "workflow_revision", "role_suggestion") and not source_task:
         raise ConflictError(f"{kind} draft requires source_task")
+    if kind == "workflow_revision":
+        raise ConflictError("workflow_revision must be created via the revision endpoint")
+    if kind == "workflow" and source_task:
+        pending = conn.execute(
+            "SELECT id, kind FROM board_drafts WHERE source_task=? AND status='pending' "
+            "AND kind IN ('workflow','workflow_revision') LIMIT 1",
+            (source_task,)).fetchone()
+        if pending:
+            raise ConflictError(
+                f"a {pending['kind']} draft is already pending for this task: "
+                f"{pending['id']}; resolve it before submitting another")
     from . import knowledge_binding
     # agent 草案严格校验 repo 名（防止 Cindy 编造）；人工草案允许安全的新名字。
     knowledge_binding.normalize_draft_tree(
@@ -121,6 +132,51 @@ def create_draft(conn: sqlite3.Connection, goal: str, tree: dict,
         (did, workspace_id, goal, jdumps(tree), "pending", created_by, now_iso(), source_task, kind),
     )
     conn.commit()
+    return get_draft(conn, did)  # type: ignore[return-value]
+
+
+def create_revision_draft(conn: sqlite3.Connection, wid: str, intent: dict,
+                          rationale: str, agent: str) -> dict:
+    """Cindy 对运行中 workflow 提交增量修订提案（不重启执行）。"""
+    from . import roles as roles_service
+    from . import tasks as tasks_service
+    from . import workflow as workflow_service
+
+    wf = workflow_service.get_workflow(conn, wid)
+    if wf is None:
+        raise ConflictError(f"workflow {wid} not found")
+    task_id = wf["task_id"]
+    pending = conn.execute(
+        "SELECT id, kind FROM board_drafts WHERE source_task=? AND status='pending' "
+        "AND kind IN ('workflow','workflow_revision') LIMIT 1", (task_id,)).fetchone()
+    if pending:
+        raise ConflictError(
+            f"a {pending['kind'] or 'workflow'} draft is already pending: {pending['id']}")
+    impact = workflow_service.preview_revision(conn, wid, intent)
+    if not impact.get("safe"):
+        raise workflow_service.RevisionConflict(impact)
+    reason = (rationale or "").strip() or "工作流增量修订"
+    tree = {
+        "schema_version": 1,
+        "base_workflow_id": wid,
+        "base_execution_no": wf.get("execution_no"),
+        "base_updated_at": wf.get("updated_at"),
+        "rationale": reason,
+        "intent": intent,
+        "impact": impact,
+    }
+    did = new_id()
+    conn.execute(
+        "INSERT INTO board_drafts (id, workspace_id, goal, tree_json, status, "
+        "created_by, created_at, source_task, kind) VALUES (?,?,?,?,?,?,?,?,?)",
+        (did, None, reason, jdumps(tree), "pending", f"agent:{agent}",
+         now_iso(), task_id, "workflow_revision"))
+    conn.commit()
+    sender = roles_service.notification_sender(conn, task_id, f"agent:{agent}")
+    tasks_service.mention(
+        conn, task_id, sender, "human",
+        f"工作流增量修订待审批（workflow {wid}）：{impact.get('summary') or reason}。"
+        "批准后原地应用，不会重启当前执行。")
     return get_draft(conn, did)  # type: ignore[return-value]
 
 
@@ -437,9 +493,35 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
         if draft is None or draft["status"] != "pending":
             continue
         kind = draft.get("kind") or "tasks"
+        if kind == "workflow_revision":
+            from . import roles as roles_service
+            from . import tasks as tasks_service
+            from . import workflow as workflow_service
+            tree = draft.get("tree") or {}
+            wid = str(tree.get("base_workflow_id") or "")
+            if not wid:
+                raise ConflictError("workflow_revision missing base_workflow_id")
+            workflow_service.apply_revision(
+                conn, wid, tree.get("intent") or {}, actor=by, draft_id=draft["id"])
+            creator = str(draft.get("created_by") or "").strip()
+            if creator.startswith("agent:"):
+                creator = creator[6:]
+            if creator:
+                tasks_service.mention(
+                    conn, draft.get("source_task"), "human", creator,
+                    "工作流增量修订已批准并原地应用，当前执行继续，无需重启。")
+            landed.append(did)
+            continue
         if kind == "workflow":
             if not draft.get("source_task"):
                 raise ConflictError("workflow draft missing source_task")
+            from . import tasks as tasks_service
+            task = tasks_service.get(conn, draft["source_task"])
+            if task is None:
+                raise ConflictError("workflow draft task not found")
+            if task.get("status") in ("done", "closed") or task.get("archived_at"):
+                raise ConflictError(
+                    "task is terminal; reopen it before approving a workflow")
             running = conn.execute(
                 "SELECT id FROM workflows WHERE task_id=? AND status='running' "
                 "ORDER BY created_at DESC, rowid DESC LIMIT 1",
@@ -565,6 +647,27 @@ def reject(conn: sqlite3.Connection, draft_id: str, by: str = "human",
                     conn, task_id, "human", target,
                     f"角色追加提案被驳回：{feedback or '请调整后重新提交'}。"
                     "修改后重新提交提案（role propose 或 task assign）即可。")
+    if draft.get("kind") in ("workflow", "workflow_revision") and draft.get("source_task"):
+        from . import tasks as tasks_service
+
+        task_id = draft["source_task"]
+        label = ("工作流修订" if draft.get("kind") == "workflow_revision"
+                 else "工作流草案")
+        creator = str(draft.get("created_by") or "").strip()
+        if creator.startswith("agent:"):
+            creator = creator[6:]
+        if feedback:
+            conn.execute(
+                "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
+                "VALUES (?,?,?,?,?)",
+                (task_id, "human", "comment",
+                 jdumps({"body": f"{label}被驳回：{feedback}"}), now),
+            )
+        if creator:
+            tasks_service.mention(
+                conn, task_id, "human", creator,
+                f"{label}被驳回：{feedback or '请根据当前执行状态重新评估'}。"
+                "请读取最新 workflow 后重新提交增量修订或完整草案。")
     conn.commit()
     return {"draft": get_draft(conn, draft_id), "replan": replan, "blocked": blocked}
 
