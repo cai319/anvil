@@ -56,7 +56,7 @@ async def test_bind_member(client):
         headers=auth_headers(),
     )
     assert r.status_code == 201
-    members = (await client.get(f"{API}/workspaces/{ws['id']}/members", headers=auth_headers())).json()
+    members = (await client.get(f"{API}/workspaces/{ws['id']}/members", headers=human_headers())).json()
     assert any(m["role_slug"] == "backend-eng" and m["access"] == "write" for m in members)
 
 
@@ -72,7 +72,7 @@ async def test_participants_crud(client):
     assert added.status_code == 201, added.text
     assert all("access" not in p for p in added.json())
     listed = (await client.get(
-        f"{API}/workspaces/{ws['id']}/participants", headers=auth_headers()
+        f"{API}/workspaces/{ws['id']}/participants", headers=human_headers()
     )).json()
     assert any(p["role_slug"] == "backend-eng" for p in listed)
     removed = await client.delete(
@@ -80,7 +80,7 @@ async def test_participants_crud(client):
     )
     assert removed.status_code == 204
     listed = (await client.get(
-        f"{API}/workspaces/{ws['id']}/participants", headers=auth_headers()
+        f"{API}/workspaces/{ws['id']}/participants", headers=human_headers()
     )).json()
     assert not any(p["role_slug"] == "backend-eng" for p in listed)
 
@@ -95,7 +95,7 @@ async def test_patch_member_access(client):
         json={"access": "admin"}, headers=auth_headers(),
     )
     assert r.status_code == 200
-    members = (await client.get(f"{API}/workspaces/{ws['id']}/members", headers=auth_headers())).json()
+    members = (await client.get(f"{API}/workspaces/{ws['id']}/members", headers=human_headers())).json()
     assert any(m["role_slug"] == "backend-eng" and m["access"] == "admin" for m in members)
 
 
@@ -106,7 +106,7 @@ async def test_unbind_member(client):
     await client.post(f"{API}/workspaces/{ws['id']}/members", json={"role_slug": "backend-eng", "access": "write"}, headers=auth_headers())
     r = await client.delete(f"{API}/workspaces/{ws['id']}/members/backend-eng", headers=human_headers())
     assert r.status_code in (200, 204)
-    members = (await client.get(f"{API}/workspaces/{ws['id']}/members", headers=auth_headers())).json()
+    members = (await client.get(f"{API}/workspaces/{ws['id']}/members", headers=human_headers())).json()
     assert not any(m["role_slug"] == "backend-eng" for m in members)
 
 

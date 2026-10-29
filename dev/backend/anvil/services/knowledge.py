@@ -849,8 +849,33 @@ def _truncate_block(text: str, take: int, mode: str, minimum: int) -> str:
     return text[:cut]
 
 
+def _reindex_note_status(conn: sqlite3.Connection, role_slug: str, meta: dict,
+                         kind: str, old, require_practice: bool) -> str:
+    """决定 reindex 时一条笔记的状态。
+
+    Agent 触发的 reindex 必须遵守实践门控：文件里的 status=active 本身不可信，
+    还要有本人成功实践的证据；系统生成的任务快照例外（task-scoped，不可跨任务复用）。
+    """
+    if old is not None and old["status"] == "active":
+        return "active"
+    if not require_practice:
+        if old is not None:
+            return old["status"] or "active"
+        status = str(meta.get("status") or "active")
+        return status if status in ("active", "draft") else "active"
+    if kind == "task_snapshot":
+        return "active"
+    if str(meta.get("status") or "") != "active":
+        return "draft"
+    from . import memory as memory_service  # 惰性导入，避免循环依赖
+    return "active" if memory_service.practice_evidence_ok(
+        conn, role_slug, meta.get("practice_task_id"), meta.get("practice_run_id")
+    ) else "draft"
+
+
 def reindex_notes(conn: sqlite3.Connection, role_slug: str, *,
-                  dry_run: bool = False, prune: bool = False) -> dict:
+                  dry_run: bool = False, prune: bool = False,
+                  require_practice: bool = False) -> dict:
     """扫描角色 notes/ 文件，解析元数据并同步 notes + FTS。"""
     home = (config.AGENTS_DIR / role_slug).resolve()
     notes_root = (home / "notes").resolve()
@@ -901,6 +926,19 @@ def reindex_notes(conn: sqlite3.Connection, role_slug: str, *,
                  text.splitlines()[0][:80] if text else "")
         tldr = (old["tldr"] if old is not None and old["tldr"] else
                 " ".join(text.split())[:200])
+        status = _reindex_note_status(
+            conn, role_slug, meta, inferred["kind"], old, require_practice)
+        practice_task_id = (
+            meta.get("practice_task_id")
+            or (old["practice_task_id"] if old is not None else None))
+        practice_run_id = (
+            meta.get("practice_run_id")
+            or (old["practice_run_id"] if old is not None else None))
+        outcome = meta.get("outcome") or (old["outcome"] if old is not None else None)
+        verified_at = (
+            old["verified_at"] if old is not None and status == "active"
+            else (inferred["updated_at"] if status == "active"
+                  and (practice_task_id or practice_run_id) else None))
         conn.execute(
             "INSERT INTO notes (id, role_slug, path, content, created_at, kind, scope, "
             "task_id, source_task, tags_json, repo, module, confidence, updated_at, "
@@ -915,11 +953,7 @@ def reindex_notes(conn: sqlite3.Connection, role_slug: str, *,
              inferred["module"], inferred["confidence"], inferred["updated_at"],
              "reindex", inferred["content_hash"], title, tldr,
              old["fields_json"] if old is not None else "{}",
-             old["practice_task_id"] if old is not None else None,
-             old["practice_run_id"] if old is not None else None,
-             old["outcome"] if old is not None else None,
-             old["verified_at"] if old is not None else None,
-             old["status"] if old is not None else "active",
+             practice_task_id, practice_run_id, outcome, verified_at, status,
              old["source_knowledge_json"] if old is not None else "[]",
              old["hit_count"] if old is not None else 0,
              old["last_hit_at"] if old is not None else None))

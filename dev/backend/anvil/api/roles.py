@@ -111,7 +111,6 @@ def expand_role(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth)
     约束：仅 Agent 会话可调用；每日至多 N 个（默认 3）；总角色数上限；
     不继承/不允许设置 tools、permission_mode 以外的高权限字段。
     """
-    import uuid
     from datetime import datetime, timedelta, timezone
 
     from .. import config
@@ -125,6 +124,36 @@ def expand_role(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth)
     brief = str(body.get("brief") or "").strip()
     if not brief:
         raise HTTPException(status_code=422, detail="brief is required")
+
+    # HITL：新建角色必须命中 human 已批准的 role_suggestion（apply_mode=authorize）。
+    authorized = services.board.authorized_role_creations(conn, body.get("task_id"))
+    if not authorized:
+        raise HTTPException(
+            status_code=403,
+            detail="no approved role_suggestion authorization; run `anvil role propose` "
+                   "and wait for human approval before `role expand`",
+        )
+    requested_slug = str(body.get("slug") or "").strip()
+    if requested_slug:
+        if requested_slug not in authorized:
+            raise HTTPException(
+                status_code=403,
+                detail=f"role {requested_slug} is not in the approved role_suggestion: "
+                       f"{', '.join(sorted(authorized))}",
+            )
+        slug = requested_slug
+    else:
+        candidates = [s for s in sorted(authorized)
+                      if services.roles.get(conn, s) is None]
+        if len(candidates) != 1:
+            raise HTTPException(
+                status_code=409,
+                detail="specify slug; approved role_suggestion contains: "
+                       + ", ".join(candidates or sorted(authorized)),
+            )
+        slug = candidates[0]
+    if services.roles.get(conn, slug) is not None:
+        raise HTTPException(status_code=409, detail=f"role {slug} already exists")
 
     since = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
     used = conn.execute(
@@ -160,11 +189,6 @@ def expand_role(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth)
     except Exception:  # noqa: BLE001 —— 运行时不可用时退化为简单画像
         data = {}
 
-    slug = str(body.get("slug") or "").strip()
-    if not slug:
-        slug = "agent-" + uuid.uuid4().hex[:6]
-    if services.roles.get(conn, slug) is not None:
-        raise HTTPException(status_code=409, detail=f"role {slug} already exists")
     display_name = str(data.get("display_name") or brief[:20] or slug)
     definition = {
         "kind": "member",

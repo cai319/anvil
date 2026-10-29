@@ -3,6 +3,7 @@ import { api, subscribeEvents } from "./api/client";
 import { installLinkInterceptor, setRouteListener } from "./router";
 import { APP_VERSION } from "./version";
 import { Icon, type IconName } from "./components/Icon";
+import { DialogHost } from "./components/dialogs";
 import { TokenResetDialog } from "./components/TokenResetDialog";
 
 // 路由级懒加载：首屏只加载外壳；页面与 React Flow 等重依赖按需下载。
@@ -402,6 +403,7 @@ export default function App() {
         aria-label="关闭导航"
         onClick={() => setDrawerOpen(false)}
       />
+      <DialogHost />
     </div>
   );
 }

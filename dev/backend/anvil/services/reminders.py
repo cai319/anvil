@@ -151,13 +151,20 @@ def delete_reminder(conn: sqlite3.Connection, rid: str) -> bool:
 
 
 def _condition_met(conn: sqlite3.Connection, condition: str) -> bool:
-    """when_condition 形如 `T-1042` 或 `task:T-1042:done`：任务终态即命中。"""
+    """when_condition 形如 `T-1042` 或 `task:T-1042:done`。
+
+    裸任务 ID 与 `task:<id>` 默认要求 `done`；显式状态则精确匹配。`closed` 是
+    人工终止（取消），不是成功完成，不能作为完成信号。
+    """
     tid = condition
+    wanted = "done"
     if condition.startswith("task:"):
         parts = condition.split(":")
-        tid = parts[1] if len(parts) > 1 else condition
+        tid = parts[1] if len(parts) > 1 else ""
+        if len(parts) > 2 and parts[2].strip():
+            wanted = parts[2].strip()
     row = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
-    return bool(row and row["status"] in ("done", "closed"))
+    return bool(row and row["status"] == wanted)
 
 
 def create_reminder_run(conn: sqlite3.Connection, role_slug: str, prompt: str) -> dict:

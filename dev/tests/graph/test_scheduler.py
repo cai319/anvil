@@ -358,3 +358,20 @@ def test_monitor_grace_for_persistent_startup(tmp_path, monkeypatch):
     row = next(r for r in _runs(env) if r["id"] == "R-P")
     assert row["status"] == "failed"
     assert row["failure_class"] == "agent_exit_process"
+
+
+def test_tick_isolates_phase_failures(tmp_path, monkeypatch):
+    """单个阶段异常不能中止整轮巡检（其他阶段仍要执行）。"""
+    env = make_env(tmp_path, monkeypatch)
+    sched = Scheduler(env["db_path"], env["orch"])
+    called: list[str] = []
+
+    def boom(_conn):
+        raise RuntimeError("phase boom")
+
+    monkeypatch.setattr(sched, "_advance_workflows", boom)
+    monkeypatch.setattr(sched, "_pump_created", lambda conn: called.append("pump"))
+    monkeypatch.setattr(sched, "_monitor", lambda conn: called.append("monitor"))
+    monkeypatch.setattr(sched, "_reap_dead_runs", lambda conn: called.append("reap"))
+    sched.tick_once()
+    assert called == ["pump", "monitor", "reap"]

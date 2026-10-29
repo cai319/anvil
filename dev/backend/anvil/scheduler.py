@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -23,6 +24,8 @@ from .services import daemon as daemon_service
 from .services import governance, leases, runs as runs_service, tasks as tasks_service
 from .services import workflow as workflow_service
 from .util import ConflictError, now_iso
+
+logger = logging.getLogger(__name__)
 
 
 def _elapsed_seconds(started_at: str | None) -> float:
@@ -60,22 +63,42 @@ class Scheduler:
         while not self._stop.is_set():
             try:
                 self.tick_once()
-            except Exception:  # noqa: BLE001 —— 单轮异常不终止循环，reconcile 自愈
-                pass
+            except Exception:  # noqa: BLE001 —— 单轮异常不终止循环
+                logger.exception("scheduler tick failed")
             self._stop.wait(self.interval)
+
+    def _pump(self, run_id: str, event: str, payload: dict | None = None) -> bool:
+        """投递单个事件；失败只影响该 run，不让整轮巡检/后续 run 饿死。"""
+        try:
+            self.orchestrator.pump(self.db_path, run_id, event, payload or {})
+            return True
+        except Exception:  # noqa: BLE001
+            logger.exception("scheduler pump failed run=%s event=%s", run_id, event)
+            return False
 
     def tick_once(self) -> None:
         self._backup_daily()
         conn = open_conn(self.db_path)
+        phases = (
+            ("governance", lambda: governance.tick(conn, dispatch=True, plans_only=True)),
+            ("advance_workflows", lambda: self._advance_workflows(conn)),
+            ("pump_created", lambda: self._pump_created(conn)),
+            ("monitor", lambda: self._monitor(conn)),
+            ("reap_dead_runs", lambda: self._reap_dead_runs(conn)),
+            ("reap_orphaned_step_runs", lambda: self._reap_orphaned_step_runs(conn)),
+            ("reap_stalled_phases", lambda: self._reap_stalled_phases(conn)),
+            ("reconcile", lambda: self._reconcile(conn)),
+        )
         try:
-            governance.tick(conn, dispatch=True, plans_only=True)
-            self._advance_workflows(conn)
-            self._pump_created(conn)
-            self._monitor(conn)
-            self._reap_dead_runs(conn)
-            self._reap_orphaned_step_runs(conn)
-            self._reap_stalled_phases(conn)
-            self._reconcile(conn)
+            for name, phase in phases:
+                try:
+                    phase()
+                except Exception:  # noqa: BLE001 —— 一个阶段失败不阻断后续阶段
+                    logger.exception("scheduler phase %s failed", name)
+                    try:
+                        conn.rollback()
+                    except sqlite3.Error:
+                        pass
         finally:
             conn.close()
         publish("tick", {})  # 通知前端刷新运行/任务状态
@@ -272,9 +295,7 @@ class Scheduler:
                     f"步骤停滞：{r['nudge_count']} 次唤醒后仍未提交", "environment",
                     failure_class="step_stalled")
                 continue
-            try:
-                self.orchestrator.pump(self.db_path, r["run_id"], "resume", {})
-            except Exception:  # noqa: BLE001
+            if not self._pump(r["run_id"], "resume"):
                 continue
             conn.execute(
                 "UPDATE workflow_steps SET last_nudge_at=?, nudge_count=nudge_count+1, updated_at=? "
@@ -291,7 +312,7 @@ class Scheduler:
 
     def _pump_created(self, conn) -> None:
         for r in conn.execute("SELECT id FROM runs WHERE status='created'").fetchall():
-            self.orchestrator.pump(self.db_path, r["id"], "wake", {})
+            self._pump(r["id"], "wake")
 
     def _monitor(self, conn) -> None:
         pm = factory.get_platform()[0]
@@ -318,8 +339,8 @@ class Scheduler:
                     # 否则会把正在规划的 run 误标 agent_exit_process。
                     if _elapsed_seconds(r["started_at"]) < config.RUN_DEAD_GRACE_SECONDS:
                         continue
-                    self.orchestrator.pump(self.db_path, r["id"], "process_exit",
-                                           {"exit_code": 1, "failure_class": "agent_exit_process"})
+                    self._pump(r["id"], "process_exit",
+                               {"exit_code": 1, "failure_class": "agent_exit_process"})
                     continue
                 # 角色正忙在别的任务上（含 __global__ 的 reminder）：这个 run 只是
                 # 排队，不能按 busy_since 判超时。
@@ -331,8 +352,8 @@ class Scheduler:
                     # 换新上下文，但注入 CIC（记忆/工作流决策/知识快照），
                     # 避免自动恢复后的新会话对历史一无所知。
                     mgr.reset_session(role, cic=True, task_id=r["task_id"])  # type: ignore[union-attr]
-                    self.orchestrator.pump(self.db_path, r["id"], "process_exit",
-                                           {"exit_code": 1, "failure_class": "platform_timeout"})
+                    self._pump(r["id"], "process_exit",
+                               {"exit_code": 1, "failure_class": "platform_timeout"})
                 continue
             # 超时回收（P0-2）：run 级 timeout_seconds（spawn 时冻结自运行时 YAML）优先，
             # RUN_TIMEOUT_SECONDS 仅作未冻结时的兜底。续跑已重置 started_at（P0-1）。
@@ -341,15 +362,15 @@ class Scheduler:
                     pm.terminate(r["native_session_id"])
                 except Exception:  # noqa: BLE001
                     pass
-                self.orchestrator.pump(self.db_path, r["id"], "process_exit",
-                                       {"exit_code": 1, "failure_class": "platform_timeout"})
+                self._pump(r["id"], "process_exit",
+                           {"exit_code": 1, "failure_class": "platform_timeout"})
                 continue
             try:
                 probe = pm.probe(r["native_session_id"])
             except Exception:  # noqa: BLE001
                 continue
             if not probe.alive:
-                self.orchestrator.pump(self.db_path, r["id"], "process_exit", {"exit_code": probe.exit_code})
+                self._pump(r["id"], "process_exit", {"exit_code": probe.exit_code})
 
     def _reap_dead_runs(self, conn) -> None:
         """常驻进程已死但 run 仍 running → 宽限期后转 suspended。
@@ -470,10 +491,7 @@ class Scheduler:
                 from .services import runs as runs_service
                 runs_service.set_status(conn, row["id"], "running")
                 continue
-            try:
-                self.orchestrator.pump(self.db_path, row["id"], "wake", {})
-            except Exception:  # noqa: BLE001 —— 下一轮 tick 继续尝试
-                pass
+            self._pump(row["id"], "wake")  # 失败下一轮 tick 继续尝试
 
     def _reconcile(self, conn) -> None:
         rows = conn.execute(
@@ -490,9 +508,15 @@ class Scheduler:
             if r["task_assignee"] and r["run_role"] != r["task_assignee"]:
                 continue
             if ts == "in_review" and rs in ("running", "submitted"):
-                self.orchestrator.pump(self.db_path, r["run_id"], "submit", {})
+                self._pump(r["run_id"], "submit")
             elif ts == "done" and rs == "reviewing":
-                self.orchestrator.resume_review(self.db_path, r["run_id"], True)
+                try:
+                    self.orchestrator.resume_review(self.db_path, r["run_id"], True)
+                except Exception:  # noqa: BLE001
+                    logger.exception("scheduler resume_review failed run=%s", r["run_id"])
             elif ts == "in_progress" and rs == "reviewing":
-                self.orchestrator.resume_review(self.db_path, r["run_id"], False)
+                try:
+                    self.orchestrator.resume_review(self.db_path, r["run_id"], False)
+                except Exception:  # noqa: BLE001
+                    logger.exception("scheduler resume_review failed run=%s", r["run_id"])
             # 注意：todo 任务有 run 是正常派发态（agent 认领前），不在此 abandon；由 monitor 收尾。

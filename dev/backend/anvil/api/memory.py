@@ -142,6 +142,7 @@ def append_memory(body: MemoryAppendIn, conn=Depends(get_db), auth: Auth = Depen
     is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
     status = services.memory.resolve_practice_status(
         conn,
+        role=role,
         practice_task_id=body.practice_task_id or auth.task_id,
         practice_run_id=body.practice_run_id or auth.run_id,
         force=(not is_real_agent) or (body.force and not is_real_agent),
@@ -179,6 +180,7 @@ def write_note(body: NoteWriteIn, conn=Depends(get_db), auth: Auth = Depends(get
     is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
     status = services.memory.resolve_practice_status(
         conn,
+        role=role,
         practice_task_id=body.practice_task_id or auth.task_id,
         practice_run_id=body.practice_run_id or auth.run_id,
         force=(not is_real_agent) or (body.force and not is_real_agent),
@@ -288,7 +290,7 @@ def reindex_knowledge(body: dict | None = None, role: str | None = None,
     try:
         return services.knowledge.reindex_notes(
             conn, role_slug, dry_run=bool(body.get("dry_run")),
-            prune=bool(body.get("prune")))
+            prune=bool(body.get("prune")), require_practice=True)
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 

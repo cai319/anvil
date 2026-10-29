@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, subscribeEvents, type Run, type TimelineEvent } from "../api/client";
 import { formatClock, formatDateTime, parseTime, useNow } from "../time";
 import { Icon } from "../components/Icon";
+import { confirmDialog } from "../components/dialogs";
 
 const RUN_LABEL: Record<string, string> = {
   created: "已创建",
@@ -93,22 +94,40 @@ export function RunSession({ id }: { id: string }) {
       <div className="toolbar">
         <button onClick={() => api.restartRun(id).then(refresh).catch((e) => setError(String(e)))}>重启进程（保留上下文）</button>
         <button onClick={() => {
-          if (window.confirm("重置会话会丢弃当前对话上下文（保留 MEMORY.md 与 notes），确定？")) {
-            api.sessionResetRun(id).then(refresh).catch((e) => setError(String(e)));
-          }
+          void confirmDialog({
+            title: "重置会话？",
+            message: "会丢弃当前对话上下文，保留 MEMORY.md 与 notes。",
+            confirmLabel: "重置会话",
+            danger: true,
+          }).then((ok) => {
+            if (ok) void api.sessionResetRun(id).then(refresh)
+              .catch((e) => setError(String(e)));
+          });
         }}>重置会话（新上下文）</button>
         <button
           className="danger"
           onClick={() => {
-            if (window.confirm("全量重置会清空该角色的 MEMORY.md 与 notes（自动先备份 home），确定？")) {
-              api.fullResetRun(id).then(refresh).catch((e) => setError(String(e)));
-            }
+            void confirmDialog({
+              title: "全量重置？",
+              message: "会清空该角色的 MEMORY.md 与 notes（自动先备份 home），不可撤销。",
+              confirmLabel: "全量重置",
+              danger: true,
+            }).then((ok) => {
+              if (ok) void api.fullResetRun(id).then(refresh)
+                .catch((e) => setError(String(e)));
+            });
           }}
         >全量重置（清记忆）</button>
         <button className="danger" onClick={() => {
-          if (window.confirm("释放进程会中止当前运行，确定？")) {
-            api.releaseRun(id).then(refresh).catch((e) => setError(String(e)));
-          }
+          void confirmDialog({
+            title: "释放进程？",
+            message: "会中止当前运行，任务可在会话保留后重新唤醒。",
+            confirmLabel: "释放进程",
+            danger: true,
+          }).then((ok) => {
+            if (ok) void api.releaseRun(id).then(refresh)
+              .catch((e) => setError(String(e)));
+          });
         }}>释放进程</button>
       </div>
       <p className="muted">

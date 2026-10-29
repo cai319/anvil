@@ -78,7 +78,7 @@ async def test_approve_role_suggestion_binds_without_replan(client, seeded, monk
 
     assert calls == []  # 批准本身不自动重规划
     timeline = (await client.get(f"{API}/tasks/T-ROLE/timeline",
-                                 headers=auth_headers())).json()
+                                 headers=human_headers())).json()
     assert not any(
         e["kind"] == "mention"
         and (e.get("payload") or {}).get("target") == "cindy"
@@ -86,7 +86,7 @@ async def test_approve_role_suggestion_binds_without_replan(client, seeded, monk
     )
     # HITL 决策留痕：记录发起请求的客户端特征（浏览器/脚本可区分）。
     audit = (await client.get(f"{API}/audit", params={"action": "board.approve"},
-                              headers=auth_headers())).json()
+                              headers=human_headers())).json()
     assert any(a["task_id"] == "T-ROLE" for a in audit)
 
 

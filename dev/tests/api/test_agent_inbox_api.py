@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip("anvil.main")
-from tests.conftest import API, auth_headers, task_payload  # noqa: E402
+from tests.conftest import API, auth_headers, human_headers, task_payload  # noqa: E402
 
 
 async def test_me_inbox_check_and_commit(client):
@@ -47,7 +47,7 @@ async def test_inbox_resolves_task_from_active_run(client, app):
     await client.post(f"{API}/tasks/T-IB2/comment", json={"body": "有更新"},
                       headers=auth_headers("pm"))
     # 不带 task_id：按角色活跃 run 解析（Agent 的常驻会话里 ANVIL_TASK_ID 可能为空）
-    r = await client.get(f"{API}/runs?task_id=T-IB2", headers=auth_headers())
+    r = await client.get(f"{API}/runs?task_id=T-IB2", headers=human_headers())
     assert r.status_code == 200
     # 直接插入一个挂起 run，模拟角色的常驻会话
     from anvil.db import open_conn

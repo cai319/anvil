@@ -3,6 +3,7 @@ import { api, type Channel, type Lesson, type Proposal, type Role } from "../api
 import { PageHeader } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { RoleAvatar } from "../components/RoleAvatar";
+import { confirmDialog } from "../components/dialogs";
 import { formatDateTime } from "../time";
 import { ChannelKnowledgeTab } from "./knowledge/ChannelKnowledgeTab";
 import { TaskKnowledgeTab } from "./knowledge/TaskKnowledgeTab";
@@ -403,13 +404,25 @@ export function Knowledge() {
   };
 
   const removeDetail = (lesson: Lesson) => {
-    if (!window.confirm("确定删除该条经验？删除后不可恢复。")) return;
-    void actDetail(() => api.deleteLesson(lesson.id));
+    void confirmDialog({
+      title: "删除共享经验？",
+      message: "该条经验会被永久删除，其他角色将不再检索到它。",
+      confirmLabel: "删除经验",
+      danger: true,
+    }).then((ok) => {
+      if (ok) void actDetail(() => api.deleteLesson(lesson.id));
+    });
   };
 
   const removeLesson = (lesson: Lesson) => {
-    if (!window.confirm("确定删除该条经验？删除后不可恢复。")) return;
-    void act(() => api.deleteLesson(lesson.id));
+    void confirmDialog({
+      title: "删除共享经验？",
+      message: "该条经验会被永久删除，其他角色将不再检索到它。",
+      confirmLabel: "删除经验",
+      danger: true,
+    }).then((ok) => {
+      if (ok) void act(() => api.deleteLesson(lesson.id));
+    });
   };
 
   const proposerLabel = (slug: string | null) => {

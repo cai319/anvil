@@ -236,6 +236,8 @@ anvil note write notes/<path>.md --content-file <file> \
 
 - 文件是真相层；写入会同步文件与索引。
 - 角色知识必须有成功实践 + 提炼证据；无证据只能写 draft，不进入检索/CIC。
+- Agent 调用 `knowledge reindex --self` 同样受实践门控：直接写入 `notes/` 的无证据内容
+  只会落 draft；human 通过 `--all`（`/knowledge/reindex`）复核后才会激活为可检索知识。
 - 已 active 的笔记不能被无证据写入覆盖（返回 422）：补充 `--practice-task`/`--outcome`
   等证据，或把未验证内容写到新的草稿路径。
 - 参考其他角色知识可以，写入自己的知识库必须经过自己的实践。
@@ -245,7 +247,7 @@ anvil note write notes/<path>.md --content-file <file> \
 ```bash
 anvil role list [--json]        # 查找系统已有角色（slug/名称/状态/画像）
 anvil role propose --task <id> --file roles.json [--goal "..."] [--json]
-anvil role expand --brief "需要一个安全评审角色" [--task <id>] [--json]
+anvil role expand --brief "需要一个安全评审角色" --slug <已批准 slug> [--task <id>] [--json]
 ```
 
 `roles.json`：
@@ -270,8 +272,9 @@ anvil role expand --brief "需要一个安全评审角色" [--task <id>] [--json
 - 先 `role list` 确认已有角色，避免重复创建。
 - **新角色先提案**：`role propose` 创建 `role_suggestion` 草案并 @human；
   human 可以反馈/驳回，直到一致后批准。
-- 批准后再 `role expand` 创建角色（继承创建者 runtime/permission_mode；
-  新角色为普通 member，每日配额有限），然后用 `task assign` 加入任务。
+- 批准后再 `role expand --slug <已批准 slug>` 创建角色（继承创建者 runtime/permission_mode；
+  新角色为普通 member，每日配额有限），然后用 `task assign` 加入任务。只能创建提案中
+  已批准的 slug；多角色提案必须用 `--slug` 指定。
 - 任务已有 Roster 时，`task assign` 只追加新角色；未获批准会自动生成追加提案，
   human 反馈/批准后重试，不会覆盖已有 assignees。
 
@@ -290,7 +293,8 @@ anvil workspace knowledge review <ws-id>
 ```
 
 规则：频道是任务归属 + 知识作用域，不是聊天室。Agent 写入为 `proposed`；
-`approve` 仅 human；harvest 只接受 `done/closed` 任务。
+`approve` 仅 human；harvest 只接受 `done/closed` 任务。Agent 读取频道知识/成员/
+资产时，必须在该频道有参与任务，否则 403；human 不受限。
 
 ## 10. 其他命令
 

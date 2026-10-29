@@ -619,6 +619,8 @@ select { height: 34px; }
   box-shadow: 2px 2px 0 var(--ink-900);
 }
 .modal-close:hover:not(:disabled) { transform: none; background: #ff8f8f; }
+.confirm-message { white-space: pre-line; }
+.confirm-dialog .field { margin-top: 10px; }
 .modal-actions {
   display: flex;
   justify-content: flex-end;

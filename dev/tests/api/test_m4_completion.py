@@ -443,7 +443,7 @@ async def test_task_list_filters_and_audit_filters(client):
 
     await client.post(f"{API}/tasks/T-F1/claim", json={}, headers=auth_headers())
     claims = (await client.get(f"{API}/audit", params={"action": "claim"},
-                               headers=auth_headers())).json()
+                               headers=human_headers())).json()
     assert any(a["task_id"] == "T-F1" for a in claims)
 
 

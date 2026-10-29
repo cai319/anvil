@@ -219,6 +219,6 @@ async def test_audit_logs_written(client):
     await _seed(client)
     await _task(client, id_="T-AUD")
     await client.post(f"{API}/tasks/T-AUD/claim", json={}, headers=auth_headers())
-    r = await client.get(f"{API}/audit", headers=auth_headers())
+    r = await client.get(f"{API}/audit", headers=human_headers())
     assert r.status_code == 200
     assert isinstance(r.json(), list)

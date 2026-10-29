@@ -101,7 +101,7 @@ async def test_mention_on_workflow_creates_reply_run(client, seeded):
                           headers={"X-Anvil-Session": "test-session", "X-Anvil-Role": "pm"},
                           json={"target": "developer", "message": "接口缺少 moveId，请确认"})
     assert r.status_code == 200, r.text
-    runs = (await client.get("/api/v1/runs?task_id=T-WF", headers=auth_headers())).json()
+    runs = (await client.get("/api/v1/runs?task_id=T-WF", headers=human_headers())).json()
     reply = [x for x in runs if x["role_slug"] == "developer"
              and (x.get("prompt") or "").startswith("[anvil:reply]")]
     assert len(reply) == 1

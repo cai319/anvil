@@ -247,7 +247,7 @@ anvil step decide <workflow-id> <decision-step-id> --approve|--reject --feedback
 anvil board draft --task $ANVIL_TASK_ID --goal "..." --tree-file wf.json --kind workflow
 anvil self reset-context --task $ANVIL_TASK_ID --reason "..."
 anvil role list [--json]
-anvil role expand --brief "需要一个安全评审角色"
+anvil role expand --brief "需要一个安全评审角色" --slug <已批准 slug>
 anvil action prepare --kind task.cancel --task $ANVIL_TASK_ID --reason "..."
 
 # 频道 / 任务 / 知识卡

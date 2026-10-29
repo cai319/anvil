@@ -33,28 +33,50 @@ def _invalidate_repo_catalog() -> None:
 # ---- MEMORY.md / notes ----------------------------------------------------
 
 
-def practice_evidence_ok(conn: sqlite3.Connection, task_id: str | None,
-                         run_id: str | None) -> bool:
-    """成功实践证据：任务 done/closed 或 run completed。"""
+def practice_evidence_ok(conn: sqlite3.Connection, role: str | None,
+                         task_id: str | None, run_id: str | None) -> bool:
+    """成功实践证据：本人参与且 done 的任务，或本人的 successful run。
+
+    - `closed` 是人工终止/取消，不是成功，不能作为证据；
+    - 任务证据必须来自该角色参与（assignee/assignees/planner）的任务；
+    - run 证据必须属于该角色，且其任务没有被取消。
+    """
     if task_id:
-        row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if row is not None and row["status"] in ("done", "closed"):
-            return True
+        row = conn.execute(
+            "SELECT status, assignee, planner FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        if row is not None and row["status"] == "done":
+            if not role:
+                return True
+            from . import tasks as tasks_service  # 惰性导入，避免循环依赖
+            if (tasks_service.is_task_participant(conn, task_id, role)
+                    or row["planner"] == role):
+                return True
     if run_id:
-        row = conn.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
-        if row is not None and row["status"] == "completed":
-            return True
+        row = conn.execute(
+            "SELECT status, role_slug, task_id FROM runs WHERE id=?", (run_id,)
+        ).fetchone()
+        if row is not None and row["status"] == "completed" \
+                and (not role or row["role_slug"] == role):
+            if not row["task_id"]:
+                return True  # 无任务 run（reminder/直聊）本身就是一次成功执行
+            task = conn.execute(
+                "SELECT status FROM tasks WHERE id=?", (row["task_id"],)
+            ).fetchone()
+            if task is not None and task["status"] != "closed":
+                return True
     return False
 
 
 def resolve_practice_status(conn: sqlite3.Connection, *,
+                            role: str | None = None,
                             practice_task_id: str | None = None,
                             practice_run_id: str | None = None,
                             force: bool = False) -> str:
     if force:
         return "active"
     return "active" if practice_evidence_ok(
-        conn, practice_task_id, practice_run_id) else "draft"
+        conn, role, practice_task_id, practice_run_id) else "draft"
 
 
 def append_memory(conn: sqlite3.Connection, role: str, content: str, *,

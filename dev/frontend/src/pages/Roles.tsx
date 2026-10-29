@@ -5,6 +5,7 @@ import { Icon } from "../components/Icon";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { formatDateTime } from "../time";
 import { PageHeader } from "../components/ui";
+import { confirmDialog } from "../components/dialogs";
 
 type Tab = "basic" | "instruction" | "tools" | "catalog" | "home" | "permissions" | "runtime";
 
@@ -217,7 +218,13 @@ export function Roles() {
   };
 
   const remove = async (r: Role) => {
-    if (!window.confirm(`确定删除角色「${r.display_name}（${r.slug}）」？该操作不可恢复。`)) return;
+    const ok = await confirmDialog({
+      title: "删除角色？",
+      message: `将删除「${r.display_name}（${r.slug}）」，该操作不可恢复。`,
+      confirmLabel: "删除角色",
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await api.deleteRole(r.slug);
       if (selected === r.slug) setSelected(null);
@@ -870,7 +877,14 @@ export function Roles() {
                     <button
                       className="danger"
                       onClick={async () => {
-                        if (!window.confirm("重置 Agent 会话会终止该角色的常驻进程并丢弃当前对话上下文（保留 MEMORY.md 与 notes）。确定？")) return;
+                        const ok = await confirmDialog({
+                          title: "重置 Agent 会话？",
+                          message: "会终止该角色的常驻进程并丢弃当前对话上下文，"
+                            + "保留 MEMORY.md 与 notes。",
+                          confirmLabel: "重置会话",
+                          danger: true,
+                        });
+                        if (!ok) return;
                         try {
                           await api.resetRoleSession(current.slug);
                           setError(null);

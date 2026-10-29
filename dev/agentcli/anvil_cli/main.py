@@ -157,10 +157,11 @@ ROLE_EPILOG = """\b
   anvil role list --json
   anvil role list | python3 -c "import sys,json; print([r['slug'] for r in json.load(sys.stdin)])"
   anvil role propose --task $ANVIL_TASK_ID --file roles.json
-  anvil role expand --brief "需要一个安全评审角色" --task $ANVIL_TASK_ID
+  anvil role expand --brief "需要一个安全评审角色" --slug security-auditor --task $ANVIL_TASK_ID
 
 规则:
   · role propose 先提交提案 @human；批准后再 role expand 创建、task assign 加入任务。
+  · role expand 只能创建 human 已批准提案中的 slug；多角色提案用 --slug 指定。
   · role expand 继承你的 runtime/permission_mode，新角色为普通 member。
   · 每日扩展配额有限；创建后会在关联任务 @human。
 """
@@ -1196,17 +1197,22 @@ def role_propose(
         _emit(draft, True)
     else:
         typer.echo(f"角色提案已提交：{draft_id or '?'}（{summary}），等待 human 审批。")
-        typer.echo("批准后执行 role expand 创建角色，再 task assign 加入任务。")
+        typer.echo("批准后执行 role expand --slug <已批准 slug> 创建角色，再 task assign 加入任务。")
 
 
 @role_app.command("expand")
 def role_expand(
     brief: str = typer.Option(..., "--brief", help="新 agent 的一句话定位"),
     task: str = typer.Option(DEFAULT_TASK, "--task", help="关联任务 id（会通知 human）"),
+    slug: str = typer.Option(None, "--slug",
+                             help="提案中 human 已批准的角色 slug（多角色提案时必填）"),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    """创建一个新 agent（继承你的 runtime；每日配额有限）。"""
-    out = _call("POST", "/api/v1/roles/expand", {"brief": brief, "task_id": task})
+    """创建 human 已批准的新 agent（继承你的 runtime；每日配额有限）。"""
+    payload = {"brief": brief, "task_id": task}
+    if slug:
+        payload["slug"] = slug
+    out = _call("POST", "/api/v1/roles/expand", payload)
     if json_out:
         _emit(out, True)
     else:

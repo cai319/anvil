@@ -422,7 +422,8 @@
   子任务**不进入大厅**，只在父任务详情新增的「子任务」页签展示（状态/认领角色/直达）。
 - **API**：`GET /tasks?parent_id=` 过滤子任务。
 - **角色查询与扩展团队**：`GET /roles` / `anvil role list` 查看当前系统已有角色；
-  `POST /roles/expand` / `anvil role expand --brief "..."`：
+  `POST /roles/expand` / `anvil role expand --brief "..." --slug <已批准 slug>`：
+  只能创建 human 已批准的 `role_suggestion`（apply_mode=authorize）中的 slug，否则 403；
   创建新 agent 并**继承创建者的 runtime/permission_mode**；新角色为普通 member，不能设置 tools/高权限字段；
   每日配额 `ANVIL_AGENT_ROLE_EXPAND_DAILY`（默认 3）、总角色上限 `ANVIL_MAX_ROLES`（默认 20）；
   创建动作写 audit `role_expand`，并在关联任务里 @human 通知。
@@ -497,11 +498,31 @@
 - **未采纳**：agent 必须是 workspace participant 才能提频道知识——设计明确
   participants 仅作派发偏好与展示，不是权限；频道知识由 human 审批兜底。
 
+### 设计审视第二轮（2026-10-29）
+
+- **升级迁移**：`workspace_knowledge_harvest_v2` 独立于 v1 标记执行，修复
+  v1.30.0–v1.30.8 升级库不会重建收割唯一索引、已批准卡编辑直接 500 的问题。
+- **workflow 增量修订**：批量批准先提交前序草案再 `BEGIN IMMEDIATE`；审批期重新分类
+  返回 `stale`（与文档/发布说明一致）；非法 intent 类型/非对象切片/空 intent 返回
+  `invalid` 而不是 500 或“无实际变更”；pending_revision 只挂到其 base workflow。
+- **Reminder**：Agent 只能管理自己的提醒（创建/列表/更新/删除/fire-now）；`when` 条件
+  默认只认 `done`，显式 `task:<id>:<status>` 精确匹配，取消（closed）不再误触发。
+- **实践门控**：`closed`（人工终止）不再算成功证据；任务证据必须是本人参与且 done；
+  run 证据必须属于本人且任务未取消；Agent reindex 对无证据文件只落 draft，
+  human 全量 reindex 才激活。
+- **角色新建 HITL**：`/roles/expand` 只能创建 human 已批准 `role_suggestion`
+  （apply_mode=authorize）中的 slug，未授权返回 403；CLI 增加 `--slug`。
+- **只读隔离**：Agent 的 timeline/activities/diff/events/runs/workspace 内容按任务参与
+  范围收紧；`GET /audit` 仅 human；`POST /runs`、`/tasks/{id}/dispatch|plan` 仅 human。
+- **调度器**：单阶段/单 run pump 异常不再中止整轮巡检，写日志并继续后续阶段。
+- **HITL UI**：审批、终止、删除、重置、频道/经验删除改用应用内确认/输入弹窗，
+  不再使用 `window.confirm/prompt`。
+
 ## 验证
 
 ```bash
 cd dev
-python3 -m pytest tests/ -q          # 605 passed, 46 skipped（2026-10-29）
+python3 -m pytest tests/ -q          # 625 passed, 46 skipped（2026-10-29）
 cd frontend && npm run build         # tsc + vite build
 ```
 

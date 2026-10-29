@@ -316,7 +316,7 @@ def test_apply_rechecks_state_and_rejects_stale_target(revision_env):
     conn.commit()
     with pytest.raises(wf_service.RevisionConflict) as exc:
         wf_service.apply_revision(conn, wid, intent, actor="human")
-    assert exc.value.impact["classification"] == "requires_restart"
+    assert exc.value.impact["classification"] == "stale"
     assert "P1.auth2.static" not in _steps(conn, wid)
 
 

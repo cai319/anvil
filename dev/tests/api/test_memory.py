@@ -228,9 +228,12 @@ async def test_knowledge_index_and_reindex(client):
     home = config.AGENTS_DIR / "qa-role" / "notes" / "modules"
     home.mkdir(parents=True, exist_ok=True)
     (home / "legacy.md").write_text("REINDEXUNIQUE module knowledge", encoding="utf-8")
-    rr = await client.post(f"{API}/me/knowledge/reindex", headers=auth_headers())
+    # 直接编辑文件后由 human 全量 reindex 确认（Agent 侧 reindex 受实践门控）。
+    rr = await client.post(f"{API}/knowledge/reindex", json={"role": "qa-role"},
+                           headers=human_headers())
     assert rr.status_code == 200
-    assert rr.json()["scanned"] >= 1 and rr.json()["updated"] >= 1
+    assert rr.json()["roles"][0]["scanned"] >= 1
+    assert rr.json()["roles"][0]["updated"] >= 1
 
     hits = await client.get(f"{API}/me/knowledge/search",
                             params={"q": "REINDEXUNIQUE"}, headers=auth_headers())

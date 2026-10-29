@@ -38,7 +38,7 @@ async def test_plan_endpoint_creates_planner_run(client, seeded):
     assert run["role_slug"] == "pm"
     assert "工作流规划者" in (run.get("prompt") or "")
     # 只拉起 planner，其他角色不动
-    runs = await client.get("/api/v1/runs", headers=auth_headers())
+    runs = await client.get("/api/v1/runs", headers=human_headers())
     assert [x["role_slug"] for x in runs.json() if x.get("task_id") == "T-PF2"] == ["pm"]
 
 

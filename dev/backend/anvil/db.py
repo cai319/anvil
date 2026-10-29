@@ -1085,6 +1085,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _rebuild_memory_fts_once(conn)
     _reset_legacy_token_usage_once(conn)
     _migrate_channel_knowledge_v1(conn)
+    _migrate_channel_knowledge_harvest_v2(conn)
     _migrate_knowledge_hits_v1(conn)
     conn.commit()
 
@@ -1258,22 +1259,31 @@ def _migrate_channel_knowledge_v1(conn: sqlite3.Connection) -> None:
             conn.execute(stmt)
         except sqlite3.OperationalError:
             pass
-    # v2：唯一索引只约束“收割行”（supersedes_id IS NULL），
-    # 允许对已批准卡生成同内容但改元数据的新提案。
-    if not _setting(conn, "schema.workspace_knowledge_harvest_v2"):
-        try:
-            conn.execute("DROP INDEX IF EXISTS idx_workspace_knowledge_harvest")
-            conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_knowledge_harvest "
-                "ON workspace_knowledge(workspace_id, source_task_id, kind, content_hash) "
-                "WHERE source_task_id IS NOT NULL AND content_hash IS NOT NULL "
-                "AND supersedes_id IS NULL")
-        except sqlite3.OperationalError:
-            pass
-        _set_setting(conn, "schema.workspace_knowledge_harvest_v2", "1")
     _ensure_workspace_knowledge_fts(conn)
     _ensure_task_knowledge_fts(conn)
     _set_setting(conn, "schema.channel_knowledge_v1", "1")
+    conn.commit()
+
+
+def _migrate_channel_knowledge_harvest_v2(conn: sqlite3.Connection) -> None:
+    """v2：唯一索引只约束“收割行”（supersedes_id IS NULL）。
+
+    必须独立于 v1 标记执行：v1.30.0–v1.30.8 的库已有 `schema.channel_knowledge_v1`
+    标记，但旧唯一索引没有谓词；若放进 v1 的早退分支，升级库永远不会重建索引，
+    已批准卡生成同内容新提案时会撞 UNIQUE 约束。
+    """
+    if _setting(conn, "schema.workspace_knowledge_harvest_v2"):
+        return
+    try:
+        conn.execute("DROP INDEX IF EXISTS idx_workspace_knowledge_harvest")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_knowledge_harvest "
+            "ON workspace_knowledge(workspace_id, source_task_id, kind, content_hash) "
+            "WHERE source_task_id IS NOT NULL AND content_hash IS NOT NULL "
+            "AND supersedes_id IS NULL")
+    except sqlite3.OperationalError:
+        pass
+    _set_setting(conn, "schema.workspace_knowledge_harvest_v2", "1")
     conn.commit()
 
 

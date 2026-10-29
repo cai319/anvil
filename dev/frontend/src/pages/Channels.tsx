@@ -13,6 +13,7 @@ import {
   type WorkspaceKnowledge,
 } from "../api/client";
 import { PageHeader } from "../components/ui";
+import { confirmDialog } from "../components/dialogs";
 import { UNBOUND_CHANNEL_VIEW } from "../channelView";
 import {
   AUTHORITY_LABEL,
@@ -303,10 +304,18 @@ export function Channels() {
     });
 
   const deleteChannel = () => {
-    if (!selected || isUnbound || !window.confirm("删除频道？任务会解绑，频道知识会删除。")) return;
-    run(async () => {
-      await api.deleteChannel(selected);
-      setSelected(null);
+    if (!selected || isUnbound) return;
+    void confirmDialog({
+      title: "删除频道？",
+      message: "任务会解绑进入「#无主题」，频道知识会删除。",
+      confirmLabel: "删除频道",
+      danger: true,
+    }).then((ok) => {
+      if (!ok) return;
+      void run(async () => {
+        await api.deleteChannel(selected);
+        setSelected(null);
+      });
     });
   };
 

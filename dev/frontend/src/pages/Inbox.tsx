@@ -3,6 +3,7 @@ import { api, subscribeEvents, type InboxItem } from "../api/client";
 import { formatDateTime } from "../time";
 import { PageHeader } from "../components/ui";
 import { GateReviewDrawer } from "../components/GateReviewDrawer";
+import { confirmDialog, promptDialog } from "../components/dialogs";
 
 /** Inbox（信息架构重构）：四类人机决策点统一入口，action card 式就地操作。 */
 
@@ -77,27 +78,40 @@ export function Inbox() {
     const meta = it.meta;
     if (meta?.draft_kind === "workflow_revision") {
       const impact = meta.workflow_revision?.impact;
-      if (!window.confirm(
-        `应用工作流增量修订？\n${impact?.summary || ""}\n`
-        + "当前执行会继续，不会终止或从头重跑。",
-      )) return;
-      act(it.id, () => api.approveDraft([raw]));
+      void confirmDialog({
+        title: "应用工作流增量修订？",
+        message: `${impact?.summary || ""}\n当前执行会继续，不会终止或从头重跑。`,
+        confirmLabel: "应用修订",
+      }).then((ok) => {
+        if (ok) void act(it.id, () => api.approveDraft([raw]));
+      });
       return;
     }
     if (meta?.draft_kind === "workflow" && meta.running_workflow) {
-      if (!window.confirm(
-        `任务当前有第 ${meta.running_execution_no || 1} 次执行正在运行。\n`
-        + "批准后将终止当前执行并从头重新开始，旧执行会保留为历史，但不会中途替换。确定继续？",
-      )) return;
-      const reason = window.prompt("请输入重新执行的原因（可留空）：", "");
-      if (reason === null) return;
-      act(it.id, () => api.approveDraft([raw], {
-        restart_running: true,
-        restart_reason: reason.trim() || undefined,
-      }));
+      void (async () => {
+        const ok = await confirmDialog({
+          title: `终止第 ${meta.running_execution_no || 1} 次执行并重新开始？`,
+          message: "批准后将终止当前执行并从头重新开始；旧执行会保留为历史，"
+            + "但不会中途替换。",
+          confirmLabel: "终止并重跑",
+          danger: true,
+        });
+        if (!ok) return;
+        const reason = await promptDialog({
+          title: "重新执行原因",
+          message: "可留空。原因会写入任务会话，便于追溯。",
+          confirmLabel: "继续",
+          input: { placeholder: "为什么需要重新执行？" },
+        });
+        if (reason === null) return;
+        void act(it.id, () => api.approveDraft([raw], {
+          restart_running: true,
+          restart_reason: reason.trim() || undefined,
+        }));
+      })();
       return;
     }
-    act(it.id, () => api.approveDraft([raw]));
+    void act(it.id, () => api.approveDraft([raw]));
   };
 
   const renderActions = (it: InboxItem) => {
@@ -132,13 +146,22 @@ export function Inbox() {
               onClick={() => {
                 const editable = it.meta?.draft_kind === "workflow"
                   || it.meta?.draft_kind === "workflow_revision";
-                let feedback: string | undefined;
-                if (editable) {
-                  const rawFeedback = window.prompt("驳回意见（会发给 Cindy）：", "");
-                  if (rawFeedback === null) return;
-                  feedback = rawFeedback.trim() || undefined;
+                if (!editable) {
+                  void act(it.id, () => api.rejectDraftById(raw));
+                  return;
                 }
-                act(it.id, () => api.rejectDraftById(raw, feedback));
+                void (async () => {
+                  const rawFeedback = await promptDialog({
+                    title: "驳回草案",
+                    message: "意见会发给 Cindy / planner，用于重新评估。",
+                    confirmLabel: "驳回",
+                    danger: true,
+                    input: { label: "驳回意见", placeholder: "请说明需要调整的地方", multiline: true },
+                  });
+                  if (rawFeedback === null) return;
+                  void act(it.id, () => api.rejectDraftById(
+                    raw, rawFeedback.trim() || undefined));
+                })();
               }}>驳回</button>
             {it.meta?.draft_kind === "workflow" && (
               <a className="small" href={`/templates?draft=${encodeURIComponent(raw)}`}>
@@ -173,8 +196,13 @@ export function Inbox() {
           <>
             <button className="primary small" disabled={disabled}
               onClick={() => {
-                if (!window.confirm(`批准后将立即执行「${it.title}」，确定？`)) return;
-                act(it.id, () => api.approveActionCard(actionId));
+                void confirmDialog({
+                  title: "批准并执行？",
+                  message: `批准后将立即执行「${it.title}」。`,
+                  confirmLabel: "批准并执行",
+                }).then((ok) => {
+                  if (ok) void act(it.id, () => api.approveActionCard(actionId));
+                });
               }}>批准并执行</button>
             <button className="small danger" disabled={disabled}
               onClick={() => act(it.id, () => api.rejectActionCard(actionId))}>拒绝</button>

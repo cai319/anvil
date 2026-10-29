@@ -10,19 +10,41 @@ from ..util import ConflictError
 router = APIRouter()
 
 
+def _is_agent(auth: Auth) -> bool:
+    return bool(auth.role and auth.role != "human")
+
+
+def _owned_reminder(conn, rid: str, auth: Auth):
+    """Agent 只能操作自己的 reminder；人类可操作全部。"""
+    reminder = services.reminders.get_reminder(conn, rid)
+    if reminder is None:
+        raise HTTPException(status_code=404, detail="reminder not found")
+    if _is_agent(auth) and reminder["role_slug"] != auth.role:
+        raise HTTPException(status_code=403, detail="reminder belongs to another role")
+    return reminder
+
+
 @router.get("/reminders")
 def list_reminders(role_slug: str | None = None, conn=Depends(get_db),
                     auth: Auth = Depends(get_auth)):
+    # Agent 只能看到自己的提醒；人类可按 role_slug 过滤或查看全部。
+    if _is_agent(auth):
+        role_slug = auth.role
     return services.reminders.list_reminders(conn, role_slug)
 
 
 @router.post("/reminders", status_code=201)
 def add_reminder(body: dict, conn=Depends(get_db),
                  auth: Auth = Depends(get_auth)):
+    requested = str(body.get("role_slug") or "").strip() or None
+    if _is_agent(auth):
+        if requested and requested != auth.role:
+            raise HTTPException(status_code=403, detail="cannot create a reminder for another role")
+        requested = auth.role
     try:
         return services.reminders.create_reminder(
             conn,
-            role_slug=body.get("role_slug"),
+            role_slug=requested,
             kind=body.get("kind", "cron"),
             cron_expr=body.get("cron_expr"),
             fire_at=body.get("fire_at"),
@@ -36,6 +58,9 @@ def add_reminder(body: dict, conn=Depends(get_db),
 @router.put("/reminders/{rid}")
 def update_reminder(rid: str, body: dict, conn=Depends(get_db),
                     auth: Auth = Depends(get_auth)):
+    _owned_reminder(conn, rid, auth)
+    if _is_agent(auth) and "role_slug" in body and body.get("role_slug") != auth.role:
+        raise HTTPException(status_code=403, detail="cannot reassign a reminder to another role")
     try:
         reminder = services.reminders.update_reminder(conn, rid, **body)
     except ValueError as exc:
@@ -48,6 +73,7 @@ def update_reminder(rid: str, body: dict, conn=Depends(get_db),
 @router.delete("/reminders/{rid}", status_code=204)
 def delete_reminder(rid: str, conn=Depends(get_db),
                     auth: Auth = Depends(get_auth)):
+    _owned_reminder(conn, rid, auth)
     if not services.reminders.delete_reminder(conn, rid):
         raise HTTPException(status_code=404, detail="reminder not found")
     return None
@@ -57,9 +83,7 @@ def delete_reminder(rid: str, conn=Depends(get_db),
 def fire_now(rid: str, request: Request, conn=Depends(get_db),
              auth: Auth = Depends(get_auth)):
     """手动触发（调试用）：创建对应 run 并标记 reminder 已触发。"""
-    reminder = services.reminders.get_reminder(conn, rid)
-    if reminder is None:
-        raise HTTPException(status_code=404, detail="reminder not found")
+    reminder = _owned_reminder(conn, rid, auth)
     if not reminder["role_slug"]:
         raise HTTPException(status_code=422, detail="reminder has no role_slug")
     run = services.reminders.create_reminder_run(

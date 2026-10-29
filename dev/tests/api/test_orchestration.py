@@ -92,7 +92,7 @@ async def test_review_approve_mentions_downstream(client):
     await client.post(f"{API}/tasks/T-DES/claim", json={}, headers=auth_headers("designer"))
     await client.post(f"{API}/tasks/T-DES/submit", json={"summary": "x"}, headers=auth_headers("designer"))
     await client.post(f"{API}/tasks/T-DES/review", json={"approve": True}, headers=human_headers())
-    tl = (await client.get(f"{API}/tasks/T-IMP/timeline", headers=auth_headers())).json()
+    tl = (await client.get(f"{API}/tasks/T-IMP/timeline", headers=human_headers())).json()
     mentions = [e for e in tl if e["kind"] == "mention"]
     assert any(m["payload"]["target"] == "developer" and "已完成" in m["payload"]["message"] for m in mentions)
 
@@ -132,7 +132,7 @@ async def test_tick_wakes_eligible_agent(client):
     await client.post(f"{API}/tasks", json={"id": "T-2", "title": "x", "tags": ["backend"]}, headers=auth_headers())
     r = await client.post(f"{API}/control/tick", headers=auth_headers())
     assert r.status_code == 200
-    runs = (await client.get(f"{API}/runs", headers=auth_headers())).json()
+    runs = (await client.get(f"{API}/runs", headers=human_headers())).json()
     assert any(run["task_id"] == "T-2" for run in runs)  # wake 创建了 run
 
 

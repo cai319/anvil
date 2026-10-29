@@ -10,12 +10,19 @@ from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..platform import factory
 from ..util import now_iso
+from . import access
 
 router = APIRouter()
 
 
 @router.post("/runs", status_code=201)
-def start_run(body: dict, request: Request, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+def start_run(body: dict, request: Request, conn=Depends(get_db),
+              auth: Auth = Depends(require_human)):
+    """手动「指派并执行」：人类为任务拉起角色 run。
+
+    Agent 的唤醒路径是 @mention/step 调度，不经过该端点；若允许 Agent 调用，
+    它就能替任意角色拉起进程（冒充/烧 token）。
+    """
     role = body.get("role_slug") or auth.role or "qa-role"
     task_id = body.get("task_id")
     # 幂等：同任务同角色已有活跃 run 时直接返回它（不二次 spawn、也不报冲突；多角色可各有一 run）
@@ -35,25 +42,40 @@ def start_run(body: dict, request: Request, conn=Depends(get_db), auth: Auth = D
 
 @router.get("/runs")
 def list_runs(role_slug: str | None = None, task_id: str | None = None,
-              active: bool = False, conn=Depends(get_db)):
+              active: bool = False, conn=Depends(get_db),
+              auth: Auth = Depends(get_auth)):
     """active=true 只返回活跃会话（含挂起等待），供主页实时看板使用。"""
+    if access.is_agent(auth):
+        if auth.task_id:
+            if task_id and task_id != auth.task_id:
+                raise HTTPException(status_code=403, detail="session is bound to another task")
+            task_id = auth.task_id
+        elif task_id:
+            access.assert_task_read(conn, auth, task_id)
+        elif role_slug and role_slug != auth.role:
+            raise HTTPException(status_code=403, detail="cannot list another role's runs")
+        else:
+            role_slug = auth.role
     statuses = list(services.runs.ACTIVE_RUN_STATUSES) if active else None
     return services.runs.list_runs(conn, role_slug=role_slug, task_id=task_id, statuses=statuses)
 
 
 @router.get("/runs/{rid}")
-def get_run(rid: str, conn=Depends(get_db)):
+def get_run(rid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     run = services.runs.get_run(conn, rid)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
+    access.assert_run_read(conn, auth, run)
     return run
 
 
 @router.get("/runs/{rid}/timeline")
-def run_timeline(rid: str, conn=Depends(get_db)):
+def run_timeline(rid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """该 run 的生命周期迁移事件（运行会话追溯）。"""
-    if services.runs.get_run(conn, rid) is None:
+    run = services.runs.get_run(conn, rid)
+    if run is None:
         raise HTTPException(status_code=404, detail="run not found")
+    access.assert_run_read(conn, auth, run)
     return services.runs.run_timeline(conn, rid)
 
 

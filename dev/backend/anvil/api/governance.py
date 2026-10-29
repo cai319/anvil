@@ -80,7 +80,8 @@ def list_audit(task_id: str | None = None, role: str | None = None,
                action: str | None = None,
                date_from: str | None = Query(default=None, alias="from"),
                date_to: str | None = Query(default=None, alias="to"),
-               limit: int = 100, conn=Depends(get_db)):
+               limit: int = 100, conn=Depends(get_db),
+               auth: Auth = Depends(require_human)):
     return services.governance.list_audit(
         conn, task_id=task_id, limit=limit, role=role, action=action,
         date_from=date_from, date_to=date_to,

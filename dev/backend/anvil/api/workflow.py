@@ -20,7 +20,8 @@ router = APIRouter()
 def _attach_pending_revision(conn, wf: dict) -> dict:
     drafts = services.board.list_drafts(conn, source_task=wf["task_id"])
     rev = next((d for d in drafts if d.get("kind") == "workflow_revision"
-                and d.get("status") == "pending"), None)
+                and d.get("status") == "pending"
+                and (d.get("tree") or {}).get("base_workflow_id") == wf["id"]), None)
     if rev:
         wf["pending_revision"] = {
             "draft_id": rev["id"],

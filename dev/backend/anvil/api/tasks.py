@@ -12,32 +12,14 @@ from ..schemas import ClaimIn, CommentIn, DepIn, ReviewIn, SubmitIn, TaskIn, Tas
 from ..services import repo_catalog
 from ..services.tasks import ConflictError
 from ..util import now_iso
-from . import events
+from . import access, events
 
 router = APIRouter()
 
 
 def _assert_session_task(conn, auth: Auth, tid: str) -> None:
-    """运行级会话只能操作自己绑定/参与的任务。
-
-    - task 绑定 token：必须与 URL 任务一致；
-    - 角色级常驻 token：任务已有绑定角色时，只允许 assignee/lead/planner/onboarding；
-      无绑定角色的开放任务仍允许任意角色 claim。
-    """
-    if auth.task_id and auth.task_id != tid:
-        raise HTTPException(status_code=403, detail="session is bound to another task")
-    if auth.role and auth.role != "human" and auth.task_id is None:
-        t = services.tasks.get(conn, tid)
-        if t is not None:
-            # 仅团队任务按 Roster 限制；单负责人/开放任务交给 claim 的排他逻辑返回 409。
-            bound = set(t.get("assignees") or [])
-            if bound:
-                if t.get("assignee"):
-                    bound.add(t["assignee"])
-                if t.get("planner"):
-                    bound.add(t["planner"])
-                if auth.role not in bound and not services.roles.is_onboarding(conn, auth.role):
-                    raise HTTPException(status_code=403, detail="role is not a participant of this task")
+    """运行级会话只能操作自己绑定/参与的任务。"""
+    access.assert_task_read(conn, auth, tid)
 
 
 def _pump_after_submit(request: Request, conn, tid: str) -> None:
@@ -288,24 +270,29 @@ def delete_task_knowledge(tid: str, kid: str, conn=Depends(get_db),
 
 
 @router.get("/{tid}/timeline")
-def task_timeline(tid: str, conn=Depends(get_db)):
+def task_timeline(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """任务会话时间线：多角色交互流（认领/提交/评审/评论/运行生命周期）。"""
     if services.tasks.get(conn, tid) is None:
         raise HTTPException(status_code=404, detail="task not found")
+    access.assert_task_read(conn, auth, tid)
     return services.tasks.timeline(conn, tid)
 
 
 @router.get("/{tid}/activities")
-def task_activities(tid: str, conn=Depends(get_db)):
+def task_activities(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """任务活动事件（评论 / @提及 / run 迁移）。"""
     if services.tasks.get(conn, tid) is None:
         raise HTTPException(status_code=404, detail="task not found")
+    access.assert_task_read(conn, auth, tid)
     return services.tasks.list_activities(conn, tid)
 
 
 @router.get("/{tid}/diff")
-def task_diff(tid: str, conn=Depends(get_db)):
+def task_diff(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """任务当前改动 + 越界文件（前端 diff 折叠区）。"""
+    if services.tasks.get(conn, tid) is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    access.assert_task_read(conn, auth, tid)
     try:
         return services.tasks.task_diff(conn, tid)
     except LookupError:
@@ -313,17 +300,20 @@ def task_diff(tid: str, conn=Depends(get_db)):
 
 
 @router.get("/{tid}/config-snapshot")
-def task_config_snapshot(tid: str, conn=Depends(get_db)):
+def task_config_snapshot(tid: str, conn=Depends(get_db),
+                         auth: Auth = Depends(get_auth)):
     if services.tasks.get(conn, tid) is None:
         raise HTTPException(status_code=404, detail="task not found")
+    access.assert_task_read(conn, auth, tid)
     return services.tasks.task_config_snapshot(conn, tid)
 
 
 @router.get("/{tid}/bids")
-def task_bids(tid: str, conn=Depends(get_db)):
+def task_bids(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """认领出价记录（score 策略为 v2；先到先得模式下为空）。"""
     if services.tasks.get(conn, tid) is None:
         raise HTTPException(status_code=404, detail="task not found")
+    access.assert_task_read(conn, auth, tid)
     return []
 
 
@@ -555,6 +545,19 @@ def heartbeat_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth
 @router.post("/{tid}/submit", response_model=TaskOut)
 def submit_task(tid: str, body: SubmitIn, request: Request, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     _assert_session_task(conn, auth, tid)
+    # 工作流任务的完成必须走 step 状态机；允许 task submit 会让任务在步骤未完成时
+    # 提前进入 in_review，甚至被评审为 done 后中断剩余步骤。人类仍可强制收口。
+    if auth.role and auth.role != "human":
+        running = conn.execute(
+            "SELECT 1 FROM workflows WHERE task_id=? AND status='running' LIMIT 1",
+            (tid,),
+        ).fetchone()
+        if running is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=("task has a running workflow; use "
+                        "`anvil step submit <workflow_id> <step_id>`"),
+            )
     team = services.tasks.is_team_task(conn, tid)
     try:
         result = services.tasks.submit(conn, tid, summary=body.summary, branch=body.branch,
@@ -772,7 +775,8 @@ def _start_planner_run(conn, request: Request, tid: str, planner: str,
 
 
 @router.post("/{tid}/plan", status_code=201)
-def plan_task(tid: str, request: Request, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+def plan_task(tid: str, request: Request, conn=Depends(get_db),
+              auth: Auth = Depends(require_human)):
     """P1-0 计划先行：唤醒 planner 角色生成工作流草案（只拉起 planner，其余角色等批准后按依赖自动派发）。"""
     _assert_session_task(conn, auth, tid)
     t = services.tasks.get(conn, tid)
@@ -791,7 +795,8 @@ def plan_task(tid: str, request: Request, conn=Depends(get_db), auth: Auth = Dep
 
 
 @router.post("/{tid}/dispatch", status_code=201)
-def dispatch_task(tid: str, request: Request, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+def dispatch_task(tid: str, request: Request, conn=Depends(get_db),
+                  auth: Auth = Depends(require_human)):
     """派发任务（owner 2026-10-19 计划先行默认化）。
 
     - 多角色任务 → 先唤醒 onboarding 助理（Cindy）分析任务并设计工作流；

@@ -45,7 +45,8 @@ async def _seed(client):
 async def test_endpoint_run_claim_submit_review(client):
     await _seed(client)
     # 手动派发：POST /runs → create_run + pump wake（spawn）
-    r = await client.post(f"{API}/runs", json={"role_slug": "dev", "task_id": "T-1"}, headers=H)
+    r = await client.post(f"{API}/runs", json={"role_slug": "dev", "task_id": "T-1"},
+                          headers=human_headers())
     assert r.status_code == 201
     rid = r.json()["id"]
     assert (await client.get(f"{API}/runs/{rid}", headers=H)).json()["status"] == "running"

@@ -268,6 +268,29 @@ def authorized_assignee_additions(conn: sqlite3.Connection, task_id: str) -> set
     return out
 
 
+def authorized_role_creations(conn: sqlite3.Connection,
+                              task_id: str | None = None) -> set[str]:
+    """human 已批准、允许 planner 创建的新角色 slug 白名单。
+
+    `role_suggestion` 的 authorize 模式只授权“先提案、批准后创建”；直接调用
+    `/roles/expand` 必须命中这里，否则就是绕过 HITL 新建角色。
+    """
+    clauses = ["kind='role_suggestion'", "status='approved'"]
+    params: list = []
+    if task_id:
+        clauses.append("source_task=?")
+        params.append(task_id)
+    rows = conn.execute(
+        f"SELECT tree_json FROM board_drafts WHERE {' AND '.join(clauses)}", params
+    ).fetchall()
+    out: set[str] = set()
+    for row in rows:
+        tree = jloads(row["tree_json"], {})
+        if str(tree.get("apply_mode") or "") == "authorize":
+            out.update(_authorized_slugs(tree))
+    return out
+
+
 def propose_assignee_additions(conn: sqlite3.Connection, task_id: str, agent: str,
                                roles: list[str], reason: str | None = None) -> dict:
     """任务已有 Roster 时的角色追加提案：复用 role_suggestion，等待 human 审批。
@@ -379,7 +402,8 @@ def _approve_assignee_authorization(conn: sqlite3.Connection, draft: dict,
     if target:
         tasks_service.mention(
             conn, task_id, "human", target,
-            f"角色追加提案已批准：{summary}。请执行 role expand（如需）并 "
+            f"角色追加提案已批准：{summary}。如需创建角色，执行 "
+            f"`anvil role expand --slug <已批准 slug>`（必须是 {summary} 之一），再 "
             f"`anvil task assign {task_id} --assignees {','.join(requested)}`。")
     return None, f"authorized only; planner must create/bind: {summary}"
 
@@ -501,6 +525,10 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
             wid = str(tree.get("base_workflow_id") or "")
             if not wid:
                 raise ConflictError("workflow_revision missing base_workflow_id")
+            # apply_revision 自己执行 BEGIN IMMEDIATE；同一批里前面的 tasks/workflow
+            # 草案可能已在本连接留下未提交 DML。先提交，避免嵌套事务直接抛
+            # OperationalError（批量批准时前者已落库，失败不会静默丢失）。
+            conn.commit()
             workflow_service.apply_revision(
                 conn, wid, tree.get("intent") or {}, actor=by, draft_id=draft["id"])
             creator = str(draft.get("created_by") or "").strip()

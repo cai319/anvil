@@ -36,7 +36,7 @@ async def test_multi_role_dispatch_plans_with_cindy(client, seeded):
     role = await client.get("/api/v1/roles/cindy", headers=auth_headers())
     assert role.status_code == 200
     # 只拉起 planner，参与角色没有被直接派发
-    runs = (await client.get("/api/v1/runs", headers=auth_headers())).json()
+    runs = (await client.get("/api/v1/runs", headers=human_headers())).json()
     assert [x["role_slug"] for x in runs if x.get("task_id") == "T-MULTI"] == ["cindy"]
 
 

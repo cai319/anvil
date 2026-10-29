@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
+from . import access
 from ..util import now_iso
 
 router = APIRouter()
@@ -89,9 +90,11 @@ def delete_workspace(ws_id: str, conn=Depends(get_db),
 
 
 @router.get("/workspaces/{ws_id}/participants")
-def list_participants(ws_id: str, conn=Depends(get_db)):
+def list_participants(ws_id: str, conn=Depends(get_db),
+                      auth: Auth = Depends(get_auth)):
     if services.workspace.get_channel(conn, ws_id) is None:
         raise HTTPException(status_code=404, detail="workspace not found")
+    access.assert_workspace_read(conn, auth, ws_id)
     return services.workspace.list_participants(conn, ws_id)
 
 
@@ -126,17 +129,20 @@ def remove_participant(ws_id: str, role_slug: str, conn=Depends(get_db),
 @router.get("/workspaces/{ws_id}/knowledge")
 def list_workspace_knowledge(ws_id: str, status: str | None = None,
                              kind: str | None = None, sort: str | None = None,
-                             conn=Depends(get_db)):
+                             conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     if services.workspace.get_channel(conn, ws_id) is None:
         raise HTTPException(status_code=404, detail="workspace not found")
+    access.assert_workspace_read(conn, auth, ws_id)
     return services.workspace_knowledge.list_for_workspace(
         conn, ws_id, status=status, kind=kind, sort=sort)
 
 
 @router.get("/workspaces/{ws_id}/knowledge/review")
-def review_workspace_knowledge(ws_id: str, conn=Depends(get_db)):
+def review_workspace_knowledge(ws_id: str, conn=Depends(get_db),
+                               auth: Auth = Depends(get_auth)):
     if services.workspace.get_channel(conn, ws_id) is None:
         raise HTTPException(status_code=404, detail="workspace not found")
+    access.assert_workspace_read(conn, auth, ws_id)
     return services.workspace_knowledge.review_candidates(conn, ws_id)
 
 
@@ -274,9 +280,10 @@ def harvest_workspace_knowledge(ws_id: str, body: dict, conn=Depends(get_db),
 
 
 @router.get("/workspaces/{ws_id}/members")
-def list_members(ws_id: str, conn=Depends(get_db)):
+def list_members(ws_id: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     if services.workspace.get_channel(conn, ws_id) is None:
         raise HTTPException(status_code=404, detail="workspace not found")
+    access.assert_workspace_read(conn, auth, ws_id)
     return services.workspace.list_members(conn, ws_id)
 
 
@@ -314,12 +321,14 @@ def remove_member(ws_id: str, role_slug: str, conn=Depends(get_db),
 @router.get("/workspaces/{ws_id}/tree")
 def workspace_tree(ws_id: str, conn=Depends(get_db),
                    auth: Auth = Depends(get_auth)):
+    access.assert_workspace_read(conn, auth, ws_id)
     return services.workspace.tree(ws_id)
 
 
 @router.get("/workspaces/{ws_id}/diff")
 def workspace_diff(ws_id: str, conn=Depends(get_db),
                    auth: Auth = Depends(get_auth)):
+    access.assert_workspace_read(conn, auth, ws_id)
     return services.workspace.diff(ws_id)
 
 

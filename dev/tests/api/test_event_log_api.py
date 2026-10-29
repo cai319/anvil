@@ -21,7 +21,7 @@ async def test_workflow_events_are_queryable(client):
                                  json={"draft_ids": [draft.json()["id"]]})
     assert approved.status_code == 200, approved.text
 
-    r = await client.get(f"{API}/tasks/T-EVT/events", headers=auth_headers())
+    r = await client.get(f"{API}/tasks/T-EVT/events", headers=human_headers())
     assert r.status_code == 200, r.text
     body = r.json()
     types = [item["event_type"] for item in body["items"]]
@@ -29,6 +29,6 @@ async def test_workflow_events_are_queryable(client):
     assert body["next_after_id"] >= 1
 
     r = await client.get(f"{API}/event-log?task_id=T-EVT&event_type=execution.started",
-                         headers=auth_headers())
+                         headers=human_headers())
     assert r.status_code == 200, r.text
     assert any(item["event_type"] == "execution.started" for item in r.json()["items"])

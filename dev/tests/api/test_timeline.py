@@ -69,5 +69,5 @@ async def test_mention_wakes_target_role(client):
         headers=auth_headers("human"),
     )
     assert r.status_code == 200
-    runs = (await client.get(f"{API}/runs", headers=auth_headers())).json()
+    runs = (await client.get(f"{API}/runs", headers=human_headers())).json()
     assert any(run["task_id"] == "T-WAKE" and run["role_slug"] == "developer" for run in runs)

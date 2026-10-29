@@ -137,6 +137,42 @@ def test_channel_knowledge_migration_and_idempotency(tmp_path):
         conn.close()
 
 
+def test_harvest_v2_index_migrates_when_v1_marker_already_set(tmp_path):
+    """v1.30.0–v1.30.8 升级：v1 标记已存在时仍必须重建收割唯一索引。"""
+    path = str(tmp_path / "upgraded.db")
+    conn = db.connect(path)
+    conn.close()
+
+    # 模拟 v1.30.8：旧唯一索引没有 supersedes_id 谓词，v1 标记已写入。
+    conn = db.open_conn(path)
+    conn.execute("DROP INDEX IF EXISTS idx_workspace_knowledge_harvest")
+    conn.execute(
+        "CREATE UNIQUE INDEX idx_workspace_knowledge_harvest "
+        "ON workspace_knowledge(workspace_id, source_task_id, kind, content_hash) "
+        "WHERE source_task_id IS NOT NULL AND content_hash IS NOT NULL"
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value, updated_at) "
+        "VALUES ('schema.channel_knowledge_v1', '1', '2026-10-25T00:00:00+00:00')")
+    conn.execute(
+        "DELETE FROM settings WHERE key='schema.workspace_knowledge_harvest_v2'")
+    conn.commit()
+    conn.close()
+
+    conn = db.connect(path)
+    try:
+        idx = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' "
+            "AND name='idx_workspace_knowledge_harvest'").fetchone()
+        assert idx is not None and "supersedes_id IS NULL" in idx["sql"]
+        marker = conn.execute(
+            "SELECT value FROM settings "
+            "WHERE key='schema.workspace_knowledge_harvest_v2'").fetchone()
+        assert marker is not None and marker["value"] == "1"
+    finally:
+        conn.close()
+
+
 def test_new_database_has_channel_knowledge_schema(tmp_path):
     path = str(tmp_path / "new.db")
     conn = db.connect(path)

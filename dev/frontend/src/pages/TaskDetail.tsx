@@ -18,6 +18,7 @@ import { usePanelLayout } from "../usePanelLayout";
 import { STATUS_META, isDynamicStep, summarizeLoops, type LoopSummary } from "../workflowGroups";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
+import { confirmDialog, promptDialog } from "../components/dialogs";
 import { GateReviewDrawer } from "../components/GateReviewDrawer";
 
 const stepAuthority = (st: WorkflowStep): "ai" | "human" | "joint" =>
@@ -77,8 +78,14 @@ function WorkflowWeightDialog({ taskId, current, onClose, onApplied }: {
   };
 
   const restart = async () => {
-    if (!window.confirm(
-      "将终止当前执行并创建新的执行。旧执行、步骤和产物保留在历史中，不会中途替换。确定继续？")) return;
+    const ok = await confirmDialog({
+      title: "重新开始工作流执行？",
+      message: "将终止当前执行并创建新的执行。旧执行、步骤和产物保留在历史中，"
+        + "不会中途替换。",
+      confirmLabel: "终止并重跑",
+      danger: true,
+    });
+    if (!ok) return;
     setBusy(true); setError(null);
     try {
       const wf = await api.restartTaskWorkflow(
@@ -1374,9 +1381,14 @@ export function TaskDetail({ id }: { id: string }) {
               className="small danger"
               disabled={busy}
               onClick={() => {
-                if (!window.confirm(
-                  "人工终止后任务会进入「已终止」状态，可重新打开；确定终止？")) return;
-                act(() => api.cancelTask(id));
+                void confirmDialog({
+                  title: "人工终止任务？",
+                  message: "任务会进入「已终止」状态，可重新打开；运行中的进程与会话会保留。",
+                  confirmLabel: "终止任务",
+                  danger: true,
+                }).then((ok) => {
+                  if (ok) void act(() => api.cancelTask(id));
+                });
               }}
             >人工终止任务</button>
           )}
@@ -1384,7 +1396,13 @@ export function TaskDetail({ id }: { id: string }) {
             className="small danger"
             disabled={busy}
             onClick={async () => {
-              if (!window.confirm("删除任务会同时删除它的 runs、评论和依赖，且不可恢复。确定？")) return;
+              const ok = await confirmDialog({
+                title: "删除任务？",
+                message: "会同时删除它的 runs、评论和依赖，且不可恢复。",
+                confirmLabel: "删除任务",
+                danger: true,
+              });
+              if (!ok) return;
               setBusy(true);
               try {
                 await api.deleteTask(id, true);
@@ -1618,17 +1636,29 @@ export function TaskDetail({ id }: { id: string }) {
                       disabled={busy}
                       onClick={() => act(async () => {
                         if (d.kind === "workflow_revision") {
-                          if (!window.confirm(
-                            `应用工作流增量修订？\n${d.tree?.impact?.summary || ""}\n`
-                            + "当前执行会继续，不会终止或从头重跑。",
-                          )) return;
+                          const ok = await confirmDialog({
+                            title: "应用工作流增量修订？",
+                            message: `${d.tree?.impact?.summary || ""}\n`
+                              + "当前执行会继续，不会终止或从头重跑。",
+                            confirmLabel: "应用修订",
+                          });
+                          if (!ok) return;
                           await api.approveDraft([d.id]);
                         } else if (d.kind === "workflow" && workflow?.status === "running") {
-                          if (!window.confirm(
-                            "任务当前有运行中的执行。批准后会终止当前执行并从头重新开始，"
-                            + "旧执行保留为历史。确定继续？",
-                          )) return;
-                          const reason = window.prompt("请输入重新执行的原因（可留空）：", "");
+                          const ok = await confirmDialog({
+                            title: "终止当前执行并重新开始？",
+                            message: "任务当前有运行中的执行。批准后会终止当前执行并从头"
+                              + "重新开始，旧执行保留为历史。",
+                            confirmLabel: "终止并重跑",
+                            danger: true,
+                          });
+                          if (!ok) return;
+                          const reason = await promptDialog({
+                            title: "重新执行原因",
+                            message: "可留空；原因会写入任务会话。",
+                            confirmLabel: "继续",
+                            input: { placeholder: "为什么需要重新执行？" },
+                          });
                           if (reason === null) return;
                           await api.approveDraft([d.id], {
                             restart_running: true,

@@ -1698,14 +1698,42 @@ def _revision_context(conn: sqlite3.Connection, wf: dict, intent: dict) -> tuple
         blocked.append({"step_id": step_id, "status": status, "reason": reason})
 
     add_slices = intent.get("add_slices") or []
-    remove_ids = [str(x) for x in (intent.get("remove_slices") or [])]
+    raw_remove = intent.get("remove_slices") or []
     updates = intent.get("update_slices") or []
     patch_steps = intent.get("patch_steps") or []
-    if not isinstance(add_slices, list) or not isinstance(updates, list) \
-            or not isinstance(patch_steps, list):
+    if not isinstance(add_slices, list) or not isinstance(raw_remove, list) \
+            or not isinstance(updates, list) or not isinstance(patch_steps, list):
         return {}, {"classification": "invalid", "safe": False,
                     "summary": "revision lists must be arrays",
                     "blocked_by": [], "affected_steps": []}
+    if any(not isinstance(raw, dict) for raw in (*add_slices, *updates)):
+        return {}, {"classification": "invalid", "safe": False,
+                    "summary": "add_slices/update_slices entries must be objects",
+                    "blocked_by": [], "affected_steps": []}
+    for raw in add_slices:
+        if "execute_steps" in raw and not isinstance(
+                raw.get("execute_steps"), (list, dict)):
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": f"slice {raw.get('id') or '?'} execute_steps "
+                                   "must be an array or object",
+                        "blocked_by": [], "affected_steps": []}
+    for item in updates:
+        patch = item.get("patch") or {}
+        if not isinstance(patch, dict):
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": f"slice {item.get('id') or '?'} patch must be an object",
+                        "blocked_by": [], "affected_steps": []}
+        if "execute_steps" in patch and not isinstance(
+                patch.get("execute_steps"), (list, dict)):
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": f"slice {item.get('id') or '?'} execute_steps "
+                                   "must be an array or object",
+                        "blocked_by": [], "affected_steps": []}
+    if not add_slices and not raw_remove and not updates and not patch_steps:
+        return {}, {"classification": "invalid", "safe": False,
+                    "summary": "revision intent has no changes",
+                    "blocked_by": [], "affected_steps": []}
+    remove_ids = [str(x) for x in raw_remove]
     has_slices = bool(add_slices or remove_ids or updates)
 
     old_ids = [str(raw.get("id")) for raw in slices]
@@ -1821,6 +1849,16 @@ def _revision_context(conn: sqlite3.Connection, wf: dict, intent: dict) -> tuple
             return {}, {"classification": "invalid", "safe": False,
                         "summary": f"step {sid} fields must be an object",
                         "blocked_by": [], "affected_steps": []}
+        if not fields:
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": f"step {sid} patch has no fields",
+                        "blocked_by": [], "affected_steps": []}
+        for key in ("depends_on", "acceptance", "scope_paths"):
+            if key in fields and fields[key] is not None \
+                    and not isinstance(fields[key], list):
+                return {}, {"classification": "invalid", "safe": False,
+                            "summary": f"step {sid} {key} must be an array",
+                            "blocked_by": [], "affected_steps": []}
         try:
             _step_fields_from_patch(fields)
         except ConflictError as exc:
@@ -2049,6 +2087,16 @@ def _apply_revision_locked(conn: sqlite3.Connection, wid: str, intent: dict,
             raise LookupError(wid)
         state, impact = _revision_context(conn, wf, intent)
         if not impact.get("safe"):
+            # 草案创建时已分类为 safe；批准时重新分类失败，说明目标在待审期间推进
+            # 或状态改变。按契约返回 stale（不是创建阶段的 requires_restart/invalid），
+            # 客户端据此重新读取状态并重新预览。
+            impact = {
+                **impact,
+                "classification": "stale",
+                "previous_classification": impact.get("classification"),
+                "summary": "修订目标在待审期间已推进或状态改变，请重新预览："
+                           + str(impact.get("summary") or ""),
+            }
             raise RevisionConflict(impact)
 
         plan_step = state["plan_step"]
