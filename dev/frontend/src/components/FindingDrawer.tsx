@@ -128,27 +128,42 @@ export function FindingDrawer({ taskId, findingId, schema, onClose, onChanged }:
     void decision(() => api.reopenFinding(taskId, findingId, note.trim()));
   };
 
-  const fields: { label: string; value: string; pre?: boolean }[] = finding ? [
-    { label: "风险类型", value: riskLabel(schema, finding.risk_type) },
-    { label: "严重等级", value: severityLabel(finding.severity) },
-    { label: "修复优先级", value: schema?.fix_priorities?.[finding.fix_priority] || finding.fix_priority },
-    { label: "问题最终置信度", value: `${finding.confidence}%` },
-    { label: "问题所在模块", value: finding.module },
-    { label: "问题函数", value: finding.function_name },
-    { label: "文件与行号", value: `${finding.file_path}:${finding.line_numbers}` },
-    { label: "触发前置条件", value: finding.preconditions, pre: true },
-    { label: "触发点", value: finding.trigger_point, pre: true },
-    { label: "问题风险描述", value: finding.risk_description, pre: true },
-    { label: "推理链（CoT）", value: finding.reasoning_chain, pre: true },
-    { label: "攻击路径（数据流）", value: finding.attack_path, pre: true },
-    { label: "PoC 状态", value: schema?.poc_statuses?.[finding.poc_status] || finding.poc_status },
+  type DrawerField = {
+    label: string;
+    value: string;
+    group: "summary" | "location" | "detail";
+    wide?: boolean;
+  };
+  const fields: DrawerField[] = finding ? [
+    // 判定摘要：短值，等宽平铺
+    { label: "风险类型", value: riskLabel(schema, finding.risk_type), group: "summary" },
+    { label: "严重等级", value: severityLabel(finding.severity), group: "summary" },
+    { label: "修复优先级",
+      value: schema?.fix_priorities?.[finding.fix_priority] || finding.fix_priority,
+      group: "summary" },
+    { label: "问题最终置信度", value: `${finding.confidence}%`, group: "summary" },
+    { label: "PoC 状态",
+      value: schema?.poc_statuses?.[finding.poc_status] || finding.poc_status,
+      group: "summary" },
+    // 问题定位：模块/函数短，文件独占宽列
+    { label: "问题所在模块", value: finding.module, group: "location" },
+    { label: "问题函数", value: finding.function_name, group: "location" },
+    { label: "文件与行号", value: `${finding.file_path}:${finding.line_numbers}`,
+      group: "location", wide: true },
+    // 详细信息：长文本整行全宽
+    { label: "触发前置条件", value: finding.preconditions, group: "detail" },
+    { label: "触发点", value: finding.trigger_point, group: "detail" },
+    { label: "问题风险描述", value: finding.risk_description, group: "detail" },
+    { label: "推理链（CoT）", value: finding.reasoning_chain, group: "detail" },
+    { label: "攻击路径（数据流）", value: finding.attack_path, group: "detail" },
     { label: finding.poc_status === "provided" ? "技术证明（PoC）" : "PoC 豁免原因",
-      value: finding.poc, pre: true },
-    { label: "修复建议", value: finding.fix_suggestion, pre: true },
+      value: finding.poc, group: "detail" },
+    { label: "修复建议", value: finding.fix_suggestion, group: "detail" },
   ] : [];
 
-  const summaryFields = fields.filter((f) => !f.pre);
-  const detailFields = fields.filter((f) => f.pre);
+  const summaryFields = fields.filter((f) => f.group === "summary");
+  const locationFields = fields.filter((f) => f.group === "location");
+  const detailFields = fields.filter((f) => f.group === "detail");
   const actionable = finding?.status === "submitted";
   const decided = finding?.status === "confirmed" || finding?.status === "false_positive";
 
@@ -201,23 +216,51 @@ export function FindingDrawer({ taskId, findingId, schema, onClose, onChanged }:
               </div>
             )}
 
-            <div className="finding-summary-grid">
-              {summaryFields.map((f) => (
-                <section key={f.label} className="finding-field finding-field-compact">
-                  <h3>{f.label}</h3>
-                  <p>{f.value || "—"}</p>
-                </section>
-              ))}
-            </div>
+            <section className="finding-section">
+              <div className="finding-section-head">
+                <h3>判定摘要</h3>
+                <span>5 项短字段 · 一行平铺</span>
+              </div>
+              <div className="finding-summary-band">
+                {summaryFields.map((f) => (
+                  <div key={f.label} className="finding-summary-card">
+                    <h3>{f.label}</h3>
+                    <p>{f.value || "—"}</p>
+                  </div>
+                ))}
+              </div>
+            </section>
 
-            <div className="finding-field-list">
-              {detailFields.map((f) => (
-                <section key={f.label} className="finding-field">
-                  <h3>{f.label}</h3>
-                  <pre>{f.value || "—"}</pre>
-                </section>
-              ))}
-            </div>
+            <section className="finding-section">
+              <div className="finding-section-head">
+                <h3>问题定位</h3>
+                <span>模块 / 函数 / 文件</span>
+              </div>
+              <div className="finding-location-grid">
+                {locationFields.map((f) => (
+                  <div key={f.label}
+                    className={`finding-location-card ${f.wide ? "is-file" : ""}`}>
+                    <h3>{f.label}</h3>
+                    <p>{f.value || "—"}</p>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="finding-section">
+              <div className="finding-section-head">
+                <h3>详细信息</h3>
+                <span>长文本整行展示</span>
+              </div>
+              <div className="finding-field-list">
+                {detailFields.map((f) => (
+                  <section key={f.label} className="finding-field">
+                    <h3>{f.label}</h3>
+                    <pre>{f.value || "—"}</pre>
+                  </section>
+                ))}
+              </div>
+            </section>
 
             {(finding.decided_by || finding.decision_note) && (
               <section className="finding-decision-record">

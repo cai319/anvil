@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1400" viewBox="0 0 1400 1400">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="22" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+    <style>
+      text { font-family: "PingFang SC", "Heiti SC", "STHeiti", sans-serif; }
+      .mono { font-family: "SF Mono", Menlo, monospace; }
+      .label { font-size: 14px; fill: #6b6375; font-weight: 500; }
+      .value { font-size: 22px; fill: #14131a; font-weight: 700; }
+      .value-sm { font-size: 17px; fill: #14131a; font-weight: 600; }
+      .h2 { font-size: 19px; fill: #14131a; font-weight: 800; }
+      .kicker { font-size: 12px; fill: #6b6375; font-weight: 700; letter-spacing: 1.6px; }
+      .body { font-size: 16px; fill: #4b4652; }
+      .muted { fill: #6b6375; }
+    </style>
+  </defs>
+
+  <rect width="1400" height="1400" fill="#14131a"/>
+  <g opacity="0.18" fill="#f7efe3">
+    <circle cx="30" cy="30" r="1.4"/><circle cx="70" cy="30" r="1.4"/><circle cx="110" cy="30" r="1.4"/>
+    <circle cx="30" cy="70" r="1.4"/><circle cx="70" cy="70" r="1.4"/><circle cx="110" cy="70" r="1.4"/>
+  </g>
+
+  <rect x="80" y="50" width="1240" height="1300" rx="0" fill="#f7efe3" filter="url(#shadow)"/>
+
+  <text x="120" y="96" class="kicker">SECURITY FINDING</text>
+  <text x="120" y="136" font-size="30" font-weight="800" fill="#14131a">命令行参数注入导致任意命令执行</text>
+  <g>
+    <rect x="120" y="158" width="74" height="28" rx="5" fill="#b91c1c"/>
+    <text x="157" y="177" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">严重</text>
+    <rect x="204" y="158" width="86" height="28" rx="14" fill="#facc15"/>
+    <text x="247" y="177" text-anchor="middle" font-size="14" font-weight="700" fill="#14131a">待确认</text>
+    <rect x="300" y="158" width="106" height="28" rx="14" fill="#efe4d2"/>
+    <text x="353" y="177" text-anchor="middle" font-size="14" font-weight="600" fill="#4b4652">置信度 88%</text>
+    <rect x="416" y="158" width="86" height="28" rx="14" fill="#efe4d2"/>
+    <text x="459" y="177" text-anchor="middle" font-size="14" font-weight="600" fill="#4b4652">注入</text>
+  </g>
+  <text x="1280" y="120" text-anchor="end" font-size="18" fill="#6b6375">更新 2026-10-30 15:20 · 作者 auditor</text>
+
+  <line x1="120" y1="208" x2="1280" y2="208" stroke="#efe4d2" stroke-width="1.5"/>
+
+  <text x="120" y="244" class="h2">判定摘要</text>
+  <text x="1280" y="244" text-anchor="end" font-size="13" class="muted">5 项短字段 · 一行平铺</text>
+
+  <rect x="120" y="258" width="1160" height="104" rx="12" fill="#fffaf1" stroke="#efe4d2" stroke-width="1.5"/>
+  <text x="142" y="294" class="label">风险类型</text>
+  <text x="142" y="330" class="value">注入</text>
+
+  <line x1="374" y1="278" x2="374" y2="342" stroke="#efe4d2" stroke-width="1"/>
+  <text x="398" y="294" class="label">严重等级</text>
+  <text x="398" y="330" class="value" fill="#b91c1c">严重</text>
+
+  <line x1="606" y1="278" x2="606" y2="342" stroke="#efe4d2" stroke-width="1"/>
+  <text x="630" y="294" class="label">修复优先级</text>
+  <text x="630" y="330" class="value">P0</text>
+
+  <line x1="838" y1="278" x2="838" y2="342" stroke="#efe4d2" stroke-width="1"/>
+  <text x="862" y="294" class="label">问题最终置信度</text>
+  <text x="862" y="330" class="value">88%</text>
+
+  <line x1="1070" y1="278" x2="1070" y2="342" stroke="#efe4d2" stroke-width="1"/>
+  <text x="1094" y="294" class="label">PoC 状态</text>
+  <text x="1094" y="330" class="value-sm" fill="#b45309">未验证</text>
+
+  <text x="120" y="410" class="h2">问题定位</text>
+  <text x="1280" y="410" text-anchor="end" font-size="13" class="muted">3 项长字段 · 文件独占宽列</text>
+
+  <rect x="120" y="424" width="250" height="94" rx="10" fill="#fffaf1" stroke="#efe4d2" stroke-width="1.5"/>
+  <text x="140" y="456" class="label">问题所在模块</text>
+  <text x="140" y="486" class="value-sm">backend/api</text>
+
+  <rect x="384" y="424" width="250" height="94" rx="10" fill="#fffaf1" stroke="#efe4d2" stroke-width="1.5"/>
+  <text x="404" y="456" class="label">问题函数</text>
+  <text x="404" y="486" class="value-sm mono">run_command</text>
+
+  <rect x="648" y="424" width="632" height="94" rx="10" fill="#fffaf1" stroke="#efe4d2" stroke-width="1.5"/>
+  <text x="668" y="456" class="label">文件与行号</text>
+  <text x="668" y="486" class="value-sm mono">backend/anvil/api/tasks.py:120-126</text>
+
+  <text x="120" y="580" class="h2">详细信息</text>
+  <text x="1280" y="580" text-anchor="end" font-size="13" class="muted">长文本保持整行全宽</text>
+
+  <rect x="120" y="594" width="1160" height="156" rx="10" fill="#fffaf1" stroke="#efe4d2" stroke-width="1.5"/>
+  <text x="140" y="624" class="label">攻击路径（数据流）</text>
+  <text x="140" y="656" class="body">消息入口：任务标题 → source: task.title → 传播: api/tasks.py#create_task → sink: subprocess.run(..., shell=True)</text>
+  <text x="140" y="684" class="body">触发条件：任务标题可控且包含 shell 元字符；执行角色可直接运行本机命令。</text>
+  <text x="140" y="712" class="body">影响：以 Anvil 服务账号权限执行任意命令，可读取工作区、密钥与数据库文件。</text>
+
+  <rect x="120" y="764" width="1160" height="156" rx="10" fill="#fffaf1" stroke="#efe4d2" stroke-width="1.5"/>
+  <text x="140" y="794" class="label">推理链（CoT）</text>
+  <text x="140" y="826" class="body">1. 任务标题由外部输入，未做 shell 元字符白名单。</text>
+  <text x="140" y="854" class="body">2. create_task 将标题拼接到命令模板，subprocess 使用 shell=True。</text>
+  <text x="140" y="882" class="body">3. 攻击者可用分号/命令替换执行任意命令；权限继承服务账号。</text>
+
+  <rect x="120" y="934" width="1160" height="156" rx="10" fill="#fffaf1" stroke="#efe4d2" stroke-width="1.5"/>
+  <text x="140" y="964" class="label">修复建议</text>
+  <text x="140" y="996" class="body">改用参数数组并移除 shell=True；对任务标题做白名单校验，禁止控制字符。</text>
+  <text x="140" y="1024" class="body">补充针对 shell 元字符的回归测试，并在任务创建入口增加长度限制。</text>
+  <text x="140" y="1052" class="body">P0：上线前修复；若暂无法修复，先限制任务标题来源并增加审计告警。</text>
+
+  <line x1="120" y1="1130" x2="1280" y2="1130" stroke="#efe4d2" stroke-width="1.5"/>
+  <rect x="120" y="1150" width="136" height="44" rx="7" fill="#facc15" stroke="#14131a" stroke-width="1.5"/>
+  <text x="188" y="1178" text-anchor="middle" font-size="15" font-weight="700" fill="#14131a">确认真实问题</text>
+  <rect x="270" y="1150" width="104" height="44" rx="7" fill="#fffaf1" stroke="#14131a" stroke-width="1.5"/>
+  <text x="322" y="1178" text-anchor="middle" font-size="15" font-weight="600" fill="#14131a">标记误报</text>
+  <rect x="388" y="1150" width="132" height="44" rx="7" fill="#fffaf1" stroke="#b91c1c" stroke-width="1.5"/>
+  <text x="454" y="1178" text-anchor="middle" font-size="15" font-weight="600" fill="#b91c1c">要求重新评估</text>
+
+  <text x="120" y="1248" font-size="14" fill="#6b6375">布局规则：短字段按“判定摘要”等宽平铺；模块/函数/文件放入“问题定位”，文件列宽约为单项的 2.5 倍；</text>
+  <text x="120" y="1272" font-size="14" fill="#6b6375">长文本字段保持整行全宽；底部操作固定可见。窄屏时摘要改为 3+2，定位区改为模块/函数并排、文件换行。</text>
+</svg>
