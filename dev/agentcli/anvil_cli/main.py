@@ -1769,7 +1769,8 @@ FINDING_EPILOG = """\b
   1. anvil finding template > finding.json     生成模板并补全所有必填字段
   2. anvil finding add --file finding.json --submit
   3. anvil finding list                        检查是否还有 draft/missing 字段
-  4. anvil finding complete --summary "未发现安全问题；已覆盖 X/Y/Z"
+  4. 等整个 workflow（所有切片/步骤）完成后：
+     anvil finding complete --summary "未发现安全问题；已覆盖 X/Y/Z"
   5. human 在 Web「问题板」页签逐条确认真实/误报
 
 示例:
@@ -1781,6 +1782,9 @@ FINDING_EPILOG = """\b
   · 只有 task reviewer 能写；human 不能代填，使用页面做真实性确认。
   · PoC 可豁免，但 poc_status=not_verified/not_applicable 时必须在 poc 写明原因。
   · 所有字段提交时必填；缺字段返回 422 与 missing_fields。
+  · 工作流步骤 run 只记录本步骤 findings，不要执行 finding complete；
+    等整个 workflow（所有切片/步骤）完成后系统会唤醒问题板收口 run。
+  · workflow 仍在 running 时 complete 返回 409；后续切片写入已提前完成的问题板会自动重开。
   · 问题板完成且所有 finding 已确认/误报后，任务才能最终通过。
 """
 

@@ -339,6 +339,41 @@ def test_issue_board_requires_reviewer_in_workflow(conn):
             {"id": "S1", "title": "实现", "role": "dev"}]})
 
 
+def test_issue_board_cannot_complete_while_workflow_running(conn):
+    """多切片/多步骤执行中不得提前 complete，否则后续切片无法写入 finding。"""
+    _issue_board_task(conn)
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "安全审计", "role": "auditor"}]})
+    with pytest.raises(ConflictError):
+        findings_service.complete_board(conn, "T1", "auditor", "第一轮就收口")
+
+    conn.execute("UPDATE workflows SET status='done' WHERE id=?", (wf["id"],))
+    conn.commit()
+    board = findings_service.complete_board(conn, "T1", "auditor", "全部切片完成")
+    assert board["status"] == "completed"
+
+
+def test_late_finding_reopens_prematurely_completed_board(conn):
+    """历史/异常数据：流程未完成但问题板已 completed，写入 finding 时自动重开。"""
+    _issue_board_task(conn)
+    now = now_iso()
+    conn.execute(
+        "UPDATE task_finding_boards SET status='completed', summary='过早完成', "
+        "completed_by='auditor', completed_at=?, updated_at=? WHERE task_id='T1'",
+        (now, now))
+    conn.commit()
+
+    finding = findings_service.create_finding(
+        conn, "T1", "auditor", {"title": "第二片新发现"})
+    assert finding["status"] == "draft"
+    assert findings_service.board_status(conn, "T1") == "in_progress"
+    row = conn.execute(
+        "SELECT reopened_by, summary FROM task_finding_boards WHERE task_id='T1'"
+    ).fetchone()
+    assert row["reopened_by"] == "auditor"
+    assert row["summary"] == "过早完成"
+
+
 def test_final_review_notification_uses_real_sender(conn):
     """@human 的最终评审通知由 planner/Cindy 发出，human 才能 @ 回去答复。"""
     _insert_role(conn, "cindy", "onboarding")

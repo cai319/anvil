@@ -297,7 +297,7 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
             parts.append(hint)
         parts.append(render.STEP_PROTOCOL)
         if _is_finding_reviewer(conn, task, run.get("role_slug")):
-            parts.append(render.FINDING_PROTOCOL)
+            parts.append(render.STEP_FINDING_PROTOCOL)
         return "\n\n".join(p for p in parts if p)
     # 规划 run（Cindy / planner）：不能因为任务已有 workflow 就被误判为回复。
     from ..services import planning as planning_service
@@ -337,7 +337,7 @@ def _protocol_for_run(conn: sqlite3.Connection, run: dict) -> str:
         return render.FINDING_PROTOCOL
     if run.get("step_id"):
         if _is_finding_reviewer(conn, task, run.get("role_slug")):
-            return render.STEP_PROTOCOL + "\n\n" + render.FINDING_PROTOCOL
+            return render.STEP_PROTOCOL + "\n\n" + render.STEP_FINDING_PROTOCOL
         return render.STEP_PROTOCOL
     from ..services import planning as planning_service
     if prompt.startswith(planning_service.PLAN_MARKER):

@@ -130,7 +130,8 @@ STEP_PROTOCOL = (
 ) + "\n\n" + ATTACHMENT_BUDGET
 
 # 问题板（Issue Board）：reviewer 在任务内填写结构化安全 findings。
-FINDING_PROTOCOL = (
+# 写入规则由“步骤 run”和“问题板收口 run”共用；complete 只在收口 run 中允许。
+FINDING_WRITE_PROTOCOL = (
     "你在处理本任务的安全问题板（Issue Board）。你是本任务的 reviewer 之一，"
     "只有 reviewer 能写入 finding；不要用 comment 代替结构化记录。\n"
     "## 写入方式\n"
@@ -144,13 +145,26 @@ FINDING_PROTOCOL = (
     "· attack_path 要写数据流：消息/命令入口 → source 点 → 传播 → sink 点；"
     "reasoning_chain 写完整推理链，不要只给结论。\n"
     "· 逐条记录，不要合并多个问题；修改草稿用 `anvil finding update <id> --file ...`，"
-    "提交用 `anvil finding submit <id>`。\n"
-    "## 完成问题板\n"
+    "提交用 `anvil finding submit <id>`。"
+)
+
+FINDING_PROTOCOL = FINDING_WRITE_PROTOCOL + (
+    "\n## 完成问题板\n"
     "· 所有 finding 提交后执行 `anvil finding complete --task $ANVIL_TASK_ID "
     "--summary \"...\"`；没有发现也要写明“未发现安全问题”及范围/依据。\n"
     "· 完成问题板后，任务会进入 human 最终评审；human 可能退回并要求你与其他角色复评，"
     "此时更新/补证并重新提交，再 complete。\n"
     "· 本 run 只做问题板工作：不要 claim/submit 普通任务，也不要修改 workflow 结构。"
+) + "\n\n" + ATTACHMENT_BUDGET
+
+# 工作流步骤里的 reviewer：只记录本步骤发现，不允许提前收口。
+STEP_FINDING_PROTOCOL = FINDING_WRITE_PROTOCOL + (
+    "\n## 当前 run 的限制（工作流步骤）\n"
+    "· 不要执行 `anvil finding complete`。问题板必须等整个 workflow（所有切片/步骤）"
+    "完成后收口；提前 complete 会阻止后续切片继续写入。\n"
+    "· 本 run 只记录/更新本步骤发现的 finding；没有发现也继续完成本步骤。\n"
+    "· 若问题板已被提前完成，写入新 finding 时系统会自动重新打开；不要跳过记录。\n"
+    "· 继续完成当前工作流步骤，不要修改 workflow 结构或角色分配。"
 ) + "\n\n" + ATTACHMENT_BUDGET
 
 # P1-0 计划先行：规划者（leader）的专用协议。规划 → 草案 → @human → 挂起；不亲自实现。

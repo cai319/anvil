@@ -231,6 +231,9 @@ anvil finding delete <fid> [--task <id>]
   `poc` 必须写明豁免原因。其余 finding 字段一律必填。
 - 所有条目提交后执行 `finding complete --summary`（即使没有问题也要写明范围与结论），
   任务才会进入 human 最终评审；human 逐条确认前任务 `review` 会被 409 拒绝。
+- **workflow 仍在 running 时不要 complete**：工作流步骤 run 只记录本步骤 findings，
+  等所有切片/步骤结束后系统会唤醒收口 run；提前 complete 返回 409。若问题板被提前完成，
+  后续切片写入 finding 会自动重开问题板，不会阻断执行。
 - human 在页面「要求重新评估」后，reviewer 会收到 `[anvil:findings]` run：
   用 `finding list/show` 读取意见，`finding update` 补证后 `finding submit`，再 `finding complete`。
 - 设计细节见 `docs/issue-board.md`。

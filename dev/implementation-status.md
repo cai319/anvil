@@ -530,8 +530,10 @@
   board `in_progress → completed`；submit 校验全部必填字段，PoC 可标记
   `not_verified`/`not_applicable` 但必须写原因。
 - 任务最终闸门：问题板必须 completed 且所有 finding 已确认/误报，否则
-  `POST /tasks/{id}/review {approve:true}` 返回 409。workflow 与问题板完成顺序无关，
-  `finalize_task_review_if_ready` 覆盖「问题板后完成」路径。
+  `POST /tasks/{id}/review {approve:true}` 返回 409。workflow 仍在 running 时
+  `finding complete` 返回 409，避免多切片任务第一轮提前收口；workflow 完成后
+  `finalize_task_review_if_ready` 负责推进到 `in_review`。历史数据中已提前 completed
+  的问题板，在后续切片写 finding 时会自动重开。
 - human 要求重新评估/推翻结论/重开问题板时，任务回 `in_progress`，reviewer 收到
   `[anvil:findings]` 专用 run 并可更新 finding；inbox 新增 `finding` 项。
 - CLI：`anvil finding template|add|update|submit|list|show|complete|delete`、
@@ -541,14 +543,14 @@
   支持 `?tab=findings&finding=<id>` 深链。
 - 文档：`docs/issue-board.md`、`docs/cli-reference.md` §5.2、README。
 - 测试：`tests/test_migrations_issue_board.py`（1）、
-  `tests/api/test_issue_board_api.py`（9）、`tests/test_workflow.py` 新增 3 条顺序/覆盖用例、
-  CLI 契约新增 finding/reviewers/--issue-board 用例。
+  `tests/api/test_issue_board_api.py`（9）、`tests/test_workflow.py` 新增 5 条顺序/覆盖/
+  提前收口/自动重开用例、CLI 契约新增 finding/reviewers/--issue-board 用例。
 
 ## 验证
 
 ```bash
 cd dev
-python3 -m pytest tests/ -q          # 641 passed, 57 skipped（2026-10-30；设 ANVIL_BIN 后 698 passed）
+python3 -m pytest tests/ -q          # 643 passed, 57 skipped（2026-10-30；设 ANVIL_BIN 后 700 passed）
 cd frontend && npm run build         # tsc + vite build
 ```
 

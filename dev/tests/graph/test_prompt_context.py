@@ -109,12 +109,14 @@ def test_reviewer_step_gets_finding_protocol(conn):
                                        step_id="S1", workflow_id="wf-1")
     developer = runs_service.create_run(conn, "developer", "T1", prompt="步骤说明",
                                         step_id="S2", workflow_id="wf-1")
-    assert "anvil finding add" in nodes._prompt_for_run(
+    reviewer_prompt = nodes._prompt_for_run(
         conn, reviewer, tasks_service.get(conn, "T1"))
+    assert "anvil finding add" in reviewer_prompt
+    assert "不要执行 `anvil finding complete`" in reviewer_prompt
     assert "anvil finding add" not in nodes._prompt_for_run(
         conn, developer, tasks_service.get(conn, "T1"))
     assert nodes._protocol_for_run(conn, reviewer) == (
-        render.STEP_PROTOCOL + "\n\n" + render.FINDING_PROTOCOL)
+        render.STEP_PROTOCOL + "\n\n" + render.STEP_FINDING_PROTOCOL)
 
 
 def test_step_prompt_includes_knowledge_hint(conn, tmp_path, monkeypatch):

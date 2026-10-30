@@ -13,7 +13,7 @@
 | 启用问题板 | 人类（创建任务 / PATCH 任务） | Web 新建任务、`POST/PATCH /tasks` |
 | 指定 reviewer | planner/Cindy、onboarding 助理、human | `POST /tasks/{id}/reviewers`、`anvil task reviewers` |
 | 创建/编辑/提交 finding | `task_reviewers`（Agent，含其 run token） | `anvil finding add/update/submit` |
-| 标记问题板完成 | `task_reviewers` | `anvil finding complete --summary` |
+| 标记问题板完成 | `task_reviewers`（workflow 已结束） | `anvil finding complete --summary` |
 | 确认/误报/要求重评/重新打开 | 仅人类（`require_human`） | Web 问题板抽屉 |
 | 最终任务通过 | 人类，且问题板 completed + 所有 finding 已决策 | Web 评审横幅、`POST /tasks/{id}/review` |
 
@@ -68,19 +68,21 @@ draft ──submit──▶ submitted ──┬─ confirm ───────
 问题板：
 
 ```
-in_progress ──reviewer complete（无 draft/changes_requested + summary）──▶ completed
-      ▲                                                                       │
-      └────────── human request-changes / reopen board ◀──────────────────────┘
+in_progress ──reviewer complete（workflow 已结束 + 无 draft/changes_requested + summary）──▶ completed
+      ▲                                                                                       │
+      └────────── human request-changes / reopen board / 后续 finding 写入自动重开 ◀──────────┘
 ```
 
 任务闸门：
 
 - 问题板 `completed` 且所有 finding 为 `confirmed` / `false_positive` 时，
   `POST /tasks/{id}/review {approve:true}` 才允许通过。
-- workflow 与问题板完成顺序无关：
-  - workflow 先完成 → 任务保持 `in_progress`，系统 @reviewer 并创建 `[anvil:findings]` run；
-    问题板完成后 `finalize_task_review_if_ready` 把任务推进到 `in_review`。
-  - 问题板先完成 → workflow 完成时 `_finalize_if_done` 直接推进到 `in_review`。
+- **workflow 仍在 running 时不得 complete 问题板**（返回 409）。多切片/多步骤任务必须
+  等所有切片执行完，`_finalize_if_done` 将 workflow 置为 done 并创建 `[anvil:findings]`
+  run 后，reviewer 再收口；这样后续切片不会因为问题板提前完成而写不进 finding。
+- 历史或异常数据中问题板已提前 completed、但任务仍在 `todo/in_progress` 时，
+  后续切片写入 finding 会自动把问题板重开（`finding_board.auto_reopen` 审计），
+  不阻断 workflow。
 - 空问题板也必须由 reviewer 执行 `finding complete --summary "未发现安全问题…"`，
   避免「没填 = 没问题」。
 

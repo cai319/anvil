@@ -240,6 +240,33 @@ def ensure_board(conn: sqlite3.Connection, task_id: str) -> dict:
     }
 
 
+def _writable_board(conn: sqlite3.Connection, task_id: str, role: str) -> dict:
+    """允许 reviewer 继续写入；流程未完成时自动纠正“过早 complete”。
+
+    loop/切片工作流中，reviewer 可能在第一片就执行了 finding complete。
+    只要任务还没进入最终评审（in_review）或终态，后续切片写入 finding 时应
+    自动把问题板重新打开，而不是让整个工作流失败。
+    """
+    board = ensure_board(conn, task_id)
+    if board["status"] != "completed":
+        return board
+    task = _task(conn, task_id)
+    if task is None or task["status"] not in ("todo", "in_progress"):
+        raise ConflictError("issue board is completed; reopen it before adding findings")
+    now = now_iso()
+    conn.execute(
+        "UPDATE task_finding_boards SET status='in_progress', reopened_by=?, "
+        "reopened_at=?, updated_at=? WHERE task_id=?",
+        (role, now, now, task_id),
+    )
+    _audit(conn, role, task_id, "finding_board.auto_reopen",
+           {"reason": "finding write after premature completion"})
+    conn.commit()
+    _comment(conn, task_id, role,
+             "问题板在流程未完成时被提前标记完成；写入新 finding 前已自动重新打开。")
+    return ensure_board(conn, task_id)
+
+
 def get_finding(conn: sqlite3.Connection, finding_id: str,
                 task_id: str | None = None) -> dict | None:
     row = conn.execute(
@@ -297,9 +324,7 @@ def create_finding(conn: sqlite3.Connection, task_id: str, role: str,
                    step_id: str | None = None, run_id: str | None = None) -> dict:
     _enabled_task(conn, task_id)
     _require_reviewer(conn, task_id, role)
-    board = ensure_board(conn, task_id)
-    if board["status"] != "in_progress":
-        raise ConflictError("issue board is completed; reopen it before adding findings")
+    _writable_board(conn, task_id, role)
     fields = _validate_partial(payload)
     if not fields.get("title"):
         raise FindingValidationError(["title"], ["问题标题不能为空"])
@@ -336,9 +361,7 @@ def update_finding(conn: sqlite3.Connection, task_id: str, finding_id: str,
     if finding["status"] not in ("draft", "changes_requested"):
         raise ConflictError(
             f"finding is {finding['status']}; only draft/changes_requested can be edited")
-    board = ensure_board(conn, task_id)
-    if board["status"] != "in_progress":
-        raise ConflictError("issue board is completed; reopen it before editing findings")
+    _writable_board(conn, task_id, role)
     fields = _validate_partial(payload)
     if not fields:
         return finding
@@ -362,9 +385,7 @@ def submit_finding(conn: sqlite3.Connection, task_id: str, finding_id: str,
         raise LookupError(finding_id)
     if finding["status"] not in ("draft", "changes_requested"):
         raise ConflictError(f"finding is {finding['status']}; cannot submit")
-    board = ensure_board(conn, task_id)
-    if board["status"] != "in_progress":
-        raise ConflictError("issue board is completed; reopen it before submitting findings")
+    _writable_board(conn, task_id, role)
     _validate_submit(finding)
     now = now_iso()
     conn.execute(
@@ -510,6 +531,14 @@ def complete_board(conn: sqlite3.Connection, task_id: str, role: str,
     board = ensure_board(conn, task_id)
     if board["status"] == "completed":
         return board
+    running = conn.execute(
+        "SELECT id FROM workflows WHERE task_id=? AND status='running' "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1", (task_id,)
+    ).fetchone()
+    if running is not None:
+        raise ConflictError(
+            "workflow is still running; keep recording findings and complete the issue "
+            "board only after all slices/steps finish")
     pending = conn.execute(
         "SELECT COUNT(*) AS n FROM task_findings WHERE task_id=? "
         "AND status IN ('draft','changes_requested')", (task_id,)
