@@ -2761,3 +2761,25 @@ details.replay-event-body > div { margin-top: 4px; }
   padding: 5px 9px;
 }
 .channels-page .channel-task-search input { padding: 4px 9px; }
+
+/* finding 详情抽屉：写在无 layer 的 type-scale 中，才能覆盖本文件里的 .modal 宽度。 */
+.finding-drawer.modal {
+  width: 90vw;
+  max-width: 96vw;
+  max-height: none;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  overflow: hidden;
+  box-shadow: -12px 0 32px rgba(20, 19, 26, 0.28);
+}
+.finding-drawer-head {
+  margin: 0;
+  padding: 18px 26px 12px;
+  border-bottom: 1px solid var(--paper-2);
+  background: var(--paper);
+}
+@media (max-width: 760px) {
+  .finding-drawer.modal { width: 100vw; max-width: 100vw; }
+  .finding-drawer-head { padding: 14px 16px 10px; }
+}
