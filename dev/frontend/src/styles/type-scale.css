@@ -2764,8 +2764,8 @@ details.replay-event-body > div { margin-top: 4px; }
 
 /* finding 详情抽屉：写在无 layer 的 type-scale 中，才能覆盖本文件里的 .modal 宽度。 */
 .finding-drawer.modal {
-  width: 90vw;
-  max-width: 96vw;
+  width: max(480px, 56vw);
+  max-width: 60vw;
   max-height: none;
   padding: 0;
   border: 0;
