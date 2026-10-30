@@ -1011,15 +1011,36 @@ export function TaskDetail({ id }: { id: string }) {
 
 
   // 描述被 6 行截断时显示“展开全文”；用实际布局高度判断，避免按字符数误判。
+  // 依赖 tab/panel.collapsed：侧栏在非会话页签或折叠时不在 DOM/不可见，
+  // 仅在 description 变化时测量会漏掉“之后切回会话页签”的场景。
   useEffect(() => {
+    if (tab !== "chat" || !task?.description) {
+      if (!task?.description) setDescOverflow(false);
+      return;
+    }
     const el = descRef.current;
     if (!el) return;
-    const check = () => setDescOverflow(el.scrollHeight > el.clientHeight + 1);
+    let frame = 0;
+    let alive = true;
+    const check = () => {
+      const node = descRef.current;
+      if (!node) return;
+      // 侧栏折叠/尚未布局时保持上一次结果，避免把“看不见”误判成“没有溢出”。
+      if (node.clientHeight === 0 && node.scrollHeight === 0) return;
+      setDescOverflow(node.scrollHeight > node.clientHeight + 1);
+    };
     check();
+    // 字体加载/首帧布局可能晚于 effect，再补测一次。
+    frame = window.requestAnimationFrame(check);
+    document.fonts?.ready.then(() => { if (alive) check(); }).catch(() => {});
     const ro = new ResizeObserver(check);
     ro.observe(el);
-    return () => ro.disconnect();
-  }, [task?.description, descOpen]);
+    return () => {
+      alive = false;
+      window.cancelAnimationFrame(frame);
+      ro.disconnect();
+    };
+  }, [task?.description, descOpen, tab, panel.collapsed]);
 
   const filteredTimeline = timeline.filter((ev) => {
     if (tlKind === "all") return true;
