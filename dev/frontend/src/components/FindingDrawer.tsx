@@ -217,7 +217,11 @@ export function FindingDrawer({ taskId, findingId, schema, onClose, onChanged }:
                 {finding.decision_note && <p className="finding-decision-note">{finding.decision_note}</p>}
               </section>
             )}
+          </div>
+        )}
 
+        {finding && (actionable || decided) && (
+          <div className="finding-drawer-footer">
             {actionable && (
               <div className="finding-decisions">
                 <button className="primary" disabled={busy} onClick={confirm}>确认真实问题</button>
