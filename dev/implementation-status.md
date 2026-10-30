@@ -548,7 +548,7 @@
 
 ```bash
 cd dev
-python3 -m pytest tests/ -q          # 640 passed, 55 skipped（2026-10-30；设 ANVIL_BIN 后 695 passed）
+python3 -m pytest tests/ -q          # 640 passed, 57 skipped（2026-10-30；设 ANVIL_BIN 后 697 passed）
 cd frontend && npm run build         # tsc + vite build
 ```
 

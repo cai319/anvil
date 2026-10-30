@@ -150,6 +150,30 @@ def test_command_maps_to_endpoint(name, mock_backend):
 
 
 @pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+def test_version_option_prints_package_version():
+    """--version 不依赖后端，直接输出版本号。"""
+    from pathlib import Path
+
+    version = (Path(__file__).parents[2] / "VERSION").read_text().strip()
+    env = {**os.environ, "ANVIL_ENDPOINT": "http://127.0.0.1:1"}
+    r = subprocess.run([ANVIL_BIN, "--version"], env=env,
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == EXIT["ok"], r.stderr
+    assert version in r.stdout, (version, r.stdout)
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+def test_unknown_task_action_lists_reviewers():
+    """未知动作提示必须列出全部动作，包括新加的 reviewers。"""
+    env = {**os.environ, "ANVIL_ENDPOINT": "http://127.0.0.1:1",
+           "ANVIL_TASK_ID": "T-0001"}
+    r = subprocess.run([ANVIL_BIN, "task", "bogus"], env=env,
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == EXIT["usage"]
+    assert "reviewers" in r.stderr, r.stderr
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
 def test_unknown_knowledge_action_shows_supported_actions():
     """拼错 action 时给出可用动作，避免 Agent 只拿到一句 unknown 后盲试。"""
     env = {**os.environ, "ANVIL_ENDPOINT": "http://127.0.0.1:1"}
@@ -194,11 +218,15 @@ def test_typer_usage_error_appends_hint():
 def test_help_contains_rules_and_examples():
     """--help 必须能直接指导执行，而不是只列参数名。"""
     cases = [
-        (["task", "-h"], ["示例:", "knowledge-write", "anvil task create", "reviewers"]),
+        (["task", "-h"], ["示例:", "knowledge-write", "anvil task create", "reviewers",
+                          "--issue-board", "anvil task reviewers"]),
         (["step", "plan", "-h"], ["plan.json", "slices", "不得指定角色"]),
         (["role", "-h"], ["role list", "role expand"]),
         (["workflow", "revise", "-h"], ["revision.json", "--preview", "requires_restart"]),
-        (["finding", "-h"], ["finding add", "finding complete", "问题板"]),
+        (["finding", "-h"], ["finding add", "finding complete", "问题板",
+                             "anvil finding template"]),
+        (["-h"], ["anvil finding template", "anvil task reviewers", "--version",
+                  "问题板"]),
     ]
     for args, needles in cases:
         r = subprocess.run([ANVIL_BIN, *args], capture_output=True,

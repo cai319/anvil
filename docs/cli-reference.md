@@ -6,6 +6,7 @@
 
 - 入口：`anvil`
 - 后端默认：`http://127.0.0.1:7317`
+- 版本：`anvil --version`（不连接后端）
 - 所有命令支持 `-h` / `--help`
 - 文档与实现不一致时，以 `anvil <command> -h` 为准
 
@@ -53,6 +54,7 @@
 
 | 命令 | 用途 |
 |---|---|
+| `anvil --version` | 查看 CLI 版本 |
 | `anvil task ...` | 任务：列表/创建/认领/评论/提交/归档/任务知识 |
 | `anvil step ...` | 工作流步骤：show/plan/submit/decide/escalate/packet |
 | `anvil finding ...` | 问题板：安全 finding 的填写/提交/完成（reviewer） |

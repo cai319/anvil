@@ -12,6 +12,11 @@ from typing import Any
 import httpx
 import typer
 
+try:
+    from . import __version__
+except ImportError:  # pragma: no cover - 支持直接执行 main.py 的开发场景
+    __version__ = "unknown"
+
 try:  # Typer 0.27+ 内置 click；旧版本仍用外部 click
     from typer._click.core import Exit as ClickExit
     from typer._click.exceptions import UsageError as ClickUsageError
@@ -31,8 +36,15 @@ MAIN_EPILOG = """\b
   anvil step submit <wf> <step> --summary "完成"
   anvil role list                     查看已有角色
 
+问题板:
+  anvil finding template                      生成 finding JSON 模板与枚举
+  anvil finding add --file f.json --submit    reviewer 提交一条 finding
+  anvil finding complete --summary "..."      完成问题板，进入 human 最终评审
+  anvil task reviewers <id> --assignees r     Cindy/human 指定 reviewer
+
 规则:
   · 工作流步骤用 anvil step，不要用 task claim/submit 代替。
+  · 问题板 finding 只有 task reviewer 能写；human 在 Web 逐条确认真实/误报。
   · 身份由 ANVIL_TOKEN / ANVIL_TASK_ID 环境变量决定；不要伪造角色。
   · 删除、审批、重置等人类操作需要 human token。
   · 退出码: 0 成功 / 1 通用失败 / 2 参数错误 / 3 状态冲突 / 4 无权限。
@@ -45,7 +57,8 @@ TASK_EPILOG = """\b
 动作:
   list [--type T] [--tag T]             列出任务
   show <id>                             查看任务详情
-  create --title "..." [--assignee r] [--issue-board]  创建任务或子任务
+  create --title "..." [--assignee r | --assignees a,b] [--issue-board]
+                                        创建任务或子任务
   assign <id> --assignees a,b           追加角色；已有 Roster 时自动提案 @human
   reviewers <id> --assignees a,b        指定问题板 reviewer（planner/onboarding/human）
   claim | unclaim <id>                  认领/释放（工作流步骤不要 claim）
@@ -59,6 +72,8 @@ TASK_EPILOG = """\b
 
 示例:
   anvil task create "修复登录超时" --assignee developer --workspace W-1
+  anvil task create "安全审计" --issue-board --assignees auditor
+  anvil task reviewers $ANVIL_TASK_ID --assignees auditor
   anvil task comment $ANVIL_TASK_ID "已完成接口联调"
   anvil task mention $ANVIL_TASK_ID --to tester "请复跑回归"
 
@@ -185,6 +200,21 @@ class GuidedTyper(typer.Typer):
 
 app = GuidedTyper(help="Anvil 本地多 Agent 编排服务 CLI", no_args_is_help=True,
                   context_settings=HELP_CTX, epilog=MAIN_EPILOG)
+
+
+def _show_version(value: bool) -> None:
+    if value:
+        typer.echo(f"anvil {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    version: bool = typer.Option(
+        False, "--version", callback=_show_version, is_eager=True,
+        help="显示 CLI 版本并退出"),
+) -> None:
+    """Anvil 本地多 Agent 编排服务 CLI。"""
 
 
 def _usage_error(message: str, hint: str | None = None) -> None:
@@ -633,8 +663,8 @@ def task_cmd(
     else:
         _usage_error(
             f"unknown task action: {action}",
-            "可用动作: list/show/create/assign/claim/unclaim/heartbeat/submit/"
-            "comment/mention/cancel/reopen/delete/block/archive/unarchive/"
+            "可用动作: list/show/create/assign/reviewers/claim/unclaim/heartbeat/"
+            "submit/comment/mention/cancel/reopen/delete/block/archive/unarchive/"
             "knowledge-list/knowledge-write/knowledge-delete。运行 `anvil task -h` 查看示例。")
     result = _call(method, path, payload, params)
     if action == "assign" and isinstance(result, dict) \

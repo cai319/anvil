@@ -76,4 +76,4 @@ Cindy 在规划时从已选角色中指定 reviewer，并保证 workflow 覆盖�
 ## 当前实现状态
 
 详见 `implementation-status.md`（各里程碑的已实现 / 未实现清单）。当前自动化测试：
-**640 passed + 55 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；未设置时相关用例跳过）。
+**640 passed + 57 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；未设置时相关用例跳过）。
