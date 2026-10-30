@@ -1030,7 +1030,7 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
 .finding-drawer.modal {
   display: flex;
   flex-direction: column;
-  width: clamp(780px, 82vw, 1320px);
+  width: min(1600px, 90vw);
   max-width: 96vw;
   height: 100%;
   max-height: none;
