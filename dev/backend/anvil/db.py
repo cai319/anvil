@@ -756,6 +756,70 @@ CREATE TABLE IF NOT EXISTS notes (
 );
 """
 
+# 问题板（Issue Board）：任务级安全 findings、审核者与完成状态。
+# 放到独立 SCHEMA，既有库通过 _migrate_issue_board_v1 幂等创建。
+ISSUE_BOARD_SCHEMA = """
+CREATE TABLE IF NOT EXISTS task_reviewers (
+    task_id   TEXT NOT NULL,
+    role_slug TEXT NOT NULL,
+    source    TEXT NOT NULL DEFAULT 'human',
+    added_at  TEXT NOT NULL,
+    PRIMARY KEY (task_id, role_slug)
+);
+
+CREATE TABLE IF NOT EXISTS task_finding_boards (
+    task_id      TEXT PRIMARY KEY,
+    status       TEXT NOT NULL DEFAULT 'in_progress',  -- in_progress|completed
+    summary      TEXT,
+    created_at   TEXT NOT NULL,
+    completed_by TEXT,
+    completed_at TEXT,
+    reopened_by  TEXT,
+    reopened_at  TEXT,
+    updated_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS task_findings (
+    id               TEXT PRIMARY KEY,
+    task_id          TEXT NOT NULL,
+    author_role      TEXT NOT NULL,
+    workflow_id      TEXT,
+    step_id          TEXT,
+    run_id           TEXT,
+    title            TEXT NOT NULL DEFAULT '',
+    risk_type        TEXT NOT NULL DEFAULT '',
+    severity         TEXT NOT NULL DEFAULT '',
+    module           TEXT NOT NULL DEFAULT '',
+    function_name    TEXT NOT NULL DEFAULT '',
+    file_path        TEXT NOT NULL DEFAULT '',
+    line_numbers     TEXT NOT NULL DEFAULT '',
+    preconditions    TEXT NOT NULL DEFAULT '',
+    reasoning_chain  TEXT NOT NULL DEFAULT '',
+    risk_description TEXT NOT NULL DEFAULT '',
+    attack_path      TEXT NOT NULL DEFAULT '',
+    trigger_point    TEXT NOT NULL DEFAULT '',
+    poc_status       TEXT NOT NULL DEFAULT '',  -- provided|not_verified|not_applicable
+    poc              TEXT NOT NULL DEFAULT '',
+    fix_priority     TEXT NOT NULL DEFAULT '',  -- P0|P1|P2|P3
+    fix_suggestion   TEXT NOT NULL DEFAULT '',
+    confidence       INTEGER NOT NULL DEFAULT 0, -- 0..100
+    status           TEXT NOT NULL DEFAULT 'draft',
+    -- draft|submitted|confirmed|false_positive|changes_requested
+    decided_by       TEXT,
+    decided_at       TEXT,
+    decision_note    TEXT,
+    version          INTEGER NOT NULL DEFAULT 1,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    submitted_at     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_findings_task_status
+    ON task_findings(task_id, status, severity, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_reviewers_role
+    ON task_reviewers(role_slug);
+"""
+
 # FTS5 is M4 (memory search); create it now if the build supports it, otherwise
 # search degrades to LIKE.
 FTS_SCHEMA = (
@@ -1086,6 +1150,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _reset_legacy_token_usage_once(conn)
     _migrate_channel_knowledge_v1(conn)
     _migrate_channel_knowledge_harvest_v2(conn)
+    _migrate_issue_board_v1(conn)
     _migrate_knowledge_hits_v1(conn)
     conn.commit()
 
@@ -1284,6 +1349,21 @@ def _migrate_channel_knowledge_harvest_v2(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
     _set_setting(conn, "schema.workspace_knowledge_harvest_v2", "1")
+    conn.commit()
+
+
+def _migrate_issue_board_v1(conn: sqlite3.Connection) -> None:
+    """问题板：tasks 开关 + reviewers/board/findings 表。"""
+    if _setting(conn, "schema.issue_board_v1"):
+        return
+    try:
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN issue_board_enabled "
+            "INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    conn.executescript(ISSUE_BOARD_SCHEMA)
+    _set_setting(conn, "schema.issue_board_v1", "1")
     conn.commit()
 
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type KnowledgeKind, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Task, type TaskKnowledge, type TaskLeases, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight, type WorkspaceKnowledge } from "../api/client";
+import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type FindingSummary, type KnowledgeKind, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Task, type TaskKnowledge, type TaskLeases, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight, type WorkspaceKnowledge } from "../api/client";
 import {
   AUTHORITY_LABEL,
   KNOWLEDGE_CARD_FIELDS,
@@ -20,6 +20,7 @@ import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
 import { confirmDialog, promptDialog } from "../components/dialogs";
 import { GateReviewDrawer } from "../components/GateReviewDrawer";
+import { TaskFindingBoard } from "./TaskFindingBoard";
 
 const stepAuthority = (st: WorkflowStep): "ai" | "human" | "joint" =>
   st.decision_authority
@@ -778,7 +779,18 @@ function TaskKnowledgePanel({ task }: { task: Task }) {
   );
 }
 
+type TaskTab = "chat" | "workflow" | "findings" | "subtasks" | "runtime";
+
+function readInitialTaskRoute(): { tab: TaskTab; finding: string | null } {
+  const params = new URLSearchParams(window.location.search);
+  const rawTab = params.get("tab");
+  const tab: TaskTab = rawTab === "workflow" || rawTab === "findings"
+    || rawTab === "subtasks" || rawTab === "runtime" ? rawTab : "chat";
+  return { tab, finding: params.get("finding") };
+}
+
 export function TaskDetail({ id }: { id: string }) {
+  const initialRoute = useRef(readInitialTaskRoute()).current;
   const [task, setTask] = useState<Task | null>(null);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
@@ -800,7 +812,8 @@ export function TaskDetail({ id }: { id: string }) {
   const [gone, setGone] = useState(false);
   const [drafts, setDrafts] = useState<BoardDraft[]>([]);
   const [dispatchNote, setDispatchNote] = useState<string | null>(null);
-  const [tab, setTab] = useState<"chat" | "workflow" | "subtasks" | "runtime">("chat");
+  const [tab, setTab] = useState<TaskTab>(initialRoute.tab);
+  const [findingSummary, setFindingSummary] = useState<FindingSummary | null>(null);
   const [tlKind, setTlKind] = useState<"all" | "dialog" | "mention" | "step" | "decision" | "run" | "review">("all");
   const [tlLimit, setTlLimit] = useState(40);
   const threadRef = useRef<HTMLElement>(null);
@@ -864,6 +877,12 @@ export function TaskDetail({ id }: { id: string }) {
         setTask(t);
         setTimeline(tl);
         setGone(false);
+        if (t.issue_board_enabled) {
+          api.getFindingSummary(id).then(setFindingSummary)
+            .catch(() => setFindingSummary(null));
+        } else {
+          setFindingSummary(null);
+        }
       })
       .catch((e) => {
         // 任务被删除：停止轮询（不再被 SSE tick 唤醒），给出可返回大厅的提示
@@ -936,6 +955,24 @@ export function TaskDetail({ id }: { id: string }) {
       setMention(null);  // 离开会话页签时关闭联想
     }
   }, [id, tab, tlKind, scrollToBottom]);
+
+  const selectTab = (next: TaskTab) => {
+    setTab(next);
+    try {
+      const url = new URL(window.location.href);
+      if (next === "chat") url.searchParams.delete("tab");
+      else url.searchParams.set("tab", next);
+      url.searchParams.delete("finding");
+      window.history.replaceState({}, "", url);
+    } catch {
+      // 地址栏同步失败不影响页签切换
+    }
+  };
+
+  // 问题板被关闭或任务未启用时，深链到 findings 的回退。
+  useEffect(() => {
+    if (tab === "findings" && task && !task.issue_board_enabled) setTab("chat");
+  }, [tab, task?.issue_board_enabled]);
 
   // 新消息到达：只有用户本来就在底部（或首次加载）时才跟随滚动；
   // 用户主动向上翻看历史时不打断。
@@ -1451,25 +1488,58 @@ export function TaskDetail({ id }: { id: string }) {
       </div>
 
       {/* 待评审横幅（HITL 醒目提示） */}
-      {task.status === "in_review" && (
-        <div className="review-banner">
-          <span className="review-banner-text"><Icon name="alert" /> 待人工评审 —— 请确认产出后「通过」或「驳回」</span>
-          <button className="primary" onClick={() => act(() => api.reviewTask(id, true))} disabled={busy}>通过</button>
-          <button className="danger" onClick={() => act(() => api.reviewTask(id, false))} disabled={busy}>驳回</button>
-        </div>
-      )}
+      {task.status === "in_review" && (() => {
+        const boardPending = (findingSummary?.counts.submitted || 0)
+          + (findingSummary?.counts.changes_requested || 0);
+        // 摘要加载失败时不锁死按钮：后端 review 仍会硬校验问题板。
+        const boardUnknown = Boolean(task.issue_board_enabled && !findingSummary);
+        const boardReady = !task.issue_board_enabled || boardUnknown
+          || Boolean(findingSummary?.board.status === "completed" && findingSummary?.all_decided);
+        return (
+          <div className="review-banner">
+            <span className="review-banner-text">
+              <Icon name="alert" />
+              {boardUnknown
+                ? "问题板状态加载中 —— 通过时后端仍会校验问题板"
+                : task.issue_board_enabled && !boardReady
+                  ? (findingSummary?.board.status !== "completed"
+                    ? "问题板未完成 —— 审核者需完成问题板后，才能最终评审"
+                    : `问题板还有 ${boardPending} 条 finding 待你逐条确认真实/误报`)
+                  : "待人工评审 —— 请确认产出后「通过」或「驳回」"}
+            </span>
+            {task.issue_board_enabled && (
+              <button className="small" onClick={() => selectTab("findings")}>
+                打开问题板
+              </button>
+            )}
+            <button className="primary"
+              disabled={busy || !boardReady}
+              title={!boardReady ? "请先完成问题板并逐条确认所有 finding" : undefined}
+              onClick={() => act(() => api.reviewTask(id, true))}>通过</button>
+            <button className="danger" onClick={() => act(() => api.reviewTask(id, false))} disabled={busy}>驳回</button>
+          </div>
+        );
+      })()}
 
       <div className="detail-tabs">
-        <button className={`tab ${tab === "chat" ? "active" : ""}`} onClick={() => setTab("chat")}>
+        <button className={`tab ${tab === "chat" ? "active" : ""}`} onClick={() => selectTab("chat")}>
           会话 {timeline.length > 0 && <span className="tab-count">{timeline.length}</span>}
         </button>
-        <button className={`tab ${tab === "workflow" ? "active" : ""}`} onClick={() => setTab("workflow")}>
+        <button className={`tab ${tab === "workflow" ? "active" : ""}`} onClick={() => selectTab("workflow")}>
           工作流 {workflow && <span className="tab-count">{workflow.steps.filter((s) => s.status === "approved").length}/{workflow.steps.length}</span>}
         </button>
-        <button className={`tab ${tab === "subtasks" ? "active" : ""}`} onClick={() => setTab("subtasks")}>
+        {task.issue_board_enabled && (
+          <button className={`tab ${tab === "findings" ? "active" : ""}`} onClick={() => selectTab("findings")}>
+            问题板
+            {findingSummary && findingSummary.pending > 0 && (
+              <span className="tab-count tab-count-alert">{findingSummary.pending}</span>
+            )}
+          </button>
+        )}
+        <button className={`tab ${tab === "subtasks" ? "active" : ""}`} onClick={() => selectTab("subtasks")}>
           子任务 {children.length > 0 && <span className="tab-count">{children.length}</span>}
         </button>
-        <button className={`tab ${tab === "runtime" ? "active" : ""}`} onClick={() => setTab("runtime")}>
+        <button className={`tab ${tab === "runtime" ? "active" : ""}`} onClick={() => selectTab("runtime")}>
           角色运行时 {(task.assignees ?? []).length > 0 && <span className="tab-count">{task.assignees.length}</span>}
         </button>
         {panel.collapsed && (
@@ -1485,7 +1555,14 @@ export function TaskDetail({ id }: { id: string }) {
       </div>
       </div>
 
-      <div className={`task-tab-body ${tab === "chat" ? "is-chat" : ""} ${tab === "workflow" ? "is-workflow" : ""}`}>
+      <div className={`task-tab-body ${tab === "chat" ? "is-chat" : ""} ${tab === "workflow" ? "is-workflow" : ""} ${tab === "findings" ? "is-findings" : ""}`}>
+      {tab === "findings" && task.issue_board_enabled && (
+        <TaskFindingBoard
+          taskId={id}
+          onChanged={() => { void refresh(); }}
+          initialFindingId={initialRoute.finding}
+        />
+      )}
       {tab === "chat" && (
       <div
         className={`task-layout ${panel.collapsed ? "panel-collapsed" : ""}`}

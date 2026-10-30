@@ -84,6 +84,39 @@ def test_projected_protocol_matches_run_kind(conn):
     assert nodes._protocol_for_run(conn, normal) == render.PROTOCOL
 
 
+def test_finding_run_uses_finding_protocol(conn):
+    """[anvil:findings] run 注入问题板协议，不能退化成只讨论的 REPLY_PROTOCOL。"""
+    run = runs_service.create_run(
+        conn, "auditor", "T1",
+        prompt="[anvil:findings]问题板需要复核：请补 PoC")
+    prompt = nodes._prompt_for_run(conn, run, {"title": "审计", "description": "安全审计"})
+    assert "问题板需要复核" in prompt
+    assert "anvil finding add" in prompt
+    assert "anvil finding complete" in prompt
+    assert "只做讨论" not in prompt
+    assert nodes._protocol_for_run(conn, run) == render.FINDING_PROTOCOL
+
+
+def test_reviewer_step_gets_finding_protocol(conn):
+    """启用问题板且执行者是 reviewer 时，步骤 run 同时注入填写协议。"""
+    now = now_iso()
+    conn.execute("UPDATE tasks SET issue_board_enabled=1 WHERE id='T1'")
+    conn.execute(
+        "INSERT INTO task_reviewers (task_id, role_slug, source, added_at) VALUES (?,?,?,?)",
+        ("T1", "auditor", "human", now))
+    conn.commit()
+    reviewer = runs_service.create_run(conn, "auditor", "T1", prompt="步骤说明",
+                                       step_id="S1", workflow_id="wf-1")
+    developer = runs_service.create_run(conn, "developer", "T1", prompt="步骤说明",
+                                        step_id="S2", workflow_id="wf-1")
+    assert "anvil finding add" in nodes._prompt_for_run(
+        conn, reviewer, tasks_service.get(conn, "T1"))
+    assert "anvil finding add" not in nodes._prompt_for_run(
+        conn, developer, tasks_service.get(conn, "T1"))
+    assert nodes._protocol_for_run(conn, reviewer) == (
+        render.STEP_PROTOCOL + "\n\n" + render.FINDING_PROTOCOL)
+
+
 def test_step_prompt_includes_knowledge_hint(conn, tmp_path, monkeypatch):
     """warm session 的步骤 prompt 也要有知识库入口与相关标题。"""
     monkeypatch.setattr(config, "AGENTS_DIR", tmp_path / "agents")

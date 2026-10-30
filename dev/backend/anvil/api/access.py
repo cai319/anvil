@@ -44,6 +44,11 @@ def assert_task_read(conn: sqlite3.Connection, auth: Auth, tid: str) -> None:
             "SELECT role_slug FROM task_assignees WHERE task_id=?", (tid,)
         ).fetchall()
     )
+    bound.update(
+        str(r["role_slug"]) for r in conn.execute(
+            "SELECT role_slug FROM task_reviewers WHERE task_id=?", (tid,)
+        ).fetchall()
+    )
     if not bound:
         return  # 开放任务：允许任意角色查看/认领
     if auth.role in bound:

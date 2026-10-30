@@ -251,13 +251,34 @@ def _knowledge_hint(conn: sqlite3.Connection, run: dict,
         return ""
 
 
+def _is_finding_reviewer(conn: sqlite3.Connection, task: dict | None,
+                         role: str | None) -> bool:
+    if not task or not task.get("issue_board_enabled") or not role:
+        return False
+    if role in (task.get("reviewer_roles") or []):
+        return True
+    tid = task.get("id")
+    if not tid:
+        return False
+    return conn.execute(
+        "SELECT 1 FROM task_reviewers WHERE task_id=? AND role_slug=? LIMIT 1",
+        (tid, role),
+    ).fetchone() is not None
+
+
 def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> str:
     """按 run 类型选择协议：
     - 工作流步骤：步骤说明 + 最近会话（含 @ 反馈）+ STEP_PROTOCOL
+    - 问题板复评：FINDING_PROTOCOL（可写 finding，不做普通 task submit）
     - 被 @ 的回复：任务背景 + 消息 + 最近会话 + REPLY_PROTOCOL（只讨论、不 claim/submit）
     - 普通任务：任务协议
     """
     prompt = run.get("prompt") or ""
+    if prompt.startswith("[anvil:findings]"):
+        body = prompt[len("[anvil:findings]"):].strip()
+        head = "\n".join(p for p in ((task or {}).get("title"),
+                                     (task or {}).get("description")) if p)
+        return "\n\n".join(p for p in (head, body, render.FINDING_PROTOCOL) if p)
     if run.get("step_id"):
         from ..services import agent_inbox
         task_id = run.get("task_id")
@@ -275,6 +296,8 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
         if hint:
             parts.append(hint)
         parts.append(render.STEP_PROTOCOL)
+        if _is_finding_reviewer(conn, task, run.get("role_slug")):
+            parts.append(render.FINDING_PROTOCOL)
         return "\n\n".join(p for p in parts if p)
     # 规划 run（Cindy / planner）：不能因为任务已有 workflow 就被误判为回复。
     from ..services import planning as planning_service
@@ -307,9 +330,14 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
 
 
 def _protocol_for_run(conn: sqlite3.Connection, run: dict) -> str:
-    """投影到 CLAUDE.md 的协议必须与 run 类型一致（步骤/规划/回复/普通任务）。"""
+    """投影到 CLAUDE.md 的协议必须与 run 类型一致（步骤/问题板/规划/回复/普通任务）。"""
     prompt = run.get("prompt") or ""
+    task = tasks_service.get(conn, run["task_id"]) if run.get("task_id") else None
+    if prompt.startswith("[anvil:findings]"):
+        return render.FINDING_PROTOCOL
     if run.get("step_id"):
+        if _is_finding_reviewer(conn, task, run.get("role_slug")):
+            return render.STEP_PROTOCOL + "\n\n" + render.FINDING_PROTOCOL
         return render.STEP_PROTOCOL
     from ..services import planning as planning_service
     if prompt.startswith(planning_service.PLAN_MARKER):

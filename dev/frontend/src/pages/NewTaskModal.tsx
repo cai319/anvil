@@ -20,6 +20,7 @@ export function NewTaskModal({ roles, roleStatus, channels = [], defaultChannelI
   const [channelOptions, setChannelOptions] = useState<Channel[]>(channels);
   const [channelId, setChannelId] = useState(defaultChannelId ?? "");
   const [newChannelName, setNewChannelName] = useState("");
+  const [issueBoard, setIssueBoard] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const composingRef = useRef(false);
@@ -72,6 +73,7 @@ export function NewTaskModal({ roles, roleStatus, channels = [], defaultChannelI
           version: seed.published_version,
           name: seed.name,
         } : undefined,
+        issue_board_enabled: issueBoard || undefined,
       });
       onCreated(task);
     } catch (e) {
@@ -148,6 +150,19 @@ export function NewTaskModal({ roles, roleStatus, channels = [], defaultChannelI
           </select>
           <small className="muted">
             模板只作为 Cindy 的规划骨架；Cindy 会结合任务和角色调整，最终草案仍需你审批。
+          </small>
+        </label>
+
+        <label className="field finding-board-toggle">
+          <span className="finding-board-toggle-head">
+            <input type="checkbox" checked={issueBoard}
+              onChange={(e) => setIssueBoard(e.target.checked)} />
+            <span>启用问题板（安全审计 findings）</span>
+          </span>
+          <small className="muted">
+            启用后任务详情会增加「问题板」页签，收集本任务排查出的安全问题。
+            Cindy 会从已选角色中指定审核者；没有合适角色时会绑定现有角色或提案新建（仍需你批准）。
+            所有问题分析完成并由你逐条确认真实/误报后，任务才能最终通过。
           </small>
         </label>
 

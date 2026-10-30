@@ -45,8 +45,9 @@ TASK_EPILOG = """\b
 动作:
   list [--type T] [--tag T]             列出任务
   show <id>                             查看任务详情
-  create --title "..." [--assignee r]   创建任务或子任务
+  create --title "..." [--assignee r] [--issue-board]  创建任务或子任务
   assign <id> --assignees a,b           追加角色；已有 Roster 时自动提案 @human
+  reviewers <id> --assignees a,b        指定问题板 reviewer（planner/onboarding/human）
   claim | unclaim <id>                  认领/释放（工作流步骤不要 claim）
   submit <id> "摘要"                    提交任务（不是工作流步骤）
   comment <id> "正文"                   评论，不唤醒任何人
@@ -429,6 +430,9 @@ def task_cmd(
     plan_first: bool = typer.Option(False, "--plan-first",
                                     help="create：先由 planner 规划",
                                     rich_help_panel="查询 / 创建"),
+    issue_board: bool = typer.Option(False, "--issue-board",
+                                     help="create：启用问题板（仅 human）",
+                                     rich_help_panel="查询 / 创建"),
     planner: str = typer.Option(None, "--planner", help="create：planner 角色",
                                 rich_help_panel="查询 / 创建"),
     knowledge_repos: str = typer.Option(
@@ -477,11 +481,12 @@ def task_cmd(
     json_out: bool = typer.Option(False, "--json", help="输出 JSON",
                                   rich_help_panel="输出"),
 ):
-    """anvil task <list|show|create|assign|claim|unclaim|heartbeat|submit|comment|mention|cancel|reopen|delete|block|archive|unarchive|knowledge-list|knowledge-write|knowledge-delete> …"""
+    """anvil task <list|show|create|assign|reviewers|claim|unclaim|heartbeat|submit|comment|mention|cancel|reopen|delete|block|archive|unarchive|knowledge-list|knowledge-write|knowledge-delete> …"""
     tid = target or DEFAULT_TASK
     needs_target = {"show", "claim", "unclaim", "heartbeat", "submit", "comment", "mention",
-                    "cancel", "reopen", "delete", "block", "assign", "archive", "unarchive",
-                    "knowledge-list", "knowledge-write", "knowledge-delete"}
+                    "cancel", "reopen", "delete", "block", "assign", "reviewers",
+                    "archive", "unarchive", "knowledge-list", "knowledge-write",
+                    "knowledge-delete"}
     if action in needs_target and not tid:
         _usage_error(
             f"task {action} 需要任务 id",
@@ -517,6 +522,8 @@ def task_cmd(
             p["base_branch"] = base_branch.strip()
         if plan_first:
             p["plan_first"] = True
+        if issue_board:
+            p["issue_board_enabled"] = True
         if planner:
             p["planner"] = planner.strip()
         if knowledge_repos:
@@ -536,6 +543,13 @@ def task_cmd(
                 "task assign 需要 --assignees a,b",
                 "只接受已存在的角色；例如 `anvil task assign T-0001 --assignees pm,tester`。")
         method, path, payload = "POST", f"/api/v1/tasks/{tid}/assign-existing", {"roles": roles}
+    elif action == "reviewers":
+        roles = [x.strip() for x in (assignees or "").split(",") if x.strip()]
+        if not roles:
+            _usage_error(
+                "task reviewers 需要 --assignees a,b",
+                "仅接受已存在的角色；例如 `anvil task reviewers T-0001 --assignees auditor`。")
+        method, path, payload = "POST", f"/api/v1/tasks/{tid}/reviewers", {"roles": roles}
     elif action == "claim":
         p = {"paths": [x.strip() for x in paths.split(",")]} if paths else {}
         method, path, payload = "POST", f"/api/v1/tasks/{tid}/claim", p
@@ -1716,6 +1730,183 @@ def board_drafts(
         typer.echo(
             f"{d['id']}  {d['status']:9s}  {kind:15s}  task={src}  "
             f"{d['goal']}  by={d['created_by']}")
+
+
+# ---- finding（问题板）-----------------------------------------------------
+
+FINDING_EPILOG = """\b
+问题板流程（仅 task_reviewers；human 只能批准/驳回）:
+  1. anvil finding template > finding.json     生成模板并补全所有必填字段
+  2. anvil finding add --file finding.json --submit
+  3. anvil finding list                        检查是否还有 draft/missing 字段
+  4. anvil finding complete --summary "未发现安全问题；已覆盖 X/Y/Z"
+  5. human 在 Web「问题板」页签逐条确认真实/误报
+
+示例:
+  anvil finding add --file finding.json --task $ANVIL_TASK_ID --submit
+  anvil finding update F-123 --file finding.json --task $ANVIL_TASK_ID
+  anvil finding complete --task $ANVIL_TASK_ID --summary "2 条已提交，PoC 见附件"
+
+规则:
+  · 只有 task reviewer 能写；human 不能代填，使用页面做真实性确认。
+  · PoC 可豁免，但 poc_status=not_verified/not_applicable 时必须在 poc 写明原因。
+  · 所有字段提交时必填；缺字段返回 422 与 missing_fields。
+  · 问题板完成且所有 finding 已确认/误报后，任务才能最终通过。
+"""
+
+finding_app = typer.Typer(
+    help="问题板 finding：reviewer 填写结构化安全 finding，human 在页面确认。",
+    context_settings=HELP_CTX,
+    epilog=FINDING_EPILOG,
+)
+app.add_typer(finding_app, name="finding")
+
+FINDING_TEMPLATE = {
+    "title": "一句话问题标题",
+    "risk_type": "injection",
+    "severity": "high",
+    "module": "模块/目录",
+    "function_name": "问题函数",
+    "file_path": "relative/path/to/file.c",
+    "line_numbers": "123-145",
+    "preconditions": "触发前置条件",
+    "reasoning_chain": "从输入到风险的完整推理链",
+    "risk_description": "问题风险描述",
+    "attack_path": "入口 -> source -> 传播 -> sink；说明数据流",
+    "trigger_point": "具体触发点",
+    "poc_status": "not_verified",
+    "poc": "PoC 复现步骤；未验证时写清原因",
+    "fix_priority": "P1",
+    "fix_suggestion": "修复建议",
+    "confidence": 80,
+}
+
+
+@finding_app.command("template")
+def finding_template(json_out: bool = typer.Option(False, "--json")):
+    """输出 finding JSON 模板（含枚举与字段说明）。"""
+    body = {
+        "template": FINDING_TEMPLATE,
+        "enums": {
+            "risk_type": ["injection", "authn_authz", "info_disclosure", "ssrf",
+                          "path_traversal", "deserialization", "race_condition",
+                          "memory_safety", "logic_flaw", "crypto", "supply_chain",
+                          "dos", "config", "other"],
+            "severity": ["critical", "high", "medium", "low", "info"],
+            "fix_priority": ["P0", "P1", "P2", "P3"],
+            "poc_status": ["provided", "not_verified", "not_applicable"],
+            "confidence": "0-100 整数",
+        },
+    }
+    _emit(body, True)
+
+
+def _finding_task(task: str | None) -> str:
+    tid = task or DEFAULT_TASK
+    if not tid:
+        _usage_error("finding 命令需要任务 id",
+                     "传 --task <id> 或设置 ANVIL_TASK_ID。")
+    return tid
+
+
+def _read_json_file(path: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        _usage_error(f"无法读取 finding JSON: {exc}",
+                     "检查 --file 路径与 JSON 语法；模板见 `anvil finding template`。")
+    if not isinstance(payload, dict):
+        _usage_error("finding JSON 必须是对象", "见 `anvil finding template`。")
+    return payload
+
+
+@finding_app.command("add")
+def finding_add(
+    file: str = typer.Option(..., "--file", help="finding JSON 文件"),
+    task: str = typer.Option(None, "--task", help="任务 id（默认 $ANVIL_TASK_ID）"),
+    submit: bool = typer.Option(False, "--submit", help="创建后立即提交"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """创建一条 finding 草稿；--submit 同时提交给 human 确认。"""
+    tid = _finding_task(task)
+    out = _call("POST", f"/api/v1/tasks/{tid}/findings", _read_json_file(file))
+    if submit:
+        out = _call("POST", f"/api/v1/tasks/{tid}/findings/{out['id']}/submit")
+    _emit(out, json_out)
+    if not json_out:
+        typer.echo(f"finding 已{'提交' if submit else '保存为草稿'}：{out.get('id')}")
+
+
+@finding_app.command("update")
+def finding_update(
+    finding_id: str = typer.Argument(...),
+    file: str = typer.Option(..., "--file", help="finding JSON 文件"),
+    task: str = typer.Option(None, "--task", help="任务 id（默认 $ANVIL_TASK_ID）"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """更新 draft/changes_requested finding。"""
+    tid = _finding_task(task)
+    _emit(_call("PATCH", f"/api/v1/tasks/{tid}/findings/{finding_id}",
+                _read_json_file(file)), json_out)
+
+
+@finding_app.command("submit")
+def finding_submit(
+    finding_id: str = typer.Argument(...),
+    task: str = typer.Option(None, "--task", help="任务 id（默认 $ANVIL_TASK_ID）"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """提交 finding 给 human 确认；所有必填字段必须完整。"""
+    tid = _finding_task(task)
+    _emit(_call("POST", f"/api/v1/tasks/{tid}/findings/{finding_id}/submit"), json_out)
+
+
+@finding_app.command("list")
+def finding_list(
+    task: str = typer.Option(None, "--task", help="任务 id（默认 $ANVIL_TASK_ID）"),
+    status: str = typer.Option(None, "--status"),
+    severity: str = typer.Option(None, "--severity"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """列出当前任务的 findings。"""
+    tid = _finding_task(task)
+    params = {k: v for k, v in (("status", status), ("severity", severity)) if v}
+    _emit(_call("GET", f"/api/v1/tasks/{tid}/findings", params=params), json_out)
+
+
+@finding_app.command("show")
+def finding_show(
+    finding_id: str = typer.Argument(...),
+    task: str = typer.Option(None, "--task", help="任务 id（默认 $ANVIL_TASK_ID）"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """查看 finding 详情。"""
+    tid = _finding_task(task)
+    _emit(_call("GET", f"/api/v1/tasks/{tid}/findings/{finding_id}"), json_out)
+
+
+@finding_app.command("complete")
+def finding_complete(
+    summary: str = typer.Option(..., "--summary", help="完成说明；无问题也必须写明范围/依据"),
+    task: str = typer.Option(None, "--task", help="任务 id（默认 $ANVIL_TASK_ID）"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """标记问题板完成，任务随后进入 human 最终评审。"""
+    tid = _finding_task(task)
+    _emit(_call("POST", f"/api/v1/tasks/{tid}/findings/complete",
+                {"summary": summary}), json_out)
+
+
+@finding_app.command("delete")
+def finding_delete(
+    finding_id: str = typer.Argument(...),
+    task: str = typer.Option(None, "--task", help="任务 id（默认 $ANVIL_TASK_ID）"),
+):
+    """删除 draft/changes_requested finding。"""
+    tid = _finding_task(task)
+    _call("DELETE", f"/api/v1/tasks/{tid}/findings/{finding_id}")
+    typer.echo(f"finding 已删除：{finding_id}")
 
 
 if __name__ == "__main__":

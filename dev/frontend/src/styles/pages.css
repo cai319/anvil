@@ -767,4 +767,352 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
 
 /* 响应式断点 */
 
+/* ── 问题板（Issue Board） ─────────────────────────────────────────────── */
+.tab-count-alert {
+  background: var(--red);
+  color: var(--ink-900);
+}
+
+.finding-board {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 0 24px;
+}
+
+.finding-board-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.finding-board-title { min-width: 0; }
+.finding-board-title h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 4px;
+  font-size: var(--fs-h2);
+}
+.finding-board-title p {
+  max-width: 780px;
+  margin: 0;
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+.finding-board-kicker {
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: var(--faint);
+  text-transform: uppercase;
+  font-weight: 800;
+}
+.finding-board-state {
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  padding: 3px 8px;
+  border-radius: 99px;
+  border: 1.5px solid var(--border-strong);
+  color: var(--muted);
+}
+.finding-board-state.is-completed {
+  color: var(--green);
+  border-color: rgba(74, 222, 128, 0.5);
+  background: rgba(74, 222, 128, 0.08);
+}
+.finding-board-state.is-in_progress {
+  color: var(--amber);
+  border-color: rgba(250, 204, 21, 0.45);
+  background: rgba(250, 204, 21, 0.08);
+}
+.finding-board-reviewers {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: var(--fs-meta);
+}
+
+.finding-board-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  gap: 8px;
+}
+.finding-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 12px;
+  background: var(--bg-soft);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+}
+.finding-stat strong { font-size: var(--fs-h2); line-height: 1.1; }
+.finding-stat span { font-size: var(--fs-meta); color: var(--muted); }
+.finding-stat.is-pending strong { color: var(--amber); }
+.finding-stat.is-confirmed strong { color: var(--red); }
+.finding-stat.is-fp strong { color: var(--green); }
+.finding-stat.is-rework strong { color: var(--blue); }
+
+.finding-board-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1.5px solid rgba(250, 204, 21, 0.4);
+  background: rgba(250, 204, 21, 0.07);
+  font-size: var(--fs-sm);
+}
+.finding-board-banner.is-done {
+  border-color: rgba(74, 222, 128, 0.4);
+  background: rgba(74, 222, 128, 0.07);
+}
+.finding-board-summary { flex-basis: 100%; }
+
+.finding-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 34px 18px;
+  text-align: center;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  color: var(--muted);
+}
+.finding-empty p { margin: 0; font-size: var(--fs-base); color: var(--text); }
+.finding-empty small { max-width: 720px; line-height: 1.6; }
+.finding-empty.is-done { border-color: rgba(74, 222, 128, 0.35); }
+
+.finding-board-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.finding-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 260px;
+  max-width: 460px;
+  padding: 0 10px;
+  background: var(--bg-soft);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+}
+.finding-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 7px 0;
+  color: var(--text);
+}
+.finding-search input:focus { outline: none; }
+.finding-board-filter-count { margin-left: auto; font-size: var(--fs-meta); }
+.finding-board-none { padding: 16px 0; }
+
+.finding-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.finding-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 14px;
+  text-align: left;
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color 0.12s, transform 0.12s;
+}
+.finding-card:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+.finding-card.is-submitted { border-left: 4px solid var(--amber); }
+.finding-card.is-confirmed { border-left: 4px solid var(--red); }
+.finding-card.is-false_positive { border-left: 4px solid var(--green); }
+.finding-card.is-changes_requested { border-left: 4px solid var(--blue); }
+.finding-card-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+.finding-card-title {
+  font-weight: 700;
+  font-size: var(--fs-base);
+  overflow-wrap: anywhere;
+}
+.finding-card-loc {
+  font-size: var(--fs-meta);
+  overflow-wrap: anywhere;
+}
+.finding-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: var(--fs-hint);
+}
+.finding-card-arrow { color: var(--faint); font-size: 22px; line-height: 1; }
+
+.finding-sev {
+  flex: 0 0 auto;
+  min-width: 46px;
+  text-align: center;
+  padding: 3px 7px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  border: 1.5px solid var(--border-strong);
+  color: var(--muted);
+}
+.finding-sev.is-critical { color: #fff; background: #991b1b; border-color: #dc2626; }
+.finding-sev.is-high { color: #fff; background: #b45309; border-color: #f59e0b; }
+.finding-sev.is-medium { color: var(--ink-900); background: var(--yellow); border-color: var(--yellow); }
+.finding-sev.is-low { color: var(--ink-900); background: var(--cyan); border-color: var(--cyan); }
+.finding-sev.is-info { color: var(--ink-900); background: var(--paper-2); border-color: var(--paper-2); }
+
+.finding-status {
+  padding: 2px 7px;
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 800;
+  border: 1.5px solid currentColor;
+}
+.finding-status.is-draft { color: var(--muted); }
+.finding-status.is-submitted { color: var(--amber); }
+.finding-status.is-confirmed { color: var(--red); }
+.finding-status.is-false_positive { color: var(--green); }
+.finding-status.is-changes_requested { color: var(--blue); }
+
+/* 右侧详情抽屉 */
+.finding-drawer-overlay {
+  align-items: stretch;
+  justify-content: flex-end;
+  padding: 0;
+}
+.finding-drawer.modal {
+  width: min(780px, 96vw);
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  margin: 0;
+  border-radius: 0;
+  padding: 18px 22px 40px;
+  box-sizing: border-box;
+}
+.finding-drawer-head { align-items: flex-start; gap: 16px; }
+.finding-drawer-head h2 { margin: 2px 0 8px; font-size: var(--fs-h2); }
+.finding-drawer-kicker {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-weight: 800;
+}
+.finding-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: var(--fs-meta);
+}
+.finding-drawer-body { display: flex; flex-direction: column; gap: 12px; }
+.finding-meta-line {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: var(--fs-meta);
+}
+.finding-callout {
+  padding: 9px 12px;
+  border-radius: var(--radius);
+  border: 1.5px solid var(--border);
+  background: var(--bg-soft);
+  font-size: var(--fs-sm);
+}
+.finding-callout.is-warn {
+  border-color: rgba(250, 204, 21, 0.4);
+  background: rgba(250, 204, 21, 0.07);
+}
+.finding-field-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.finding-field {
+  padding: 10px 12px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--paper-3);
+  color: var(--text-on-paper);
+  min-width: 0;
+}
+.finding-field.is-long { grid-column: 1 / -1; }
+.finding-field h3 {
+  margin: 0 0 5px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-on-paper-muted);
+}
+.finding-field p { margin: 0; font-size: var(--fs-sm); line-height: 1.55; overflow-wrap: anywhere; }
+.finding-field pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-body);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+}
+.finding-decision-record {
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  border: 1.5px solid var(--border);
+}
+.finding-decision-record h3 { margin: 0 0 4px; font-size: var(--fs-sm); }
+.finding-decision-record p { margin: 0; font-size: var(--fs-sm); }
+.finding-decision-note {
+  margin-top: 6px !important;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--paper-3);
+  color: var(--text-on-paper);
+}
+.finding-decisions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 4px;
+}
+
+.finding-board-toggle { gap: 8px; }
+.finding-board-toggle-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+}
+.finding-board-toggle-head input { width: auto; }
+
+@media (max-width: 760px) {
+  .finding-field-list { grid-template-columns: 1fr; }
+  .finding-drawer.modal { width: 100vw; padding: 14px 14px 30px; }
+  .finding-board-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
 }

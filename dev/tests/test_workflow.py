@@ -12,6 +12,7 @@ import pytest
 from anvil import config
 from anvil.db import connect
 from anvil.services import board as board_service
+from anvil.services import findings as findings_service
 from anvil.services import tasks as tasks_service
 from anvil.services import workflow as wf_service
 from anvil.util import ConflictError, now_iso
@@ -266,6 +267,76 @@ def _insert_role(conn, slug: str, kind: str = "member") -> None:
         "created_at, updated_at, enabled) VALUES (?,?,?,?,?,?,1)",
         (slug, slug, os.path.join(tempfile.gettempdir(), slug), json.dumps({"kind": kind}), now, now))
     conn.commit()
+
+
+def _issue_board_task(conn, reviewer: str = "auditor") -> None:
+    """把 T1 切到启用问题板，并指定 reviewer（workflow 必须覆盖该角色）。"""
+    now = now_iso()
+    conn.execute(
+        "UPDATE tasks SET issue_board_enabled=1, status='in_progress' WHERE id='T1'")
+    conn.execute(
+        "INSERT INTO task_reviewers (task_id, role_slug, source, added_at) VALUES (?,?,?,?)",
+        ("T1", reviewer, "human", now))
+    conn.commit()
+    findings_service.ensure_board(conn, "T1")
+    conn.commit()
+
+
+def _board_completed(conn) -> None:
+    now = now_iso()
+    conn.execute(
+        "UPDATE task_finding_boards SET status='completed', summary='未发现安全问题', "
+        "completed_by='auditor', completed_at=?, updated_at=? WHERE task_id='T1'",
+        (now, now))
+    conn.commit()
+
+
+def test_issue_board_gate_waits_for_board_after_workflow(conn):
+    """workflow 先完成：问题板未完成时任务保持 in_progress；完成后进入 in_review。"""
+    _issue_board_task(conn)
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "安全审计", "role": "auditor"}]})
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' WHERE workflow_id=? AND step_id='S1'",
+        (wf["id"],))
+    conn.commit()
+
+    wf_service._finalize_if_done(conn, wf["id"])
+    task = conn.execute("SELECT status FROM tasks WHERE id='T1'").fetchone()
+    assert task["status"] == "in_progress"
+    run = conn.execute(
+        "SELECT prompt FROM runs WHERE task_id='T1' AND role_slug='auditor' "
+        "ORDER BY rowid DESC LIMIT 1").fetchone()
+    assert run is not None and "[anvil:findings]" in (run["prompt"] or "")
+
+    _board_completed(conn)
+    assert wf_service.finalize_task_review_if_ready(conn, "T1") is True
+    task = conn.execute("SELECT status FROM tasks WHERE id='T1'").fetchone()
+    assert task["status"] == "in_review"
+
+
+def test_issue_board_gate_allows_review_when_board_finished_first(conn):
+    """问题板先完成：workflow 完成时直接进入 in_review。"""
+    _issue_board_task(conn)
+    _board_completed(conn)
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "安全审计", "role": "auditor"}]})
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' WHERE workflow_id=? AND step_id='S1'",
+        (wf["id"],))
+    conn.commit()
+
+    wf_service._finalize_if_done(conn, wf["id"])
+    task = conn.execute("SELECT status FROM tasks WHERE id='T1'").fetchone()
+    assert task["status"] == "in_review"
+
+
+def test_issue_board_requires_reviewer_in_workflow(conn):
+    """reviewer 必须被 workflow 覆盖，否则草案直接拒绝。"""
+    _issue_board_task(conn)
+    with pytest.raises(ConflictError):
+        wf_service.create_workflow(conn, "T1", {"steps": [
+            {"id": "S1", "title": "实现", "role": "dev"}]})
 
 
 def test_final_review_notification_uses_real_sender(conn):

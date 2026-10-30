@@ -134,6 +134,7 @@ class TaskIn(BaseModel):
     parent_id: str | None = None
     depends_on: list[str] = Field(default_factory=list)
     knowledge_repos: list[str | KnowledgeRepoIn] | None = None
+    issue_board_enabled: bool = False
 
 
 class TaskPatch(BaseModel):
@@ -149,6 +150,7 @@ class TaskPatch(BaseModel):
     acceptance: list[str] | None = None
     assignee: str | None = None
     knowledge_repos: list[str | KnowledgeRepoIn] | None = None
+    issue_board_enabled: bool | None = None
 
 
 class TaskOut(BaseModel):
@@ -178,6 +180,8 @@ class TaskOut(BaseModel):
     knowledge_repos: list[dict[str, Any]] = Field(default_factory=list)
     knowledge_binding_locked: bool = False
     knowledge_binding_state: str | None = None
+    issue_board_enabled: bool = False
+    reviewer_roles: list[str] = Field(default_factory=list)
     created_at: str
     updated_at: str
     archived_at: str | None = None
@@ -195,6 +199,65 @@ class SubmitIn(BaseModel):
 
 class ReviewIn(BaseModel):
     approve: bool
+
+
+class FindingIn(BaseModel):
+    """问题板 finding。draft 可部分填写；submit 时由服务层校验完整性。"""
+    title: str = ""
+    risk_type: str = ""
+    severity: str = ""
+    module: str = ""
+    function_name: str = ""
+    file_path: str = ""
+    line_numbers: str = ""
+    preconditions: str = ""
+    reasoning_chain: str = ""
+    risk_description: str = ""
+    attack_path: str = ""
+    trigger_point: str = ""
+    poc_status: str = ""
+    poc: str = ""
+    fix_priority: str = ""
+    fix_suggestion: str = ""
+    confidence: int = 0
+    workflow_id: str | None = None
+    step_id: str | None = None
+    run_id: str | None = None
+
+
+class FindingPatch(BaseModel):
+    title: str | None = None
+    risk_type: str | None = None
+    severity: str | None = None
+    module: str | None = None
+    function_name: str | None = None
+    file_path: str | None = None
+    line_numbers: str | None = None
+    preconditions: str | None = None
+    reasoning_chain: str | None = None
+    risk_description: str | None = None
+    attack_path: str | None = None
+    trigger_point: str | None = None
+    poc_status: str | None = None
+    poc: str | None = None
+    fix_priority: str | None = None
+    fix_suggestion: str | None = None
+    confidence: int | None = None
+    workflow_id: str | None = None
+    step_id: str | None = None
+    run_id: str | None = None
+
+
+class FindingDecisionIn(BaseModel):
+    note: str | None = None
+
+
+class FindingCompleteIn(BaseModel):
+    summary: str
+
+
+class ReviewersIn(BaseModel):
+    roles: list[str] = Field(default_factory=list)
 
 
 class DepIn(BaseModel):

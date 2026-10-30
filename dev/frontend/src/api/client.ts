@@ -67,8 +67,98 @@ export interface Task {
   }[];
   depends_on: string[];
   parent_id: string | null;
+  issue_board_enabled?: boolean;
+  reviewer_roles?: string[];
   created_at: string;
   updated_at: string;
+}
+
+export type FindingStatus =
+  | "draft" | "submitted" | "confirmed" | "false_positive" | "changes_requested";
+
+export interface Finding {
+  id: string;
+  task_id: string;
+  author_role: string;
+  workflow_id: string | null;
+  step_id: string | null;
+  run_id: string | null;
+  title: string;
+  risk_type: string;
+  severity: string;
+  module: string;
+  function_name: string;
+  file_path: string;
+  line_numbers: string;
+  preconditions: string;
+  reasoning_chain: string;
+  risk_description: string;
+  attack_path: string;
+  trigger_point: string;
+  poc_status: string;
+  poc: string;
+  fix_priority: string;
+  fix_suggestion: string;
+  confidence: number;
+  status: FindingStatus;
+  decided_by: string | null;
+  decided_at: string | null;
+  decision_note: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  submitted_at: string | null;
+}
+
+export type FindingInput = Partial<Omit<Finding,
+  "id" | "task_id" | "author_role" | "status" | "version" |
+  "created_at" | "updated_at" | "submitted_at" | "decided_by" |
+  "decided_at" | "decision_note">>;
+
+export interface FindingBoard {
+  task_id: string;
+  status: "in_progress" | "completed";
+  summary: string | null;
+  created_at: string;
+  completed_by: string | null;
+  completed_at: string | null;
+  reopened_by: string | null;
+  reopened_at: string | null;
+  updated_at: string;
+}
+
+export interface FindingSummary {
+  task_id: string;
+  task_status: string;
+  board: FindingBoard;
+  reviewers: string[];
+  counts: Record<FindingStatus | string, number>;
+  severity_counts: Record<string, number>;
+  total: number;
+  pending: number;
+  can_complete: boolean;
+  all_decided: boolean;
+  items?: Finding[];
+}
+
+export interface FindingFieldSpec {
+  key: string;
+  label: string;
+  required?: boolean;
+  max?: number;
+  enum?: Record<string, string>;
+  enum_labels?: Record<string, string>;
+  int?: boolean;
+}
+
+export interface FindingSchema {
+  fields: FindingFieldSpec[];
+  risk_types: Record<string, string>;
+  severities: Record<string, string>;
+  fix_priorities: Record<string, string>;
+  poc_statuses: Record<string, string>;
+  statuses: string[];
+  required: string[];
 }
 
 export interface Runtime {
@@ -194,11 +284,14 @@ export const api = {
     plan_seed?: { template_id: string; version: number; name?: string } | null;
     tags?: string[]; repo?: string | null; workspace_id?: string | null;
     base_branch?: string | null; knowledge_repos?: (string | { repo: string; reason?: string })[];
+    issue_board_enabled?: boolean;
   }): Promise<Task> =>
     req("POST", "/tasks", { title, scope_paths: ["**"], ...opts }).then((r) => json<Task>(r)),
   patchTask: (id: string, patch: {
     knowledge_repos?: (string | { repo: string; reason?: string })[];
     tags?: string[];
+    issue_board_enabled?: boolean;
+    force?: boolean;
   }): Promise<Task> =>
     req("PATCH", `/tasks/${id}`, patch).then((r) => json<Task>(r)),
   getTaskKnowledgeRepos: (id: string): Promise<{
@@ -332,6 +425,48 @@ export const api = {
     req("POST", `/tasks/${id}/comment`, { body }, role).then((r) => json<Task>(r)),
   mentionTask: (id: string, target: string, message: string, role?: string): Promise<Task> =>
     req("POST", `/tasks/${id}/mention`, { target, message }, role).then((r) => json<Task>(r)),
+
+  // issue board / findings
+  getFindingSchema: (taskId: string): Promise<FindingSchema> =>
+    authFetch(`${BASE}/tasks/${taskId}/findings/schema`).then((r) => json<FindingSchema>(r)),
+  getFindingSummary: (taskId: string): Promise<FindingSummary> =>
+    authFetch(`${BASE}/tasks/${taskId}/findings/summary`).then((r) => json<FindingSummary>(r)),
+  listFindings: (taskId: string, params?: {
+    status?: string; severity?: string; risk_type?: string; q?: string;
+  }): Promise<FindingSummary & { items: Finding[] }> => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params || {})) {
+      if (v) qs.set(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return authFetch(`${BASE}/tasks/${taskId}/findings${suffix}`).then((r) => json(r));
+  },
+  getFinding: (taskId: string, fid: string): Promise<Finding> =>
+    authFetch(`${BASE}/tasks/${taskId}/findings/${fid}`).then((r) => json<Finding>(r)),
+  createFinding: (taskId: string, body: FindingInput & { title: string }): Promise<Finding> =>
+    req("POST", `/tasks/${taskId}/findings`, body).then((r) => json<Finding>(r)),
+  updateFinding: (taskId: string, fid: string, body: FindingInput): Promise<Finding> =>
+    req("PATCH", `/tasks/${taskId}/findings/${fid}`, body).then((r) => json<Finding>(r)),
+  submitFinding: (taskId: string, fid: string): Promise<Finding> =>
+    req("POST", `/tasks/${taskId}/findings/${fid}/submit`, {}).then((r) => json<Finding>(r)),
+  confirmFinding: (taskId: string, fid: string, note?: string): Promise<Finding> =>
+    req("POST", `/tasks/${taskId}/findings/${fid}/confirm`, { note }).then((r) => json<Finding>(r)),
+  falsePositiveFinding: (taskId: string, fid: string, note?: string): Promise<Finding> =>
+    req("POST", `/tasks/${taskId}/findings/${fid}/false-positive`, { note }).then((r) => json<Finding>(r)),
+  requestFindingChanges: (taskId: string, fid: string, note: string): Promise<Finding> =>
+    req("POST", `/tasks/${taskId}/findings/${fid}/request-changes`, { note }).then((r) => json<Finding>(r)),
+  reopenFinding: (taskId: string, fid: string, note: string): Promise<Finding> =>
+    req("POST", `/tasks/${taskId}/findings/${fid}/reopen`, { note }).then((r) => json<Finding>(r)),
+  deleteFinding: (taskId: string, fid: string): Promise<unknown> =>
+    req("DELETE", `/tasks/${taskId}/findings/${fid}`).then((r) => json(r)),
+  completeFindingBoard: (taskId: string, summary: string): Promise<FindingSummary> =>
+    req("POST", `/tasks/${taskId}/findings/complete`, { summary }).then((r) => json<FindingSummary>(r)),
+  reopenFindingBoard: (taskId: string, note: string): Promise<FindingSummary> =>
+    req("POST", `/tasks/${taskId}/findings/reopen`, { note }).then((r) => json<FindingSummary>(r)),
+  setTaskReviewers: (taskId: string, roles: string[]): Promise<FindingSummary> =>
+    req("POST", `/tasks/${taskId}/reviewers`, { roles }).then((r) => json<FindingSummary>(r)),
+  removeTaskReviewer: (taskId: string, role: string): Promise<FindingSummary> =>
+    req("DELETE", `/tasks/${taskId}/reviewers/${encodeURIComponent(role)}`).then((r) => json<FindingSummary>(r)),
 
   // runtimes
   listRuntimes: (): Promise<Runtime[]> => authFetch(`${BASE}/runtimes`).then((r) => json<Runtime[]>(r)),
@@ -1029,11 +1164,17 @@ export interface InboxDraftMeta {
   deadline_at?: string | null;
   recommendation?: PacketRecommendation;
   task_title?: string;
+  // finding board metadata
+  finding_pending?: number;
+  finding_confirmed?: number;
+  finding_false_positive?: number;
+  finding_summary?: string;
+  reviewers?: string[];
 }
 
 export interface InboxItem {
   id: string;
-  kind: "review" | "mention" | "draft" | "lesson" | "proposal" | "gate" | "decision" | "action";
+  kind: "review" | "mention" | "draft" | "lesson" | "proposal" | "gate" | "decision" | "action" | "finding";
   title: string;
   detail: string;
   task_id: string | null;

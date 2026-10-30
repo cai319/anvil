@@ -993,6 +993,31 @@ def _workflow_roles(definition: dict) -> set[str]:
     return roles
 
 
+def _validate_issue_board(conn: sqlite3.Connection, task_id: str | None,
+                          definition: dict) -> None:
+    """问题板任务：必须有 reviewer，且 reviewer 必须出现在 workflow 中。"""
+    if not task_id:
+        return
+    task = conn.execute(
+        "SELECT issue_board_enabled FROM tasks WHERE id=?", (task_id,)
+    ).fetchone()
+    if task is None or not task["issue_board_enabled"]:
+        return
+    reviewers = [r["role_slug"] for r in conn.execute(
+        "SELECT role_slug FROM task_reviewers WHERE task_id=?", (task_id,)
+    ).fetchall()]
+    if not reviewers:
+        raise ConflictError(
+            "issue board is enabled but no reviewer is bound; "
+            "use `anvil task reviewers <id> --assignees <role>` first")
+    roles = _workflow_roles(definition)
+    missing = [r for r in reviewers if r not in roles]
+    if missing:
+        raise ConflictError(
+            "workflow must assign every issue-board reviewer to a step or loop phase; "
+            "missing: " + ", ".join(missing))
+
+
 def validate_role_coverage(conn: sqlite3.Connection, task_id: str | None,
                            definition: dict) -> None:
     """切片类 workflow 必须让任务绑定的每个角色都参与。
@@ -1002,6 +1027,7 @@ def validate_role_coverage(conn: sqlite3.Connection, task_id: str | None,
     """
     if not task_id:
         return
+    _validate_issue_board(conn, task_id, definition)
     if not (definition.get("loop") or definition.get("slices")):
         return
     assignees = [
@@ -1110,6 +1136,7 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
     # ---- 预校验：id/依赖/环/decision 元数据 ----
     raw, plan = _plan_steps(conn, steps)
     _validate_loop(conn, definition, raw)
+    _validate_issue_board(conn, task_id, definition)
     if enforce_role_coverage:
         validate_role_coverage(conn, task_id, definition)
 
@@ -2922,8 +2949,42 @@ def gates(conn: sqlite3.Connection) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def finalize_task_review_if_ready(conn: sqlite3.Connection, task_id: str) -> bool:
+    """把任务推进到最终人工评审；问题板未完成时保持 in_progress。
+
+    幂等：任务已 in_review/done 或最新 workflow 尚未 done 时不做任何事。
+    """
+    task = conn.execute(
+        "SELECT status, issue_board_enabled FROM tasks WHERE id=?", (task_id,)
+    ).fetchone()
+    if task is None or task["status"] not in ("in_progress", "todo"):
+        return False
+    if task["issue_board_enabled"]:
+        from . import findings as findings_service
+        if findings_service.board_status(conn, task_id) != "completed":
+            return False
+    latest = conn.execute(
+        "SELECT status FROM workflows WHERE task_id=? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1", (task_id,)
+    ).fetchone()
+    if latest is not None and latest["status"] != "done":
+        return False
+    now = now_iso()
+    conn.execute(
+        "UPDATE tasks SET status='in_review', lease_expires_at=NULL, updated_at=? "
+        "WHERE id=? AND status IN ('in_progress','todo')", (now, task_id))
+    conn.commit()
+    from . import roles as roles_service
+    sender = roles_service.notification_sender(conn, task_id)
+    _mention(conn, task_id, "human",
+             "工作流全部步骤完成，问题板已就绪，请做最终评审（通过/驳回）",
+             sender=sender)
+    conn.commit()
+    return True
+
+
 def _finalize_if_done(conn: sqlite3.Connection, wid: str) -> None:
-    """所有步骤完成 → workflow done，任务进入最终人工评审。"""
+    """所有步骤完成 → workflow done；问题板完成后再进入最终人工评审。"""
     wf = get_workflow(conn, wid)
     if wf is None or wf["status"] != "running":
         return
@@ -2933,20 +2994,31 @@ def _finalize_if_done(conn: sqlite3.Connection, wid: str) -> None:
     conn.execute(
         "UPDATE workflows SET status='done', finished_at=?, updated_at=? WHERE id=?",
         (now, now, wid))
-    conn.execute(
-        "UPDATE tasks SET status='in_review', lease_expires_at=NULL, updated_at=? "
-        "WHERE id=? AND status IN ('in_progress','todo')", (now, wf["task_id"]))
     ledger.emit(
         conn, "execution.finished", task_id=wf["task_id"], workflow_id=wid,
         execution_no=wf.get("execution_no"), actor_type="system", actor="workflow",
         payload={"steps": len(wf.get("steps") or [])},
     )
     dossier.persist(conn, wid, commit=False)
-    from . import roles as roles_service
-    sender = roles_service.notification_sender(
-        conn, wf["task_id"], wf.get("created_by"))
-    _mention(conn, wf["task_id"], "human",
-             "工作流全部步骤完成，请做最终评审（通过/驳回）", sender=sender)
+    conn.commit()
+    if not finalize_task_review_if_ready(conn, wf["task_id"]):
+        # 问题板未完成：保持 in_progress，给 reviewer 创建专用 findings run，
+        # 否则 workflow 已 done，调度器不会再为这个任务派步骤。
+        from . import findings as findings_service
+        from . import runs as runs_service
+        from . import tasks as tasks_service
+        reviewers = findings_service.reviewer_roles(conn, wf["task_id"])
+        for role in reviewers:
+            tasks_service.mention(
+                conn, wf["task_id"], "system", role,
+                "工作流已完成，但问题板尚未完成；请补齐 findings 并执行 "
+                "`anvil finding complete --task ... --summary ...`。")
+            runs_service.create_run(
+                conn, role, wf["task_id"],
+                prompt=("[anvil:findings] 工作流已完成，但问题板尚未完成。请补齐/复核 "
+                        "findings，冲突或遗漏要与其他角色确认；完成后执行 "
+                        "`anvil finding complete --task $ANVIL_TASK_ID --summary \"...\"`。"))
+        conn.commit()
     conn.commit()
 
 

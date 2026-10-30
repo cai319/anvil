@@ -63,7 +63,17 @@ v1.30 起明确区分三个容易混淆的概念：
 
 设计细节见 `../docs/v1.30-channel-knowledge.md`。
 
+## 问题板（Issue Board）
+
+新建任务时可勾选「启用问题板」。启用后任务详情增加「问题板」页签，集中收集本任务排查出的
+安全问题：任务审核者通过 `anvil finding ...` 按固定字段（风险类型/严重等级/模块/函数/
+文件行号/前置条件/推理链/风险描述/攻击路径/PoC/修复优先级/修复建议/置信度）填写并提交；
+自然人在页面上逐条确认真实问题或误报。问题板完成且所有 finding 已确认后，任务才能最终通过。
+Cindy 在规划时从已选角色中指定 reviewer，并保证 workflow 覆盖该角色。
+
+设计细节见 `../docs/issue-board.md`，CLI 用法见 `../docs/cli-reference.md` §5.2。
+
 ## 当前实现状态
 
 详见 `implementation-status.md`（各里程碑的已实现 / 未实现清单）。当前自动化测试：
-**605 passed + 46 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；设值后 3 个跳过项会执行）。
+**640 passed + 55 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；未设置时相关用例跳过）。

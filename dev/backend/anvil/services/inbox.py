@@ -23,6 +23,7 @@ def collect(conn: sqlite3.Connection) -> dict:
     items.extend(_workflow_gates(conn))
     items.extend(_workflow_decisions(conn))
     items.extend(_action_cards(conn))
+    items.extend(_finding_boards(conn))
     items.sort(key=lambda i: i["created_at"] or "", reverse=True)
     return {"count": len(items), "items": items}
 
@@ -30,7 +31,13 @@ def collect(conn: sqlite3.Connection) -> dict:
 def _reviews(conn: sqlite3.Connection) -> list[dict]:
     out = []
     for r in conn.execute(
-        "SELECT id, title, updated_at FROM tasks WHERE status='in_review' ORDER BY updated_at"
+        """SELECT t.id, t.title, t.updated_at FROM tasks t
+            WHERE t.status='in_review'
+              AND NOT EXISTS (
+                SELECT 1 FROM task_finding_boards b
+                  JOIN task_findings f ON f.task_id=b.task_id
+                 WHERE b.task_id=t.id AND b.status='completed' AND f.status='submitted')
+            ORDER BY t.updated_at"""
     ).fetchall():
         roles = [x["role_slug"] for x in conn.execute(
             "SELECT role_slug FROM task_role_claims WHERE task_id=? AND status IN ('submitted','approved')",
@@ -305,6 +312,44 @@ def _lessons(conn: sqlite3.Connection) -> list[dict]:
             "title": (r["content"] or "")[:60],
             "detail": "知识库升格提案" + (f" · 标签 {','.join(tags)}" if tags else ""),
             "task_id": None, "created_at": r["created_at"],
+        })
+    return out
+
+
+def _finding_boards(conn: sqlite3.Connection) -> list[dict]:
+    """问题板已完成、任务在最终评审、且仍有未确认 finding。"""
+    rows = conn.execute(
+        """SELECT b.task_id, b.completed_at, b.summary, t.title,
+                  SUM(CASE WHEN f.status='submitted' THEN 1 ELSE 0 END) AS pending,
+                  SUM(CASE WHEN f.status='confirmed' THEN 1 ELSE 0 END) AS confirmed,
+                  SUM(CASE WHEN f.status='false_positive' THEN 1 ELSE 0 END) AS false_positive
+             FROM task_finding_boards b
+             JOIN tasks t ON t.id=b.task_id
+             LEFT JOIN task_findings f ON f.task_id=b.task_id
+            WHERE b.status='completed' AND t.status='in_review'
+            GROUP BY b.task_id
+           HAVING pending > 0"""
+    ).fetchall()
+    out = []
+    for r in rows:
+        reviewers = [x["role_slug"] for x in conn.execute(
+            "SELECT role_slug FROM task_reviewers WHERE task_id=? ORDER BY added_at",
+            (r["task_id"],),
+        )]
+        out.append({
+            "id": f"finding:{r['task_id']}", "kind": "finding",
+            "title": f"问题板待确认 — {r['title']}",
+            "detail": f"{int(r['pending'] or 0)} 条 finding 待确认"
+                      + (f" · reviewer: {', '.join(reviewers)}" if reviewers else ""),
+            "task_id": r["task_id"],
+            "created_at": r["completed_at"] or "",
+            "meta": {
+                "finding_pending": int(r["pending"] or 0),
+                "finding_confirmed": int(r["confirmed"] or 0),
+                "finding_false_positive": int(r["false_positive"] or 0),
+                "finding_summary": r["summary"] or "",
+                "reviewers": reviewers,
+            },
         })
     return out
 

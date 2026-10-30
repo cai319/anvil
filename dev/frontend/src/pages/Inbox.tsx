@@ -16,6 +16,7 @@ const KIND_LABEL: Record<InboxItem["kind"], string> = {
   gate: "审核门",
   decision: "决策",
   action: "操作申请",
+  finding: "问题板",
 };
 
 const KIND_COLOR: Record<InboxItem["kind"], string> = {
@@ -27,6 +28,7 @@ const KIND_COLOR: Record<InboxItem["kind"], string> = {
   gate: "#92400e",
   decision: "#0f766e",
   action: "#be185d",
+  finding: "#a16207",
 };
 
 type Tab = "all" | InboxItem["kind"];
@@ -41,6 +43,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "gate", label: "审核门" },
   { key: "decision", label: "决策" },
   { key: "action", label: "操作申请" },
+  { key: "finding", label: "问题板" },
 ];
 
 export function Inbox() {
@@ -210,6 +213,14 @@ export function Inbox() {
           </>
         );
       }
+      case "finding":
+        return (
+          <>
+            <a className="primary small button-like"
+              href={`/tasks/${it.task_id}?tab=findings`}>逐条确认 finding</a>
+            <a className="small" href={`/tasks/${it.task_id}`}>看任务</a>
+          </>
+        );
       case "gate":
       case "decision": {
         const [, wid, sid] = it.id.split(":");

@@ -1,7 +1,7 @@
 # Anvil 实现状态与缺口清单
 
 对照 `../design.md`（v3.0）与 owner 决策（2026-09-16 / 10-17 / 10-18）。
-最近更新：2026-10-18。
+最近更新：2026-10-30。
 
 ## 里程碑总览
 
@@ -518,11 +518,37 @@
 - **HITL UI**：审批、终止、删除、重置、频道/经验删除改用应用内确认/输入弹窗，
   不再使用 `window.confirm/prompt`。
 
+## 问题板 Issue Board（2026-10-30）
+
+- 任务新增可选 `issue_board_enabled`；启用后强制 Cindy 计划先行，任务详情增加「问题板」页签。
+- 新增 `task_reviewers`、`task_finding_boards`、`task_findings` 三表与
+  `schema.issue_board_v1` 迁移；任务删除/启动孤儿清理覆盖新表。
+- reviewer 由 Cindy/planner/onboarding/human 指定（`POST /tasks/{id}/reviewers`），
+  必须是已存在、启用、非 onboarding 且被 workflow 覆盖的角色。
+- 新增 `services/findings.py` 单一字段/枚举来源与完整状态机：
+  `draft → submitted → confirmed | false_positive | changes_requested`；
+  board `in_progress → completed`；submit 校验全部必填字段，PoC 可标记
+  `not_verified`/`not_applicable` 但必须写原因。
+- 任务最终闸门：问题板必须 completed 且所有 finding 已确认/误报，否则
+  `POST /tasks/{id}/review {approve:true}` 返回 409。workflow 与问题板完成顺序无关，
+  `finalize_task_review_if_ready` 覆盖「问题板后完成」路径。
+- human 要求重新评估/推翻结论/重开问题板时，任务回 `in_progress`，reviewer 收到
+  `[anvil:findings]` 专用 run 并可更新 finding；inbox 新增 `finding` 项。
+- CLI：`anvil finding template|add|update|submit|list|show|complete|delete`、
+  `anvil task reviewers`、`anvil task create --issue-board`。
+- Web：新建任务勾选启用；问题板页签支持筛选/搜索/统计、finding 抽屉（全部字段分组）、
+  逐条确认/误报/要求重评/推翻；评审横幅与「通过」按钮按问题板状态硬性禁用；
+  支持 `?tab=findings&finding=<id>` 深链。
+- 文档：`docs/issue-board.md`、`docs/cli-reference.md` §5.2、README。
+- 测试：`tests/test_migrations_issue_board.py`（1）、
+  `tests/api/test_issue_board_api.py`（9）、`tests/test_workflow.py` 新增 3 条顺序/覆盖用例、
+  CLI 契约新增 finding/reviewers/--issue-board 用例。
+
 ## 验证
 
 ```bash
 cd dev
-python3 -m pytest tests/ -q          # 625 passed, 46 skipped（2026-10-29）
+python3 -m pytest tests/ -q          # 640 passed, 55 skipped（2026-10-30；设 ANVIL_BIN 后 695 passed）
 cd frontend && npm run build         # tsc + vite build
 ```
 

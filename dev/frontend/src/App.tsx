@@ -122,7 +122,9 @@ function initialSidebarCollapsed(): boolean {
   }
 }
 
-function parseRoute(path: string): Route {
+function parseRoute(rawPath: string): Route {
+  // 深链可能带 query/hash（如 /tasks/T1?tab=findings&finding=F1）；路由只看 pathname。
+  const path = rawPath.split("?")[0].split("#")[0];
   if (path.startsWith("/inbox")) return { page: "inbox" };
   if (path.startsWith("/activity")) return { page: "activity" };
   if (path.startsWith("/decompose")) return { page: "decompose" };

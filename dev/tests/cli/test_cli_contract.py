@@ -55,6 +55,17 @@ CONTRACT = {
     "task knowledge-write": (["task", "knowledge-write", "T-0001",
                               "--title", "t", "--tldr", "d", "--kind", "task_finding"],
                              "POST", f"{API}/tasks/T-0001/knowledge"),
+    "task reviewers": (["task", "reviewers", "T-0001", "--assignees", "auditor"],
+                       "POST", f"{API}/tasks/T-0001/reviewers"),
+    "finding list": (["finding", "list"], "GET", f"{API}/tasks/T-0001/findings"),
+    "finding show": (["finding", "show", "F-1"], "GET",
+                     f"{API}/tasks/T-0001/findings/F-1"),
+    "finding submit": (["finding", "submit", "F-1"], "POST",
+                       f"{API}/tasks/T-0001/findings/F-1/submit"),
+    "finding complete": (["finding", "complete", "--summary", "未发现安全问题"],
+                         "POST", f"{API}/tasks/T-0001/findings/complete"),
+    "finding delete": (["finding", "delete", "F-1"], "DELETE",
+                       f"{API}/tasks/T-0001/findings/F-1"),
     "workspace knowledge list": (["workspace", "knowledge", "list", "W-1"], "GET",
                                  f"{API}/workspaces/W-1/knowledge"),
     "workspace knowledge propose": (["workspace", "knowledge", "propose", "W-1",
@@ -183,10 +194,11 @@ def test_typer_usage_error_appends_hint():
 def test_help_contains_rules_and_examples():
     """--help 必须能直接指导执行，而不是只列参数名。"""
     cases = [
-        (["task", "-h"], ["示例:", "knowledge-write", "anvil task create"]),
+        (["task", "-h"], ["示例:", "knowledge-write", "anvil task create", "reviewers"]),
         (["step", "plan", "-h"], ["plan.json", "slices", "不得指定角色"]),
         (["role", "-h"], ["role list", "role expand"]),
         (["workflow", "revise", "-h"], ["revision.json", "--preview", "requires_restart"]),
+        (["finding", "-h"], ["finding add", "finding complete", "问题板"]),
     ]
     for args, needles in cases:
         r = subprocess.run([ANVIL_BIN, *args], capture_output=True,
@@ -236,6 +248,47 @@ def test_task_mention_accepts_message_option(mock_backend):
               "--message", "hi"], mock_backend)
     assert r.returncode == EXIT["ok"], r.stderr
     assert _Handler.bodies[-1] == {"target": "qa-role", "message": "hi"}
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+def test_task_create_issue_board_flag(mock_backend):
+    """--issue-board 必须映射为 issue_board_enabled，而不是被静默忽略。"""
+    r = _run(["task", "create", "安全审计", "--issue-board"], mock_backend)
+    assert r.returncode == EXIT["ok"], r.stderr
+    assert _Handler.bodies[-1]["issue_board_enabled"] is True
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+def test_finding_add_and_update_read_json_file(mock_backend, tmp_path):
+    """finding add/update 从 --file 读取结构化字段；add --submit 继续提交。"""
+    p = tmp_path / "finding.json"
+    p.write_text(json.dumps({"title": "命令注入", "severity": "high"},
+                            ensure_ascii=False), encoding="utf-8")
+    _Handler.forced_body = {"id": "F-123", "status": "draft"}
+    r = _run(["finding", "add", "--task", "T-0001", "--file", str(p), "--submit"],
+             mock_backend)
+    assert r.returncode == EXIT["ok"], r.stderr
+    assert ("POST", f"{API}/tasks/T-0001/findings") in _Handler.requests
+    assert ("POST", f"{API}/tasks/T-0001/findings/F-123/submit") in _Handler.requests
+    assert _Handler.bodies[0] == {"title": "命令注入", "severity": "high"}
+
+    r = _run(["finding", "update", "F-123", "--task", "T-0001", "--file", str(p)],
+             mock_backend)
+    assert r.returncode == EXIT["ok"], r.stderr
+    assert ("PATCH", f"{API}/tasks/T-0001/findings/F-123") in _Handler.requests
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+def test_finding_template_contains_required_fields():
+    """模板必须包含全部必填字段与枚举，reviewer 才能直接照着填。"""
+    env = {**os.environ, "ANVIL_ENDPOINT": "http://127.0.0.1:1"}
+    r = subprocess.run([ANVIL_BIN, "finding", "template"], env=env,
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == EXIT["ok"], r.stderr
+    for key in ("risk_type", "severity", "attack_path", "reasoning_chain",
+                "poc_status", "fix_priority", "confidence", "line_numbers"):
+        assert key in r.stdout, (key, r.stdout)
+    assert "critical" in r.stdout and "not_verified" in r.stdout
 
 
 @pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")

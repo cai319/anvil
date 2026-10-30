@@ -55,6 +55,7 @@
 |---|---|
 | `anvil task ...` | 任务：列表/创建/认领/评论/提交/归档/任务知识 |
 | `anvil step ...` | 工作流步骤：show/plan/submit/decide/escalate/packet |
+| `anvil finding ...` | 问题板：安全 finding 的填写/提交/完成（reviewer） |
 | `anvil knowledge ...` | 角色知识：检索/索引/仓库/知识卡 |
 | `anvil note write` | 写入角色笔记（实践门控） |
 | `anvil role ...` | 角色：list/expand |
@@ -76,8 +77,9 @@ anvil task create --title "..." [--description "..."] [--assignee <role>]
                  [--assignees a,b] [--parent <id>] [--workspace <id>]
                  [--repo <name>] [--base-branch <branch>]
                  [--knowledge-repos a,b] [--tags a,b] [--type T]
-                 [--plan-first] [--planner <role>]
+                 [--plan-first] [--planner <role>] [--issue-board]
 anvil task assign <id> --assignees a,b
+anvil task reviewers <id> --assignees auditor   # planner/onboarding/human
 anvil task claim <id> [--paths src/a,src/b]
 anvil task unclaim <id>
 anvil task heartbeat <id>
@@ -102,6 +104,9 @@ anvil task knowledge-delete <id> --id <knowledge-id>   # human
 - `comment` 只写时间线，不唤醒；`mention` 才唤醒目标角色。
 - **工作流步骤不要调用 `task claim` / `task submit`**；用 `anvil step`。
 - 子任务用 `--parent` + `--assignee`/`--assignees` 显式指派；创建者不要先 claim。
+- `--issue-board` 只能由 human 在顶层任务启用；任务会强制走 Cindy 计划先行。
+  Cindy 用 `task reviewers <id> --assignees <role>` 指定审核者（必须是已存在且被
+  workflow 覆盖的角色），之后 reviewer 用 `anvil finding ...` 填写问题板。
 - **已有 Roster 时 `assign` 只追加新角色**：首次调用会创建/更新角色追加提案并
   @human（返回 202 / `pending_review`）；human 反馈或批准后重新执行同一命令即可。
   批准只授权 planner，角色仍由 planner 创建/绑定，不会替换已有 assignees。
@@ -198,6 +203,35 @@ anvil workflow revise <wf> --file revision.json             # 创建修订草案
   重排切片、修改 running/submitted/approved 步骤都会 `requires_restart`。
 - 同一 workflow 同时只允许一个待审修订；有待审完整 workflow 草案时也会 409。
 - 详细设计见 `docs/workflow-revision.md`。
+
+## 5.2 问题板：`anvil finding`
+
+任务启用问题板（`anvil task create --issue-board`）后，由任务 reviewer 在 agent 会话中
+用以下命令填写安全 finding；human 在 Web 任务详情的「问题板」页签逐条确认真实/误报。
+
+```bash
+anvil finding template                                  # 输出 finding JSON 模板 + 枚举
+anvil finding add --file finding.json [--task <id>] [--submit]
+anvil finding update <fid> --file finding.json [--task <id>]
+anvil finding submit <fid> [--task <id>]
+anvil finding list [--task <id>] [--status ...] [--severity ...] [--json]
+anvil finding show <fid> [--task <id>] [--json]
+anvil finding complete --summary "..." [--task <id>]
+anvil finding delete <fid> [--task <id>]
+```
+
+规则：
+
+- `--task` 默认取 `ANVIL_TASK_ID`；只有 `task_reviewers` 能写入，human 也不能代填。
+- `add` 默认保存草稿；`submit` 会校验全部必填字段（风险类型/严重等级/模块/函数/文件与行号/
+  前置条件/推理链/风险描述/攻击路径/触发点/PoC 状态/技术证明/修复优先级/修复建议/置信度）。
+- `poc_status=provided` 时 `poc` 填可复现证明；`not_verified` / `not_applicable` 时
+  `poc` 必须写明豁免原因。其余 finding 字段一律必填。
+- 所有条目提交后执行 `finding complete --summary`（即使没有问题也要写明范围与结论），
+  任务才会进入 human 最终评审；human 逐条确认前任务 `review` 会被 409 拒绝。
+- human 在页面「要求重新评估」后，reviewer 会收到 `[anvil:findings]` run：
+  用 `finding list/show` 读取意见，`finding update` 补证后 `finding submit`，再 `finding complete`。
+- 设计细节见 `docs/issue-board.md`。
 
 ## 6. 知识：`anvil knowledge`
 

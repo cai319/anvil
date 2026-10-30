@@ -53,6 +53,11 @@ def create_task(body: TaskIn, conn=Depends(get_db),
                 auth: Auth = Depends(get_auth)):
     is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
     if is_real_agent:
+        if body.issue_board_enabled:
+            raise HTTPException(
+                status_code=403,
+                detail="issue board must be enabled by a human",
+            )
         # 主任务保持 human 创建；角色运行时只能在“自己参与的任务”下创建子任务。
         if not body.parent_id:
             raise HTTPException(
@@ -82,6 +87,7 @@ def create_task(body: TaskIn, conn=Depends(get_db),
         parent_id=body.parent_id, depends_on=body.depends_on,
         knowledge_repos=repos or None,
         knowledge_repos_source="human" if auth.role in (None, "human") else "agent",
+        issue_board_enabled=body.issue_board_enabled,
         )
         if is_real_agent:
             services.tasks.audit_create(
@@ -410,11 +416,29 @@ def archive_completed_tasks(workspace_id: str | None = Query(default=None),
 
 
 @router.patch("/{tid}", response_model=TaskOut)
-def patch_task(tid: str, body: TaskPatch, conn=Depends(get_db),
-               auth: Auth = Depends(require_human)):
-    if services.tasks.get(conn, tid) is None:
+def patch_task(tid: str, body: TaskPatch, force: bool = False,
+               conn=Depends(get_db), auth: Auth = Depends(require_human)):
+    task = services.tasks.get(conn, tid)
+    if task is None:
         raise HTTPException(status_code=404, detail="task not found")
     fields = body.model_dump(exclude_none=True)
+    if "issue_board_enabled" in fields:
+        if fields["issue_board_enabled"]:
+            running = conn.execute(
+                "SELECT 1 FROM workflows WHERE task_id=? AND status='running' LIMIT 1",
+                (tid,)).fetchone()
+            if task["status"] not in ("todo", "in_progress") or running is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="issue board can only be enabled before the workflow starts")
+        else:
+            findings_count = conn.execute(
+                "SELECT COUNT(*) AS n FROM task_findings WHERE task_id=?", (tid,)
+            ).fetchone()["n"]
+            if findings_count and not force:
+                raise HTTPException(
+                    status_code=409,
+                    detail="task has findings; pass force=true to hide the issue board")
     repos = fields.pop("knowledge_repos", None)
     if repos is not None:
         repos = [r if isinstance(r, dict) else {"repo": str(r)} for r in repos]
@@ -617,7 +641,17 @@ def _wake_mentioned_role(conn, request: Request, task: dict, target: str,
             except Exception:  # noqa: BLE001
                 pass
         return
-    if wf is not None or target == services.roles.ONBOARDING_SLUG:
+    if (task.get("issue_board_enabled")
+            and target in services.findings.reviewer_roles(conn, task["id"])
+            and services.findings.board_status(conn, task["id"]) == "in_progress"):
+        # 问题板复评：不能被 workflow 的 REPLY_PROTOCOL 拦住（reviewer 需要写 finding）。
+        run = services.runs.create_run(
+            conn, target, task["id"],
+            prompt=("[anvil:findings]你在任务会话中被 "
+                    f"{sender} @：\n{message}\n\n"
+                    "请复核/更新问题板 findings；完成后执行 "
+                    "`anvil finding complete --task $ANVIL_TASK_ID --summary \"...\"`。"))
+    elif wf is not None or target == services.roles.ONBOARDING_SLUG:
         # 工作流任务或 Cindy：起回复 run（只讨论，不 claim/改 workflow）。
         run = services.runs.create_run(
             conn, target, task["id"],
@@ -819,8 +853,23 @@ def dispatch_task(tid: str, request: Request, conn=Depends(get_db),
                 "draft_kind": pending["kind"] or "tasks"}
 
     onboarding_enabled = os.environ.get("ANVIL_ONBOARDING", "1") != "0"
+    running_workflow = conn.execute(
+        "SELECT 1 FROM workflows WHERE task_id=? AND status='running' LIMIT 1", (tid,)
+    ).fetchone()
+    force_board_plan = bool(t.get("issue_board_enabled")) and running_workflow is None
     planner = None
-    if t.get("plan_first") and t.get("planner"):
+    if force_board_plan:
+        # 问题板必须有 reviewer 与人审环节，单角色任务也必须先由 planner 指定。
+        planner = t.get("planner") or (
+            services.roles.ensure_onboarding(conn)["slug"] if onboarding_enabled else None)
+        if not planner:
+            raise HTTPException(
+                status_code=409,
+                detail="issue board requires onboarding/planner; enable onboarding or set a planner",
+            )
+        if services.roles.get(conn, planner) is None:
+            raise HTTPException(status_code=409, detail=f"planner {planner} not found")
+    elif t.get("plan_first") and t.get("planner"):
         planner = t["planner"]
         if services.roles.get(conn, planner) is None:
             raise HTTPException(status_code=409, detail=f"planner {planner} not found")

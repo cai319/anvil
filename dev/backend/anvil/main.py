@@ -23,7 +23,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import config
 from .api import (
-    actions, agent_inbox, board, event_log, events, governance, inbox, knowledge_repos, memory, reminders, roles, runs, runtimes, tasks, templates, tooling, workflow, workspaces,
+    actions, agent_inbox, board, event_log, events, findings, governance, inbox, knowledge_repos, memory, reminders, roles, runs, runtimes, tasks, templates, tooling, workflow, workspaces,
 )
 from .db import connect, open_conn
 from .deps import token_is_valid
@@ -91,7 +91,8 @@ def _cleanup_orphans(conn) -> None:
     for wf in orphan_wfs:
         conn.execute("DELETE FROM workflow_steps WHERE workflow_id=?", (wf["id"],))
         conn.execute("DELETE FROM workflows WHERE id=?", (wf["id"],))
-    for table in ("task_deps", "task_assignees", "task_role_claims", "task_knowledge_repos"):
+    for table in ("task_deps", "task_assignees", "task_role_claims", "task_knowledge_repos",
+                  "task_reviewers", "task_finding_boards", "task_findings"):
         conn.execute(f"DELETE FROM {table} WHERE task_id NOT IN (SELECT id FROM tasks)")
     conn.execute(
         "DELETE FROM task_deps WHERE depends_on NOT IN (SELECT id FROM tasks)")
@@ -251,6 +252,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     app.include_router(runtimes.router, prefix="/api/v1/runtimes", tags=["runtimes"])
     app.include_router(roles.router, prefix="/api/v1", tags=["roles"])
     app.include_router(tasks.router, prefix="/api/v1/tasks", tags=["tasks"])
+    app.include_router(findings.router, prefix="/api/v1", tags=["findings"])
     app.include_router(inbox.router, prefix="/api/v1", tags=["inbox"])
     app.include_router(agent_inbox.router, prefix="/api/v1", tags=["agent-inbox"])
     app.include_router(actions.router, prefix="/api/v1", tags=["actions"])

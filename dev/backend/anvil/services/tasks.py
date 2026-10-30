@@ -115,7 +115,8 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
            created_by: str | None = None, parent_id: str | None = None,
            depends_on: list[str] | None = None,
            knowledge_repos: list | None = None,
-           knowledge_repos_source: str = "human") -> dict:
+           knowledge_repos_source: str = "human",
+           issue_board_enabled: bool = False) -> dict:
     tid = id or new_id()
     if str(tid).startswith("__"):
         # `__global__` 是角色上下文槽的保留 key，不能与真实任务 id 冲突。
@@ -142,17 +143,22 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
         repo = parent.get("repo")
         workspace_id = parent.get("workspace_id")
         base_branch = parent.get("base_branch")
+    board_enabled = bool(issue_board_enabled)
     conn.execute(
         """INSERT INTO tasks (id, title, type, status, priority, tags_json, repo, workspace_id,
                               base_branch, scope_paths_json, description, acceptance_json,
                               assignee, plan_first, planner, plan_seed_json, created_by, parent_id,
-                              created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                              created_at, updated_at, issue_board_enabled)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (tid, title, type, "todo", priority, jdumps(tags), repo, workspace_id, base_branch,
          jdumps(scope_paths or []), description, jdumps(acceptance or []),
-         assignee, int(plan_first), planner, jdumps(plan_seed) if plan_seed else None,
-         created_by, parent_id, now, now),
+         assignee, int(plan_first or board_enabled), planner,
+         jdumps(plan_seed) if plan_seed else None,
+         created_by, parent_id, now, now, int(board_enabled)),
     )
+    if board_enabled:
+        from . import findings as findings_service
+        findings_service.ensure_board(conn, tid)
     for d in (depends_on or []):
         conn.execute("INSERT OR IGNORE INTO task_deps (task_id, depends_on) VALUES (?,?)", (tid, d))
     for a in (assignees or []):
@@ -192,15 +198,26 @@ def get(conn: sqlite3.Connection, tid: str) -> dict | None:
     d["assignees"] = [x["role_slug"] for x in conn.execute(
         "SELECT role_slug FROM task_assignees WHERE task_id=? ORDER BY joined_at", (tid,))]
     d["role_claims"] = _role_claims(conn, tid)
+    d["reviewer_roles"] = [x["role_slug"] for x in conn.execute(
+        "SELECT role_slug FROM task_reviewers WHERE task_id=? ORDER BY added_at, role_slug",
+        (tid,)).fetchall()]
     knowledge_binding.attach_bindings(conn, [d])
     return d
 
 
 def assign_roles(conn: sqlite3.Connection, tid: str, roles: list[str]) -> dict:
     """绑定任务的参与角色（团队）。全量替换 task_assignees + 重置角色工作状态。"""
-    if get(conn, tid) is None:
+    task = get(conn, tid)
+    if task is None:
         raise LookupError(tid)
     _assert_assignable(conn, roles)
+    if task.get("issue_board_enabled"):
+        reviewers = set(task.get("reviewer_roles") or [])
+        dropped = reviewers - set(roles)
+        if dropped:
+            raise ConflictError(
+                "issue board reviewers must remain task assignees; remove them via "
+                "the reviewers endpoint first: " + ", ".join(sorted(dropped)))
     now = now_iso()
     conn.execute("DELETE FROM task_assignees WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM task_role_claims WHERE task_id=?", (tid,))
@@ -274,6 +291,12 @@ def update(conn: sqlite3.Connection, tid: str, **fields) -> dict | None:
     json_cols = {"tags": "tags_json", "scope_paths": "scope_paths_json", "acceptance": "acceptance_json"}
     if "tags" in fields and fields["tags"] is not None:
         fields["tags"] = knowledge.normalize_tags(fields["tags"])
+    board_enabled = None
+    if "issue_board_enabled" in fields and fields["issue_board_enabled"] is not None:
+        board_enabled = bool(fields["issue_board_enabled"])
+        fields["issue_board_enabled"] = int(board_enabled)
+        if board_enabled:
+            fields["plan_first"] = 1
     if "status" in fields and fields["status"] is not None:
         target = getattr(fields["status"], "value", fields["status"])
         target = str(target)
@@ -299,6 +322,10 @@ def update(conn: sqlite3.Connection, tid: str, **fields) -> dict | None:
     cols = ", ".join(f"{c}=?" for c in assign)
     conn.execute(f"UPDATE tasks SET {cols} WHERE id=?", (*assign.values(), tid))
     conn.commit()
+    if board_enabled:
+        from . import findings as findings_service
+        findings_service.ensure_board(conn, tid)
+        conn.commit()
     if "tags" in fields:
         repo_catalog.invalidate_catalog()
         task = get(conn, tid)
@@ -544,6 +571,9 @@ def review(conn: sqlite3.Connection, tid: str, approve: bool, role: str | None =
         raise LookupError(tid)
     if t["status"] != "in_review":
         raise ConflictError(f"task {tid} is {t['status']}, expected in_review")
+    if approve and t.get("issue_board_enabled"):
+        from . import findings as findings_service
+        findings_service.assert_ready_for_task_review(conn, tid)
     new_status = "done" if approve else "in_progress"
     lease = None if approve else t.get("lease_expires_at")
     conn.execute(
@@ -837,6 +867,9 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
     conn.execute("DELETE FROM task_assignees WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM task_knowledge_repos WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM task_role_claims WHERE task_id=?", (tid,))
+    conn.execute("DELETE FROM task_reviewers WHERE task_id=?", (tid,))
+    conn.execute("DELETE FROM task_finding_boards WHERE task_id=?", (tid,))
+    conn.execute("DELETE FROM task_findings WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM activities WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM sessions WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM role_inbox_cursors WHERE task_id=?", (tid,))
@@ -1090,4 +1123,6 @@ def _row(r) -> dict:
     d["scope_paths"] = jloads(d.pop("scope_paths_json"), [])
     d["acceptance"] = jloads(d.pop("acceptance_json"), [])
     d["plan_seed"] = jloads(d.pop("plan_seed_json", None), None)
+    if "issue_board_enabled" in d:
+        d["issue_board_enabled"] = bool(d["issue_board_enabled"])
     return d

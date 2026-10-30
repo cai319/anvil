@@ -129,6 +129,30 @@ STEP_PROTOCOL = (
     "只修改本步骤范围内的文件；越界提交会被拒绝。"
 ) + "\n\n" + ATTACHMENT_BUDGET
 
+# 问题板（Issue Board）：reviewer 在任务内填写结构化安全 findings。
+FINDING_PROTOCOL = (
+    "你在处理本任务的安全问题板（Issue Board）。你是本任务的 reviewer 之一，"
+    "只有 reviewer 能写入 finding；不要用 comment 代替结构化记录。\n"
+    "## 写入方式\n"
+    "· 先运行 `anvil finding template` 查看字段/枚举模板，再把一个 finding 写成 JSON 文件，"
+    "执行 `anvil finding add --task $ANVIL_TASK_ID --file finding.json [--submit]`。\n"
+    "· 字段：title/risk_type/severity/module/function_name/file_path/line_numbers/"
+    "preconditions/reasoning_chain/risk_description/attack_path/trigger_point/"
+    "poc_status/poc/fix_priority/fix_suggestion/confidence。\n"
+    "· 除 PoC 可豁免外，submit 时全部必填。PoC 豁免时 poc_status 写 "
+    "not_verified 或 not_applicable，并在 poc 里写清原因；能构造 PoC 时必须给出可复现步骤。\n"
+    "· attack_path 要写数据流：消息/命令入口 → source 点 → 传播 → sink 点；"
+    "reasoning_chain 写完整推理链，不要只给结论。\n"
+    "· 逐条记录，不要合并多个问题；修改草稿用 `anvil finding update <id> --file ...`，"
+    "提交用 `anvil finding submit <id>`。\n"
+    "## 完成问题板\n"
+    "· 所有 finding 提交后执行 `anvil finding complete --task $ANVIL_TASK_ID "
+    "--summary \"...\"`；没有发现也要写明“未发现安全问题”及范围/依据。\n"
+    "· 完成问题板后，任务会进入 human 最终评审；human 可能退回并要求你与其他角色复评，"
+    "此时更新/补证并重新提交，再 complete。\n"
+    "· 本 run 只做问题板工作：不要 claim/submit 普通任务，也不要修改 workflow 结构。"
+) + "\n\n" + ATTACHMENT_BUDGET
+
 # P1-0 计划先行：规划者（leader）的专用协议。规划 → 草案 → @human → 挂起；不亲自实现。
 PLANNING_PROTOCOL = (
     "你是本任务的工作流规划者（人类助理 / leader）。先评估角色、再规划、后协调，不亲自实现具体产出。\n"
@@ -253,6 +277,16 @@ PLANNING_PROTOCOL = (
     "取消/删除/不可逆操作、角色演化/预算）才 @human。\n"
     "第四步：若规划约束说明 human 拒绝了新增角色：只能用现有 Roster 规划；如果没有任何可用角色，"
     "停止并在消息中说明需要 human 先创建/绑定至少一个角色，不得虚构角色或步骤。\n"
+    "## 问题板任务（task.issue_board_enabled=true）\n"
+    "· 先从人类勾选/Roster 中找审核、审计、安全、测试类角色作为 reviewer；纯审计任务中"
+    "唯一的审核角色也可以作为 reviewer。\n"
+    "· 找到后用 `anvil task reviewers $ANVIL_TASK_ID --assignees <slug>` 落库；"
+    "找不到合适角色时，绑定现有合适角色或提交 role_suggestion，human 批准后再继续；"
+    "不能静默启用一个无人填写的问题板。\n"
+    "· workflow 必须把 reviewer 映射到静态步骤或 loop 阶段；flat steps 优先给审核步骤 "
+    "gate=true，loop 内不能放 gate（最终 task review 承担 human 审核）。\n"
+    "· 审核步骤的 instructions 要写明用 `anvil finding add/update/submit` 逐条填写，"
+    "完成后 `anvil finding complete --summary`；审核者必须独立于实现者。\n"
     "禁止：不要实现具体步骤；不要 submit 主任务；不要自行创建角色；草案被驳回时按人工意见修订后重新提交。"
 )
 
