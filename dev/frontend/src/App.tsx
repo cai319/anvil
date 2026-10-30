@@ -293,10 +293,13 @@ export default function App() {
       className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${drawerOpen ? "drawer-open" : ""}`}
     >
       <aside id="app-sidebar" className="sidebar" aria-label="主导航">
-        <a href="/" className="brand" onClick={() => setDrawerOpen(false)}>
+        <a href="/" className="brand"
+          title="开发者：ikaruga 00818083 供平台安全测试内部使用"
+          onClick={() => setDrawerOpen(false)}>
           <span className="dot" />
           <span className="brand-name">Anvil</span>
-          <span className="brand-version" title={`Anvil 当前版本 ${APP_VERSION}`}>
+          <span className="brand-version"
+            title="开发者：ikaruga 00818083 供平台安全测试内部使用">
             {APP_VERSION}
           </span>
         </a>
