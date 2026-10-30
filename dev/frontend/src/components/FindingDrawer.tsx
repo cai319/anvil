@@ -147,6 +147,8 @@ export function FindingDrawer({ taskId, findingId, schema, onClose, onChanged }:
     { label: "修复建议", value: finding.fix_suggestion, pre: true },
   ] : [];
 
+  const summaryFields = fields.filter((f) => !f.pre);
+  const detailFields = fields.filter((f) => f.pre);
   const actionable = finding?.status === "submitted";
   const decided = finding?.status === "confirmed" || finding?.status === "false_positive";
 
@@ -199,11 +201,20 @@ export function FindingDrawer({ taskId, findingId, schema, onClose, onChanged }:
               </div>
             )}
 
-            <div className="finding-field-list">
-              {fields.map((f) => (
-                <section key={f.label} className={`finding-field ${f.pre ? "is-long" : ""}`}>
+            <div className="finding-summary-grid">
+              {summaryFields.map((f) => (
+                <section key={f.label} className="finding-field finding-field-compact">
                   <h3>{f.label}</h3>
-                  {f.pre ? <pre>{f.value || "—"}</pre> : <p>{f.value || "—"}</p>}
+                  <p>{f.value || "—"}</p>
+                </section>
+              ))}
+            </div>
+
+            <div className="finding-field-list">
+              {detailFields.map((f) => (
+                <section key={f.label} className="finding-field">
+                  <h3>{f.label}</h3>
+                  <pre>{f.value || "—"}</pre>
                 </section>
               ))}
             </div>
