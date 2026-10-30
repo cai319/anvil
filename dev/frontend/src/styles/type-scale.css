@@ -128,6 +128,62 @@ button,
   line-height: 1.35;
 }
 
+/* ── 任务档案：统一的标签/值排版 ─────────────────── */
+.task-meta {
+  grid-template-columns: clamp(58px, 4.6vw, 78px) minmax(0, 1fr);
+  align-items: center;
+  column-gap: 0;
+  row-gap: 0;
+  margin: 0.35rem 0 0.9rem;
+}
+.task-meta > dt,
+.task-meta > dd {
+  min-width: 0;
+  margin: 0;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--paper-2);
+  font-family: var(--font-body);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+.task-meta > dt {
+  padding-right: 12px;
+  color: var(--text-on-paper-muted);
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+.task-meta > dd {
+  color: var(--text-on-paper);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.task-meta > :nth-last-child(-n + 2) { border-bottom: 0; }
+
+/* 状态徽标与角色灯不再使用 9px 小字，跟随档案正文尺寸。 */
+.task-meta .status,
+.task-meta .role-live-chip,
+.task-meta .role-live-name {
+  font-size: var(--fs-sm);
+}
+.task-meta .status {
+  padding: 2px 8px;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.25;
+}
+.task-meta .role-live-chip {
+  gap: 7px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.task-meta .role-live-name {
+  color: var(--text-on-paper-soft);
+  font-family: var(--font-body);
+}
+.task-meta .role-live-queue { font-size: var(--fs-meta); }
+.task-meta .mono { font-size: var(--fs-sm); }
+
 /* ── 仅提示 / 帮助文字保留最小字号 ─────────────── */
 .role-slug-hint,
 .session-compose p.muted,
