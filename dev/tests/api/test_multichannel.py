@@ -157,6 +157,24 @@ async def test_task_filtered_by_channel(client):
     assert all(t["workspace_id"] == ws1["id"] for t in r.json())
 
 
+async def test_task_payload_includes_workspace_ref(client):
+    """任务详情/列表返回频道引用，前端不需要拿 id 再猜频道名。"""
+    await _seed(client)
+    ws = (await _ws(client, name="任务档案频道", repo="repo-x")).json()
+    created = (await client.post(
+        f"{API}/tasks", json={"title": "x", "workspace_id": ws["id"]},
+        headers=auth_headers())).json()
+    assert created["workspace"] == {
+        "id": ws["id"], "name": "任务档案频道", "repo": "repo-x"}
+
+    detail = (await client.get(f"{API}/tasks/{created['id']}",
+                               headers=human_headers())).json()
+    assert detail["workspace"]["name"] == "任务档案频道"
+    listed = (await client.get(f"{API}/tasks", headers=human_headers())).json()
+    row = next(t for t in listed if t["id"] == created["id"])
+    assert row["workspace"]["name"] == "任务档案频道"
+
+
 # ---- 频道内完整链路 ------------------------------------------------------
 
 

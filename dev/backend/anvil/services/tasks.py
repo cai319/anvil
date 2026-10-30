@@ -201,8 +201,25 @@ def get(conn: sqlite3.Connection, tid: str) -> dict | None:
     d["reviewer_roles"] = [x["role_slug"] for x in conn.execute(
         "SELECT role_slug FROM task_reviewers WHERE task_id=? ORDER BY added_at, role_slug",
         (tid,)).fetchall()]
+    _attach_workspaces(conn, [d])
     knowledge_binding.attach_bindings(conn, [d])
     return d
+
+
+def _attach_workspaces(conn: sqlite3.Connection, tasks: list[dict]) -> list[dict]:
+    """给任务附上频道引用（id/name/repo），避免前端只拿到 workspace_id。"""
+    ids = {str(t["workspace_id"]) for t in tasks if t.get("workspace_id")}
+    refs: dict[str, dict] = {}
+    if ids:
+        placeholders = ",".join("?" for _ in ids)
+        for row in conn.execute(
+            f"SELECT id, name, repo FROM workspaces WHERE id IN ({placeholders})",
+            tuple(ids),
+        ).fetchall():
+            refs[str(row["id"])] = dict(row)
+    for t in tasks:
+        t["workspace"] = refs.get(str(t.get("workspace_id") or ""))
+    return tasks
 
 
 def assign_roles(conn: sqlite3.Connection, tid: str, roles: list[str]) -> dict:
@@ -280,6 +297,7 @@ def list_all(conn: sqlite3.Connection, status: str | None = None, assignee: str 
         q += " WHERE " + " AND ".join(clauses)
     q += " ORDER BY created_at DESC"
     tasks = [_with_deps(conn, _row(r)) for r in conn.execute(q, params)]
+    _attach_workspaces(conn, tasks)
     return knowledge_binding.attach_bindings(conn, tasks)
 
 

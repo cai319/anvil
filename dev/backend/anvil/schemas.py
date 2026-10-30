@@ -162,6 +162,7 @@ class TaskOut(BaseModel):
     tags: list[str] = Field(default_factory=list)
     repo: str | None = None
     workspace_id: str | None = None
+    workspace: dict[str, Any] | None = None
     base_branch: str | None = None
     scope_paths: list[str] = Field(default_factory=list)
     description: str | None = None
