@@ -927,18 +927,28 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
   align-items: flex-start;
   gap: 12px;
   width: 100%;
-  padding: 12px 14px;
+  min-height: 0;
+  padding: 13px 15px;
   text-align: left;
   background: var(--surface);
-  border: 1.5px solid var(--border);
+  color: var(--text);
+  border: 1.5px solid var(--border-strong);
   border-radius: var(--radius);
+  box-shadow: none;
+  font-weight: 400;
+  white-space: normal;
   cursor: pointer;
-  transition: border-color 0.12s, transform 0.12s;
+  transition: background 0.12s, border-color 0.12s, transform 0.12s;
 }
-.finding-card:hover {
-  border-color: var(--border-strong);
+.finding-card:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--accent-strong);
   transform: translateY(-1px);
+  box-shadow: none;
 }
+.finding-card:active:not(:disabled) { transform: translateY(0); }
+.finding-card:focus-visible { outline: 3px solid var(--cyan); outline-offset: 2px; }
 .finding-card.is-submitted { border-left: 4px solid var(--amber); }
 .finding-card.is-confirmed { border-left: 4px solid var(--red); }
 .finding-card.is-false_positive { border-left: 4px solid var(--green); }
@@ -951,11 +961,14 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
   flex: 1;
 }
 .finding-card-title {
+  color: var(--text);
   font-weight: 700;
   font-size: var(--fs-base);
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 .finding-card-loc {
+  color: var(--muted);
   font-size: var(--fs-meta);
   overflow-wrap: anywhere;
 }
@@ -966,7 +979,16 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
   flex-wrap: wrap;
   font-size: var(--fs-hint);
 }
-.finding-card-arrow { color: var(--faint); font-size: 22px; line-height: 1; }
+.finding-card-arrow {
+  color: var(--faint);
+  font-size: 22px;
+  line-height: 1;
+  transition: color 0.12s, transform 0.12s;
+}
+.finding-card:hover .finding-card-arrow {
+  color: var(--accent-strong);
+  transform: translateX(2px);
+}
 
 .finding-sev {
   flex: 0 0 auto;
