@@ -58,6 +58,19 @@ async def test_single_role_dispatch_is_direct(client, seeded):
     assert [x["role_slug"] for x in body["runs"]] == ["developer"]
 
 
+async def test_plan_first_single_role_dispatch_plans_with_cindy(client, seeded):
+    r = await client.post("/api/v1/tasks", headers=auth_headers(), json=task_payload(
+        id="T-PF-SINGLE", assignees=["developer"], plan_first=True))
+    assert r.status_code == 201, r.text
+    r = await client.post("/api/v1/tasks/T-PF-SINGLE/dispatch", headers=human_headers())
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["mode"] == "planning"
+    assert body["planner"] == "cindy"
+    task = (await client.get("/api/v1/tasks/T-PF-SINGLE", headers=auth_headers())).json()
+    assert task["planner"] == "cindy"
+
+
 @pytest.mark.asyncio
 async def test_single_role_tagless_dispatch_plans_with_cindy(client, seeded, monkeypatch):
     monkeypatch.setattr(config, "KNOWLEDGE_BINDING_MODE", "auto")

@@ -1,6 +1,7 @@
 """Task endpoints: CRUD + manual assign + agent-side transitions (§3.1/§10)."""
 from __future__ import annotations
 
+import os
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -904,7 +905,19 @@ def plan_task(tid: str, request: Request, conn=Depends(get_db),
         raise HTTPException(status_code=404, detail="task not found")
     planner = t.get("planner")
     if not planner:
-        raise HTTPException(status_code=409, detail="task has no planner; set planner first")
+        # plan_first 任务未显式设置 planner：回退到 onboarding 助理（Cindy），
+        # 与 /dispatch 的选择逻辑保持一致；回退结果落库，后续按钮不再禁用。
+        if os.environ.get("ANVIL_ONBOARDING", "1") != "0":
+            planner = services.roles.ensure_onboarding(conn)["slug"]
+            conn.execute(
+                "UPDATE tasks SET planner=?, updated_at=? WHERE id=?",
+                (planner, now_iso(), tid))
+            conn.commit()
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail="task has no planner and onboarding is disabled",
+            )
     if services.roles.get(conn, planner) is None:
         raise HTTPException(status_code=409, detail=f"planner {planner} not found")
     assignees = _assignee_slugs(conn, tid)
@@ -955,10 +968,23 @@ def dispatch_task(tid: str, request: Request, conn=Depends(get_db),
             )
         if services.roles.get(conn, planner) is None:
             raise HTTPException(status_code=409, detail=f"planner {planner} not found")
-    elif t.get("plan_first") and t.get("planner"):
-        planner = t["planner"]
+    elif t.get("plan_first"):
+        # plan_first 是硬语义：无论单角色/多角色，都先由 planner（缺省 Cindy）规划，
+        # 不允许因为知识绑定状态而退化成直接派发。
+        planner = t.get("planner") or (
+            services.roles.ensure_onboarding(conn)["slug"] if onboarding_enabled else None)
+        if not planner:
+            raise HTTPException(
+                status_code=409,
+                detail="plan_first requires onboarding/planner; enable onboarding or set a planner",
+            )
         if services.roles.get(conn, planner) is None:
             raise HTTPException(status_code=409, detail=f"planner {planner} not found")
+        if not t.get("planner"):
+            conn.execute(
+                "UPDATE tasks SET planner=?, updated_at=? WHERE id=?",
+                (planner, now_iso(), tid))
+            conn.commit()
     elif not assignees and onboarding_enabled:
         # 没有绑定角色：Cindy 先评估并给出角色建议。
         planner = services.roles.ensure_onboarding(conn)["slug"]

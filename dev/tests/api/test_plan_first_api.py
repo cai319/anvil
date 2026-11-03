@@ -50,10 +50,24 @@ async def test_plan_endpoint_rejects_non_assignee_planner(client, seeded):
     assert r.status_code == 409
 
 
-async def test_plan_endpoint_requires_planner(client, seeded):
+async def test_plan_endpoint_falls_back_to_cindy(client, seeded):
+    """plan_first 任务未设置 planner 时，生成工作流应回退到 Cindy。"""
     await client.post("/api/v1/tasks", json=task_payload(
-        id="T-PF5", assignees=["pm"]), headers=auth_headers())
+        id="T-PF5", assignees=["pm"], plan_first=True), headers=auth_headers())
     r = await client.post("/api/v1/tasks/T-PF5/plan", headers=human_headers())
+    assert r.status_code == 201, r.text
+    run = r.json()
+    assert run["role_slug"] == "cindy"
+    task = (await client.get("/api/v1/tasks/T-PF5", headers=auth_headers())).json()
+    assert task["planner"] == "cindy"
+
+
+async def test_plan_endpoint_requires_planner_when_onboarding_disabled(
+        client, seeded, monkeypatch):
+    monkeypatch.setenv("ANVIL_ONBOARDING", "0")
+    await client.post("/api/v1/tasks", json=task_payload(
+        id="T-PF6", assignees=["pm"], plan_first=True), headers=auth_headers())
+    r = await client.post("/api/v1/tasks/T-PF6/plan", headers=human_headers())
     assert r.status_code == 409
 
 

@@ -1749,7 +1749,7 @@ export function TaskDetail({ id }: { id: string }) {
               <button
                 className="primary"
                 disabled={busy}
-                title="0 角色时 Cindy 会先分析并建议角色；多角色任务先由 Cindy 规划工作流；单角色任务若无标签或知识仓库匹配较弱，也会先由 Cindy 识别知识仓库。草案经你批准后执行"
+                title="0 角色时 Cindy 会先分析并建议角色；plan_first 或多角色任务先由 planner/Cindy 规划工作流；单角色任务若无标签或知识仓库匹配较弱，也会先由 Cindy 识别知识仓库。草案经你批准后执行"
                 onClick={() => act(async () => {
                   const res = await api.dispatchTask(id);
                   setDispatchNote(
@@ -1767,19 +1767,13 @@ export function TaskDetail({ id }: { id: string }) {
                   ? "派发（Cindy 分析并建议角色）"
                   : (task.assignees?.length ?? 0) >= 2
                     ? "派发（先由 Cindy 规划）"
-                    : (!task.knowledge_binding_locked
-                        && ["needs_cindy", "suggested", "fallback"].includes(
-                          task.knowledge_binding_state ?? ""))
-                      ? "派发（Cindy 识别知识仓库）"
-                      : "派发并执行"}</button>
-            )}
-            {task.plan_first && task.status === "todo" && (
-              <button
-                className="primary"
-                disabled={busy || !task.planner}
-                title={task.planner ? `唤醒 ${task.planner} 生成工作流草案` : "任务未设置 planner"}
-                onClick={() => act(() => api.planTask(id))}
-              >生成工作流</button>
+                    : task.plan_first
+                      ? "派发（先规划工作流）"
+                      : (!task.knowledge_binding_locked
+                          && ["needs_cindy", "suggested", "fallback"].includes(
+                            task.knowledge_binding_state ?? ""))
+                        ? "派发（Cindy 识别知识仓库）"
+                        : "派发并执行"}</button>
             )}
             {task.status === "in_progress" && (
               <>
