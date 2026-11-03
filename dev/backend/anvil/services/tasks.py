@@ -93,11 +93,13 @@ def is_task_participant(conn: sqlite3.Connection, tid: str, role: str) -> bool:
 
 
 def audit_create(conn: sqlite3.Connection, tid: str, actor: str | None, *,
-                 parent_id: str | None = None, workspace_id: str | None = None,
+                 parent_id: str | None = None, parent_step_id: str | None = None,
+                 workspace_id: str | None = None,
                  repo: str | None = None) -> None:
     """记录任务创建审计，尤其是角色运行时创建的子任务。"""
     _audit(conn, actor, tid, "create", {
         "parent_id": parent_id,
+        "parent_step_id": parent_step_id,
         "workspace_id": workspace_id,
         "repo": repo,
     })
@@ -113,6 +115,7 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
            plan_first: bool = False, planner: str | None = None,
            plan_seed: dict | None = None,
            created_by: str | None = None, parent_id: str | None = None,
+           parent_step_id: str | None = None, due_at: str | None = None,
            depends_on: list[str] | None = None,
            knowledge_repos: list | None = None,
            knowledge_repos_source: str = "human",
@@ -148,13 +151,13 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
         """INSERT INTO tasks (id, title, type, status, priority, tags_json, repo, workspace_id,
                               base_branch, scope_paths_json, description, acceptance_json,
                               assignee, plan_first, planner, plan_seed_json, created_by, parent_id,
-                              created_at, updated_at, issue_board_enabled)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                              parent_step_id, due_at, created_at, updated_at, issue_board_enabled)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (tid, title, type, "todo", priority, jdumps(tags), repo, workspace_id, base_branch,
          jdumps(scope_paths or []), description, jdumps(acceptance or []),
          assignee, int(plan_first or board_enabled), planner,
          jdumps(plan_seed) if plan_seed else None,
-         created_by, parent_id, now, now, int(board_enabled)),
+         created_by, parent_id, parent_step_id, due_at, now, now, int(board_enabled)),
     )
     if board_enabled:
         from . import findings as findings_service
@@ -204,6 +207,47 @@ def get(conn: sqlite3.Connection, tid: str) -> dict | None:
     _attach_workspaces(conn, [d])
     knowledge_binding.attach_bindings(conn, [d])
     return d
+
+
+def list_delegations(conn: sqlite3.Connection, parent_id: str) -> list[dict]:
+    """父任务下的委派工单（含旧子任务），带父 step 与最新 run 的展示信息。"""
+    if get(conn, parent_id) is None:
+        raise LookupError(parent_id)
+    rows = conn.execute(
+        """SELECT t.*,
+                  ws.title AS step_title,
+                  r.id AS run_id, r.status AS run_status,
+                  r.failure_class AS run_failure_class,
+                  COALESCE(
+                    (SELECT c.summary FROM task_role_claims c
+                      WHERE c.task_id=t.id AND c.summary IS NOT NULL
+                      ORDER BY c.submitted_at DESC LIMIT 1),
+                    (SELECT json_extract(a.payload_json, '$.summary') FROM audit a
+                      WHERE a.task_id=t.id AND a.action='submit'
+                      ORDER BY a.id DESC LIMIT 1)
+                  ) AS submitted_summary
+             FROM tasks t
+             LEFT JOIN workflow_steps ws
+               ON ws.step_id=t.parent_step_id
+              AND ws.workflow_id=(
+                  SELECT w.id FROM workflows w WHERE w.task_id=t.parent_id
+                  ORDER BY w.created_at DESC, w.rowid DESC LIMIT 1)
+             LEFT JOIN runs r
+               ON r.id=(SELECT x.id FROM runs x WHERE x.task_id=t.id
+                        ORDER BY x.started_at DESC, x.rowid DESC LIMIT 1)
+            WHERE t.parent_id=?
+            ORDER BY t.created_at, t.id""", (parent_id,)).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        d = dict(row)
+        d["tags"] = jloads(d.pop("tags_json", "[]"), [])
+        d["scope_paths"] = jloads(d.pop("scope_paths_json", "[]"), [])
+        d["acceptance"] = jloads(d.pop("acceptance_json", "[]"), [])
+        d["assignees"] = [x["role_slug"] for x in conn.execute(
+            "SELECT role_slug FROM task_assignees WHERE task_id=? ORDER BY joined_at",
+            (d["id"],))]
+        out.append(d)
+    return out
 
 
 def _attach_workspaces(conn: sqlite3.Connection, tasks: list[dict]) -> list[dict]:
@@ -567,8 +611,9 @@ def submit(conn: sqlite3.Connection, tid: str, *, summary: str | None = None,
             (now, tid),
         )
         _complete_runs(conn, tid)
-        mention(conn, tid, role or "system", "human",
-                f"团队任务已全部提交，请评审（{', '.join(t['assignees'])}）")
+        if not _notify_delegator(conn, t, role):
+            mention(conn, tid, role or "system", "human",
+                    f"团队任务已全部提交，请评审（{', '.join(t['assignees'])}）")
         _audit(conn, role, tid, "submit", {"summary": summary, "branch": branch,
                                            "changed_paths": changed,
                                            "reported_paths": changed_paths,
@@ -577,6 +622,7 @@ def submit(conn: sqlite3.Connection, tid: str, *, summary: str | None = None,
         return get(conn, tid)  # type: ignore[return-value]
 
     conn.execute("UPDATE tasks SET status='in_review', updated_at=? WHERE id=?", (now, tid))
+    _notify_delegator(conn, t, role)
     _audit(conn, role, tid, "submit", {"summary": summary, "branch": branch,
                                        "changed_paths": changed, "reported_paths": changed_paths})
     conn.commit()
@@ -614,6 +660,54 @@ def review(conn: sqlite3.Connection, tid: str, approve: bool, role: str | None =
     conn.commit()
     if approve:
         notify_downstream(conn, tid)  # 完成后 @提及下游角色，触发交接
+    return get(conn, tid)  # type: ignore[return-value]
+
+
+def _require_delegation(t: dict) -> None:
+    if not t.get("parent_step_id"):
+        raise ConflictError(f"task {t['id']} is not a delegation task")
+    if t["status"] != "in_review":
+        raise ConflictError(f"task {t['id']} is {t['status']}, expected in_review")
+
+
+def accept_delegation(conn: sqlite3.Connection, tid: str, actor: str | None) -> dict:
+    """派发者验收委派工单：子任务 done，父 step 的委派门释放。"""
+    t = get(conn, tid)
+    if t is None:
+        raise LookupError(tid)
+    _require_delegation(t)
+    review(conn, tid, True, actor)
+    created = str(t.get("created_by") or "")
+    delegator = created[len("agent:"):] if created.startswith("agent:") else ""
+    if delegator and actor != delegator:
+        mention(conn, tid, actor or "system", delegator,
+                "委派已验收，请继续父 step")
+    _audit(conn, actor, tid, "delegation.accept", {
+        "delegator": t.get("created_by"), "owner": t.get("assignee"),
+    })
+    conn.commit()
+    return get(conn, tid)  # type: ignore[return-value]
+
+
+def reject_delegation(conn: sqlite3.Connection, tid: str, actor: str | None,
+                      feedback: str) -> dict:
+    """派发者打回委派工单：子任务回到 in_progress，并 @ 负责人返工。"""
+    feedback = (feedback or "").strip()
+    if not feedback:
+        raise ConflictError("feedback is required when rejecting a delegation")
+    t = get(conn, tid)
+    if t is None:
+        raise LookupError(tid)
+    _require_delegation(t)
+    review(conn, tid, False, actor)
+    if t.get("assignee"):
+        mention(conn, tid, actor or "system", t["assignee"],
+                f"委派打回：{feedback}")
+    _audit(conn, actor, tid, "delegation.reject", {
+        "delegator": t.get("created_by"), "owner": t.get("assignee"),
+        "feedback": feedback,
+    })
+    conn.commit()
     return get(conn, tid)  # type: ignore[return-value]
 
 
@@ -1018,6 +1112,19 @@ def _assert_submittable(conn: sqlite3.Connection, t: dict) -> None:
     children = conn.execute("SELECT status FROM tasks WHERE parent_id=?", (t["id"],)).fetchall()
     if any(c["status"] != "done" for c in children):
         raise ConflictError("child tasks not all done")
+
+
+def _notify_delegator(conn: sqlite3.Connection, t: dict, actor: str | None) -> bool:
+    """委派提交后通知派发者验收；同角色自委派时通知 human。"""
+    if not t.get("parent_step_id"):
+        return False
+    created = str(t.get("created_by") or "")
+    if not created.startswith("agent:"):
+        return False
+    delegator = created[len("agent:"):]
+    target = "human" if delegator == (actor or "") else delegator
+    mention(conn, t["id"], actor or "system", target, "委派已提交，请验收")
+    return True
 
 
 def _assert_channel_member(conn: sqlite3.Connection, t: dict, role: str) -> None:

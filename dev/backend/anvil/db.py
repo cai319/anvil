@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     claimed_at       TEXT,
     created_by       TEXT,
     parent_id        TEXT,
+    parent_step_id   TEXT,                          -- 委派工单：父任务下的 workflow step
+    due_at           TEXT,                          -- 委派工单截止时间（展示/后续告警）
     -- DEPRECATED: 旧版美元成本字段，仅保留兼容；不再写入/展示。Token 见 token_usage。
     cost_budget_usd  REAL,
     cost_used_usd    REAL NOT NULL DEFAULT 0,
@@ -1055,7 +1057,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             pass
     for col in ("plan_first INTEGER NOT NULL DEFAULT 0", "planner TEXT",
                 "workflow_weight TEXT", "workflow_weight_source TEXT",
-                "workflow_weight_reason TEXT"):
+                "workflow_weight_reason TEXT", "parent_step_id TEXT", "due_at TEXT"):
         try:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col}")
         except sqlite3.OperationalError:

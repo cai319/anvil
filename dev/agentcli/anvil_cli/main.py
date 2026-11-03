@@ -63,6 +63,8 @@ TASK_EPILOG = """\b
   reviewers <id> --assignees a,b        指定问题板 reviewer（planner/onboarding/human）
   claim | unclaim <id>                  认领/释放（工作流步骤不要 claim）
   submit <id> "摘要"                    提交任务（不是工作流步骤）
+  delegation-accept <id>                派发者验收委派工单
+  delegation-reject <id> --feedback "…" 派发者打回委派工单
   comment <id> "正文"                   评论，不唤醒任何人
   mention <id> --to <role> "正文"       @提及并唤醒目标角色
   archive | unarchive <id>              归档/取消归档（human）
@@ -73,6 +75,11 @@ TASK_EPILOG = """\b
 示例:
   anvil task create "修复登录超时" --assignee developer --workspace W-1
   anvil task create "安全审计" --issue-board --assignees auditor
+  anvil task create "构造 PoC" --parent $ANVIL_TASK_ID --parent-step S3 \\
+    --assignee vuln-verifier --acceptance "PoC 可复现" --scope-paths poc/ \\
+    --due-at 2026-12-01T18:00:00+08:00
+  anvil task delegation-accept <子任务ID>
+  anvil task delegation-reject <子任务ID> --feedback "缺少命令输出"
   anvil task reviewers $ANVIL_TASK_ID --assignees auditor
   anvil task comment $ANVIL_TASK_ID "已完成接口联调"
   anvil task mention $ANVIL_TASK_ID --to tester "请复跑回归"
@@ -470,6 +477,22 @@ def task_cmd(
         rich_help_panel="查询 / 创建"),
     parent: str = typer.Option(None, "--parent", help="父任务 id（create 子任务）",
                                rich_help_panel="查询 / 创建"),
+    parent_step: str = typer.Option(
+        None, "--parent-step",
+        help="create：父 workflow step id（委派工单必须带）",
+        rich_help_panel="查询 / 创建"),
+    acceptance: str = typer.Option(
+        None, "--acceptance",
+        help="create：验收标准，分号分隔",
+        rich_help_panel="查询 / 创建"),
+    scope_paths: str = typer.Option(
+        None, "--scope-paths",
+        help="create：范围路径，逗号分隔",
+        rich_help_panel="查询 / 创建"),
+    due_at: str = typer.Option(
+        None, "--due-at",
+        help="create：委派截止时间，ISO8601（如 2026-12-01T18:00:00+08:00）",
+        rich_help_panel="查询 / 创建"),
     title: str = typer.Option(None, "--title", help="create：任务标题",
                               rich_help_panel="查询 / 创建"),
     description: str = typer.Option(None, "--description", help="create：任务描述",
@@ -487,6 +510,10 @@ def task_cmd(
     summary: str = typer.Option(
         None, "--summary",
         help="submit：摘要（涉及交付件时逐项写性质/内容简介/绝对路径）",
+        rich_help_panel="执行 / 协作"),
+    feedback: str = typer.Option(
+        None, "--feedback",
+        help="delegation-reject：打回原因",
         rich_help_panel="执行 / 协作"),
     message: str = typer.Option(None, "--message", "-m",
                                 help="comment/mention：正文（等价位置参数 body）",
@@ -516,6 +543,7 @@ def task_cmd(
     """anvil task <list|show|create|assign|reviewers|claim|unclaim|heartbeat|submit|comment|mention|cancel|reopen|delete|block|archive|unarchive|knowledge-list|knowledge-write|knowledge-delete> …"""
     tid = target or DEFAULT_TASK
     needs_target = {"show", "claim", "unclaim", "heartbeat", "submit", "comment", "mention",
+                    "delegation-accept", "delegation-reject",
                     "cancel", "reopen", "delete", "block", "assign", "reviewers",
                     "archive", "unarchive", "knowledge-list", "knowledge-write",
                     "knowledge-delete"}
@@ -544,6 +572,14 @@ def task_cmd(
             p["description"] = description
         if parent:
             p["parent_id"] = parent
+        if parent_step:
+            p["parent_step_id"] = parent_step.strip()
+        if acceptance:
+            p["acceptance"] = [x.strip() for x in acceptance.split(";") if x.strip()]
+        if scope_paths:
+            p["scope_paths"] = [x.strip() for x in scope_paths.split(",") if x.strip()]
+        if due_at:
+            p["due_at"] = due_at.strip()
         if tags:
             p["tags"] = [x.strip() for x in tags.split(",") if x.strip()]
         if repo:
@@ -591,6 +627,16 @@ def task_cmd(
         method, path, payload = "POST", f"/api/v1/tasks/{tid}/heartbeat", {}
     elif action == "submit":
         method, path, payload = "POST", f"/api/v1/tasks/{tid}/submit", {"summary": summary or body}
+    elif action == "delegation-accept":
+        method, path, payload = "POST", f"/api/v1/tasks/{tid}/delegation/accept", {}
+    elif action == "delegation-reject":
+        reason = (feedback or body_text).strip()
+        if not reason:
+            _usage_error(
+                "task delegation-reject 需要 --feedback \"原因\"",
+                "例如 `anvil task delegation-reject <子任务ID> --feedback \"缺少命令输出\"`。")
+        method, path, payload = (
+            "POST", f"/api/v1/tasks/{tid}/delegation/reject", {"feedback": reason})
     elif action == "comment":
         if body_text and "@" in body_text:
             typer.echo(

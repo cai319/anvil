@@ -95,6 +95,16 @@ def test_planning_protocol_requires_deliverable_check():
     assert "无具体交付件" in PLANNING_PROTOCOL
 
 
+def test_planning_protocol_keeps_decomposition_with_planner():
+    """规划级分解只能由 Cindy 定义；执行角色只能提议或使用委派工单。"""
+    from anvil.graph.render import PLANNING_PROTOCOL
+
+    assert "规划级分解" in PLANNING_PROTOCOL
+    assert "执行角色" in PLANNING_PROTOCOL
+    assert "委派工单" in PLANNING_PROTOCOL
+    assert "@cindy" in PLANNING_PROTOCOL
+
+
 def test_task_size_block_flags_audit_and_wide_scope():
     assert "plan_slices + loop" in planning._task_size_block(
         {"title": "大型项目代码安全审计", "scope_paths": []})

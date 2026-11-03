@@ -33,6 +33,35 @@ DELIVERABLE_MANIFEST = (
     "· 证据文件仍按 CLI 的相对路径规则提交；交付件清单只用于 human 直接打开，不替代证据。\n"
 )
 
+# 子任务 = 委派工单：默认不建；只有能换取稀缺资源时才拆。
+DELEGATION_PROTOCOL = (
+    "## 子任务 = 委派工单（默认不建）\n"
+    "· 能用当前 step 或 `anvil task mention` 解决的，不建子任务。\n"
+    "· 只有能换取以下之一时才建：独立上下文（大量日志/搜索结果/文件）；"
+    "多个独立只读分支并行；不同角色的权限/工具/验收；执行失败后确有必要的动态分解；"
+    "跨会话持久责任。\n"
+    "· 规划级分解（新增阶段/角色/顺序）只能由 Cindy 定义；执行角色只执行 "
+    "`anvil task mention $ANVIL_TASK_ID --to cindy \"具体诉求\"` 提议。\n"
+    "· 建子任务必须写清：目标、输入、输出、验收、scope、owner、TTL、父步骤。"
+    "工作流内命令必须带 `--parent $ANVIL_TASK_ID --parent-step <步骤ID>`，例如："
+    "`anvil task create --title \"...\" --description \"...\" --parent $ANVIL_TASK_ID "
+    "--parent-step S3 --assignee <角色> --acceptance \"...\" --scope-paths poc/`。\n"
+    "· 目标角色忙时子任务会排队；父 step 提交前必须等委派完成。"
+    "同角色委派只能串行；需要真并行请优先用运行时自带的 subagent（只读）。\n"
+    "· 负责人完成后执行 `anvil task submit <子任务ID> \"...\"`；派发者收到通知后执行 "
+    "`anvil task delegation-accept <子任务ID>` 或 "
+    "`anvil task delegation-reject <子任务ID> --feedback \"...\"`。负责人不能验收自己的产出。\n"
+    "· 反模式：共享写状态/同一文件并行写、强耦合、频繁往返、仅因“任务复杂”而拆。\n"
+)
+
+# 回复 run 只讨论，不创建规划级任务；确需委派时用短版规则。
+REPLY_DELEGATION_PROTOCOL = (
+    "## 委派（回复 run 限制）\n"
+    "· 本轮只讨论；不要创建规划级任务。确需委派时，必须在消息里写清目标/输入/输出/验收/"
+    "scope/owner/TTL，并使用 `--parent $ANVIL_TASK_ID --parent-step <步骤ID>`；"
+    "规划级变更先 `@cindy` 提议。\n"
+)
+
 # §7.4 注入给 Agent 的协议说明（约 400 token）。
 PROTOCOL = (
     "你在 Anvil 环境中运行。当前环境变量 ANVIL_TASK_ID 指示你被分配的任务。\n"
@@ -47,12 +76,13 @@ PROTOCOL = (
     "完成后必须执行 `anvil task submit $ANVIL_TASK_ID \"完成摘要\"` 声明完成，仅仅退出进程不算完成。\n"
     "长任务中每隔若干分钟执行 `anvil task heartbeat` 续租，否则任务会被回收。\n"
     "发现自己不适合这个任务时执行 `anvil task unclaim` 并说明理由，这是正常操作。\n"
-    "拆分临时子任务时，用 `anvil task create ... --assignee <执行角色>`（团队用 `--assignees a,b`）"
-    "指定执行者；不要 claim 你拆给别人的子任务。若已 claim 但要让别人执行，先 "
-    "`anvil task unclaim <id>` 再 @对方认领（单负责人任务一旦被 claim 就是排他的）。\n"
+    "需要拆出独立子任务时，先按下方「子任务 = 委派工单」判断；命令必须带 "
+    "`--parent $ANVIL_TASK_ID`（工作流内还要带 `--parent-step <步骤ID>`），写清契约。"
+    "不要 claim 你拆给别人的子任务；若已 claim 但要让别人执行，先 `anvil task unclaim <id>` "
+    "再 @对方认领。\n"
     "只有需要人类决策（评审）时，系统会 @human 通知自然人；其余事务由角色间 @提及自行协商。\n"
     "只修改 scope 范围内的文件，越界的提交会被拒绝。"
-) + "\n\n" + DELIVERABLE_MANIFEST + "\n\n" + ATTACHMENT_BUDGET
+) + "\n\n" + DELEGATION_PROTOCOL + "\n\n" + DELIVERABLE_MANIFEST + "\n\n" + ATTACHMENT_BUDGET
 
 # 角色被 @ 且当前没有工作流步骤时的回复协议：只讨论，不 claim/submit 任务。
 REPLY_PROTOCOL = (
@@ -61,8 +91,8 @@ REPLY_PROTOCOL = (
     "本轮只做讨论与回复：不要 claim 或 submit **当前任务**（$ANVIL_TASK_ID），"
     "也不要开始新的工作流步骤；如果消息明确要求你 claim/submit **另一个任务或子任务**"
     "（例如 `anvil task claim <子任务ID>`），按消息指示执行。\n"
-    "如果你在回复中创建或转交子任务：用 `anvil task create ... --assignee <执行角色>`"
-    "（团队用 `--assignees a,b`）指定执行者，**不要 claim 你拆给别人的子任务**；"
+    "如果你在回复中创建或转交子任务：必须按下方「委派」规则，带上 "
+    "`--parent $ANVIL_TASK_ID --parent-step <步骤ID>` 和契约字段；**不要 claim 你拆给别人的子任务**；"
     "若已 claim 但要让别人执行，先 `anvil task unclaim <id>` 再 @对方认领。\n"
     "但若人类明确要求你执行操作（如启动程序、运行验证命令、准备演示环境），可以在当前工作目录"
     "执行并把结果回复给人类。\n"
@@ -72,7 +102,7 @@ REPLY_PROTOCOL = (
     "`anvil task mention $ANVIL_TASK_ID --to <对方角色slug> \"结论\"` 回复（这会自动唤醒对方）；"
     "只有在纯旁注、不需要对方行动时才用 `anvil task comment`。\n"
     "回复后结束进程；如果需要对方处理后给你回执，你会在被 @ 时再次唤醒。"
-)
+) + "\n\n" + REPLY_DELEGATION_PROTOCOL
 
 # 工作流步骤协议：角色执行一个 workflow step（不是整个 task）。
 STEP_PROTOCOL = (
@@ -103,11 +133,14 @@ STEP_PROTOCOL = (
     "· 需要人类决策时先做路由：若问题属于某个现有角色的职责/能力范围，@该角色处理；"
     "只有新建角色、workflow 审批、gate、最终评审、取消/删除等不可逆事项才 @human。"
     "升级给人类后结束进程挂起等待。\n"
-    "· 拆分临时工作：`anvil task create --title \"<标题>\" --description \"<说明>\" "
-    "--parent $ANVIL_TASK_ID --assignee <执行角色>`（团队用 `--assignees a,b`）创建子任务，"
+    "· 需要拆出独立委派工单时，按下方「子任务 = 委派工单」判断；命令必须带 "
+    "`--parent $ANVIL_TASK_ID --parent-step <步骤ID>`，写清目标/输入/输出/验收/scope/owner/TTL。"
     "然后 @ 目标角色认领。**不要 claim 你拆给别人的子任务**——单负责人任务一旦被 claim 就是排他的；"
     "若你已 claim 但要让别人执行，先 `anvil task unclaim <id>` 再 @对方。"
-    "子任务不进大厅，只在父任务的「子任务」页签展示。\n"
+    "子任务不进大厅，只在父任务的「委派」页签展示。\n"
+    "· 需要并行只读探索/复现/测试矩阵/独立 review 时，优先使用运行时自带的 subagent 能力；"
+    "只读、有边界，结果与证据路径写进 step summary/evidence。运行时没有 subagent 就串行做，"
+    "或改用委派工单；不要为了并行自行开多个角色进程。\n"
     "· 需要扩展团队：先 `anvil role list` 查看已有角色；确需新角色时先 "
     "`anvil role propose --task $ANVIL_TASK_ID --file roles.json` 提交提案 @human，"
     "human 反馈/批准后再 `anvil role expand --brief \"<定位>\" --slug <已批准 slug>` 创建"
@@ -141,7 +174,7 @@ STEP_PROTOCOL = (
     "文件证据只能使用 repo 或 agent home 内的相对路径。"
     "不要调用 `anvil task submit` 或 `anvil task claim`。\n"
     "只修改本步骤范围内的文件；越界提交会被拒绝。"
-) + "\n\n" + DELIVERABLE_MANIFEST + "\n\n" + ATTACHMENT_BUDGET
+) + "\n\n" + DELEGATION_PROTOCOL + "\n\n" + DELIVERABLE_MANIFEST + "\n\n" + ATTACHMENT_BUDGET
 
 # 问题板（Issue Board）：reviewer 在任务内填写结构化安全 findings。
 # 写入规则由“步骤 run”和“问题板收口 run”共用；complete 只在收口 run 中允许。
@@ -218,6 +251,9 @@ PLANNING_PROTOCOL = (
     "  · **角色分配只能由你（planner）定义**：loop 模板中的 execute/verify/fix/verify2/decide/scope "
     "角色是唯一来源；plan_slices 步骤只能提交切片粒度/轮数，不得在切片里写角色字段"
     "（execute_role/verify_role/...，也不得给 execute_steps 写 role），服务端会拒绝。\n"
+    "  · **规划级分解只能由你定义**：workflow step 是默认单位；执行角色不得创建规划级子任务。"
+    "执行角色需要新增工作项时只能 @cindy 提议；你可以通过 workflow 修订/新草案决定是否新增步骤，"
+    "或让它用「委派工单」（`parent_step_id`）处理边界清晰的短工单。\n"
     "  · **所有绑定角色都必须参与**：任务 Roster 中的每个角色都必须出现在某个静态步骤或 loop 阶段；"
     "服务端会拒绝遗漏绑定角色的切片 workflow。优先把角色映射到 loop 的某个阶段；"
     "只有确实只在切片全部完成后才参与的角色（如最终发布评审）才放在静态步骤。"

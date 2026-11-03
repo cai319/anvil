@@ -132,6 +132,8 @@ class TaskIn(BaseModel):
     plan_seed: dict[str, Any] | None = None
     created_by: str | None = None
     parent_id: str | None = None
+    parent_step_id: str | None = None
+    due_at: str | None = None
     depends_on: list[str] = Field(default_factory=list)
     knowledge_repos: list[str | KnowledgeRepoIn] | None = None
     issue_board_enabled: bool = False
@@ -177,6 +179,8 @@ class TaskOut(BaseModel):
     claimed_at: str | None = None
     created_by: str | None = None
     parent_id: str | None = None
+    parent_step_id: str | None = None
+    due_at: str | None = None
     depends_on: list[str] = Field(default_factory=list)
     knowledge_repos: list[dict[str, Any]] = Field(default_factory=list)
     knowledge_binding_locked: bool = False

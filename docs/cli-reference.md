@@ -76,8 +76,10 @@
 anvil task list [--type T] [--tag T] [--parent <id>] [--json]
 anvil task show <id> [--json]
 anvil task create --title "..." [--description "..."] [--assignee <role>]
-                 [--assignees a,b] [--parent <id>] [--workspace <id>]
-                 [--repo <name>] [--base-branch <branch>]
+                 [--assignees a,b] [--parent <id>] [--parent-step <step-id>]
+                 [--workspace <id>] [--repo <name>] [--base-branch <branch>]
+                 [--acceptance "验收1;验收2"] [--scope-paths src/a,src/b]
+                 [--due-at 2026-12-01T18:00:00+08:00]
                  [--knowledge-repos a,b] [--tags a,b] [--type T]
                  [--plan-first] [--planner <role>] [--issue-board]
 anvil task assign <id> --assignees a,b
@@ -105,7 +107,15 @@ anvil task knowledge-delete <id> --id <knowledge-id>   # human
 - 位置参数 `action` 默认 `list`；`target` 通常省略，默认取 `ANVIL_TASK_ID`。
 - `comment` 只写时间线，不唤醒；`mention` 才唤醒目标角色。
 - **工作流步骤不要调用 `task claim` / `task submit`**；用 `anvil step`。
-- 子任务用 `--parent` + `--assignee`/`--assignees` 显式指派；创建者不要先 claim。
+- **委派工单（子任务）默认不建**：只有能换取独立上下文、只读并行、不同角色权限、
+  独立验收、失败后动态分解或跨会话持久责任时才建；能用当前 step 或 `mention`
+  解决的不建。规划级分解只能由 Cindy 定义，执行角色只能 `@cindy` 提议。
+- 工作流内的委派必须带 `--parent <父任务> --parent-step <步骤ID>`，并写清
+  `--description`（目标/输入/输出）、`--acceptance`、`--scope-paths`、owner、TTL；
+  TTL 用 `--due-at <ISO8601>` 记录（当前只展示/告警，超时处理在后续版本）；
+  目标角色忙时排队，父 step 提交前必须等委派完成。创建者不要 claim 委派给别人的工单。
+- 委派完成后由派发者验收（`POST /tasks/{id}/delegation/accept|reject`）；
+  负责人不能验收自己的产出；父任务最终评审仍由 human 完成。
 - `--issue-board` 只能由 human 在顶层任务启用；任务会强制走 Cindy 计划先行。
   Cindy 用 `task reviewers <id> --assignees <role>` 指定审核者（必须是已存在且被
   workflow 覆盖的角色），之后 reviewer 用 `anvil finding ...` 填写问题板。

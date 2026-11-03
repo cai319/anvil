@@ -813,6 +813,17 @@ def _assert_current_run(step: dict, run_id: str | None) -> None:
         raise ConflictError(f"stale_run: step {step.get('step_id')} has no active run")
 
 
+def _assert_delegations_done(conn: sqlite3.Connection, wf: dict, step_id: str) -> None:
+    """委派工单未完成前，父 step 不能收口。"""
+    pending = conn.execute(
+        "SELECT id FROM tasks WHERE parent_id=? AND parent_step_id=? "
+        "AND status != 'done' LIMIT 1",
+        (wf["task_id"], step_id)).fetchone()
+    if pending is not None:
+        raise ConflictError(
+            f"delegations not all done: {pending['id']} is still open")
+
+
 def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
                      role: str | None, plan: dict, run_id: str | None = None) -> dict:
     """运行期角色提交切片计划：校验后按 loop 模板生成每片小闭环。
@@ -839,6 +850,7 @@ def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
         if step is None:
             raise LookupError(step_id)
         _assert_current_run(step, run_id)
+        _assert_delegations_done(conn, wf, step_id)
         if step["status"] == "running":
             leases.assert_step(conn, step, run_id)
         if step.get("kind") != "plan_slices":
@@ -2426,6 +2438,7 @@ def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
     if step is None:
         raise LookupError(step_id)
     _assert_current_run(step, run_id)
+    _assert_delegations_done(conn, wf, step_id)
     leases.assert_step(conn, step, run_id)
     if step["role_slug"] != role:
         raise ConflictError(f"step {step_id} belongs to {step['role_slug']}, not {role}")
@@ -2509,6 +2522,7 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
         if step is None:
             raise LookupError(step_id)
         _assert_current_run(step, run_id)
+        _assert_delegations_done(conn, wf, step_id)
         if step["status"] == "running":
             leases.assert_step(conn, step, run_id)
         if step.get("kind") != "decision":
@@ -2958,6 +2972,12 @@ def finalize_task_review_if_ready(conn: sqlite3.Connection, task_id: str) -> boo
         "SELECT status, issue_board_enabled FROM tasks WHERE id=?", (task_id,)
     ).fetchone()
     if task is None or task["status"] not in ("in_progress", "todo"):
+        return False
+    # 委派工单未完成时，父任务不能进入最终评审（普通任务 submit 守卫同理）。
+    pending_child = conn.execute(
+        "SELECT 1 FROM tasks WHERE parent_id=? AND status != 'done' LIMIT 1",
+        (task_id,)).fetchone()
+    if pending_child is not None:
         return False
     if task["issue_board_enabled"]:
         from . import findings as findings_service

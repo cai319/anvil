@@ -72,6 +72,34 @@ def create_task(body: TaskIn, conn=Depends(get_db),
                 status_code=403,
                 detail="agent is not a participant of the parent task",
             )
+    if body.parent_step_id:
+        if not body.parent_id:
+            raise HTTPException(
+                status_code=422, detail="parent_step_id requires parent_id")
+        step = conn.execute(
+            "SELECT ws.workflow_id, ws.step_id, ws.role_slug, ws.status "
+            "FROM workflow_steps ws JOIN workflows w ON w.id=ws.workflow_id "
+            "WHERE w.task_id=? AND ws.step_id=? "
+            "ORDER BY w.created_at DESC, w.rowid DESC LIMIT 1",
+            (body.parent_id, body.parent_step_id)).fetchone()
+        if step is None:
+            raise HTTPException(status_code=404, detail="parent step not found")
+        if step["status"] != "running":
+            raise HTTPException(
+                status_code=409,
+                detail=f"parent step {body.parent_step_id} is {step['status']}, expected running")
+        if is_real_agent and auth.role != step["role_slug"]:
+            raise HTTPException(
+                status_code=403,
+                detail="only the parent step's role can create a delegation",
+            )
+        for slug in ([body.assignee] if body.assignee else []) + list(body.assignees or []):
+            role_row = services.roles.get(conn, slug)
+            if role_row is None or not role_row.get("enabled", True):
+                raise HTTPException(
+                    status_code=404, detail=f"delegate role not found or disabled: {slug}")
+        if not body.type:
+            body.type = "delegation"
     if auth.role:
         body.created_by = ("human" if auth.role == "human" else f"agent:{auth.role}")
     repos = [r.model_dump() if hasattr(r, "model_dump") else r
@@ -84,7 +112,9 @@ def create_task(body: TaskIn, conn=Depends(get_db),
         acceptance=body.acceptance, assignee=body.assignee, assignees=body.assignees,
         plan_first=body.plan_first, planner=body.planner, plan_seed=body.plan_seed,
         created_by=body.created_by,
-        parent_id=body.parent_id, depends_on=body.depends_on,
+        parent_id=body.parent_id, parent_step_id=body.parent_step_id,
+        due_at=body.due_at,
+        depends_on=body.depends_on,
         knowledge_repos=repos or None,
         knowledge_repos_source="human" if auth.role in (None, "human") else "agent",
         issue_board_enabled=body.issue_board_enabled,
@@ -93,6 +123,7 @@ def create_task(body: TaskIn, conn=Depends(get_db),
             services.tasks.audit_create(
                 conn, task["id"], auth.role,
                 parent_id=body.parent_id,
+                parent_step_id=body.parent_step_id,
                 workspace_id=task.get("workspace_id"),
                 repo=task.get("repo"),
             )
@@ -607,6 +638,61 @@ def review_task(tid: str, body: ReviewIn, request: Request, conn=Depends(get_db)
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     _resume_after_review(request, conn, tid, body.approve)
+    events.publish("task", {"id": tid, "status": result["status"]})
+    return result
+
+
+@router.get("/{tid}/delegations")
+def list_delegations(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    """父任务下的委派工单（含旧子任务），供「委派」页签/step 详情使用。"""
+    _assert_session_task(conn, auth, tid)
+    try:
+        return services.tasks.list_delegations(conn, tid)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="task not found")
+
+
+def _delegation_actor(task: dict, auth: Auth) -> str:
+    """只有派发者本人或 human 能验收委派；负责人不能验收自己的产出。"""
+    if auth.role == "human" or auth.test_bypass:
+        return "human"
+    created = str(task.get("created_by") or "")
+    delegator = created[len("agent:"):] if created.startswith("agent:") else ""
+    owner = str(task.get("assignee") or "")
+    if auth.role and auth.role == delegator and auth.role != owner:
+        return auth.role
+    raise HTTPException(
+        status_code=403,
+        detail="only the delegator or a human can accept/reject this delegation",
+    )
+
+
+@router.post("/{tid}/delegation/accept", response_model=TaskOut)
+def accept_delegation(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    task = services.tasks.get(conn, tid)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    actor = _delegation_actor(task, auth)
+    try:
+        result = services.tasks.accept_delegation(conn, tid, actor)
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    events.publish("task", {"id": tid, "status": result["status"]})
+    return result
+
+
+@router.post("/{tid}/delegation/reject", response_model=TaskOut)
+def reject_delegation(tid: str, body: dict, conn=Depends(get_db),
+                      auth: Auth = Depends(get_auth)):
+    task = services.tasks.get(conn, tid)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    actor = _delegation_actor(task, auth)
+    try:
+        result = services.tasks.reject_delegation(
+            conn, tid, actor, str(body.get("feedback") or ""))
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     events.publish("task", {"id": tid, "status": result["status"]})
     return result
 

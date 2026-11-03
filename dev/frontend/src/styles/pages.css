@@ -591,6 +591,26 @@ dd { margin: 0; }
 .child-task:hover { border-color: var(--cyan); }
 .child-title { flex: 1; }
 
+/* ---- 委派工单 ----------------------------------------------------------- */
+.delegations { margin-bottom: 14px; }
+.delegation-summary { padding: 8px 10px; margin-bottom: 10px; border: 1px solid var(--border, #e5e2dc);
+  border-radius: 8px; background: var(--bg-soft); font-size: 12px; }
+.delegation-group { margin-bottom: 14px; }
+.delegation-group-title { font-size: 13px; margin: 8px 0; font-weight: 600; }
+.delegation-card { padding: 10px 12px; margin-bottom: 8px; border: 1px solid var(--border, #e5e2dc);
+  border-radius: 8px; background: var(--paper-3); color: var(--text-on-paper); }
+.delegation-card:hover { border-color: var(--cyan); }
+.delegation-head { display: flex; align-items: center; gap: 8px; }
+.delegation-title { flex: 1; font-weight: 600; color: inherit; text-decoration: none; }
+.delegation-meta { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; margin-top: 4px;
+  color: var(--text-on-paper-muted); }
+.delegation-acceptance, .delegation-result { font-size: 12px; margin-top: 4px; }
+.delegation-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px;
+  font-size: 12px; }
+.delegation-actions a { color: var(--cyan); }
+.wf-delegations { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; font-size: 12px; }
+.wf-delegations a { color: var(--cyan); text-decoration: none; }
+
 .modal input:not([type="checkbox"]), .modal textarea {
   background: var(--bg-soft);
   border: 1px solid var(--border-strong);

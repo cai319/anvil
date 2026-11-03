@@ -639,6 +639,13 @@ todo ──claim──> in progress ──submit──> in review ──approve�
 
 Agent 可以创建子任务。子任务与父任务构成依赖，父任务在所有子任务 `done` 前不可 `submit`。
 
+> **子任务定位（owner 2026-11-03）**：子任务是执行期「委派工单」，不是规划单元。
+> Cindy 的 workflow 是唯一控制平面；执行角色只能在当前 running step 下创建，必须挂
+> `parent_step_id`，写清目标/输入/输出/验收/scope/owner/TTL。目标角色忙时排队；
+> 父 step 提交前必须等委派完成。派发者验收，负责人不能验收自己的产出；父任务最终评审
+> 仍由 human 完成。step 内只读并行优先用运行时原生 subagent，Anvil 只要求汇总与证据路径；
+> 平台级 worker/spawn 作为后续能力。
+
 ### 5.2 任务字段
 
 ```yaml
@@ -1658,3 +1665,4 @@ M3 的工具治理看你实际挂多少工具决定，M4 的长程能力看你�
 | 2026-10-23 | 可靠性/请求体/知识延续增量 | 附录 A.2 |
 | 2026-10-23 | 多任务角色调度、任务上下文槽、实时点灯 | §6.1 / §6.3 / `docs/superpowers/specs/2026-10-23-role-task-contexts-design.md` |
 | 2026-11-03 | 交付件清单（性质/内容简介/绝对路径）与 check 环节核验 | §6.1 / §7.4 |
+| 2026-11-03 | 子任务 = 执行期委派工单；step 内只读 fan-out 用运行时原生 subagent | §5.1 / §6.1 |

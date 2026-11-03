@@ -436,6 +436,11 @@
   同时保留「扩展团队 → role expand」指引。
 - 测试：`tests/api/test_subtasks.py`、`tests/api/test_role_expand.py`。
 
+> **2026-11-03 更新**：子任务定位为执行期「委派工单」：工作流内必须挂
+> `parent_step_id` 并写清目标/输入/输出/验收/scope/owner/TTL；目标角色忙时排队；
+> 父 step 提交前必须等委派完成；派发者验收，负责人不能验收自己的产出。
+> 并行只读探索优先用运行时原生 subagent。任务详情的「子任务」页签已改为「委派」。
+
 ## Token 统计（2026-10-19，替代不准确的「今日成本」）
 
 - 新表 `token_usage`：daemon 从 CLI `result.usage`（兼容 `modelUsage` 聚合）记录

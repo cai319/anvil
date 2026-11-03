@@ -72,6 +72,23 @@ def test_protocols_require_deliverable_manifest():
     assert "test -f" in render.STEP_PROTOCOL
 
 
+def test_protocols_define_delegation_contract():
+    """子任务 = 委派工单：默认不建、六类触发、父 step、验收与排队语义。"""
+    for protocol in (render.PROTOCOL, render.STEP_PROTOCOL):
+        assert "委派工单" in protocol
+        assert "默认不建" in protocol
+        assert "--parent-step" in protocol
+        assert "目标" in protocol and "验收" in protocol
+        assert "scope" in protocol and "TTL" in protocol
+        assert "排队" in protocol
+        assert "delegation-accept" in protocol
+        assert "delegation-reject" in protocol
+    assert "运行时自带的 subagent" in render.STEP_PROTOCOL
+    assert "summary/evidence" in render.STEP_PROTOCOL
+    assert "委派" in render.REPLY_PROTOCOL
+    assert "--parent-step" in render.REPLY_PROTOCOL
+
+
 def test_step_prompt_uses_agent_inbox_and_stays_small(conn):
     for i in range(60):
         tasks_service.comment(conn, "T1", "pm", f"{i}:" + "长内容" * 100)

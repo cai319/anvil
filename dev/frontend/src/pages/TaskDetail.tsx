@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type FindingSummary, type KnowledgeKind, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Task, type TaskKnowledge, type TaskLeases, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight, type WorkspaceKnowledge } from "../api/client";
+import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type Delegation, type FindingSummary, type KnowledgeKind, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Task, type TaskKnowledge, type TaskLeases, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight, type WorkspaceKnowledge } from "../api/client";
 import {
   AUTHORITY_LABEL,
   KNOWLEDGE_CARD_FIELDS,
@@ -51,6 +51,121 @@ const RUN_LABEL: Record<string, string> = {
   abandoned: "已放弃",
   suspended: "已挂起",
 };
+
+type DelegationState = {
+  label: string;
+  cls: "todo" | "in_progress" | "in_review" | "done" | "closed";
+};
+
+function delegationState(d: Delegation): DelegationState {
+  if (d.status === "done") return { label: "已完成", cls: "done" };
+  if (d.status === "closed") return { label: "已取消", cls: "closed" };
+  if (d.status === "in_review") return { label: "待验收", cls: "in_review" };
+  if (d.run_status === "failed" || d.run_status === "abandoned")
+    return { label: "异常", cls: "closed" };
+  if (d.run_status === "running") return { label: "进行中", cls: "in_progress" };
+  if (d.run_status === "created" || d.run_status === "projecting")
+    return { label: "排队中", cls: "in_progress" };
+  if (d.status === "in_progress") return { label: "进行中", cls: "in_progress" };
+  return { label: "待认领", cls: "todo" };
+}
+
+function DelegationCard({ d, onChanged }: { d: Delegation; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const state = delegationState(d);
+
+  const run = async (action: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await action();
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const nudge = () => {
+    if (!d.assignee) return;
+    void run(() => api.mentionTask(d.id, d.assignee!, "催办：请同步委派进展"));
+  };
+
+  const accept = () => {
+    void run(() => api.acceptDelegation(d.id));
+  };
+
+  const reject = async () => {
+    const feedback = await promptDialog({
+      title: "打回委派",
+      message: "请说明需要负责人返工的问题。",
+      input: { label: "打回原因", multiline: true },
+      inputRequired: true,
+      confirmLabel: "打回",
+      danger: true,
+    });
+    if (!feedback) return;
+    void run(() => api.rejectDelegation(d.id, feedback));
+  };
+
+  const cancel = async () => {
+    const ok = await confirmDialog({
+      title: "取消委派？",
+      message: "取消后父 step 仍需人工处理该委派才能收口。",
+      confirmLabel: "取消委派",
+      danger: true,
+    });
+    if (!ok) return;
+    void run(() => api.cancelTask(d.id));
+  };
+
+  const canAccept = d.status === "in_review";
+  const canCancel = d.status === "todo" || d.status === "in_progress";
+  const delegator = d.created_by?.startsWith("agent:")
+    ? d.created_by.slice("agent:".length)
+    : (d.created_by || "—");
+  const owner = d.assignee || (d.assignees?.length ? d.assignees.join("、") : "无人认领");
+
+  return (
+    <div className={`delegation-card delegation-${state.cls}`}>
+      <div className="delegation-head">
+        <a className="delegation-title" href={`/tasks/${d.id}`}>{d.title}</a>
+        <span className={`status status-${state.cls}`}>{state.label}</span>
+        {d.run_failure_class && (
+          <span className="badge badge-in_progress" title="失败分类">{d.run_failure_class}</span>
+        )}
+      </div>
+      <div className="delegation-meta">
+        <span>{delegator} → {owner}</span>
+        <span>{d.step_title || "未关联步骤"}</span>
+        <span>截止：{d.due_at ? formatDateTime(d.due_at) : "未设置"}</span>
+        {d.created_at && <span className="muted">{formatClock(d.created_at)}</span>}
+      </div>
+      {d.acceptance?.length > 0 && (
+        <div className="delegation-acceptance">验收：{d.acceptance.join("；")}</div>
+      )}
+      {d.scope_paths?.length > 0 && (
+        <div className="muted">scope：{d.scope_paths.join("、")}</div>
+      )}
+      {d.submitted_summary && (
+        <div className="delegation-result">结果：{d.submitted_summary}</div>
+      )}
+      <div className="delegation-actions">
+        <a href={`/tasks/${d.id}`}>打开详情</a>
+        {d.assignee && (
+          <button className="small" disabled={busy} onClick={nudge}>催办</button>
+        )}
+        {canAccept && (
+          <button className="small" disabled={busy} onClick={accept}>通过验收</button>
+        )}
+        {canAccept && (
+          <button className="small" disabled={busy} onClick={reject}>打回</button>
+        )}
+        {canCancel && (
+          <button className="small danger" disabled={busy} onClick={cancel}>取消</button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function WorkflowWeightDialog({ taskId, current, onClose, onApplied }: {
   taskId: string;
@@ -830,7 +945,7 @@ export function TaskDetail({ id }: { id: string }) {
   const [showWeight, setShowWeight] = useState(false);
   const [dossierBusy, setDossierBusy] = useState(false);
   const [reviewStep, setReviewStep] = useState<WorkflowStep | null>(null);
-  const [children, setChildren] = useState<Task[]>([]);
+  const [delegations, setDelegations] = useState<Delegation[]>([]);
   const [wfView, setWfView] = useState<"graph" | "list">("graph");
   const [showApplyTemplate, setShowApplyTemplate] = useState(false);
   const [seedTemplates, setSeedTemplates] = useState<WorkflowTemplate[]>([]);
@@ -868,8 +983,8 @@ export function TaskDetail({ id }: { id: string }) {
     return () => { alive = false; };
   }, [displayWorkflow?.id, displayWorkflow?.updated_at]);
 
-  const refreshChildren = () =>
-    api.listTaskChildren(id).then(setChildren).catch(() => []);
+  const refreshDelegations = () =>
+    api.listTaskDelegations(id).then(setDelegations).catch(() => setDelegations([]));
 
   const refresh = () =>
     Promise.all([api.getTask(id), api.getTaskTimeline(id)])
@@ -920,7 +1035,7 @@ export function TaskDetail({ id }: { id: string }) {
     setDescOverflow(false);
     refresh();
     refreshWorkflow();
-    refreshChildren();
+    refreshDelegations();
     api.listRoles().then(setRoles).catch(() => {});
     api.listWorkflowTemplates(undefined, "active").then((list) => {
       setSeedTemplates(list.filter((item) => item.published_version
@@ -932,7 +1047,7 @@ export function TaskDetail({ id }: { id: string }) {
       if (ev.topic === "tick" || (ev.topic === "task" && ev.payload.id === id)) {
         refresh();
         refreshWorkflow();
-        refreshChildren();
+        refreshDelegations();
         refreshDrafts();
       }
     });
@@ -1333,6 +1448,7 @@ export function TaskDetail({ id }: { id: string }) {
   const renderStepRow = (st: WorkflowStep) => {
     const cls = statusClass(st.status);
     const label = STATUS_META[st.status].label;
+    const stepDelegations = delegations.filter((d) => d.parent_step_id === st.step_id);
     return (
       <div key={st.step_id} className="wf-step">
         <span className="wf-id mono">{st.step_id}</span>
@@ -1351,6 +1467,11 @@ export function TaskDetail({ id }: { id: string }) {
             {st.risk_level && st.risk_level !== "normal" && (
               <span className="badge gate-stale">风险 {st.risk_level}</span>
             )}
+            {stepDelegations.length > 0 && (
+              <span className="badge wf-gate" title="本步骤的委派工单">
+                委派 {stepDelegations.length}
+              </span>
+            )}
             <span className={`status status-${cls}`}>{label}</span>
           </div>
           {st.depends_on?.length > 0 && <div className="muted wf-deps">依赖：{st.depends_on.join("、")}</div>}
@@ -1363,6 +1484,18 @@ export function TaskDetail({ id }: { id: string }) {
             </div>
           )}
           {st.summary && <div className="muted wf-summary">{st.summary}</div>}
+          {stepDelegations.length > 0 && (
+            <div className="wf-delegations">
+              {stepDelegations.map((d) => {
+                const s = delegationState(d);
+                return (
+                  <a key={d.id} href={`/tasks/${d.id}`} className="muted">
+                    {d.title} <span className={`status status-${s.cls}`}>{s.label}</span>
+                  </a>
+                );
+              })}
+            </div>
+          )}
         </div>
         <div className="wf-actions">
           {st.run_id && <a href={`/runs/${st.run_id}`}>会话</a>}
@@ -1558,7 +1691,7 @@ export function TaskDetail({ id }: { id: string }) {
           </button>
         )}
         <button className={`tab ${tab === "subtasks" ? "active" : ""}`} onClick={() => selectTab("subtasks")}>
-          子任务 {children.length > 0 && <span className="tab-count">{children.length}</span>}
+          委派 {delegations.length > 0 && <span className="tab-count">{delegations.length}</span>}
         </button>
         <button className={`tab ${tab === "runtime" ? "active" : ""}`} onClick={() => selectTab("runtime")}>
           角色运行时 {(task.assignees ?? []).length > 0 && <span className="tab-count">{task.assignees.length}</span>}
@@ -2244,23 +2377,51 @@ export function TaskDetail({ id }: { id: string }) {
         </div>
       )}
 
-      {tab === "subtasks" && (
-        <div className="child-tasks">
-          {children.length === 0 && (
-            <p className="muted">暂无临时子任务。Agent 可用 `anvil task create --parent …` 创建，供其他角色认领。</p>
-          )}
-          {children.map((c) => (
-            <a key={c.id} className="child-task" href={`/tasks/${c.id}`}>
-              <span className="child-title">{c.title}</span>
-              <span className={`status status-${c.status === "in_progress" ? "in_progress" : c.status === "in_review" ? "in_review" : c.status === "done" ? "done" : c.status === "closed" ? "closed" : "todo"}`}>
-                {STATUS_LABEL[c.status]}
-              </span>
-              <span className="muted">{c.assignees?.length ? c.assignees.join("、") : "无人认领"}</span>
-              <span className="muted mono">{c.id.slice(0, 8)}</span>
-            </a>
-          ))}
-        </div>
-      )}
+      {tab === "subtasks" && (() => {
+        const groups = new Map<string, { title: string; items: Delegation[] }>();
+        for (const d of delegations) {
+          const key = d.parent_step_id || "__none__";
+          const title = d.step_title || "未关联步骤";
+          const group = groups.get(key) ?? { title, items: [] };
+          group.items.push(d);
+          groups.set(key, group);
+        }
+        const pending = delegations.filter(
+          (d) => d.status !== "done" && d.status !== "closed").length;
+        const waiting = delegations.filter((d) => d.status === "in_review").length;
+        return (
+          <div className="delegations">
+            <div className="delegation-summary">
+              <strong>委派 {delegations.length}</strong>
+              {pending > 0 && <span> · 未完成 {pending}</span>}
+              {waiting > 0 && <span> · 待验收 {waiting}</span>}
+              {pending > 0 && (
+                <span className="muted"> · 父 step 提交前需完成</span>
+              )}
+            </div>
+            {delegations.length === 0 && (
+              <p className="muted">
+                当前任务没有委派。需要另一个角色独立完成一块工作时，在 step 中创建委派工单；
+                并行只读探索优先用运行时 subagent。
+              </p>
+            )}
+            {Array.from(groups.entries()).map(([key, group]) => (
+              <section key={key} className="delegation-group">
+                <h3 className="delegation-group-title">
+                  {group.title} <span className="muted">{group.items.length}</span>
+                </h3>
+                {group.items.map((d) => (
+                  <DelegationCard
+                    key={d.id}
+                    d={d}
+                    onChanged={() => { void refreshDelegations(); }}
+                  />
+                ))}
+              </section>
+            ))}
+          </div>
+        );
+      })()}
 
       {tab === "runtime" && <RoleSessions task={task} roles={roles} workflow={workflow} />}
       </div>

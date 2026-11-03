@@ -67,8 +67,33 @@ export interface Task {
   }[];
   depends_on: string[];
   parent_id: string | null;
+  parent_step_id?: string | null;
+  due_at?: string | null;
   issue_board_enabled?: boolean;
   reviewer_roles?: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Delegation {
+  id: string;
+  title: string;
+  type: string | null;
+  status: Task["status"];
+  parent_id: string;
+  parent_step_id: string | null;
+  step_title: string | null;
+  created_by: string | null;
+  assignee: string | null;
+  assignees: string[];
+  acceptance: string[];
+  scope_paths: string[];
+  description: string | null;
+  due_at: string | null;
+  run_id: string | null;
+  run_status: string | null;
+  run_failure_class: string | null;
+  submitted_summary: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -318,6 +343,13 @@ export const api = {
     req("POST", "/knowledge/repos/suggest", body).then((r) => json(r)),
   listTaskChildren: (parentId: string): Promise<Task[]> =>
     authFetch(`${BASE}/tasks?parent_id=${encodeURIComponent(parentId)}`).then((r) => json<Task[]>(r)),
+  listTaskDelegations: (taskId: string): Promise<Delegation[]> =>
+    authFetch(`${BASE}/tasks/${encodeURIComponent(taskId)}/delegations`)
+      .then((r) => json<Delegation[]>(r)),
+  acceptDelegation: (id: string): Promise<Task> =>
+    req("POST", `/tasks/${id}/delegation/accept`, {}).then((r) => json<Task>(r)),
+  rejectDelegation: (id: string, feedback: string): Promise<Task> =>
+    req("POST", `/tasks/${id}/delegation/reject`, { feedback }).then((r) => json<Task>(r)),
   listTaskRuns: (taskId: string): Promise<Run[]> =>
     authFetch(`${BASE}/runs?task_id=${encodeURIComponent(taskId)}`).then((r) => json<Run[]>(r)),
   getTaskWorkflow: (taskId: string): Promise<Workflow> =>
