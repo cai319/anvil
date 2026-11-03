@@ -191,5 +191,7 @@ def test_tick_resets_hung_model_call_after_timeout(tmp_path, monkeypatch):
     orch = _Orch()
     Scheduler(env["db_path"], orch).tick_once()
     assert mgr.reset_calls == [("dev", True)]  # 新会话 + CIC
-    assert ("R-M", "process_exit", {"exit_code": 1,
-                                    "failure_class": "platform_timeout"}) in orch.pumped
+    assert ("R-M", "process_exit", {
+        "exit_code": 1, "failure_class": "platform_timeout",
+        "observed_started_at": OLD,
+    }) in orch.pumped

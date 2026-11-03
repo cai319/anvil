@@ -651,6 +651,13 @@ def process_exit_node(state: dict, config) -> dict:
         run = _run(conn, run_id)
         if not run:
             return {}
+        payload = state.get("payload") or {}
+        # 陈旧探测让路：scheduler.monitor 先探测到进程已死，随后用户重启并重新 spawn
+        # （mark_spawned 会重置 started_at）。此时旧探测泵入的 process_exit 不能把新
+        # 进程判死，否则重启会表现为「失败 → 运行中 → 失败」。
+        observed_started = payload.get("observed_started_at")
+        if observed_started is not None and run.get("started_at") != observed_started:
+            return {}
         # 依据 run 自身状态，而非 task 状态：已终态/已提交（评审流接管）/挂起（suspended）则不动。
         if run["status"] in ("completed", "failed", "abandoned", "submitted", "reviewing", "suspended"):
             return {}
@@ -664,7 +671,6 @@ def process_exit_node(state: dict, config) -> dict:
         # 挂起：若该角色最后 @提及了某个角色（等待响应），则保持 running，等 @回来再 resume。
         if _waiting_for_reply(conn, run.get("task_id"), run["role_slug"]):
             return {}
-        payload = state.get("payload") or {}
         exit_code = payload.get("exit_code")
         # §7.4：退出但未 submit 永不 completed；非零→failed，否则 abandoned。
         # 失败分类（P0-4）：优先用泵入的分类（如 platform_timeout），否则按退出码归因。

@@ -194,14 +194,18 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             c = open_conn(path)
             try:
                 rows = c.execute(
-                    "SELECT id FROM runs WHERE role_slug=? AND status IN ('created','projecting','running')",
+                    "SELECT id, started_at FROM runs WHERE role_slug=? "
+                    "AND status IN ('created','projecting','running')",
                     (role,),
                 ).fetchall()
             finally:
                 c.close()
             for r in rows:
                 try:
-                    orchestrator.pump(path, r["id"], "process_exit", {"exit_code": code})
+                    orchestrator.pump(path, r["id"], "process_exit", {
+                        "exit_code": code,
+                        "observed_started_at": r["started_at"],
+                    })
                 except Exception:  # noqa: BLE001
                     pass
         role_daemon.on_exit = _on_role_exit

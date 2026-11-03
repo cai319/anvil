@@ -80,6 +80,27 @@ def test_monitor_detects_exit(tmp_path, monkeypatch):
     assert any(r["task_id"] == "T-M" and r["status"] == "failed" for r in runs)
 
 
+def test_monitor_process_exit_carries_observed_started_at(tmp_path, monkeypatch):
+    """monitor 的 process_exit 必须带上探测时的 started_at，供重启后的陈旧事件让路。"""
+    monkeypatch.setattr(config, "AUTO_DISPATCH", True)
+    env = make_env(tmp_path, monkeypatch)
+    _seed_todo(env, "T-O")
+    sched = Scheduler(env["db_path"], env["orch"])
+    sched.tick_once()  # spawn
+    run = next(r for r in _runs(env) if r["task_id"] == "T-O")
+    env["fake"].alive = False
+
+    captured = []
+    monkeypatch.setattr(
+        env["orch"], "pump",
+        lambda db, rid, event, payload=None: captured.append((rid, event, payload or {})))
+    sched.tick_once()
+
+    exits = [p for rid, event, p in captured if event == "process_exit" and rid == run["id"]]
+    assert exits
+    assert exits[0]["observed_started_at"] == run["started_at"]
+
+
 def test_lease_reclaim_abandons_run(tmp_path, monkeypatch):
     env = make_env(tmp_path, monkeypatch)
     conn = open_conn(env["db_path"])

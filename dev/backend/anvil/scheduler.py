@@ -339,8 +339,10 @@ class Scheduler:
                     # 否则会把正在规划的 run 误标 agent_exit_process。
                     if _elapsed_seconds(r["started_at"]) < config.RUN_DEAD_GRACE_SECONDS:
                         continue
-                    self._pump(r["id"], "process_exit",
-                               {"exit_code": 1, "failure_class": "agent_exit_process"})
+                    self._pump(r["id"], "process_exit", {
+                        "exit_code": 1, "failure_class": "agent_exit_process",
+                        "observed_started_at": r["started_at"],
+                    })
                     continue
                 # 角色正忙在别的任务上（含 __global__ 的 reminder）：这个 run 只是
                 # 排队，不能按 busy_since 判超时。
@@ -352,8 +354,10 @@ class Scheduler:
                     # 换新上下文，但注入 CIC（记忆/工作流决策/知识快照），
                     # 避免自动恢复后的新会话对历史一无所知。
                     mgr.reset_session(role, cic=True, task_id=r["task_id"])  # type: ignore[union-attr]
-                    self._pump(r["id"], "process_exit",
-                               {"exit_code": 1, "failure_class": "platform_timeout"})
+                    self._pump(r["id"], "process_exit", {
+                        "exit_code": 1, "failure_class": "platform_timeout",
+                        "observed_started_at": r["started_at"],
+                    })
                 continue
             # 超时回收（P0-2）：run 级 timeout_seconds（spawn 时冻结自运行时 YAML）优先，
             # RUN_TIMEOUT_SECONDS 仅作未冻结时的兜底。续跑已重置 started_at（P0-1）。
@@ -362,15 +366,20 @@ class Scheduler:
                     pm.terminate(r["native_session_id"])
                 except Exception:  # noqa: BLE001
                     pass
-                self._pump(r["id"], "process_exit",
-                           {"exit_code": 1, "failure_class": "platform_timeout"})
+                self._pump(r["id"], "process_exit", {
+                    "exit_code": 1, "failure_class": "platform_timeout",
+                    "observed_started_at": r["started_at"],
+                })
                 continue
             try:
                 probe = pm.probe(r["native_session_id"])
             except Exception:  # noqa: BLE001
                 continue
             if not probe.alive:
-                self._pump(r["id"], "process_exit", {"exit_code": probe.exit_code})
+                self._pump(r["id"], "process_exit", {
+                    "exit_code": probe.exit_code,
+                    "observed_started_at": r["started_at"],
+                })
 
     def _reap_dead_runs(self, conn) -> None:
         """常驻进程已死但 run 仍 running → 宽限期后转 suspended。

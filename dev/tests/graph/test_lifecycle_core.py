@@ -79,6 +79,24 @@ def test_suspended_not_overwritten_by_process_exit(tmp_path, monkeypatch):
     assert _get(env, rid)["status"] == "suspended"  # 守卫：suspended 不被 process_exit 覆盖
 
 
+def test_stale_process_exit_after_restart_is_ignored(tmp_path, monkeypatch):
+    """重启后重新 spawn 会重置 started_at；基于旧 started_at 的 process_exit 必须让路。"""
+    env = make_env(tmp_path, monkeypatch)
+    rid = _mk_run(env, status="running", sid="rs:dev", started_delta_s=600)
+    old_started = _get(env, rid)["started_at"]
+
+    conn = open_conn(env["db_path"])
+    runs_service.mark_spawned(conn, rid, "rs:dev")  # 重启后重新拉起，计时重置
+    conn.close()
+
+    env["orch"].pump(env["db_path"], rid, "process_exit",
+                     {"exit_code": 1, "failure_class": "agent_exit_process",
+                      "observed_started_at": old_started})
+    r = _get(env, rid)
+    assert r["status"] == "running"
+    assert r["failure_class"] is None
+
+
 # ---- P0 补丁：@mention 唤醒（resume）不得泄漏旧进程 -------------------------
 
 def test_resume_terminates_old_process(tmp_path, monkeypatch):

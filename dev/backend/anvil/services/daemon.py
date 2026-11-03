@@ -506,16 +506,21 @@ class DaemonManager:
             return
         with r.lock:
             r.suppress_exit = True
-            self._slot_persist(r)
-            r.queue.clear()
-            r.busy = False
-            r.busy_since = None
-            r.current_run_id = None
-            r.current_task_id = None
-            r.current_step_id = None
-            r.current_log_path = None
-            self._kill_locked(r, graceful=True)
-            r.suppress_exit = False
+            # 计划内重启的杀人窗口：scheduler.monitor 不能把这当成进程死亡。
+            r.switching = True
+            try:
+                self._slot_persist(r)
+                r.queue.clear()
+                r.busy = False
+                r.busy_since = None
+                r.current_run_id = None
+                r.current_task_id = None
+                r.current_step_id = None
+                r.current_log_path = None
+                self._kill_locked(r, graceful=True)
+            finally:
+                r.suppress_exit = False
+                r.switching = False
             r.context_key = None
             r.loaded_spec = None
             r.session_id = None
@@ -539,10 +544,15 @@ class DaemonManager:
                 active = clear_all or r.context_key == key
                 if active:
                     r.suppress_exit = True
-                    self._slot_persist(r)
-                    r.queue.clear()
-                    self._kill_locked(r, graceful=True)
-                    r.suppress_exit = False
+                    # 计划内重置同样有杀人窗口；monitor 不能误判为进程死亡。
+                    r.switching = True
+                    try:
+                        self._slot_persist(r)
+                        r.queue.clear()
+                        self._kill_locked(r, graceful=True)
+                    finally:
+                        r.suppress_exit = False
+                        r.switching = False
                     r.context_key = None
                     r.loaded_spec = None
                     r.session_id = None

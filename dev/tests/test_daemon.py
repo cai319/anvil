@@ -5,6 +5,7 @@ import io
 import json
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -597,6 +598,37 @@ def test_restart_process_preserves_session(env):
     sids = [line.split()[1] for line in log.read_text().splitlines()]
     assert modes == ["new", "resume"]
     assert sids == [sid1, sid1]
+
+
+@pytest.mark.parametrize("action", ["restart", "reset"])
+def test_planned_kill_marks_switching_during_kill(env, monkeypatch, action):
+    """计划内重启/重置的杀人窗口必须让 scheduler.monitor 看到 switching，不能误判失败。"""
+    conn, mgr, fake, log = env
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "first",
+             extra_env={"FAKE_TURN_DELAY": "2"})
+    assert _wait(lambda: mgr.status("qa-role")["status"] == "busy")
+
+    started = threading.Event()
+    release = threading.Event()
+    original = mgr._kill_locked
+
+    def blocking_kill(r, graceful=True):
+        started.set()
+        assert release.wait(5)
+        return original(r, graceful=graceful)
+
+    monkeypatch.setattr(mgr, "_kill_locked", blocking_kill)
+    target = mgr.restart_process if action == "restart" else mgr.reset_session
+    worker = threading.Thread(target=target, args=("qa-role",))
+    worker.start()
+    try:
+        assert started.wait(5)
+        assert mgr.status("qa-role")["switching"] is True
+    finally:
+        release.set()
+        worker.join(15)
+    assert not worker.is_alive()
 
 
 def test_delete_task_kills_persistent_role_process(env, monkeypatch):
