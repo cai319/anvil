@@ -58,7 +58,7 @@ TASK_EPILOG = """\b
   list [--type T] [--tag T]             列出任务
   show <id>                             查看任务详情
   create --title "..." [--assignee r | --assignees a,b] [--issue-board]
-                                        创建任务或子任务
+                                        创建任务或委派工单（--parent/--parent-step）
   assign <id> --assignees a,b           追加角色；已有 Roster 时自动提案 @human
   reviewers <id> --assignees a,b        指定问题板 reviewer（planner/onboarding/human）
   claim | unclaim <id>                  认领/释放（工作流步骤不要 claim）

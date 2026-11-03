@@ -55,7 +55,7 @@
 | 命令 | 用途 |
 |---|---|
 | `anvil --version` | 查看 CLI 版本 |
-| `anvil task ...` | 任务：列表/创建/认领/评论/提交/归档/任务知识 |
+| `anvil task ...` | 任务：列表/创建/委派工单/验收/认领/评论/提交/归档/任务知识 |
 | `anvil step ...` | 工作流步骤：show/plan/submit/decide/escalate/packet |
 | `anvil finding ...` | 问题板：安全 finding 的填写/提交/完成（reviewer） |
 | `anvil knowledge ...` | 角色知识：检索/索引/仓库/知识卡 |
@@ -88,6 +88,8 @@ anvil task claim <id> [--paths src/a,src/b]
 anvil task unclaim <id>
 anvil task heartbeat <id>
 anvil task submit <id> --summary "完成摘要"
+anvil task delegation-accept <id>
+anvil task delegation-reject <id> --feedback "打回原因"
 anvil task comment <id> "正文"                 # 也可 --message
 anvil task mention <id> --to <role|human> "正文"  # 也可 --message
 anvil task block <id> --on <task-id>
@@ -114,8 +116,10 @@ anvil task knowledge-delete <id> --id <knowledge-id>   # human
   `--description`（目标/输入/输出）、`--acceptance`、`--scope-paths`、owner、TTL；
   TTL 用 `--due-at <ISO8601>` 记录（当前只展示/告警，超时处理在后续版本）；
   目标角色忙时排队，父 step 提交前必须等委派完成。创建者不要 claim 委派给别人的工单。
-- 委派完成后由派发者验收（`POST /tasks/{id}/delegation/accept|reject`）；
-  负责人不能验收自己的产出；父任务最终评审仍由 human 完成。
+- 委派完成后由派发者验收：`anvil task delegation-accept <id>` 或
+  `anvil task delegation-reject <id> --feedback "原因"`（对应
+  `POST /tasks/{id}/delegation/accept|reject`）；负责人不能验收自己的产出；
+  父任务最终评审仍由 human 完成。
 - `--issue-board` 只能由 human 在顶层任务启用；任务会强制走 Cindy 计划先行。
   Cindy 用 `task reviewers <id> --assignees <role>` 指定审核者（必须是已存在且被
   workflow 覆盖的角色），之后 reviewer 用 `anvil finding ...` 填写问题板。
