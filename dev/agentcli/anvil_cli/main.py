@@ -484,8 +484,10 @@ def task_cmd(
                            rich_help_panel="执行 / 协作"),
     to: str = typer.Option(None, "--to", help="mention：目标角色或 human",
                            rich_help_panel="执行 / 协作"),
-    summary: str = typer.Option(None, "--summary", help="submit：摘要",
-                                rich_help_panel="执行 / 协作"),
+    summary: str = typer.Option(
+        None, "--summary",
+        help="submit：摘要（涉及交付件时逐项写性质/内容简介/绝对路径）",
+        rich_help_panel="执行 / 协作"),
     message: str = typer.Option(None, "--message", "-m",
                                 help="comment/mention：正文（等价位置参数 body）",
                                 rich_help_panel="执行 / 协作"),
@@ -1419,11 +1421,14 @@ app.add_typer(step_app, name="step")
   anvil step submit WF-1 S2 --summary "修复完成" --changed-paths src/auth.ts,src/api.ts
 
 规则: 只对 running 步骤提交；不要用 task submit。409 时先 `anvil step show WF-1`。
+涉及具体交付件时，--summary 必须逐项列出性质、内容简介与绝对路径；无交付件时写「本次提交无具体交付件」。
 """)
 def step_submit(
     workflow_id: str = typer.Argument(..., help="工作流 ID"),
     step_id: str = typer.Argument(..., help="步骤 ID（如 S1）"),
-    summary: str = typer.Option("", "--summary", help="完成摘要"),
+    summary: str = typer.Option(
+        "", "--summary",
+        help="完成摘要；涉及交付件时逐项写性质、内容简介与绝对路径"),
     evidence_file: str = typer.Option(
         "", "--evidence-file", help="证据 JSON 文件（数组）"),
     changed_paths: str = typer.Option(

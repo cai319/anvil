@@ -81,6 +81,20 @@ def test_planning_protocol_uses_runtime_slicing():
     assert "--to cindy" in PLANNING_PROTOCOL
 
 
+def test_planning_protocol_requires_deliverable_check():
+    """Cindy 必须自动识别交付件任务，并把三要素核验落到 check 环节。"""
+    from anvil.graph.render import PLANNING_PROTOCOL
+
+    assert "交付件清单" in PLANNING_PROTOCOL
+    assert "性质" in PLANNING_PROTOCOL
+    assert "内容简介" in PLANNING_PROTOCOL
+    assert "绝对路径" in PLANNING_PROTOCOL
+    assert "check 环节" in PLANNING_PROTOCOL
+    assert "verify/verify2/decide" in PLANNING_PROTOCOL
+    assert "不得通过" in PLANNING_PROTOCOL
+    assert "无具体交付件" in PLANNING_PROTOCOL
+
+
 def test_task_size_block_flags_audit_and_wide_scope():
     assert "plan_slices + loop" in planning._task_size_block(
         {"title": "大型项目代码安全审计", "scope_paths": []})

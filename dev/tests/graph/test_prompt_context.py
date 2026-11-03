@@ -60,6 +60,18 @@ def test_protocols_include_attachment_budget():
     assert "不要反复读取" in render.STEP_PROTOCOL
 
 
+def test_protocols_require_deliverable_manifest():
+    """提交 human 评审前必须给出交付件清单：性质、内容简介、绝对路径。"""
+    for protocol in (render.PROTOCOL, render.STEP_PROTOCOL, render.FINDING_PROTOCOL):
+        assert "交付件清单" in protocol
+        assert "性质" in protocol
+        assert "内容简介" in protocol
+        assert "绝对路径" in protocol
+        assert "无具体交付件" in protocol
+    assert "test -f" in render.PROTOCOL
+    assert "test -f" in render.STEP_PROTOCOL
+
+
 def test_step_prompt_uses_agent_inbox_and_stays_small(conn):
     for i in range(60):
         tasks_service.comment(conn, "T1", "pm", f"{i}:" + "长内容" * 100)

@@ -117,6 +117,8 @@ anvil task knowledge-delete <id> --id <knowledge-id>   # human
   并立即唤醒挂起/空闲的步骤 run，**不重新规划**；workflow 已 `done` → `in_review`；
   无 workflow 或 workflow `terminated/failed` → `todo`，再决定是否重新派发/规划。
 - `knowledge-write` 的 `--kind` 例如 `task_finding`；`--fields` 必须是 JSON 对象。
+- `submit` 涉及具体交付件时，摘要必须逐项列出交付件的**性质、内容简介与绝对路径**；
+  绝对路径须真实存在，不能只写文件名/相对路径。无交付件时明确写「本次提交无具体交付件」。
 
 ## 5. 工作流步骤：`anvil step`
 
@@ -169,6 +171,9 @@ anvil step packet <wf> <step> [--json]
 - `plan_slices` 用 `step plan`，`decision` 用 `step decide`，普通步骤用 `step submit`。
 - 切片只描述范围/粒度/轮次，**不得指定角色或 loop 阶段**；角色由 Cindy 的 loop 模板定义。
 - 不是工作流任务时才用 `anvil task submit`。
+- `step submit --summary` 涉及具体交付件时，必须逐项列出**性质、内容简介与绝对路径**；
+  无交付件时写「本次提交无具体交付件」。Cindy 会把这些要求的核验落到 check 环节
+  （verify/verify2/decide、gate 或最终人工评审）。
 
 ## 5.1 工作流增量修订：`anvil workflow revise`
 

@@ -19,6 +19,20 @@ ATTACHMENT_BUDGET = (
     "再执行 `anvil self reset-context`。\n"
 )
 
+# 交付件清单：提交 human 评审前，让自然人能按绝对路径直接打开每个具体交付件。
+DELIVERABLE_MANIFEST = (
+    "## 交付件清单（涉及具体交付件时必须遵守）\n"
+    "· 只要任务/步骤产出代码、文档、报告、测试、配置、构建产物、数据文件等具体交付件，"
+    "提交 human 评审前必须在 submit 摘要（以及评审说明）中逐项列出「交付件清单」。\n"
+    "· 每个交付件写清三要素：**性质**（代码/文档/报告/测试/配置/产物/数据等）、"
+    "**内容简介**（一句话说明它是什么、解决什么问题）、"
+    "**绝对路径**（从根目录开始的完整路径，如 /Users/.../src/foo.py；不要只写文件名或相对路径）。\n"
+    "· 绝对路径必须真实存在且指向最终位置；提交前用 `ls -l <绝对路径>` 或 "
+    "`test -f <绝对路径>` 自检，不得编造。\n"
+    "· 没有具体交付件（纯讨论/决策/评审）时，在摘要中明确写「本次提交无具体交付件」。\n"
+    "· 证据文件仍按 CLI 的相对路径规则提交；交付件清单只用于 human 直接打开，不替代证据。\n"
+)
+
 # §7.4 注入给 Agent 的协议说明（约 400 token）。
 PROTOCOL = (
     "你在 Anvil 环境中运行。当前环境变量 ANVIL_TASK_ID 指示你被分配的任务。\n"
@@ -38,7 +52,7 @@ PROTOCOL = (
     "`anvil task unclaim <id>` 再 @对方认领（单负责人任务一旦被 claim 就是排他的）。\n"
     "只有需要人类决策（评审）时，系统会 @human 通知自然人；其余事务由角色间 @提及自行协商。\n"
     "只修改 scope 范围内的文件，越界的提交会被拒绝。"
-) + "\n\n" + ATTACHMENT_BUDGET
+) + "\n\n" + DELIVERABLE_MANIFEST + "\n\n" + ATTACHMENT_BUDGET
 
 # 角色被 @ 且当前没有工作流步骤时的回复协议：只讨论，不 claim/submit 任务。
 REPLY_PROTOCOL = (
@@ -127,7 +141,7 @@ STEP_PROTOCOL = (
     "文件证据只能使用 repo 或 agent home 内的相对路径。"
     "不要调用 `anvil task submit` 或 `anvil task claim`。\n"
     "只修改本步骤范围内的文件；越界提交会被拒绝。"
-) + "\n\n" + ATTACHMENT_BUDGET
+) + "\n\n" + DELIVERABLE_MANIFEST + "\n\n" + ATTACHMENT_BUDGET
 
 # 问题板（Issue Board）：reviewer 在任务内填写结构化安全 findings。
 # 写入规则由“步骤 run”和“问题板收口 run”共用；complete 只在收口 run 中允许。
@@ -155,7 +169,7 @@ FINDING_PROTOCOL = FINDING_WRITE_PROTOCOL + (
     "· 完成问题板后，任务会进入 human 最终评审；human 可能退回并要求你与其他角色复评，"
     "此时更新/补证并重新提交，再 complete。\n"
     "· 本 run 只做问题板工作：不要 claim/submit 普通任务，也不要修改 workflow 结构。"
-) + "\n\n" + ATTACHMENT_BUDGET
+) + "\n\n" + DELIVERABLE_MANIFEST + "\n\n" + ATTACHMENT_BUDGET
 
 # 工作流步骤里的 reviewer：只记录本步骤发现，不允许提前收口。
 STEP_FINDING_PROTOCOL = FINDING_WRITE_PROTOCOL + (
@@ -226,10 +240,21 @@ PLANNING_PROTOCOL = (
     "decide 由审计负责人按风险等级给出放行/打回/升级结论。\n"
     "  · 工作流顶层给出 feedback_rules 与 verification 矩阵："
     "{\"cell\":\"功能路径|property|回归|发布\",\"method\":\"如何验证\",\"verifier_role\":\"角色\"}。\n"
+    "  · **交付件清单与 check 环节（必须自动识别）**：先判断任务是否涉及具体交付件"
+    "（代码变更、文档、报告、测试、配置、构建产物、数据文件等）。若涉及：\n"
+    "    - 每个产出步骤的 acceptance 必须包含「提交摘要逐项给出交付件清单：性质、内容简介、绝对路径」；\n"
+    "    - check 环节（verify/verify2/decide、gate 步骤、最终人工评审步骤）的 instructions 与 "
+    "acceptance 必须包含「逐项核验交付件清单：三要素齐全、绝对路径真实存在、内容与任务目标一致；"
+    "缺失、只写文件名/相对路径或路径不存在则不得通过」，并要求核验者实际打开/检查路径；\n"
+    "    - 需要人工决策的步骤把交付件清单原样带入 feedback 与评审材料，方便 human 直接打开。\n"
+    "  · 若不涉及具体交付件（纯讨论/评审/决策），在 workflow 说明或 acceptance 中明确写"
+    "「本任务无具体交付件」，不要虚构路径。\n"
     "  · 提交前自检：有 plan_slices 步骤？loop.from 指向它？"
     "loop 的 execute/verify/decide 角色可区分且 ≠ onboarding？"
     "所有绑定角色都映射到步骤/loop 阶段？切片计划不包含角色字段？"
-    "最终步骤依赖 plan 步骤？每个步骤都写了实时同步要求？不满足则重写。\n"
+    "最终步骤依赖 plan 步骤？每个步骤都写了实时同步要求？"
+    "涉及具体交付件时，产出步骤是否要求交付件清单、check 环节是否核验三要素与绝对路径？"
+    "不满足则重写。\n"
     "  然后把工作流写入 JSON 文件并执行 "
     "`anvil board draft --task $ANVIL_TASK_ID --goal \"<目标一句话>\" --kind workflow --tree-file <workflow.json>`。\n"
     "  大型任务用 `plan_slices + loop` 格式（服务端在运行时展开切片）：\n"
