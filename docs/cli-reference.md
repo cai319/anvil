@@ -109,6 +109,8 @@ anvil task knowledge-delete <id> --id <knowledge-id>   # human
 - 位置参数 `action` 默认 `list`；`target` 通常省略，默认取 `ANVIL_TASK_ID`。
 - `comment` 只写时间线，不唤醒；`mention` 才唤醒目标角色。
 - **工作流步骤不要调用 `task claim` / `task submit`**；用 `anvil step`。
+- 规划期间（`plan_first`、planner run 活跃或存在待审草案）不接受 human
+  `task assign` 或手动 `POST /runs`；先等草案批准/驳回，或改走 `task dispatch`。
 - **委派工单（子任务）默认不建**：只有能换取独立上下文、只读并行、不同角色权限、
   独立验收、失败后动态分解或跨会话持久责任时才建；能用当前 step 或 `mention`
   解决的不建。规划级分解只能由 Cindy 定义，执行角色只能 `@cindy` 提议。

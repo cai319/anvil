@@ -139,8 +139,12 @@ def create_task(body: TaskIn, conn=Depends(get_db),
 def assign_roles(tid: str, body: dict, conn=Depends(get_db),
                  auth: Auth = Depends(require_human)):
     """绑定任务参与角色（团队协作，多角色）。body: {roles: [slug, ...]}"""
-    if services.tasks.get(conn, tid) is None:
+    task = services.tasks.get(conn, tid)
+    if task is None:
         raise HTTPException(status_code=404, detail="task not found")
+    conflict = services.tasks.planning_conflict(conn, task)
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
     roles = [str(r) for r in (body.get("roles") or [])]
     try:
         result = services.tasks.assign_roles(conn, tid, roles)

@@ -25,6 +25,16 @@ def start_run(body: dict, request: Request, conn=Depends(get_db),
     """
     role = body.get("role_slug") or auth.role or "qa-role"
     task_id = body.get("task_id")
+    task = services.tasks.get(conn, task_id) if task_id else None
+    if task and task.get("plan_first"):
+        raise HTTPException(
+            status_code=409,
+            detail="plan_first task must be dispatched to the planner; use task dispatch",
+        )
+    if task:
+        conflict = services.tasks.planning_conflict(conn, task)
+        if conflict:
+            raise HTTPException(status_code=409, detail=conflict)
     # 幂等：同任务同角色已有活跃 run 时直接返回它（不二次 spawn、也不报冲突；多角色可各有一 run）
     if task_id and role:
         existing = services.runs.find_active_run(conn, task_id, role)

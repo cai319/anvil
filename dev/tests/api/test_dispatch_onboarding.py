@@ -1,6 +1,8 @@
 """计划先行默认化：多角色任务由 onboarding 助理（Cindy）先规划；单角色直接派发。"""
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 pytest.importorskip("anvil.main")
@@ -69,6 +71,37 @@ async def test_plan_first_single_role_dispatch_plans_with_cindy(client, seeded):
     assert body["planner"] == "cindy"
     task = (await client.get("/api/v1/tasks/T-PF-SINGLE", headers=auth_headers())).json()
     assert task["planner"] == "cindy"
+
+
+def _mark_planner_active(app, tid: str) -> None:
+    conn = sqlite3.connect(app.state.db_path)
+    try:
+        conn.execute(
+            "UPDATE runs SET status='suspended' WHERE task_id=? AND role_slug='cindy'",
+            (tid,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def test_planning_blocks_human_assign_and_direct_run(client, seeded, app):
+    """Cindy 规划期间，human 不能绕过 planner 直接改 Roster / 拉起 run。"""
+    await _create_task(client, "T-PLANNING", ["pm", "developer"])
+    dispatched = await client.post(
+        "/api/v1/tasks/T-PLANNING/dispatch", headers=human_headers())
+    assert dispatched.status_code == 201, dispatched.text
+    assert dispatched.json()["mode"] == "planning"
+    _mark_planner_active(app, "T-PLANNING")
+
+    assigned = await client.post(
+        "/api/v1/tasks/T-PLANNING/assign", json={"roles": ["tester"]},
+        headers=human_headers())
+    assert assigned.status_code == 409, assigned.text
+
+    run = await client.post(
+        "/api/v1/runs", json={"role_slug": "tester", "task_id": "T-PLANNING"},
+        headers=human_headers())
+    assert run.status_code == 409, run.text
 
 
 @pytest.mark.asyncio

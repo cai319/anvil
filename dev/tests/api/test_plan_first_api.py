@@ -1,6 +1,8 @@
 """P1-0 字段与端点：任务 plan_first/planner、规划 run、草案提交与批准落板。"""
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 pytest.importorskip("anvil.main")
@@ -69,6 +71,37 @@ async def test_plan_endpoint_requires_planner_when_onboarding_disabled(
         id="T-PF6", assignees=["pm"], plan_first=True), headers=auth_headers())
     r = await client.post("/api/v1/tasks/T-PF6/plan", headers=human_headers())
     assert r.status_code == 409
+
+
+def _mark_planner_active(app, tid: str) -> None:
+    conn = sqlite3.connect(app.state.db_path)
+    try:
+        conn.execute(
+            "UPDATE runs SET status='suspended' WHERE task_id=? AND role_slug='cindy'",
+            (tid,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def test_human_cannot_assign_or_start_run_while_planner_active(
+        client, seeded, app):
+    """Cindy 规划期间，human 不能改 Roster，也不能直接拉起角色 run。"""
+    await client.post("/api/v1/tasks", json=task_payload(
+        id="T-PF7", assignees=["pm"], plan_first=True), headers=auth_headers())
+    planned = await client.post("/api/v1/tasks/T-PF7/plan", headers=human_headers())
+    assert planned.status_code == 201, planned.text
+    _mark_planner_active(app, "T-PF7")
+
+    assigned = await client.post(
+        "/api/v1/tasks/T-PF7/assign", json={"roles": ["developer"]},
+        headers=human_headers())
+    assert assigned.status_code == 409, assigned.text
+
+    run = await client.post(
+        "/api/v1/runs", json={"role_slug": "developer", "task_id": "T-PF7"},
+        headers=human_headers())
+    assert run.status_code == 409, run.text
 
 
 async def test_agent_can_submit_draft_and_human_approves(client, seeded):

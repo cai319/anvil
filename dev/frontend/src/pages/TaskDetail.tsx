@@ -946,6 +946,7 @@ export function TaskDetail({ id }: { id: string }) {
   const [dossierBusy, setDossierBusy] = useState(false);
   const [reviewStep, setReviewStep] = useState<WorkflowStep | null>(null);
   const [delegations, setDelegations] = useState<Delegation[]>([]);
+  const [plannerActive, setPlannerActive] = useState(false);
   const [wfView, setWfView] = useState<"graph" | "list">("graph");
   const [showApplyTemplate, setShowApplyTemplate] = useState(false);
   const [seedTemplates, setSeedTemplates] = useState<WorkflowTemplate[]>([]);
@@ -987,10 +988,17 @@ export function TaskDetail({ id }: { id: string }) {
     api.listTaskDelegations(id).then(setDelegations).catch(() => setDelegations([]));
 
   const refresh = () =>
-    Promise.all([api.getTask(id), api.getTaskTimeline(id)])
-      .then(([t, tl]) => {
+    Promise.all([api.getTask(id), api.getTaskTimeline(id), api.listTaskRuns(id)])
+      .then(([t, tl, runs]) => {
         setTask(t);
         setTimeline(tl);
+        const active = new Set([
+          "created", "projecting", "running", "submitted", "reviewing", "suspended",
+        ]);
+        const onboarding = new Set(roles.filter(isOnboardingRole).map((r) => r.slug));
+        setPlannerActive(runs.some((r) => active.has(r.status)
+          && (r.role_slug === t.planner || r.role_slug === "cindy"
+            || onboarding.has(r.role_slug))));
         setGone(false);
         if (t.issue_board_enabled) {
           api.getFindingSummary(id).then(setFindingSummary)
@@ -1725,7 +1733,9 @@ export function TaskDetail({ id }: { id: string }) {
         {/* 左：会话流 */}
         <div className="task-main">
           <div className="session-actions">
-            {task.status === "todo" && (
+            {task.status === "todo" && !task.plan_first && !workflow
+              && drafts.length === 0 && (task.assignees?.length ?? 0) === 0
+              && !plannerActive && (
               <>
                 <select value={assignee} onChange={(e) => setAssignee(e.target.value)} title="选择要指派的角色">
                   <option value="">选择角色…</option>
@@ -1743,6 +1753,9 @@ export function TaskDetail({ id }: { id: string }) {
                   disabled={busy || !assignee}
                 >指派并执行</button>
               </>
+            )}
+            {task.status === "todo" && plannerActive && (
+              <span className="muted">Cindy 正在规划工作流，请到收件箱处理草案。</span>
             )}
             {(task.status === "todo" || task.status === "in_progress")
               && !(workflow && workflow.status === "running") && (

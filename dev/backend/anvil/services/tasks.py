@@ -291,6 +291,37 @@ def assign_roles(conn: sqlite3.Connection, tid: str, roles: list[str]) -> dict:
     return get(conn, tid)  # type: ignore[return-value]
 
 
+def planning_conflict(conn: sqlite3.Connection, task: dict | None) -> str | None:
+    """计划期锁定：human 直接改 Roster/拉起角色 run 会与 Cindy 的规划竞态。"""
+    if task is None:
+        return None
+    running = conn.execute(
+        "SELECT 1 FROM workflows WHERE task_id=? AND status='running' LIMIT 1",
+        (task["id"],)).fetchone()
+    if running:
+        return ("task has a running workflow; use workflow steps instead of "
+                "direct assign/execution")
+    draft = conn.execute(
+        "SELECT 1 FROM board_drafts WHERE source_task=? AND status='pending' LIMIT 1",
+        (task["id"],)).fetchone()
+    if draft:
+        return ("task has a pending planning draft; approve or reject it "
+                "before changing assignees")
+    from . import roles as roles_service
+
+    planner = str(task.get("planner") or "")
+    rows = conn.execute(
+        "SELECT role_slug FROM runs WHERE task_id=? "
+        "AND status NOT IN ('completed','failed','abandoned')",
+        (task["id"],)).fetchall()
+    for row in rows:
+        role = str(row["role_slug"] or "")
+        if role and (role == planner or roles_service.is_onboarding(conn, role)):
+            return ("task is being planned by the planner; wait for the draft "
+                    "or re-dispatch")
+    return None
+
+
 def add_assignees(conn: sqlite3.Connection, tid: str, roles: list[str]) -> dict:
     """追加任务参与角色（非破坏性，保留已有 assignees/claims）。"""
     t = get(conn, tid)
