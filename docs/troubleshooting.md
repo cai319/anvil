@@ -445,15 +445,18 @@ curl -v --max-time 30 -X POST 'http://<tracker>/draft/bulkCreate' \
   -H 'Content-Type: application/json' \
   -d '{"source":"anvil-probe","list":[]}'
 
-# 默认不使用 HTTP(S)_PROXY/ALL_PROXY；需要确认代理环境是否仍在影响其他工具
+# Tracker 请求不走代理；这里只用于对照进程/系统里是否存在代理配置
 env | grep -i proxy
 ```
 
-Tracker 请求与 `curl` 的行为一致：默认读取 `HTTP_PROXY` / `HTTPS_PROXY` /
-`ALL_PROXY` / `NO_PROXY`；未配置代理时由本机路由表选择出口网卡。若 Anvil 服务进程
-没有继承到所需代理变量，可设置 `ANVIL_ISSUE_TRACKER_PROXY` 显式指定代理
-（例如 `http://proxy.local:8080`），它会覆盖环境变量；留空则继续使用环境变量。
-用户保证网络连通时，优先检查代理变量是否与服务进程实际网络环境一致。
+Tracker 请求**固定直连**：不读取 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` /
+`NO_PROXY`，也不读取 Windows 注册表 / macOS 系统设置里的系统代理。由本机路由表
+直接选择出口网卡。日志里的 `env_proxies=` / `system_proxies=` 仅用于诊断，不会生效。
+
+> 这是常见故障：Windows 系统代理或 macOS 系统代理指向 `127.0.0.1:7890` 时，
+> httpx 默认会走系统代理，而 `curl` 直连，于是出现“curl 能通、Anvil 不行，
+> Wireshark 物理网卡看不到包”。Tracker 请求现在显式 `trust_env=False` 且
+> `proxy=None`，不会再被 localhost 系统代理接管。
 
 超时可通过环境变量调整，修改后重启后端：
 
@@ -462,7 +465,6 @@ Tracker 请求与 `curl` 的行为一致：默认读取 `HTTP_PROXY` / `HTTPS_PR
 | `ANVIL_ISSUE_TRACKER_TIMEOUT` | 30 | 正式批量提交的读写超时（秒） |
 | `ANVIL_ISSUE_TRACKER_TEST_TIMEOUT` | 10 | 「测试连接」的空 list 探测超时（秒） |
 | `ANVIL_ISSUE_TRACKER_CONNECT_TIMEOUT` | 5 | TCP 建连超时（秒）；与读超时分开，便于定位 |
-| `ANVIL_ISSUE_TRACKER_PROXY` | 空 | 显式出站代理；留空时读取 `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` |
 
 如果浏览器 Network 中 `/api/v1/...` 的 504 响应来自 nginx/Ingress（响应头有
 `server: nginx`、`via` 等，响应体是 HTML），需要把该代理的读超时调到大于
@@ -472,5 +474,33 @@ Tracker 请求与 `curl` 的行为一致：默认读取 `HTTP_PROXY` / `HTTPS_PR
 proxy_read_timeout 60s;
 proxy_send_timeout 60s;
 ```
+
+### Q21. 后端日志文件在哪，怎么抓完整定位信息
+
+后端启动时自动创建：
+
+- 源码模式：`<项目根>/log/anvil.log`（Windows：`<项目根>\log\anvil.log`）
+- 打包模式：`<anvil-server.exe 所在目录>/log/anvil.log`
+- 可用 `ANVIL_LOG_DIR` 改目录；`ANVIL_LOG_LEVEL` 改级别；默认 INFO。
+
+日志包含：
+
+- 所有 `/api/v1` 用户操作：`http id=... method=... path=... status=... duration_ms=...
+  role=... task=... client=...`
+- tracker 出站：`tracker send ...` / `tracker response ...` / `tracker timeout ...`，
+  其中包括 endpoint、source、条数/字节数、host/port、DNS 状态与地址、目标出口本地 IP、
+  代理与 `NO_PROXY`、`env_proxies`、超时、状态码、耗时和错误类型。
+- 不记录 token、Cookie、请求正文或完整响应正文。
+
+Windows 抓取：
+
+```powershell
+Get-Content .\log\anvil.log -Tail 200 -Wait
+Select-String -Path .\log\anvil.log -Pattern 'tracker|http id=|ERROR|Traceback'
+```
+
+如果日志里 `target_local_ip` 为 `127.0.0.1`，说明请求走了本机代理/本机地址；
+如果是某个网卡 IP，就用该 IP 对应网卡抓包。`proxy_source=env:HTTP_PROXY` 等字段
+可确认实际使用的代理变量。
 
 ---

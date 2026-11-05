@@ -21,5 +21,8 @@ dev/dist/
 # Never commit this directory.
 data/
 
+# Backend runtime logs (default <project>/log/anvil.log)
+log/
+
 # Superpowers local brainstorm/cache
 .superpowers/

@@ -34,6 +34,7 @@ from .services import roles as roles_service
 from .services import runs as runs_service
 from .graph import build_graph, get_checkpointer
 from .graph.orchestrator import Orchestrator
+from .logging_setup import AccessLogMiddleware, setup_logging
 from .scheduler import Scheduler
 from .version import VERSION
 
@@ -185,6 +186,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     if test_auth and scheduler_enabled:
         raise RuntimeError(
             "ANVIL_TEST_AUTH is test-only and must not be enabled in the production server")
+    if cfg.get("file_logging") is True:
+        setup_logging()
     scheduler = Scheduler(path, orchestrator) if scheduler_enabled else None
 
     # 常驻角色运行时（owner 2026-10-19）：生产入口（scheduler_enabled）默认启用；
@@ -263,6 +266,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     app.state.scheduler_enabled = scheduler_enabled
 
     app.add_middleware(_LocalTokenMiddleware)
+    # 访问日志必须在鉴权外层，才能记录 401/403 等用户操作结果。
+    app.add_middleware(AccessLogMiddleware)
 
     app.include_router(runtimes.router, prefix="/api/v1/runtimes", tags=["runtimes"])
     app.include_router(roles.router, prefix="/api/v1", tags=["roles"])

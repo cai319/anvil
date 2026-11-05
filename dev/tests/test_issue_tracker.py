@@ -95,8 +95,8 @@ def test_connection_rejects_missing_endpoint(monkeypatch):
     assert result["ok"] is False
 
 
-def test_post_request_honors_proxy_config(monkeypatch):
-    """读取代理环境变量（与 curl 一致）；显式代理可覆盖环境变量。"""
+def test_post_request_never_uses_proxy(monkeypatch):
+    """Tracker 请求固定直连，即使进程环境或系统存在代理。"""
     captured: dict = {}
 
     class FakeClient:
@@ -112,23 +112,24 @@ def test_post_request_honors_proxy_config(monkeypatch):
         def post(self, endpoint, json):
             captured["endpoint"] = endpoint
             captured["payload"] = json
-            return object()
+
+            class FakeResponse:
+                status_code = 200
+                text = "{}"
+                content = b"{}"
+                headers = {}
+
+            return FakeResponse()
 
     monkeypatch.setattr(issue_tracker.httpx, "Client", FakeClient)
-    monkeypatch.setattr(issue_tracker.config, "ISSUE_TRACKER_PROXY", "")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.local:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.local:8080")
+    monkeypatch.setenv("ALL_PROXY", "http://proxy.local:8080")
     issue_tracker._post_request(
         "http://1.2.3.4/api/draft/bulkCreate", {"source": "x", "list": []})
-    assert captured["trust_env"] is True
+    assert captured["trust_env"] is False
     assert captured["proxy"] is None
     assert captured["endpoint"].endswith("/draft/bulkCreate")
-
-    captured.clear()
-    monkeypatch.setattr(issue_tracker.config, "ISSUE_TRACKER_PROXY",
-                        "http://proxy.local:8080")
-    issue_tracker._post_request(
-        "http://1.2.3.4/api/draft/bulkCreate", {"source": "x", "list": []})
-    assert captured["trust_env"] is True
-    assert captured["proxy"] == "http://proxy.local:8080"
 
 
 def test_connection_timeout(monkeypatch):

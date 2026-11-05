@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import socket
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
@@ -18,6 +21,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from .. import config
+from ..logging_setup import proxy_snapshot, sanitize_proxy, system_proxy_snapshot
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
 from . import findings, governance
 
@@ -96,22 +100,149 @@ def save_settings(conn: sqlite3.Connection, url: str, *, actor: str = "human") -
     _audit(conn, actor, None, "issue_tracker.config",
            {"server_url": text, "cleared": not bool(text)})
     conn.commit()
+    logger.info("tracker config saved server_url=%s actor=%s configured=%s",
+                text or "-", actor, bool(text))
     return get_settings(conn)
+
+
+def _host_port(url: str) -> tuple[str, int]:
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    return host, port
+
+
+def _dns_snapshot(host: str, port: int, timeout: float = 1.5) -> dict:
+    """带超时的 DNS 诊断：不让日志诊断本身无限阻塞。"""
+    result: dict = {"status": "pending"}
+
+    def worker() -> None:
+        try:
+            started = time.monotonic()
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+            addresses = []
+            for family, _socktype, _proto, _canon, sockaddr in infos:
+                address = sockaddr[0]
+                if address not in addresses:
+                    addresses.append(address)
+            result.update(
+                status="ok",
+                addresses=",".join(addresses) or "-",
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+            )
+        except Exception as exc:  # noqa: BLE001 - 诊断信息必须完整
+            result.update(status="error",
+                          error=f"{type(exc).__name__}: {exc}")
+
+    thread = threading.Thread(target=worker, name="anvil-dns-diag", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        return {"status": "timeout", "addresses": "-",
+                "elapsed_ms": int(timeout * 1000)}
+    return result
+
+
+def _local_ip_for(host: str, port: int) -> str:
+    """用 UDP connect 让系统路由表选出口地址（不发包），用于定位网卡。"""
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+    except OSError as exc:
+        return f"dns-error:{type(exc).__name__}"
+    errors = []
+    for family, socktype, proto, _canon, sockaddr in infos:
+        sock = socket.socket(family, socktype, proto)
+        try:
+            sock.settimeout(0.5)
+            sock.connect(sockaddr)
+            return str(sock.getsockname()[0])
+        except OSError as exc:
+            errors.append(str(exc))
+        finally:
+            sock.close()
+    return f"error:{errors[0] if errors else 'no-address'}"
+
+
+def _outbound_context(endpoint: str, timeout: float) -> str:
+    host, port = _host_port(endpoint)
+    dns = _dns_snapshot(host, port)
+    target_ip = _local_ip_for(host, port) if dns["status"] == "ok" else "-"
+    env_no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or "-"
+    return " ".join([
+        f"host={host or '-'}",
+        f"port={port}",
+        f"dns_status={dns['status']}",
+        f"dns={dns.get('addresses') or dns.get('error') or '-'}",
+        f"dns_ms={dns.get('elapsed_ms', '-')}",
+        f"target_local_ip={target_ip}",
+        "proxy=none",
+        "proxy_source=disabled",
+        f"env_proxies={proxy_snapshot()}",
+        f"system_proxies={system_proxy_snapshot()}",
+        f"no_proxy={sanitize_proxy(env_no_proxy)}",
+        "trust_env=False",
+        f"timeout={timeout:g}",
+        f"connect_timeout={min(timeout, CONNECT_TIMEOUT):g}",
+    ])
 
 
 def _post_request(endpoint: str, payload: dict,
                   timeout: float = DEFAULT_TIMEOUT) -> httpx.Response:
     # connect 单独限时，避免 DNS/TCP 建连慢时占用全部读超时；其余阶段共享 timeout。
     limits = httpx.Timeout(timeout, connect=min(timeout, CONNECT_TIMEOUT))
-    # 与 curl 一致：trust_env=True 读取系统代理环境变量；未配置代理时由本机
-    # 路由表选择出口网卡。ANVIL_ISSUE_TRACKER_PROXY 可显式覆盖环境变量。
-    with httpx.Client(
-        timeout=limits,
-        follow_redirects=False,
-        trust_env=True,
-        proxy=config.ISSUE_TRACKER_PROXY or None,
-    ) as client:
-        return client.post(endpoint, json=payload)
+    source = str(payload.get("source") or "")
+    kind = "test" if source.startswith(f"{SOURCE_PREFIX}-test:") else "submit"
+    items = payload.get("list") if isinstance(payload.get("list"), list) else []
+    payload_bytes = len(jdumps(payload).encode("utf-8"))
+    context = _outbound_context(endpoint, timeout)
+    started = time.monotonic()
+    logger.info(
+        "tracker send kind=%s endpoint=%s source=%s items=%s payload_bytes=%s %s",
+        kind, endpoint, source, len(items), payload_bytes, context,
+    )
+    try:
+        # Tracker 请求一律直连：不读取环境代理、不读取 Windows/macOS 系统代理。
+        # 由本机路由表选择出口网卡，避免 localhost 系统代理导致“抓不到包”。
+        with httpx.Client(
+            timeout=limits,
+            follow_redirects=False,
+            trust_env=False,
+            proxy=None,
+        ) as client:
+            response = client.post(endpoint, json=payload)
+    except httpx.TimeoutException as exc:
+        logger.warning(
+            "tracker timeout kind=%s endpoint=%s type=%s elapsed_ms=%s %s",
+            kind, endpoint, type(exc).__name__, int((time.monotonic() - started) * 1000),
+            context,
+        )
+        raise
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "tracker error kind=%s endpoint=%s type=%s elapsed_ms=%s error=%s %s",
+            kind, endpoint, type(exc).__name__, int((time.monotonic() - started) * 1000),
+            exc, context,
+        )
+        raise
+    except Exception as exc:  # 代理配置/客户端构造错误
+        logger.warning(
+            "tracker setup error kind=%s endpoint=%s type=%s error=%s %s",
+            kind, endpoint, type(exc).__name__, exc, context,
+        )
+        raise
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    try:
+        body_preview = response.text[:300].replace("\n", " ")
+    except Exception:  # noqa: BLE001
+        body_preview = "<unreadable>"
+    logger.info(
+        "tracker response kind=%s endpoint=%s status=%s elapsed_ms=%s "
+        "response_bytes=%s content_type=%s server=%s body=%s",
+        kind, endpoint, response.status_code, elapsed_ms,
+        len(response.content), response.headers.get("content-type", "-"),
+        response.headers.get("server", "-"), body_preview,
+    )
+    return response
 
 
 def _timeout_message(exc: httpx.TimeoutException, timeout: float,
@@ -447,6 +578,9 @@ def test_connection(conn: sqlite3.Connection | None, url: str | None = None,
     if not ok:
         logger.warning("issue tracker test rejected endpoint=%s status=%s message=%s",
                        endpoint, status, message[:200])
+    else:
+        logger.info("issue tracker test ok endpoint=%s status=%s latency_ms=%s",
+                    endpoint, status, latency_ms)
     result = {
         "ok": ok,
         "endpoint": endpoint,

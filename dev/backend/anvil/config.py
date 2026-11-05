@@ -26,6 +26,13 @@ def _frontend_dist() -> Path:
 FRONTEND_DIST = _frontend_dist()
 
 
+def _default_log_dir() -> Path:
+    """源码：<项目根>/log；打包：<anvil-server.exe 所在目录>/log。"""
+    if getattr(sys, "_MEIPASS", None) or getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "log"
+    return ROOT_DIR.parent / "log"
+
+
 def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
@@ -34,6 +41,11 @@ def _env(name: str, default: str) -> str:
 DATA_DIR = Path(_env("ANVIL_DATA_DIR", str(ROOT_DIR.parent / "data"))).expanduser()
 
 SQLITE_PATH = Path(_env("ANVIL_SQLITE_PATH", str(DATA_DIR / "anvil.db"))).expanduser()
+# 运行日志：默认项目根 log/，Windows 源码模式即 <项目根>\log\anvil.log。
+LOG_DIR = Path(_env("ANVIL_LOG_DIR", str(_default_log_dir()))).expanduser()
+LOG_LEVEL = _env("ANVIL_LOG_LEVEL", "INFO").upper()
+LOG_MAX_BYTES = int(_env("ANVIL_LOG_MAX_BYTES", str(20 * 1024 * 1024)))
+LOG_BACKUPS = int(_env("ANVIL_LOG_BACKUPS", "10"))
 AGENTS_DIR = Path(_env("ANVIL_AGENTS_DIR", str(DATA_DIR / "agents"))).expanduser()
 REPOS_DIR = Path(_env("ANVIL_REPOS_DIR", str(DATA_DIR / "repos"))).expanduser()
 # 任务数据存储（与知识库完全分开）。task_workspaces 表 + 每任务目录。
@@ -65,9 +77,6 @@ ISSUE_TRACKER_TEST_TIMEOUT_SECONDS = float(
     _env("ANVIL_ISSUE_TRACKER_TEST_TIMEOUT", "10"))
 ISSUE_TRACKER_CONNECT_TIMEOUT_SECONDS = float(
     _env("ANVIL_ISSUE_TRACKER_CONNECT_TIMEOUT", "5"))
-# 出站请求与 curl 一致：读取 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY；
-# 未配置代理时由本机路由表选择出口网卡。此项可显式覆盖代理（留空则使用环境变量）。
-ISSUE_TRACKER_PROXY = _env("ANVIL_ISSUE_TRACKER_PROXY", "").strip()
 
 # 常驻角色运行时（persistent daemon）：默认随生产服务启用；测试环境（create_app 未开
 # scheduler）不启用，保持 one-shot 假进程路径可测。
@@ -244,3 +253,8 @@ def ensure_dirs() -> None:
               TASK_WORKSPACES_DIR, KNOWLEDGE_REPOS_DIR, CHANNELS_DIR,
               SQLITE_PATH.parent):
         d.mkdir(parents=True, exist_ok=True)
+    # 日志目录不可写时由 setup_logging 回退到 DATA_DIR/log，不能阻断服务启动。
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass

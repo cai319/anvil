@@ -4,18 +4,25 @@
 """
 from __future__ import annotations
 
+import logging
 import threading
 import webbrowser
 
 import uvicorn
 
-from . import config
+from . import config, logging_setup
 from .main import create_app
+from .version import VERSION
 
 
 def main() -> None:
     config.ensure_dirs()
-    app = create_app({"scheduler_enabled": True})
+    log_path = logging_setup.setup_logging()
+    logging.getLogger("anvil.server").info(
+        "Anvil server starting version=%s log_file=%s host=%s port=%s",
+        VERSION, log_path, config.HOST, config.PORT,
+    )
+    app = create_app({"scheduler_enabled": True, "file_logging": True})
     url = f"http://{config.HOST}:{config.PORT}"
     threading.Timer(1.5, lambda: webbrowser.open(url)).start()
     uvicorn.run(app, host=config.HOST, port=config.PORT, log_level="info")
