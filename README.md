@@ -429,7 +429,10 @@ API：`GET /api/v1/features`、`PUT/DELETE /api/v1/features/{key}`（人工身�
   - `ANVIL_LOG_LEVEL`：默认 `INFO`
   - `ANVIL_LOG_MAX_BYTES`：单文件字节数
   - `ANVIL_LOG_BACKUPS`：备份数量
-- 记录所有 `/api/v1` 用户操作：请求 ID、方法、路径、查询参数名、状态码、耗时、
+- 默认级别 `INFO`：变更操作（POST/PUT/PATCH/DELETE）和错误落盘；成功的
+  GET/状态轮询记 `DEBUG`，默认不写盘，避免页面轮询刷满日志。4xx 记 `WARNING`，
+  5xx 记 `ERROR`。
+- 记录 `/api/v1` 用户操作：请求 ID、方法、路径、查询参数名、状态码、耗时、
   角色、任务、客户端 IP、User-Agent。
 - 记录后端访问问题跟踪服务器的出站诊断：endpoint、source、条数/字节数、host/port、
   DNS 状态与解析地址、目标出口本地 IP、环境代理与 `NO_PROXY`、操作系统系统代理
@@ -623,6 +626,7 @@ anvil init --with-roles
 - [docs/v1.41.0-release.md](docs/v1.41.0-release.md)：v1.41.0 问题板外部问题跟踪提交
 - [docs/v1.41.1-release.md](docs/v1.41.1-release.md)：v1.41.1 问题板提交反馈、tracker 超时/代理诊断与 CLI 帮助修复
 - [docs/v1.41.2-release.md](docs/v1.41.2-release.md)：v1.41.2 运行日志与 tracker 系统代理修复
+- [docs/v1.41.3-release.md](docs/v1.41.3-release.md)：v1.41.3 日志级别按业务收敛
 - [docs/workflow-revision.md](docs/workflow-revision.md)：运行中 workflow 的增量修订（安全变更不重启任务）
 - [docs/operations.md](docs/operations.md)：打包、备份/迁移/重置、卸载
 - [docs/troubleshooting.md](docs/troubleshooting.md)：详细排查

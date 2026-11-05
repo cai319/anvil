@@ -140,6 +140,14 @@ def setup_logging(log_dir: Path | str | None = None) -> Path:
             uv_logger.addHandler(handler)
             if uv_logger.level == logging.NOTSET or uv_logger.level > level:
                 uv_logger.setLevel(level)
+        # 默认 INFO 时不让 httpx/httpcore 的逐请求 INFO 行重复刷日志；
+        # 主动排查可设 ANVIL_LOG_LEVEL=DEBUG 恢复。
+        if level > logging.DEBUG:
+            for name in ("httpx", "httpcore"):
+                dependency_logger = logging.getLogger(name)
+                if dependency_logger.level == logging.NOTSET \
+                        or dependency_logger.level < logging.WARNING:
+                    dependency_logger.setLevel(logging.WARNING)
 
         _handler = handler
         _log_path = target
@@ -187,7 +195,18 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
             raise
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
-        access_logger.info(
+        # 默认 INFO：成功的 GET/轮询（页面刷新、状态轮询）记 DEBUG，不落盘；
+        # 变更操作（POST/PUT/PATCH/DELETE）与实际错误记 INFO/WARNING。
+        if response.status_code >= 500:
+            log_level = logging.ERROR
+        elif response.status_code >= 400:
+            log_level = logging.WARNING
+        elif method in ("GET", "HEAD", "OPTIONS"):
+            log_level = logging.DEBUG
+        else:
+            log_level = logging.INFO
+        access_logger.log(
+            log_level,
             "http id=%s method=%s path=%s query_keys=%s status=%s "
             "duration_ms=%s role=%s task=%s client=%s xff=%s "
             "content_length=%s ua=%s",

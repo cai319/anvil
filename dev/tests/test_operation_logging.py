@@ -50,10 +50,18 @@ def test_setup_logging_writes_utf8_file(tmp_path):
         logging_setup._log_path = old_path
 
 
-async def test_api_requests_are_logged(client, caplog):
-    caplog.set_level(logging.INFO, logger="anvil.access")
+async def test_get_requests_are_debug_only(client, caplog):
+    """默认 INFO 时成功的 GET/轮询不落盘；DEBUG 才可见。"""
+    caplog.set_level(logging.DEBUG, logger="anvil.access")
     r = await client.get(f"{API}/tasks")
     assert r.status_code == 200
     assert "http id=" in caplog.text
     assert f"path={API}/tasks" in caplog.text
     assert "status=200" in caplog.text
+
+
+async def test_get_errors_are_logged_at_warning(client, caplog):
+    caplog.set_level(logging.WARNING, logger="anvil.access")
+    r = await client.get(f"{API}/does-not-exist")
+    assert r.status_code == 404
+    assert "status=404" in caplog.text

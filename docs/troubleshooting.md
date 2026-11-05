@@ -485,11 +485,13 @@ proxy_send_timeout 60s;
 
 日志包含：
 
-- 所有 `/api/v1` 用户操作：`http id=... method=... path=... status=... duration_ms=...
+- 默认 `ANVIL_LOG_LEVEL=INFO`：变更操作（POST/PUT/PATCH/DELETE）与错误落盘；
+  成功的 GET/状态轮询记 `DEBUG`，默认不写盘；4xx 记 `WARNING`，5xx 记 `ERROR`。
+- `/api/v1` 用户操作：`http id=... method=... path=... status=... duration_ms=...
   role=... task=... client=...`
 - tracker 出站：`tracker send ...` / `tracker response ...` / `tracker timeout ...`，
   其中包括 endpoint、source、条数/字节数、host/port、DNS 状态与地址、目标出口本地 IP、
-  代理与 `NO_PROXY`、`env_proxies`、超时、状态码、耗时和错误类型。
+  代理与 `NO_PROXY`、`env_proxies`、`system_proxies`、超时、状态码、耗时和错误类型。
 - 不记录 token、Cookie、请求正文或完整响应正文。
 
 Windows 抓取：
