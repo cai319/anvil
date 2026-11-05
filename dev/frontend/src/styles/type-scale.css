@@ -2951,8 +2951,14 @@ details.replay-event-body > div { margin-top: 4px; }
 .tooling-tracker-card { margin-bottom: clamp(16px, 1.3vw, 24px); }
 .tooling-tracker-form {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, 200px);
+  align-items: end;
   gap: 8px;
   margin-top: 10px;
+}
+.tooling-tracker-hint { margin: 6px 0 0; }
+@media (max-width: 760px) {
+  .tooling-tracker-form { grid-template-columns: 1fr; }
 }
 .tooling-tracker-form label {
   display: grid;
@@ -2970,7 +2976,16 @@ details.replay-event-body > div { margin-top: 4px; }
   color: var(--text-on-paper);
   font-size: var(--fs-meta);
 }
+.tooling-tracker-card .tool-import-head > div { min-width: 0; }
+.tooling-tracker-card .tool-import-head .chip {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  border-color: rgba(20, 19, 26, 0.28);
+  background: var(--paper-2);
+  color: var(--text-on-paper-muted);
+}
 .tooling-tracker-card .tool-import-head .chip.is-on {
   border-color: var(--green-on-paper, #15803d);
+  background: rgba(21, 128, 61, 0.08);
   color: var(--green-on-paper, #15803d);
 }

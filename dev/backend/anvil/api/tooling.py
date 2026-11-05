@@ -233,7 +233,9 @@ def save_issue_tracker(body: dict, conn=Depends(get_db),
                        auth: Auth = Depends(require_human)):
     try:
         return services.issue_tracker.save_settings(
-            conn, str(body.get("server_url") or ""), actor=auth.role or "human")
+            conn, str(body.get("server_url") or ""),
+            field_max_chars=body.get("field_max_chars"),
+            actor=auth.role or "human")
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

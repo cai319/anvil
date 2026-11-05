@@ -52,17 +52,126 @@ def test_item_mapping_and_markdown():
     assert "禁止 shell" in item["description_md"]
 
 
+def _long_item() -> dict:
+    long = "很长的字段内容" * 250
+    return {
+        "risk_description": long,
+        "risk_type": "注入",
+        "severity": "严重",
+        "module": long,
+        "handler_name": "run_command",
+        "file_line_no": "backend/anvil/api/tasks.py:120-126",
+        "pre_condition": long,
+        "attack_path": long,
+        "trigger_point": long,
+        "fix_priority": "P0",
+        "fix_suggestion": long,
+        "description_md": "# 完整详情\n" + long,
+    }
+
+
+def test_compact_items_uses_llm_and_keeps_description(monkeypatch):
+    item = _long_item()
+    original_description = item["description_md"]
+    prompts: list[str] = []
+
+    monkeypatch.setattr(issue_tracker.utility, "resolve_runtime_id",
+                        lambda conn, preferred=None: "fake-runtime")
+
+    def fake_generate(conn, prompt, **kwargs):
+        prompts.append(prompt)
+        return '{"items":[{"index":0,"fields":{' + ",".join(
+            f'"{key}":"精简后的{key}"' for key in (
+                "risk_description", "module", "pre_condition", "attack_path",
+                "trigger_point", "fix_suggestion")
+        ) + '}}]}'
+
+    monkeypatch.setattr(issue_tracker.utility, "generate", fake_generate)
+    out = issue_tracker._compact_items(None, [item], task_id="T-1")
+
+    assert prompts
+    assert '"description_md"' in prompts[0]
+    assert "很长的字段内容" in prompts[0]
+    assert out[0]["description_md"] == original_description
+    assert out[0]["risk_description"] == "精简后的risk_description"
+    for key, value in out[0].items():
+        if key != "description_md":
+            assert len(str(value)) <= issue_tracker.FIELD_MAX_CHARS
+
+
+def test_compact_items_falls_back_to_truncation(monkeypatch):
+    item = _long_item()
+    original_description = item["description_md"]
+
+    monkeypatch.setattr(issue_tracker.utility, "resolve_runtime_id",
+                        lambda conn, preferred=None: "fake-runtime")
+
+    def fail_generate(*args, **kwargs):
+        raise issue_tracker.utility.UtilityError("runtime unavailable")
+
+    monkeypatch.setattr(issue_tracker.utility, "generate", fail_generate)
+    out = issue_tracker._compact_items(None, [item], task_id="T-1")
+
+    assert out[0]["description_md"] == original_description
+    for key, value in out[0].items():
+        if key != "description_md":
+            assert len(str(value)) <= issue_tracker.FIELD_MAX_CHARS
+    assert out[0]["risk_description"].endswith("…")
+
+
+def test_compact_items_respects_configured_max(monkeypatch):
+    item = _long_item()
+    monkeypatch.setattr(issue_tracker.utility, "resolve_runtime_id",
+                        lambda conn, preferred=None: "fake-runtime")
+
+    def fake_generate(*args, **kwargs):
+        return ('{"items":[{"index":0,"fields":{'
+                '"risk_description":"' + "长" * 300 + '"}}]}')
+
+    monkeypatch.setattr(issue_tracker.utility, "generate", fake_generate)
+    out = issue_tracker._compact_items(
+        None, [item], task_id="T-1", max_chars=128)
+    assert out[0]["risk_description"] == "长" * 127 + "…"
+    for key, value in out[0].items():
+        if key != "description_md":
+            assert len(str(value)) <= 128
+
+
+def test_compact_items_skips_llm_for_short_fields(monkeypatch):
+    item = {
+        "risk_description": "短描述",
+        "severity": "高",
+        "description_md": "完整详情",
+    }
+
+    def fail_generate(*args, **kwargs):
+        raise AssertionError("short fields must not call LLM")
+
+    monkeypatch.setattr(issue_tracker.utility, "generate", fail_generate)
+    out = issue_tracker._compact_items(None, [item], task_id="T-1")
+    assert out[0]["risk_description"] == "短描述"
+    assert out[0]["description_md"] == "完整详情"
+
+
 def test_settings_roundtrip(tmp_path):
     conn = connect(str(tmp_path / "tracker.db"))
     try:
-        assert issue_tracker.get_settings(conn)["configured"] is False
+        initial = issue_tracker.get_settings(conn)
+        assert initial["configured"] is False
+        assert initial["field_max_chars"] == issue_tracker.FIELD_MAX_CHARS
         out = issue_tracker.save_settings(
-            conn, "http://1.2.3.4:5000/api/", actor="human")
+            conn, "http://1.2.3.4:5000/api/", field_max_chars=1024,
+            actor="human")
         assert out["configured"] is True
         assert out["server_url"] == "http://1.2.3.4:5000/api"
+        assert out["field_max_chars"] == 1024
         assert issue_tracker.get_settings(conn)["server_url"].endswith("/api")
         issue_tracker.save_settings(conn, "", actor="human")
         assert issue_tracker.get_settings(conn)["configured"] is False
+        assert issue_tracker.get_settings(conn)["field_max_chars"] == 1024
+        with pytest.raises(ValueError):
+            issue_tracker.save_settings(conn, "", field_max_chars=10,
+                                        actor="human")
     finally:
         conn.close()
 

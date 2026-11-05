@@ -355,6 +355,11 @@ anvil knowledge card-validate --file card.json --for-approval
   本地不做跳过/去重，只保留提交历史与最新外部 ID。
 - 外部 `description_md` 包含该 finding 的完整详情；外部 API 使用
   `POST {server_url}/draft/bulkCreate`。
+- `description_md` 以外的字段在发送前会检查长度：超过配置值时通过默认 CLI
+  运行时的 LLM 精简；LLM 不可用或返回非法结果时本地截断兜底，避免对端 DB
+  string 字段超限。该上限可在「工具」页「单字段最大字符数」调整（默认 512，
+  范围 64–4096）；`ANVIL_ISSUE_TRACKER_FIELD_MAX_CHARS` 提供环境默认值，
+  `ANVIL_ISSUE_TRACKER_COMPACT_TIMEOUT` 控制 LLM 精简超时（默认 60 秒）。
 
 ## 4. 配置
 
@@ -627,6 +632,7 @@ anvil init --with-roles
 - [docs/v1.41.1-release.md](docs/v1.41.1-release.md)：v1.41.1 问题板提交反馈、tracker 超时/代理诊断与 CLI 帮助修复
 - [docs/v1.41.2-release.md](docs/v1.41.2-release.md)：v1.41.2 运行日志与 tracker 系统代理修复
 - [docs/v1.41.3-release.md](docs/v1.41.3-release.md)：v1.41.3 日志级别按业务收敛
+- [docs/v1.41.4-release.md](docs/v1.41.4-release.md)：v1.41.4 Tracker 字段 LLM 精简与可配置上限
 - [docs/workflow-revision.md](docs/workflow-revision.md)：运行中 workflow 的增量修订（安全变更不重启任务）
 - [docs/operations.md](docs/operations.md)：打包、备份/迁移/重置、卸载
 - [docs/troubleshooting.md](docs/troubleshooting.md)：详细排查

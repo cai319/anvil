@@ -154,6 +154,7 @@ export interface IssueTrackerSettings {
   server_url: string;
   configured: boolean;
   source_prefix: string;
+  field_max_chars: number;
 }
 
 export interface IssueTrackerTestResult {
@@ -1064,9 +1065,13 @@ export const api = {
     req("DELETE", `/features/${encodeURIComponent(key)}`).then((r) => json<FeatureFlag>(r)),
   getIssueTrackerSettings: (): Promise<IssueTrackerSettings> =>
     authFetch(`${BASE}/tooling/issue-tracker`).then((r) => json<IssueTrackerSettings>(r)),
-  saveIssueTrackerSettings: (serverUrl: string): Promise<IssueTrackerSettings> =>
-    req("PUT", "/tooling/issue-tracker", { server_url: serverUrl })
-      .then((r) => json<IssueTrackerSettings>(r)),
+  saveIssueTrackerSettings: (
+    serverUrl: string, fieldMaxChars?: number,
+  ): Promise<IssueTrackerSettings> =>
+    req("PUT", "/tooling/issue-tracker", {
+      server_url: serverUrl,
+      ...(fieldMaxChars !== undefined ? { field_max_chars: fieldMaxChars } : {}),
+    }).then((r) => json<IssueTrackerSettings>(r)),
   testIssueTracker: (serverUrl?: string): Promise<IssueTrackerTestResult> =>
     req("POST", "/tooling/issue-tracker/test",
       serverUrl !== undefined ? { server_url: serverUrl } : {})

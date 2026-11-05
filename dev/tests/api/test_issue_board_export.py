@@ -159,6 +159,76 @@ async def test_export_permissions_and_tooling_test(client, app, monkeypatch):
     assert left == 0
 
 
+async def test_tooling_field_max_chars_roundtrip(client):
+    saved = await client.put(
+        f"{API}/tooling/issue-tracker",
+        json={"server_url": "http://127.0.0.1:9/api", "field_max_chars": 256},
+        headers=human_headers())
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["field_max_chars"] == 256
+    loaded = await client.get(
+        f"{API}/tooling/issue-tracker", headers=human_headers())
+    assert loaded.status_code == 200
+    assert loaded.json()["field_max_chars"] == 256
+    invalid = await client.put(
+        f"{API}/tooling/issue-tracker",
+        json={"server_url": "http://127.0.0.1:9/api", "field_max_chars": 10},
+        headers=human_headers())
+    assert invalid.status_code == 422
+
+
+async def test_export_compacts_fields_but_keeps_full_description(
+        client, app, monkeypatch):
+    reviewer = await _seed(client, app)
+    await _configure(client)
+    marker = "LONG_MARKER_123"
+    long_text = marker * 100
+    created = await client.post(
+        f"{API}/tasks/T-IB/findings",
+        json=finding_payload(
+            risk_description=long_text,
+            attack_path=long_text,
+            pre_condition=long_text,
+            fix_suggestion=long_text,
+        ),
+        headers=reviewer)
+    assert created.status_code == 201, created.text
+    fid = created.json()["id"]
+    assert (await client.post(
+        f"{API}/tasks/T-IB/findings/{fid}/submit",
+        headers=reviewer)).status_code == 200
+
+    monkeypatch.setattr(issue_tracker.utility, "resolve_runtime_id",
+                        lambda conn, preferred=None: "fake-runtime")
+    monkeypatch.setattr(
+        issue_tracker.utility, "generate",
+        lambda *args, **kwargs: (
+            '{"items":[{"index":0,"fields":{'
+            '"risk_description":"精简风险描述",'
+            '"attack_path":"精简攻击路径",'
+            '"pre_condition":"精简前置条件",'
+            '"fix_suggestion":"精简修复建议"}}]}'
+        ))
+
+    exported: list[dict] = []
+
+    def fake_post(endpoint, payload, timeout=15):
+        exported.append(payload)
+        return FakeResponse(200, {"code": 0, "msg": "ok", "data": [999]})
+
+    monkeypatch.setattr(issue_tracker, "_post_request", fake_post)
+    r = await client.post(
+        f"{API}/tasks/T-IB/findings/{fid}/external-submit",
+        headers=human_headers())
+    assert r.status_code == 200, r.text
+    item = exported[-1]["list"][0]
+    for key, value in item.items():
+        if key != "description_md":
+            assert len(str(value)) <= issue_tracker.FIELD_MAX_CHARS, key
+    assert item["risk_description"] == "精简风险描述"
+    assert marker in item["description_md"]
+
+
 async def test_export_timeout_reports_stage(client, app, monkeypatch):
     reviewer = await _seed(client, app)
     fid = await _next_id(client, reviewer)

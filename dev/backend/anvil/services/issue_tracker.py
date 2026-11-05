@@ -23,15 +23,23 @@ import httpx
 from .. import config
 from ..logging_setup import proxy_snapshot, sanitize_proxy, system_proxy_snapshot
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
-from . import findings, governance
+from . import findings, governance, utility
 
 SETTING_URL = "issue_tracker.url"
+SETTING_FIELD_MAX = "issue_tracker.field_max_chars"
 SOURCE_PREFIX = "anvil"
 ELIGIBLE_STATUSES = ("submitted", "confirmed", "changes_requested")
 MAX_BATCH = 200
 DEFAULT_TIMEOUT = config.ISSUE_TRACKER_TIMEOUT_SECONDS
 TEST_TIMEOUT = config.ISSUE_TRACKER_TEST_TIMEOUT_SECONDS
 CONNECT_TIMEOUT = config.ISSUE_TRACKER_CONNECT_TIMEOUT_SECONDS
+FIELD_MAX_CHARS = config.ISSUE_TRACKER_FIELD_MAX_CHARS
+FIELD_MAX_MIN = 64
+FIELD_MAX_MAX = 4096
+COMPACT_TIMEOUT = config.ISSUE_TRACKER_COMPACT_TIMEOUT_SECONDS
+COMPACT_CHUNK_SIZE = 8
+# 枚举/优先级字段不做 LLM 重写；最终仍统一做长度兜底。
+COMPACT_EXCLUDED_FIELDS = {"description_md", "risk_type", "severity", "fix_priority"}
 
 logger = logging.getLogger("anvil.issue_tracker")
 
@@ -52,12 +60,24 @@ def _audit(conn: sqlite3.Connection, actor: str, task_id: str | None,
         (actor, task_id, action, jdumps(payload), now_iso()))
 
 
+def _field_max_chars(conn: sqlite3.Connection) -> int:
+    raw = governance.get_setting(conn, SETTING_FIELD_MAX)
+    try:
+        value = int(raw) if raw not in (None, "") else FIELD_MAX_CHARS
+    except (TypeError, ValueError):
+        value = FIELD_MAX_CHARS
+    if value < FIELD_MAX_MIN or value > FIELD_MAX_MAX:
+        return FIELD_MAX_CHARS
+    return value
+
+
 def get_settings(conn: sqlite3.Connection) -> dict:
     url = str(governance.get_setting(conn, SETTING_URL) or "").strip()
     return {
         "server_url": url,
         "configured": bool(url),
         "source_prefix": SOURCE_PREFIX,
+        "field_max_chars": _field_max_chars(conn),
     }
 
 
@@ -89,20 +109,34 @@ def endpoint_url(base: str) -> str:
     return f"{normalize_base_url(base)}/draft/bulkCreate"
 
 
-def save_settings(conn: sqlite3.Connection, url: str, *, actor: str = "human") -> dict:
+def save_settings(conn: sqlite3.Connection, url: str, *,
+                  field_max_chars: int | None = None,
+                  actor: str = "human") -> dict:
     text = str(url or "").strip()
     if text:
         text = normalize_base_url(text)
         governance.set_setting(conn, SETTING_URL, text)
     else:
         conn.execute("DELETE FROM settings WHERE key=?", (SETTING_URL,))
-        conn.commit()
-    _audit(conn, actor, None, "issue_tracker.config",
-           {"server_url": text, "cleared": not bool(text)})
+    if field_max_chars is not None:
+        try:
+            value = int(field_max_chars)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("字段最大字符数必须是整数") from exc
+        if value < FIELD_MAX_MIN or value > FIELD_MAX_MAX:
+            raise ValueError(
+                f"字段最大字符数必须在 {FIELD_MAX_MIN}–{FIELD_MAX_MAX} 之间")
+        governance.set_setting(conn, SETTING_FIELD_MAX, str(value))
+    current = get_settings(conn)
+    _audit(conn, actor, None, "issue_tracker.config", {
+        "server_url": text, "cleared": not bool(text),
+        "field_max_chars": current["field_max_chars"],
+    })
     conn.commit()
-    logger.info("tracker config saved server_url=%s actor=%s configured=%s",
-                text or "-", actor, bool(text))
-    return get_settings(conn)
+    logger.info(
+        "tracker config saved server_url=%s configured=%s field_max_chars=%s actor=%s",
+        text or "-", bool(text), current["field_max_chars"], actor)
+    return current
 
 
 def _host_port(url: str) -> tuple[str, int]:
@@ -377,6 +411,126 @@ def build_item(task: dict, board: dict | None, finding: dict,
     return item
 
 
+def _overlong_fields(item: dict, max_chars: int) -> dict[str, str]:
+    return {
+        key: str(value)
+        for key, value in item.items()
+        if key not in COMPACT_EXCLUDED_FIELDS
+        and isinstance(value, str) and len(value) > max_chars
+    }
+
+
+def _compact_prompt(chunk: list[tuple[int, dict, dict[str, str]]],
+                    max_chars: int) -> str:
+    material = [
+        {
+            "index": index,
+            "fields": fields,
+            # 只给 LLM 足够理解的上下文；真正发送的 description_md 保持完整。
+            "description_md": str(item.get("description_md", ""))[:6000],
+        }
+        for index, item, fields in chunk
+    ]
+    return f"""你是问题跟踪字段压缩器。下面每条 finding 的 fields 含超长字段，
+请在不改变事实的前提下压缩为不超过 {max_chars} 个中文字符的简洁描述。
+
+硬性规则：
+1. 只输出一个 JSON 对象，不要 Markdown 代码块或解释。
+2. 只输出 fields 中已有的键，不得新增、删除或改名；每个值必须是非空字符串。
+3. 保留关键事实：模块/函数/文件行号、风险本质、前置条件、攻击路径、触发点、
+   修复动作。不得编造原文没有的数字、文件、命令或结论。
+4. description_md 是该 finding 的完整材料，只用于理解，不要修改或返回它。
+5. 每条输出字段尽量控制在 {max_chars} 字符内。
+
+输出 schema：
+{{"items":[{{"index":0,"fields":{{"字段名":"压缩后的描述"}}}}]}}
+
+待压缩数据：
+{json.dumps(material, ensure_ascii=False)}
+"""
+
+
+def _enforce_field_limits(items: list[dict], max_chars: int) -> list[dict]:
+    """最终硬兜底：description_md 以外的字段一律不超过 max_chars。"""
+    truncated: list[str] = []
+    for item in items:
+        for key, value in list(item.items()):
+            if key == "description_md" or not isinstance(value, str):
+                continue
+            if len(value) <= max_chars:
+                continue
+            item[key] = value[:max(0, max_chars - 1)] + "…"
+            truncated.append(key)
+    if truncated:
+        logger.warning("tracker fields truncated after compaction fields=%s",
+                       ",".join(sorted(set(truncated))))
+    return items
+
+
+def _compact_items(conn: sqlite3.Connection, items: list[dict], *,
+                   task_id: str, max_chars: int = FIELD_MAX_CHARS) -> list[dict]:
+    """对超长非 description_md 字段做一次 LLM 精简，失败则截断兜底。"""
+    pending = [
+        (index, item, _overlong_fields(item, max_chars))
+        for index, item in enumerate(items)
+    ]
+    pending = [entry for entry in pending if entry[2]]
+    if not pending:
+        return _enforce_field_limits(items, max_chars)
+
+    field_names = sorted({key for _idx, _item, fields in pending
+                          for key in fields})
+    logger.info("tracker compact start task=%s items=%s fields=%s max_chars=%s",
+                task_id, len(pending), ",".join(field_names), max_chars)
+    compacted = 0
+    try:
+        runtime_id = utility.resolve_runtime_id(conn)
+    except utility.UtilityError as exc:
+        runtime_id = "-"
+        logger.warning("tracker compact runtime unavailable task=%s error=%s",
+                       task_id, exc)
+
+    if runtime_id == "-":
+        logger.warning(
+            "tracker compact skipped task=%s reason=runtime_unavailable; "
+            "fallback=truncate", task_id)
+    else:
+        for start in range(0, len(pending), COMPACT_CHUNK_SIZE):
+            chunk = pending[start:start + COMPACT_CHUNK_SIZE]
+            try:
+                raw = utility.generate(
+                    conn, _compact_prompt(chunk, max_chars), runtime_id=runtime_id,
+                    timeout=COMPACT_TIMEOUT)
+                data = utility.extract_json_object(raw)
+                result_items = data.get("items") if isinstance(data, dict) else None
+                if not isinstance(result_items, list):
+                    raise ValueError("LLM 未返回 items 数组")
+                by_index = {
+                    int(entry.get("index")): entry.get("fields")
+                    for entry in result_items
+                    if isinstance(entry, dict) and str(entry.get("index", "")).isdigit()
+                }
+                for index, item, fields in chunk:
+                    cleaned = by_index.get(index)
+                    if not isinstance(cleaned, dict):
+                        continue
+                    for key in fields:
+                        value = cleaned.get(key)
+                        if isinstance(value, (str, int, float)) and str(value).strip():
+                            item[key] = str(value).strip()
+                            compacted += 1
+                logger.debug("tracker compact chunk ok task=%s chunk=%s items=%s runtime=%s",
+                             task_id, start // COMPACT_CHUNK_SIZE + 1, len(chunk), runtime_id)
+            except Exception as exc:  # noqa: BLE001 - 失败必须降级，不阻断提交
+                logger.warning(
+                    "tracker compact chunk failed task=%s chunk=%s type=%s error=%s; "
+                    "fallback=truncate", task_id, start // COMPACT_CHUNK_SIZE + 1,
+                    type(exc).__name__, exc)
+    logger.info("tracker compact done task=%s compacted_fields=%s fallback_truncate=%s",
+                task_id, compacted, runtime_id == "-")
+    return _enforce_field_limits(items, max_chars)
+
+
 def _task(conn: sqlite3.Connection, task_id: str) -> dict:
     row = conn.execute(
         "SELECT id, title, status, issue_board_enabled FROM tasks WHERE id=?",
@@ -466,6 +620,9 @@ def export_findings(conn: sqlite3.Connection, task_id: str,
     source = _source(task_id)
     items = [build_item(task, board, finding, source=source,
                         submitted_at=submitted_at) for finding in candidates]
+    # 完整信息保留在 description_md；其余字段在发送前用 LLM 压缩并硬限制长度。
+    items = _compact_items(conn, items, task_id=task_id,
+                           max_chars=settings["field_max_chars"])
     payload = {"source": source, "list": items}
     # 网络调用前释放本地事务，避免长时间持有 SQLite 锁。
     conn.commit()

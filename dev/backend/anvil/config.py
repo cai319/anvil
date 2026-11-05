@@ -77,6 +77,12 @@ ISSUE_TRACKER_TEST_TIMEOUT_SECONDS = float(
     _env("ANVIL_ISSUE_TRACKER_TEST_TIMEOUT", "10"))
 ISSUE_TRACKER_CONNECT_TIMEOUT_SECONDS = float(
     _env("ANVIL_ISSUE_TRACKER_CONNECT_TIMEOUT", "5"))
+# 外部字段（除 description_md）压缩：超过 512 字符时用 LLM 精简；失败则本地截断兜底。
+# 对端 DB 的 string 字段上限按 512 处理，留足安全余量。
+ISSUE_TRACKER_FIELD_MAX_CHARS = int(
+    _env("ANVIL_ISSUE_TRACKER_FIELD_MAX_CHARS", "512"))
+ISSUE_TRACKER_COMPACT_TIMEOUT_SECONDS = float(
+    _env("ANVIL_ISSUE_TRACKER_COMPACT_TIMEOUT", "60"))
 
 # 常驻角色运行时（persistent daemon）：默认随生产服务启用；测试环境（create_app 未开
 # scheduler）不启用，保持 one-shot 假进程路径可测。

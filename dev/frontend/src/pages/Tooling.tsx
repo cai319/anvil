@@ -83,6 +83,7 @@ export function Tooling() {
   const [flagNotice, setFlagNotice] = useState<string | null>(null);
   const [tracker, setTracker] = useState<IssueTrackerSettings | null>(null);
   const [trackerUrl, setTrackerUrl] = useState("");
+  const [trackerMaxChars, setTrackerMaxChars] = useState("512");
   const [trackerBusy, setTrackerBusy] = useState<"save" | "test" | null>(null);
   const [trackerNotice, setTrackerNotice] = useState<string | null>(null);
   const [trackerError, setTrackerError] = useState<string | null>(null);
@@ -121,12 +122,16 @@ export function Tooling() {
       .then((data) => {
         setTracker(data);
         setTrackerUrl(data.server_url || "");
+        setTrackerMaxChars(String(data.field_max_chars ?? 512));
       })
       .catch((e) => setTrackerError(String(e)));
   }, []);
 
   const trackerUrlValid = !trackerUrl.trim()
     || /^https?:\/\/[^/\s]+/i.test(trackerUrl.trim());
+  const trackerMaxCharsValue = Number(trackerMaxChars);
+  const trackerMaxCharsValid = /^\d+$/.test(trackerMaxChars.trim())
+    && trackerMaxCharsValue >= 64 && trackerMaxCharsValue <= 4096;
 
   const saveTracker = async () => {
     setTrackerBusy("save");
@@ -134,12 +139,14 @@ export function Tooling() {
     setTrackerNotice(null);
     setTrackerTest(null);
     try {
-      const data = await api.saveIssueTrackerSettings(trackerUrl.trim());
+      const data = await api.saveIssueTrackerSettings(
+        trackerUrl.trim(), trackerMaxCharsValue);
       setTracker(data);
       setTrackerUrl(data.server_url || "");
+      setTrackerMaxChars(String(data.field_max_chars));
       setTrackerNotice(data.configured
-        ? `问题跟踪服务器已保存：${data.server_url}`
-        : "问题跟踪服务器地址已清空。");
+        ? `问题跟踪服务器已保存：${data.server_url}（字段上限 ${data.field_max_chars}）`
+        : `问题跟踪服务器地址已清空（字段上限 ${data.field_max_chars}）。`);
     } catch (e) {
       setTrackerError(String(e));
     } finally {
@@ -312,10 +319,25 @@ export function Tooling() {
               onChange={(e) => { setTrackerUrl(e.target.value); setTrackerNotice(null); setTrackerTest(null); }}
             />
           </label>
+          <label>
+            单字段最大字符数
+            <input
+              type="number"
+              min={64}
+              max={4096}
+              step={1}
+              value={trackerMaxChars}
+              onChange={(e) => { setTrackerMaxChars(e.target.value); setTrackerNotice(null); }}
+            />
+          </label>
         </div>
+        <p className="muted tooling-tracker-hint">
+          <code>description_md</code> 不限制；其余字段超过该值时先由 LLM 精简，
+          失败则截断兜底。
+        </p>
         <div className="card-actions">
           <button type="button" className="primary"
-            disabled={trackerBusy !== null || !trackerUrlValid}
+            disabled={trackerBusy !== null || !trackerUrlValid || !trackerMaxCharsValid}
             onClick={() => { void saveTracker(); }}>保存</button>
           <button type="button"
             disabled={trackerBusy !== null || !trackerUrlValid || (!trackerUrl.trim() && !tracker?.configured)}

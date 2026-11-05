@@ -465,6 +465,12 @@ Tracker 请求**固定直连**：不读取 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_P
 | `ANVIL_ISSUE_TRACKER_TIMEOUT` | 30 | 正式批量提交的读写超时（秒） |
 | `ANVIL_ISSUE_TRACKER_TEST_TIMEOUT` | 10 | 「测试连接」的空 list 探测超时（秒） |
 | `ANVIL_ISSUE_TRACKER_CONNECT_TIMEOUT` | 5 | TCP 建连超时（秒）；与读超时分开，便于定位 |
+| `ANVIL_ISSUE_TRACKER_FIELD_MAX_CHARS` | 512 | 除 `description_md` 外单字段最大字符数的环境默认值；工具页可覆盖（64–4096） |
+| `ANVIL_ISSUE_TRACKER_COMPACT_TIMEOUT` | 60 | LLM 字段精简超时（秒）；失败则本地截断兜底 |
+
+发送前会检查 `description_md` 以外的字段：超过上限时调用默认 CLI 运行时做一次
+LLM 精简；LLM 不可用/返回非法 JSON 时本地截断并记录
+`tracker compact ... fallback=truncate`。`description_md` 始终保留完整信息。
 
 如果浏览器 Network 中 `/api/v1/...` 的 504 响应来自 nginx/Ingress（响应头有
 `server: nginx`、`via` 等，响应体是 HTML），需要把该代理的读超时调到大于
