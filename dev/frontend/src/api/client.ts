@@ -35,6 +35,12 @@ export interface Task {
   priority: unknown;
   tags: string[];
   repo: string | null;
+  source_repo?: string | null;
+  knowledge_mode?: "shared" | "local" | "temp" | null;
+  task_workspace?: {
+    path: string; kind: string; status: string;
+    source_repo: string | null;
+  } | null;
   workspace_id?: string | null;
   workspace?: { id: string; name: string; repo: string | null } | null;
   archived_at?: string | null;
@@ -196,6 +202,18 @@ export interface Runtime {
   last_probe_log: string | null;
 }
 
+export interface FeatureFlag {
+  key: string;
+  title: string;
+  summary: string;
+  description: string;
+  category: "knowledge" | "context" | "workspace" | string;
+  config_attr: string;
+  value: boolean;
+  default: boolean;
+  overridden: boolean;
+}
+
 export interface Role {
   slug: string;
   display_name: string;
@@ -336,6 +354,113 @@ export const api = {
     req("POST", `/tasks/${id}/knowledge-repos/${encodeURIComponent(repo)}/dismiss`).then((r) => json(r)),
   listKnowledgeRepos: (): Promise<{ repos: KnowledgeRepoProfile[]; total: number; enabled: boolean }> =>
     authFetch(`${BASE}/knowledge/repos`).then((r) => json(r)),
+  listTopicRepos: (status = "active"): Promise<{ repos: TopicRepo[] }> =>
+    authFetch(`${BASE}/knowledge/topic-repos?status=${encodeURIComponent(status)}`)
+      .then((r) => json(r)),
+  createTopicRepo: (body: { repo: string; description?: string }): Promise<TopicRepo> =>
+    req("POST", "/knowledge/repos", body).then((r) => json<TopicRepo>(r)),
+  renameTopicRepo: (repo: string, newName: string): Promise<TopicRepo> =>
+    req("POST", `/knowledge/repos/${encodeURIComponent(repo)}/rename`,
+      { new_name: newName }).then((r) => json<TopicRepo>(r)),
+  mergeTopicRepo: (repo: string, target: string): Promise<unknown> =>
+    req("POST", `/knowledge/repos/${encodeURIComponent(repo)}/merge`,
+      { target }).then((r) => json(r)),
+  lockTopicRepo: (repo: string, locked: boolean): Promise<TopicRepo> =>
+    req("POST", `/knowledge/repos/${encodeURIComponent(repo)}/lock`,
+      { locked }).then((r) => json<TopicRepo>(r)),
+  listRepoCards: (params?: {
+    repo?: string; status?: string; q?: string; limit?: number;
+  }): Promise<{ cards: RepoCard[] }> => {
+    if (params?.repo) {
+      const qs = new URLSearchParams();
+      if (params.status) qs.set("status", params.status);
+      if (params.q) qs.set("q", params.q);
+      if (params.limit) qs.set("limit", String(params.limit));
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return authFetch(`${BASE}/knowledge/repos/${encodeURIComponent(params.repo)}/cards${suffix}`)
+        .then((r) => json<RepoCard[]>(r).then((cards) => ({ cards })));
+    }
+    const qs = new URLSearchParams();
+    qs.set("status", params?.status ?? "all");
+    if (params?.q) qs.set("q", params.q);
+    if (params?.limit) qs.set("limit", String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return authFetch(`${BASE}/knowledge/repo-cards${suffix}`).then((r) => json(r));
+  },
+  getKnowledgeQualitySummary: (repo?: string): Promise<{
+    repos: {
+      repo_id: string; repo: string; total: number; approved: number;
+      proposed: number; rejected: number; legacy: number; duplicates: number;
+      review_due: number; avg_score: number;
+      coverage: { use_when: number; expected_effect: number; evidence: number };
+      approved_coverage?: { use_when: number; expected_effect: number; evidence: number };
+      missing: Record<string, number>; kind_counts: Record<string, number>;
+      feedback: Record<string, number>;
+    }[];
+    totals: Record<string, unknown>;
+    generated_at: string;
+  }> => {
+    const suffix = repo ? `?repo=${encodeURIComponent(repo)}` : "";
+    return authFetch(`${BASE}/knowledge/quality/summary${suffix}`).then((r) => json(r));
+  },
+  updateRepoCard: (cardId: string, patch: {
+    title?: string; tldr?: string; fields?: Record<string, unknown>;
+    tags?: string[]; authority?: string; review_at?: string | null;
+    expires_at?: string | null; expected_version?: number;
+  }): Promise<RepoCard> =>
+    req("PATCH", `/knowledge/repo-cards/${encodeURIComponent(cardId)}`, patch)
+      .then((r) => json<RepoCard>(r)),
+  cleanRepoCard: (cardId: string, body: {
+    dry_run: boolean; runtime_id?: string | null;
+    cleaned?: Record<string, unknown>;
+  }): Promise<Record<string, unknown>> =>
+    req("POST", `/knowledge/repo-cards/${encodeURIComponent(cardId)}/clean`, body)
+      .then((r) => json(r)),
+  updateTaskKnowledge: (taskId: string, cardId: string, patch: {
+    title?: string; tldr?: string; fields?: Record<string, unknown>;
+    tags?: string[]; review_at?: string | null; expected_version?: number;
+  }): Promise<TaskKnowledge> =>
+    req("PATCH", `/tasks/${encodeURIComponent(taskId)}/knowledge/${encodeURIComponent(cardId)}`, patch)
+      .then((r) => json<TaskKnowledge>(r)),
+  feedbackRepoCard: (cardId: string, body: {
+    signal: "applied" | "helpful" | "unhelpful" | "no_effect";
+    note?: string; task_id?: string; run_id?: string;
+  }): Promise<unknown> =>
+    req("POST", `/knowledge/repo-cards/${encodeURIComponent(cardId)}/feedback`, body)
+      .then((r) => json(r)),
+  reviewCandidates: (repo?: string, limit = 50): Promise<{ cards: RepoCard[] }> => {
+    const qs = new URLSearchParams();
+    if (repo) qs.set("repo", repo);
+    qs.set("limit", String(limit));
+    return authFetch(`${BASE}/knowledge/review-candidates?${qs.toString()}`)
+      .then((r) => json(r));
+  },
+  reviewRepoCard: (cardId: string, action: "keep" | "deprecate" | "refresh"): Promise<RepoCard> =>
+    req("POST", `/knowledge/repo-cards/${encodeURIComponent(cardId)}/review`, { action })
+      .then((r) => json<RepoCard>(r)),
+  approveRepoCard: (cardId: string): Promise<RepoCard> =>
+    req("POST", `/knowledge/repo-cards/${encodeURIComponent(cardId)}/approve`, {})
+      .then((r) => json<RepoCard>(r)),
+  rejectRepoCard: (cardId: string): Promise<RepoCard> =>
+    req("POST", `/knowledge/repo-cards/${encodeURIComponent(cardId)}/reject`, {})
+      .then((r) => json<RepoCard>(r)),
+  repoCardToChannel: (cardId: string, workspaceId: string): Promise<unknown> =>
+    req("POST", `/knowledge/repo-cards/${encodeURIComponent(cardId)}/to-channel`,
+      { workspace_id: workspaceId }).then((r) => json(r)),
+  repoCardToShared: (cardId: string): Promise<unknown> =>
+    req("POST", `/knowledge/repo-cards/${encodeURIComponent(cardId)}/to-shared`, {})
+      .then((r) => json(r)),
+  approveTaskKnowledge: (taskId: string, cardId: string): Promise<TaskKnowledge> =>
+    req("POST", `/tasks/${encodeURIComponent(taskId)}/knowledge/${encodeURIComponent(cardId)}/approve`, {})
+      .then((r) => json<TaskKnowledge>(r)),
+  promoteTaskKnowledge: (taskId: string, cardId: string, repo: string): Promise<unknown> =>
+    req("POST", `/tasks/${encodeURIComponent(taskId)}/knowledge/${encodeURIComponent(cardId)}/promote`,
+      { repo }).then((r) => json(r)),
+  explainTaskKnowledge: (taskId: string, role?: string): Promise<unknown> => {
+    const suffix = role ? `?role=${encodeURIComponent(role)}` : "";
+    return authFetch(`${BASE}/tasks/${encodeURIComponent(taskId)}/knowledge/explain${suffix}`)
+      .then((r) => json(r));
+  },
   suggestKnowledgeRepos: (body: {
     title: string; description?: string; tags?: string[]; repo?: string | null;
     workspace_id?: string | null; task_id?: string | null; limit?: number;
@@ -529,6 +654,9 @@ export const api = {
     authFetch(`${BASE}/runs/${id}/log`).then((r) => json(r)),
   getRunSnapshot: (id: string): Promise<Record<string, unknown>> =>
     authFetch(`${BASE}/runs/${id}/snapshot`).then((r) => json(r)),
+  getRunContextManifest: (id: string, kind?: string): Promise<ContextManifest[]> =>
+    authFetch(`${BASE}/runs/${id}/context-manifest${kind ? `?kind=${encodeURIComponent(kind)}` : ""}`)
+      .then((r) => json<ContextManifest[]>(r)),
   restartRun: (id: string): Promise<Run> => req("POST", `/runs/${id}/restart`, {}).then((r) => json(r)),
   sessionResetRun: (id: string): Promise<Run> => req("POST", `/runs/${id}/session-reset`, {}).then((r) => json(r)),
   fullResetRun: (id: string): Promise<Run> => req("POST", `/runs/${id}/full-reset`, {}).then((r) => json(r)),
@@ -737,7 +865,9 @@ export const api = {
     }),
   validateKnowledgeCard: (body: {
     kind: string; fields: Record<string, unknown>; for_approval?: boolean;
-  }): Promise<KnowledgeCardCheck> =>
+    title?: string; tldr?: string; body_md?: string; authority?: string;
+    review_at?: string | null; expires_at?: string | null;
+  }): Promise<KnowledgeCardCheck & { quality?: QualityReport }> =>
     req("POST", "/knowledge/card/validate", body).then((r) => json<KnowledgeCardCheck>(r)),
   reviewWorkspaceKnowledge: (wsId: string): Promise<KnowledgeReview> =>
     authFetch(`${BASE}/workspaces/${wsId}/knowledge/review`).then((r) => json<KnowledgeReview>(r)),
@@ -891,6 +1021,12 @@ export const api = {
     req("POST", `/mcp/servers/${id}/test`, {}).then((r) => json(r)),
   listToolPresets: (): Promise<Record<string, { max_tool_tokens: number; allowlist: unknown[] }>> =>
     authFetch(`${BASE}/tools/presets`).then((r) => json(r)),
+  listFeatureFlags: (): Promise<{ flags: FeatureFlag[] }> =>
+    authFetch(`${BASE}/features`).then((r) => json(r)),
+  setFeatureFlag: (key: string, value: boolean): Promise<FeatureFlag> =>
+    req("PUT", `/features/${encodeURIComponent(key)}`, { value }).then((r) => json<FeatureFlag>(r)),
+  resetFeatureFlag: (key: string): Promise<FeatureFlag> =>
+    req("DELETE", `/features/${encodeURIComponent(key)}`).then((r) => json<FeatureFlag>(r)),
 
   // role extras
   getRoleHome: (slug: string): Promise<{ slug: string; home_path: string; files: string[] }> =>
@@ -946,6 +1082,84 @@ export type KnowledgeAuthority = "normative" | "reference";
 export type KnowledgeStatus =
   | "draft" | "proposed" | "approved" | "rejected" | "deprecated" | "expired";
 
+export interface QualityDimensions {
+  evidence: number;
+  scenario: number;
+  effect: number;
+  readability: number;
+}
+
+export interface QualityReport {
+  score: number;
+  grade: "A" | "B" | "C" | "D" | string;
+  blocking: string[];
+  missing: string[];
+  warnings: string[];
+  dimensions: QualityDimensions;
+  readable: boolean;
+  checked_at?: string | null;
+  gate_version?: number;
+  legacy?: boolean;
+  resolved_fields?: Record<string, string | null>;
+  llm?: Record<string, unknown> | null;
+}
+
+/** 主题知识库注册表条目（管理页）。 */
+export interface TopicRepo {
+  id: string;
+  display_name: string;
+  description: string;
+  status: "active" | "merged" | "archived";
+  merged_into?: string | null;
+  locked: number | boolean;
+  auto_created: number | boolean;
+  needs_review: number | boolean;
+  created_by?: string | null;
+  source_task_id?: string | null;
+  created_at: string;
+  updated_at: string;
+  counts: Record<string, number>;
+  card_count: number;
+  pending: number;
+  aliases: string[];
+  task_count: number;
+}
+
+/** 主题知识库卡片（文件真相在 data/knowledge-repos/<repo>/）。 */
+export interface RepoCard {
+  id: string;
+  repo_id: string;
+  repo: string;
+  kind: string;
+  authority: KnowledgeAuthority;
+  status: KnowledgeStatus;
+  title: string;
+  tldr: string;
+  body_md: string;
+  fields: Record<string, unknown>;
+  tags: string[];
+  source_task_id: string | null;
+  source_step_id: string | null;
+  source_role: string | null;
+  source_event: string | null;
+  provenance?: Record<string, unknown>;
+  completeness?: number;
+  quality?: QualityReport;
+  legacy?: boolean;
+  confidence: number;
+  content_hash?: string | null;
+  version: number;
+  approved_at: string | null;
+  approved_by: string | null;
+  expires_at: string | null;
+  review_at: string | null;
+  conflicts: string[];
+  hit_count?: number;
+  last_hit_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface WorkspaceKnowledge {
   id: string;
   workspace_id: string;
@@ -975,6 +1189,8 @@ export interface WorkspaceKnowledge {
   review_at: string | null;
   conflicts: string[];
   completeness: number;
+  quality?: QualityReport;
+  legacy?: boolean;
   hit_count?: number;
   last_hit_at?: string | null;
   is_expired?: boolean;
@@ -1019,7 +1235,14 @@ export interface TaskKnowledge {
   fields: Record<string, unknown>;
   tags: string[];
   source_role: string | null;
-  status: "active" | "archived";
+  status: "active" | "proposed" | "archived";
+  completeness?: number;
+  quality?: QualityReport;
+  legacy?: boolean;
+  repo_id?: string | null;
+  repo_key?: string | null;
+  path?: string | null;
+  source_event?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1039,6 +1262,7 @@ export interface RoleKnowledgeIndex {
   task_counts: Record<string, number>;
   recent: {
     id: string; path: string; kind: string; repo: string | null;
+    repo_id?: string | null; repo_display?: string | null;
     updated_at: string | null; hit_count?: number; last_hit_at?: string | null;
   }[];
   total_role: number;
@@ -1111,6 +1335,8 @@ export interface KnowledgeHit {
   scope: string;
   task_id: string | null;
   repo: string | null;
+  repo_id?: string | null;
+  repo_display?: string | null;
   module?: string | null;
   tags: string[];
   snippet: string;
@@ -1702,6 +1928,34 @@ export interface TimelineEvent {
   slice_key?: string | null;
   execution_no?: number | null;
   payload: Record<string, unknown>;
+}
+
+export interface ContextManifestBlock {
+  name?: string | null;
+  layer?: string | null;
+  kind?: string | null;
+  scope?: string | null;
+  tags?: string[];
+  score?: number | null;
+  chars?: number;
+  injected?: boolean;
+  reason?: string | null;
+  source_ids?: string[];
+  priority?: number;
+  order?: number;
+}
+
+export interface ContextManifest {
+  id: number;
+  run_id?: string | null;
+  role_slug: string;
+  task_id?: string | null;
+  kind: string;
+  budget_chars: number;
+  total_chars: number;
+  blocks: ContextManifestBlock[];
+  omitted: ContextManifestBlock[];
+  created_at: string;
 }
 
 export interface Reminder {

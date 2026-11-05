@@ -120,6 +120,7 @@ class TaskIn(BaseModel):
     priority: Any = None
     tags: list[str] = Field(default_factory=list)
     repo: str | None = None
+    source_repo: str | None = None
     workspace_id: str | None = None
     base_branch: str | None = None
     scope_paths: list[str] = Field(default_factory=list)
@@ -146,6 +147,7 @@ class TaskPatch(BaseModel):
     tags: list[str] | None = None
     status: TaskStatus | None = None
     repo: str | None = None
+    source_repo: str | None = None
     base_branch: str | None = None
     scope_paths: list[str] | None = None
     description: str | None = None
@@ -163,6 +165,9 @@ class TaskOut(BaseModel):
     priority: Any = None
     tags: list[str] = Field(default_factory=list)
     repo: str | None = None
+    source_repo: str | None = None
+    knowledge_mode: str | None = None
+    task_workspace: dict[str, Any] | None = None
     workspace_id: str | None = None
     workspace: dict[str, Any] | None = None
     base_branch: str | None = None
@@ -285,6 +290,11 @@ class MemoryAppendIn(BaseModel):
     outcome: str | None = None
     source_knowledge: list[str] = Field(default_factory=list)
     force: bool = False
+    # 默认写经验卡；durable=True 写 PRINCIPLES.md 耐久准则。
+    durable: bool = False
+    kind: str = "personal_lesson"
+    tags: list[str] = Field(default_factory=list)
+    repo: str | None = None
 
 
 class NoteWriteIn(BaseModel):

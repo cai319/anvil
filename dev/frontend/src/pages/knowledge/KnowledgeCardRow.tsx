@@ -5,6 +5,7 @@ import {
   KNOWLEDGE_KIND_LABEL,
   KNOWLEDGE_STATUS_LABEL,
 } from "../../knowledgeCard";
+import { QualityBadge, QualityMissing, QualityWarnings } from "./KnowledgeQuality";
 
 const STATUS_CLASS: Record<KnowledgeStatus, string> = {
   draft: "todo",
@@ -70,6 +71,8 @@ export function ChannelKnowledgeRow({ card, busy, onApprove, onReject }: {
               reviewAt={card.review_at}
               conflicts={card.conflicts}
             />
+            <QualityBadge quality={card.quality} />
+            <QualityMissing quality={card.quality} />
             <a href={`/channels?channel=${encodeURIComponent(card.workspace_id)}&tab=knowledge`}>
               {channelName}
             </a>
@@ -85,6 +88,7 @@ export function ChannelKnowledgeRow({ card, busy, onApprove, onReject }: {
             )}
           </span>
           <span className="knowledge-record-tldr">{card.tldr}</span>
+          <QualityWarnings quality={card.quality} />
           <details className="knowledge-record-details">
             <summary>查看知识卡</summary>
             <pre>{card.body_md}</pre>
@@ -109,7 +113,11 @@ export function ChannelKnowledgeRow({ card, busy, onApprove, onReject }: {
   );
 }
 
-export function TaskKnowledgeRow({ card }: { card: TaskKnowledge }) {
+export function TaskKnowledgeRow({ card, busy, onApprove }: {
+  card: TaskKnowledge;
+  busy?: boolean;
+  onApprove?: (card: TaskKnowledge) => void;
+}) {
   const archived = Boolean(card.task_archived_at) || card.status === "archived";
   return (
     <li className="knowledge-record">
@@ -119,12 +127,21 @@ export function TaskKnowledgeRow({ card }: { card: TaskKnowledge }) {
             {card.task_title || card.task_id}
           </a>
           <span className="knowledge-record-actions">
+            {card.status === "proposed" && onApprove && (
+              <button type="button" className="small primary" disabled={busy}
+                onClick={() => onApprove(card)}>批准</button>
+            )}
             <a className="small button-like" href={`/tasks/${card.task_id}`}>任务页</a>
           </span>
         </div>
         <strong className="knowledge-record-title">{card.title}</strong>
         <span className="knowledge-record-meta">
           <KnowledgeBadges kind={card.kind} />
+          <QualityBadge quality={card.quality} />
+          <QualityMissing quality={card.quality} />
+          {card.status === "proposed" && (
+            <span className="status status-in_review">待批准草稿</span>
+          )}
           {card.workspace_name && <span>{card.workspace_name}</span>}
           {card.source_subtask_id && (
             <span className="review-reason">来自子任务 {card.source_subtask_id}</span>
@@ -138,6 +155,7 @@ export function TaskKnowledgeRow({ card }: { card: TaskKnowledge }) {
           </span>
         </span>
         <span className="knowledge-record-tldr">{card.tldr}</span>
+        <QualityWarnings quality={card.quality} />
         <details className="knowledge-record-details">
           <summary>查看知识卡</summary>
           <pre>{card.body_md}</pre>

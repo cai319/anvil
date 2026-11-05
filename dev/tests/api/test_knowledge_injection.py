@@ -37,6 +37,12 @@ async def _workspace(client):
 
 async def _card(client, ws_id: str, *, kind: str, title: str, fields: dict,
                 expires_at: str | None = None):
+    fields = {
+        "use_when": "当前频道的同类任务",
+        "expected_effect": "减少返工与口径不一致",
+        "evidence": "任务评审记录",
+        **fields,
+    }
     r = await client.post(
         f"{API}/workspaces/{ws_id}/knowledge",
         json={

@@ -458,8 +458,11 @@ def task_cmd(
                             rich_help_panel="查询 / 创建"),
     tags: str = typer.Option(None, "--tags", help="create：标签（逗号分隔）",
                              rich_help_panel="查询 / 创建"),
-    repo: str = typer.Option(None, "--repo", help="create：执行仓库（单值）",
+    repo: str = typer.Option(None, "--repo", help="create：主知识主题（知识 repo 名）",
                              rich_help_panel="查询 / 创建"),
+    source_repo: str = typer.Option(
+        None, "--source-repo", help="create：任务数据来源 Git 仓库（可选，不是知识 repo）",
+        rich_help_panel="查询 / 创建"),
     workspace: str = typer.Option(None, "--workspace", help="create：频道/workspace id",
                                   rich_help_panel="查询 / 创建"),
     base_branch: str = typer.Option(None, "--base-branch", help="create：基线分支",
@@ -584,6 +587,8 @@ def task_cmd(
             p["tags"] = [x.strip() for x in tags.split(",") if x.strip()]
         if repo:
             p["repo"] = repo.strip()
+        if source_repo:
+            p["source_repo"] = source_repo.strip()
         if workspace:
             p["workspace_id"] = workspace.strip()
         if base_branch:
@@ -742,11 +747,18 @@ def memory_cmd(
     source_knowledge: str = typer.Option(None, "--source-knowledge",
                                          help="只读参考过的知识 id（逗号分隔）"),
     force: bool = typer.Option(False, "--force", help="human 强制写入（Agent 不允许）"),
+    durable: bool = typer.Option(False, "--durable",
+                                 help="写入 PRINCIPLES.md 耐久准则（默认写经验卡）"),
+    tags: str = typer.Option(None, "--tags", help="逗号分隔的经验卡标签"),
+    kind: str = typer.Option("personal_lesson", "--kind"),
+    repo: str = typer.Option(None, "--repo", help="知识主题 repo"),
+    role: str = typer.Option(None, "--role", help="compact 目标角色（human 用）"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="compact 只预览不写入"),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    """anvil memory <append|search> <text>"""
+    """anvil memory <append|search|compact> <text>"""
     if action == "append":
-        body = {"content": text}
+        body = {"content": text, "durable": durable, "kind": kind}
         for key, value in (("practice_task_id", practice_task),
                            ("practice_run_id", practice_run), ("outcome", outcome)):
             if value:
@@ -754,11 +766,20 @@ def memory_cmd(
         if source_knowledge:
             body["source_knowledge"] = [
                 x.strip() for x in source_knowledge.split(",") if x.strip()]
+        if tags:
+            body["tags"] = [x.strip() for x in tags.split(",") if x.strip()]
+        if repo:
+            body["repo"] = repo
         if force:
             body["force"] = True
         _emit(_call("POST", "/api/v1/me/memory", body), json_out)
     elif action == "search":
         _emit(_call("GET", "/api/v1/me/memory/search", params={"q": text}), json_out)
+    elif action == "compact":
+        body = {"dry_run": dry_run}
+        if role:
+            body["role"] = role
+        _emit(_call("POST", "/api/v1/me/memory/compact", body), json_out)
     else:
         raise typer.Exit(2)
 
@@ -872,6 +893,18 @@ def knowledge_cmd(
     for_approval: bool = typer.Option(False, "--for-approval",
                                       help="card-validate：按 approve 必填项校验",
                                       rich_help_panel="知识卡"),
+    apply: bool = typer.Option(False, "--apply",
+                               help="clean：应用预览写回 proposed（默认 dry-run）",
+                               rich_help_panel="知识质量"),
+    runtime: str = typer.Option(None, "--runtime",
+                                help="clean：指定 utility 运行时",
+                                rich_help_panel="知识质量"),
+    signal: str = typer.Option(None, "--signal",
+                               help="feedback：applied|helpful|unhelpful|no_effect",
+                               rich_help_panel="知识质量"),
+    review_action: str = typer.Option("keep", "--review-action",
+                                      help="review：keep|deprecate|refresh",
+                                      rich_help_panel="知识质量"),
     json_out: bool = typer.Option(False, "--json", help="输出 JSON",
                                   rich_help_panel="输出"),
 ):
@@ -911,6 +944,116 @@ def knowledge_cmd(
             "tags": [x.strip() for x in tags.split(",")] if tags else [],
             "repo": repo,
         }), json_out)
+    elif action == "repo-create":
+        if not query:
+            _usage_error(
+                "knowledge repo-create 需要主题名",
+                "例如 `anvil knowledge repo-create openssl-x509 --fields '{\"description\":\"...\"}'`。")
+        payload = {"repo": query}
+        if fields:
+            try:
+                payload.update(json.loads(fields))
+            except json.JSONDecodeError as exc:
+                _usage_error(f"--fields 不是合法 JSON: {exc}", "传 JSON 对象。")
+        _emit(_call("POST", "/api/v1/knowledge/repos", payload), json_out)
+    elif action == "repo-cards":
+        from urllib.parse import quote
+        name = repo or query
+        if not name:
+            _usage_error("knowledge repo-cards 需要主题名", "传 --repo <name>。")
+        params = {"status": kind} if kind else None
+        _emit(_call("GET", f"/api/v1/knowledge/repos/{quote(name, safe='')}/cards",
+                    params=params), json_out)
+    elif action == "card-create":
+        from urllib.parse import quote
+        name = repo or query
+        if not name or not file:
+            _usage_error("knowledge card-create 需要主题名和 --file",
+                         "例如 `anvil knowledge card-create openssl --file card.json`。")
+        try:
+            with open(file, encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            _usage_error(f"无法读取知识卡文件: {exc}", "检查 --file 路径与 JSON 语法。")
+        _emit(_call("POST", f"/api/v1/knowledge/repos/{quote(name, safe='')}/cards",
+                    payload), json_out)
+    elif action == "quality":
+        params = {"repo": repo} if repo else None
+        _emit(_call("GET", "/api/v1/knowledge/quality/summary",
+                    params=params), json_out)
+    elif action == "clean":
+        import time
+        from urllib.parse import quote
+        if note_id:
+            preview = _call(
+                "POST", f"/api/v1/knowledge/repo-cards/{quote(note_id, safe='')}/clean",
+                {"dry_run": True, "runtime_id": runtime})
+            if apply:
+                result = _call(
+                    "POST",
+                    f"/api/v1/knowledge/repo-cards/{quote(note_id, safe='')}/clean",
+                    {"dry_run": False, "runtime_id": runtime, "cleaned": preview})
+                _emit(result, json_out)
+            else:
+                _emit(preview, json_out)
+        else:
+            name = repo or query
+            if not name:
+                _usage_error("knowledge clean 需要 --id <card-id> 或 --repo <repo>",
+                             "单卡用 --id；小批量用 --repo。默认 dry-run。")
+            card_result = _call(
+                "GET", f"/api/v1/knowledge/repos/{quote(name, safe='')}/cards",
+                params={"status": kind or "proposed", "limit": limit})
+            cards = card_result if isinstance(card_result, list) else (
+                card_result.get("cards", []) if isinstance(card_result, dict) else [])
+            results = []
+            for card in cards[:limit]:
+                try:
+                    preview = _call(
+                        "POST",
+                        f"/api/v1/knowledge/repo-cards/{quote(card['id'], safe='')}/clean",
+                        {"dry_run": True, "runtime_id": runtime})
+                    item = {"card_id": card["id"], "ok": True, "preview": preview}
+                    if apply:
+                        item["applied"] = _call(
+                            "POST",
+                            f"/api/v1/knowledge/repo-cards/{quote(card['id'], safe='')}/clean",
+                            {"dry_run": False, "runtime_id": runtime,
+                             "cleaned": preview})
+                    results.append(item)
+                except Exception as exc:  # noqa: BLE001
+                    results.append({"card_id": card.get("id"), "ok": False,
+                                    "error": str(exc)})
+                time.sleep(0.05)
+            _emit({"dry_run": not apply, "count": len(results),
+                   "results": results}, json_out)
+    elif action == "feedback":
+        if not note_id or not signal:
+            _usage_error("knowledge feedback 需要 --id <card-id> 和 --signal",
+                         "signal: applied|helpful|unhelpful|no_effect。")
+        _emit(_call("POST", f"/api/v1/knowledge/repo-cards/{note_id}/feedback",
+                    {"signal": signal, "note": query or ""}), json_out)
+    elif action == "review":
+        if note_id:
+            _emit(_call("POST", f"/api/v1/knowledge/repo-cards/{note_id}/review",
+                        {"action": review_action}), json_out)
+        else:
+            params = {"repo": repo} if repo else None
+            _emit(_call("GET", "/api/v1/knowledge/review-candidates",
+                        params=params), json_out)
+    elif action in ("card-approve", "card-reject"):
+        if not note_id:
+            _usage_error(f"knowledge {action} 需要 --id <card-id>", "先 repo-cards 查询。")
+        verb = "approve" if action == "card-approve" else "reject"
+        _emit(_call("POST", f"/api/v1/knowledge/repo-cards/{note_id}/{verb}", {}), json_out)
+    elif action == "explain":
+        task_id = task or DEFAULT_TASK
+        if not task_id:
+            _usage_error("knowledge explain 需要 --task <task-id>",
+                         "传 --task，或设置 ANVIL_TASK_ID。")
+        params = {"role": role} if role else None
+        _emit(_call("GET", f"/api/v1/tasks/{task_id}/knowledge/explain",
+                    params=params), json_out)
     elif action == "show":
         if not note_id:
             _usage_error(
@@ -967,7 +1110,8 @@ def knowledge_cmd(
         _usage_error(
             f"unknown knowledge action: {action}",
             "可用动作: search/show/index/list/reindex/repo-list/repo-show/"
-            "repo-suggest/card-template/card-validate。运行 `anvil knowledge -h` 查看示例。")
+            "repo-suggest/card-template/card-validate/quality/clean/feedback/review。"
+            "运行 `anvil knowledge -h` 查看示例。")
 
 
 @app.command("lesson", help="提议一条共享经验（human 审批）。", epilog=LESSON_EPILOG,

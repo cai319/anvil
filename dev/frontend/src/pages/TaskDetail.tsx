@@ -3,6 +3,7 @@ import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type Delegatio
 import {
   AUTHORITY_LABEL,
   KNOWLEDGE_CARD_FIELDS,
+  KNOWLEDGE_QUALITY_FIELDS,
   KNOWLEDGE_KINDS,
   KNOWLEDGE_KIND_LABEL,
 } from "../knowledgeCard";
@@ -542,11 +543,17 @@ const REPO_SOURCE_LABEL: Record<string, string> = {
   agent: "Agent",
 };
 
+const KNOWLEDGE_MODE_LABEL: Record<string, string> = {
+  shared: "主题知识库",
+  local: "任务级知识库",
+  temp: "临时知识空间",
+};
+
 const REPO_STATE_HINT: Record<string, string> = {
   applied: "已按任务标签/文本自动关联。",
   suggested: "低置信度建议，确认后才会参与检索。",
   needs_cindy: "任务还没有标签，派发后由 Cindy 识别。",
-  fallback: "未匹配到知识仓库，回退到执行 repo + shared。",
+  fallback: "未匹配到主题知识库，回退到任务级/临时知识空间 + shared。",
   locked: "已人工固定，自动识别和 Cindy 不会覆盖。",
   off: "知识仓库功能已关闭。",
 };
@@ -610,10 +617,10 @@ function KnowledgeRepoPanel({ task, onChanged }: { task: Task; onChanged: () => 
 
   return (
     <>
-      <h3 className="side-h">知识仓库</h3>
+      <h3 className="side-h">知识主题</h3>
       <div className="repo-panel">
         {visible.length === 0 && (
-          <p className="muted hint">{REPO_STATE_HINT[state ?? ""] ?? "尚未关联知识仓库。"}</p>
+          <p className="muted hint">{REPO_STATE_HINT[state ?? ""] ?? "尚未关联主题知识库。"}</p>
         )}
         <div className="repo-chips">
           {[...applied, ...suggested].map((r) => (
@@ -873,7 +880,8 @@ function TaskKnowledgePanel({ task }: { task: Task }) {
                 ))}
               </select>
             </label>
-            {KNOWLEDGE_CARD_FIELDS[kind].map((f) => (
+            {[...KNOWLEDGE_QUALITY_FIELDS,
+              ...KNOWLEDGE_CARD_FIELDS[kind]].map((f) => (
               <label key={f.key}>{f.label}
                 <textarea rows={2} value={fields[f.key] || ""}
                   onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })} />
@@ -2118,6 +2126,26 @@ export function TaskDetail({ id }: { id: string }) {
             </dd>
             <dt>类型</dt><dd>{task.type ?? "—"}</dd>
             <dt>标签</dt><dd>{task.tags?.length ? task.tags.join(", ") : "—"}</dd>
+            <dt>知识主题</dt>
+            <dd>
+              <span className="mono">{task.repo || "临时知识空间"}</span>
+              {task.knowledge_mode && (
+                <span className="muted">
+                  {" "}· {KNOWLEDGE_MODE_LABEL[task.knowledge_mode] ?? task.knowledge_mode}
+                </span>
+              )}
+            </dd>
+            <dt>任务工作空间</dt>
+            <dd>
+              {task.task_workspace?.path ? (
+                <span className="mono" title={task.task_workspace.path}>
+                  {task.task_workspace.path.split("/task-workspaces/").pop()}
+                </span>
+              ) : "—"}
+              {task.source_repo && (
+                <span className="muted"> · Git 来源 {task.source_repo}</span>
+              )}
+            </dd>
             {task.archived_at && (
               <>
                 <dt>归档</dt>

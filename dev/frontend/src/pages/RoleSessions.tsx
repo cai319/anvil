@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import {
   api, subscribeEvents,
-  type Role, type RoleRuntimeStatus, type Run, type Task, type TimelineEvent, type Workflow,
+  type ContextManifest, type Role, type RoleRuntimeStatus, type Run, type Task,
+  type TimelineEvent, type Workflow,
 } from "../api/client";
 import { roleStatusFromWorkflow } from "../workflowStatus";
 import { roleLiveDot, roleLiveState, stateClassForDot } from "../roleLive";
@@ -48,9 +49,10 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
   const [runs, setRuns] = useState<Run[]>([]);
   const [runsLoaded, setRunsLoaded] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [subTab, setSubTab] = useState<"log" | "timeline">("log");
+  const [subTab, setSubTab] = useState<"log" | "timeline" | "manifest">("log");
   const [logs, setLogs] = useState<Record<string, string>>({});
   const [timelines, setTimelines] = useState<Record<string, TimelineEvent[]>>({});
+  const [manifests, setManifests] = useState<Record<string, ContextManifest[]>>({});
   const [runtimes, setRuntimes] = useState<Record<string, RoleRuntimeStatus>>({});
   // 参与角色 + planner（通常是 Cindy）：planner 也可能同时服务多个任务。
   const slugs = Array.from(new Set([
@@ -120,6 +122,11 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
       api.getRunTimeline(run.id)
         .then((t) => setTimelines((prev) => ({ ...prev, [run.id]: t })))
         .catch(() => setTimelines((prev) => ({ ...prev, [run.id]: [] })));
+    }
+    if (!(run.id in manifests)) {
+      api.getRunContextManifest(run.id)
+        .then((m) => setManifests((prev) => ({ ...prev, [run.id]: m })))
+        .catch(() => setManifests((prev) => ({ ...prev, [run.id]: [] })));
     }
   };
 
@@ -240,15 +247,17 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
                 <div className="rs-tabs">
                   <button className={`small ${subTab === "log" ? "primary" : ""}`} onClick={() => setSubTab("log")}>完整交互（上下文 / 模型 / 工具）</button>
                   <button className={`small ${subTab === "timeline" ? "primary" : ""}`} onClick={() => setSubTab("timeline")}>历史上下文（时间线）</button>
+                  <button className={`small ${subTab === "manifest" ? "primary" : ""}`} onClick={() => setSubTab("manifest")}>上下文来源</button>
                   <button className="small" onClick={() => {
                     api.getRunLog(run.id)
                       .then((r) => setLogs((prev) => ({ ...prev, [run.id]: r.exists ? r.content : "（该会话暂无日志）" })))
                       .catch(() => {});
                   }}>刷新日志</button>
                 </div>
-                {subTab === "log" ? (
+                {subTab === "log" && (
                   <pre className="run-log">{logs[run.id] ?? "加载中…"}</pre>
-                ) : (
+                )}
+                {subTab === "timeline" && (
                   <ul className="rs-timeline">
                     {(timelines[run.id] ?? []).length === 0 && <li className="muted">暂无上下文事件。</li>}
                     {(timelines[run.id] ?? []).map((ev) => (
@@ -259,6 +268,34 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
                       </li>
                     ))}
                   </ul>
+                )}
+                {subTab === "manifest" && (
+                  <div className="rs-manifest">
+                    {(manifests[run.id] ?? []).length === 0 && (
+                      <p className="muted">暂无上下文清单（历史 run 可能未记录）。</p>
+                    )}
+                    {(manifests[run.id] ?? []).map((m) => (
+                      <div key={m.id} className="rs-manifest-group">
+                        <div className="muted">
+                          <strong>{m.kind}</strong> · {m.total_chars} chars · {formatClock(m.created_at)}
+                        </div>
+                        <ul className="rs-timeline">
+                          {m.blocks.map((b, i) => (
+                            <li key={`${m.id}-${i}`}>
+                              <span className="muted mono">[{b.layer ?? "?"}]</span>{" "}
+                              <strong>{b.name ?? b.kind ?? "block"}</strong>{" "}
+                              <span className="muted">
+                                {b.chars ?? 0} chars · {b.injected ? "注入" : (b.reason ?? "省略")}
+                              </span>
+                              {b.source_ids?.length ? (
+                                <span className="muted mono"> · {b.source_ids.slice(0, 3).join(", ")}</span>
+                              ) : null}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
                 )}
               </div>
             )}

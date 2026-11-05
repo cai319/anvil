@@ -92,8 +92,10 @@ def _profile(profiles: dict[str, dict], name: str | None) -> dict | None:
             "lessons_pending": 0,
             "notes_role": 0,
             "tasks_exec": 0,
+            "tasks_topic": 0,
             "filesystem": False,
         },
+        "registry": None,
         "last_activity_at": None,
     })
     entry["names"][display_repo(name)] += 1
@@ -111,13 +113,15 @@ def _touch(entry: dict, at: str | None) -> None:
 def _collect_workspaces(conn: sqlite3.Connection, profiles: dict[str, dict]) -> None:
     try:
         rows = conn.execute(
-            "SELECT name, repo, description, updated_at FROM workspaces "
-            "WHERE repo IS NOT NULL AND repo <> ''"
+            "SELECT name, repo, knowledge_repo, description, updated_at FROM workspaces "
+            "WHERE (knowledge_repo IS NOT NULL AND knowledge_repo <> '') "
+            "   OR (repo IS NOT NULL AND repo <> '')"
         ).fetchall()
     except sqlite3.Error:
         return
     for row in rows:
-        entry = _profile(profiles, row["repo"])
+        # 频道知识主题优先；repo 只是执行默认来源（旧数据回退）。
+        entry = _profile(profiles, row["knowledge_repo"] or row["repo"])
         if entry is None:
             continue
         entry["sources"].add("workspace")
@@ -203,7 +207,7 @@ def _collect_tasks(conn: sqlite3.Connection, profiles: dict[str, dict],
         if entry is None:
             continue
         entry["sources"].add("tasks")
-        entry["counts"]["tasks_exec"] += 1
+        entry["counts"]["tasks_topic"] += 1
         try:
             tags = json.loads(row["tags_json"] or "[]")
         except (TypeError, ValueError):
@@ -236,6 +240,33 @@ def _collect_filesystem(profiles: dict[str, dict]) -> None:
             continue
         entry["sources"].add("filesystem")
         entry["counts"]["filesystem"] = True
+
+
+def _collect_registry(conn: sqlite3.Connection, profiles: dict[str, dict]) -> None:
+    """把主题知识库注册表（含空 repo）并入 catalog，保证新 repo 可被后续任务匹配。"""
+    try:
+        rows = conn.execute(
+            "SELECT id, display_name, description, status, merged_into, locked, "
+            "auto_created, needs_review, updated_at FROM knowledge_repos "
+            "WHERE status='active'"
+        ).fetchall()
+    except sqlite3.Error:
+        return
+    for row in rows:
+        entry = _profile(profiles, row["display_name"])
+        if entry is None:
+            continue
+        entry["sources"].add("registry")
+        entry["registry"] = {
+            "id": row["id"], "display_name": row["display_name"],
+            "locked": bool(row["locked"]),
+            "auto_created": bool(row["auto_created"]),
+            "needs_review": bool(row["needs_review"]),
+        }
+        desc = str(row["description"] or "").strip()
+        if desc:
+            entry["descriptions"].append(desc)
+        _touch(entry, row["updated_at"])
 
 
 def _finalize(entry: dict) -> dict:
@@ -274,6 +305,15 @@ def _finalize(entry: dict) -> dict:
             "tasks": entry["task_samples"],
         },
         "last_activity_at": entry["last_activity_at"],
+        "repo_id": (entry.get("registry") or {}).get("id") or entry["key"],
+        "kind": "topic" if (
+            entry.get("registry") or counts.get("lessons_approved")
+            or counts.get("notes_role") or counts.get("tasks_topic")
+            or counts.get("tasks_exec")
+        ) else ("exec" if counts.get("filesystem") else "unknown"),
+        "locked": bool((entry.get("registry") or {}).get("locked")),
+        "auto_created": bool((entry.get("registry") or {}).get("auto_created")),
+        "needs_review": bool((entry.get("registry") or {}).get("needs_review")),
     }
 
 
@@ -298,6 +338,7 @@ def build_catalog(conn: sqlite3.Connection, *, include_filesystem: bool = True,
     _collect_tasks(conn, profiles, exclude_task_id)
     if include_filesystem:
         _collect_filesystem(profiles)
+    _collect_registry(conn, profiles)
 
     repos = [_finalize(entry) for entry in profiles.values()]
     repos.sort(key=lambda p: p["repo"].casefold())
@@ -359,7 +400,8 @@ def suggest(conn: sqlite3.Connection, *, title: str, description: str = "",
     """按标签+词法+活跃度+亲和度给候选 repo 打分；不写库。"""
     catalog = build_catalog(
         conn, use_cache=use_cache, exclude_task_id=exclude_task_id)
-    profiles = [p for p in catalog["repos"] if p.get("selectable")]
+    profiles = [p for p in catalog["repos"]
+                if p.get("selectable") and p.get("kind") == "topic"]
     if not profiles:
         return {"candidates": [], "tag_keys": [], "generated_at": catalog["generated_at"]}
 
@@ -415,6 +457,7 @@ def suggest(conn: sqlite3.Connection, *, title: str, description: str = "",
         counts = profile.get("counts") or {}
         activity_raw = (3 * int(counts.get("lessons_approved") or 0)
                         + 2 * int(counts.get("notes_role") or 0)
+                        + int(counts.get("tasks_topic") or 0)
                         + int(counts.get("tasks_exec") or 0))
         activity = min(1.0, math.log1p(max(0, activity_raw)) / math.log1p(50))
         s_prior = 0.6 * activity + 0.4 * _recency(profile.get("last_activity_at"))

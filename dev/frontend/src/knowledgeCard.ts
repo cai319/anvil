@@ -16,6 +16,34 @@ export const KNOWLEDGE_KIND_LABEL: Record<KnowledgeKind, string> = {
   personal_lesson: "个人经验",
 };
 
+/** 所有知识卡共用的质量字段：批准前必须有场景/效果/证据。 */
+export const KNOWLEDGE_QUALITY_FIELDS: { key: string; label: string; hint: string }[] = [
+  { key: "use_when", label: "使用场景", hint: "什么时候该用这条知识？写给执行者和评审者看。" },
+  { key: "expected_effect", label: "作用效果", hint: "用了能避免什么、减少什么或保证什么；尽量具体。" },
+  { key: "evidence", label: "证据与来源", hint: "任务/步骤/run/文件/命令/评审结论；不能只写“已验证”。" },
+  { key: "preconditions", label: "前置条件", hint: "适用前必须满足的环境、版本或依赖。" },
+  { key: "exclusions", label: "不适用/反例", hint: "什么情况下这条知识不成立，避免被过度套用。" },
+  { key: "effect_type", label: "效果类型", hint: "avoid_error / reduce_rework / speed / compliance / quality / other。" },
+];
+
+export const QUALITY_FIELD_LABEL: Record<string, string> = {
+  use_when: "使用场景", expected_effect: "作用效果", evidence: "证据与来源",
+  preconditions: "前置条件", exclusions: "不适用/反例", effect_type: "效果类型",
+  scope: "适用范围", rule: "规则", rationale: "理由", examples: "示例",
+  verification: "如何验证", exceptions: "例外", context: "背景", decision: "决定",
+  alternatives: "备选方案", consequences: "后果与取舍", purpose: "目的",
+  steps: "步骤", rollback: "回滚/失败处理", capability: "能力", why: "为什么需要",
+  when: "何时需要", observation: "观察", lesson: "结论/经验", applicability: "适用性",
+  counterexamples: "反例", task_context: "任务上下文", finding: "发现",
+  reuse_scope: "可复用范围", practice: "实践任务/run", outcome: "结果",
+  confidence: "置信度", title: "标题", tldr: "TLDR", body: "正文",
+  title_length: "标题长度", tldr_length: "TLDR 长度", body_length: "正文长度",
+};
+
+export function qualityFieldLabel(key: string): string {
+  return QUALITY_FIELD_LABEL[key] ?? key;
+}
+
 export const KNOWLEDGE_CARD_FIELDS: Record<KnowledgeKind, { key: string; label: string }[]> = {
   convention: [
     { key: "rule", label: "规则" }, { key: "scope", label: "适用范围" },

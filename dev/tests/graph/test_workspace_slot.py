@@ -29,11 +29,17 @@ def test_run_workspace_path_prefers_task_slot(tmp_path, monkeypatch):
 
 
 def test_run_workspace_path_falls_back_without_slot(tmp_path, monkeypatch):
+    from anvil import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
     conn = connect(str(tmp_path / "ws2.db"))
     monkeypatch.setattr(nodes, "_persistent_session", lambda conn, effective: {"ok": True})
     run = {"role_slug": "dev", "task_id": "T2",
            "worktree_path": str(tmp_path / "new-worktree")}
     role = {"home_path": str(tmp_path / "home")}
 
-    assert nodes._run_workspace_path(conn, run, role, {}) == str(tmp_path / "home")
+    # 无槽 + 无 worktree → 使用每任务 workspace（不再回退共享角色 home）。
+    path = nodes._run_workspace_path(conn, run, role, {})
+    assert path != str(tmp_path / "home")
+    assert path.endswith("T2")
+    assert (tmp_path / "data" / "task-workspaces").exists()
     conn.close()

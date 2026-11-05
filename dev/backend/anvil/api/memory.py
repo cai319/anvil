@@ -154,7 +154,37 @@ def append_memory(body: MemoryAppendIn, conn=Depends(get_db), auth: Auth = Depen
         outcome=body.outcome,
         source_knowledge=body.source_knowledge,
         status=status,
+        durable=body.durable,
+        kind=body.kind,
+        tags=body.tags,
+        repo=body.repo,
     )
+
+
+@router.get("/me/memory/principles")
+def get_principles(conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    role = auth.role or "qa-role"
+    return {"role": role, "content": services.memory.read_principles(role)}
+
+
+@router.put("/me/memory/principles")
+def put_principles(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    role = auth.role or "qa-role"
+    return services.memory.write_principles(
+        conn, role, str(body.get("content") or ""),
+        mode=str(body.get("mode") or "replace"), actor=role)
+
+
+@router.post("/me/memory/compact")
+def compact_memory(body: dict | None = None, conn=Depends(get_db),
+                   auth: Auth = Depends(get_auth)):
+    """把 legacy MEMORY.md 拆成 PRINCIPLES.md + 经验卡；默认 dry-run 预览。"""
+    body = body or {}
+    role = str(body.get("role") or auth.role or "qa-role")
+    if auth.role not in (None, "human") and role != auth.role:
+        raise HTTPException(status_code=403, detail="agents may only compact their own memory")
+    return services.memory.migrate_memory_file(
+        conn, role, dry_run=bool(body.get("dry_run", True)))
 
 
 @router.get("/me/memory/search")

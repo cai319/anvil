@@ -23,11 +23,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import config
 from .api import (
-    actions, agent_inbox, board, event_log, events, findings, governance, inbox, knowledge_repos, memory, reminders, roles, runs, runtimes, tasks, templates, tooling, workflow, workspaces,
+    actions, agent_inbox, board, event_log, events, feature_flags, findings, governance, inbox, knowledge_repos, memory, reminders, roles, runs, runtimes, tasks, templates, tooling, workflow, workspaces,
 )
 from .db import connect, open_conn
 from .deps import token_is_valid
 from .services import daemon as daemon_service
+from .services import features as features_service
 from .services import ledger as ledger_service
 from .services import roles as roles_service
 from .services import runs as runs_service
@@ -161,6 +162,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         except OSError:
             pass
     _init = connect(path)
+    # 功能开关覆盖持久化在 settings；每次启动重新应用到 config。
+    features_service.apply_overrides(_init)
     ledger_service.backfill_once(_init)
     # 历史删除遗留的孤儿 workflow/run：启动时清理，避免调度器继续推进已删除任务。
     _cleanup_orphans(_init)
@@ -219,6 +222,13 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                                      config.CONTEXT_RESET_MAX_RETRIES)
         role_daemon.on_context_overflow = _on_role_context_overflow
 
+        def _on_project(role: str, run_id: str, task_id: str | None,
+                        workspace_path: str | None) -> None:
+            """实际投递前投影当前任务（延迟投影）。"""
+            from .graph import nodes as graph_nodes
+            graph_nodes.project_run_by_path(path, run_id)
+        role_daemon.on_project = _on_project
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # 启动自愈（P0-3）：上一实例崩溃遗留的 running/projecting run → suspended（可 @mention 续跑）
@@ -265,6 +275,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     app.include_router(knowledge_repos.router, prefix="/api/v1/knowledge", tags=["knowledge-repos"])
     app.include_router(workspaces.router, prefix="/api/v1", tags=["workspaces"])
     app.include_router(governance.router, prefix="/api/v1", tags=["governance"])
+    app.include_router(feature_flags.router, prefix="/api/v1/features", tags=["features"])
     app.include_router(runs.router, prefix="/api/v1", tags=["runs"])
     app.include_router(board.router, prefix="/api/v1", tags=["board"])
     app.include_router(templates.router, prefix="/api/v1", tags=["workflow-templates"])

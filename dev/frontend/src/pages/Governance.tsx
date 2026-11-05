@@ -8,6 +8,18 @@ interface AuditRow {
   role_slug: string | null;
   task_id: string | null;
   action: string;
+  payload?: Record<string, unknown>;
+}
+
+function auditAction(row: AuditRow): string {
+  const payload = row.payload || {};
+  if (row.action === "feature.toggle") {
+    return `功能开关 ${String(payload.key ?? "")} → ${payload.value ? "开启" : "关闭"}`;
+  }
+  if (row.action === "feature.reset") {
+    return `功能开关 ${String(payload.key ?? "")} → 恢复默认${payload.value ? "开启" : "关闭"}`;
+  }
+  return row.action;
 }
 
 interface BudgetInfo {
@@ -189,7 +201,7 @@ export function Governance() {
                     <td className="mono">{formatDateTime(a.created_at)}</td>
                     <td>{a.role_slug ?? "—"}</td>
                     <td>{a.task_id ?? "—"}</td>
-                    <td>{a.action}</td>
+                    <td title={JSON.stringify(a.payload || {})}>{auditAction(a)}</td>
                   </tr>
                 ))}
               </tbody>

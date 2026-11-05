@@ -119,8 +119,9 @@ async def test_memory_append_and_fts_search(client):
     hits = (await client.get(f"{API}/me/memory/search", params={"q": "alembic"},
                              headers=auth_headers())).json()
     assert any("alembic" in h["content"] for h in hits)
-    memory_file = Path(config.AGENTS_DIR) / "qa-role" / "MEMORY.md"
-    assert "alembic migration gotcha" in memory_file.read_text(encoding="utf-8")
+    card_dir = Path(config.AGENTS_DIR) / "qa-role" / "notes" / "memory" / "cards"
+    assert any("alembic migration gotcha" in p.read_text(encoding="utf-8")
+               for p in card_dir.glob("*.md"))
 
 
 async def test_lesson_approval_writes_shared_file_and_respects_cap(client, monkeypatch):
@@ -247,8 +248,9 @@ async def test_role_versions_and_rollback(client):
 
 async def test_role_home_file_read_and_traversal_guard(client):
     await _seed(client)
-    await client.post(f"{API}/me/memory", json={"content": "可见内容"}, headers=auth_headers())
-    ok = await client.get(f"{API}/roles/qa-role/home/file", params={"path": "MEMORY.md"},
+    await client.post(f"{API}/me/memory", json={"content": "可见内容", "durable": True},
+                      headers=auth_headers())
+    ok = await client.get(f"{API}/roles/qa-role/home/file", params={"path": "PRINCIPLES.md"},
                           headers=auth_headers())
     assert ok.status_code == 200
     assert "可见内容" in ok.json()["content"]

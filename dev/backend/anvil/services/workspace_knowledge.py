@@ -1,13 +1,17 @@
 """频道知识：知识卡 CRUD、审批、版本快照、冲突/老化、从任务收割。"""
 from __future__ import annotations
 
+import json
 import math
+import os
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+from .. import config
 from ..util import jdumps, jloads, new_id, now_iso
-from . import knowledge_card
+from . import knowledge_card, knowledge_quality
 from .knowledge import tokenize_for_match
 from .tasks import ConflictError, get as get_task
 
@@ -40,6 +44,11 @@ def _row(row: sqlite3.Row | None) -> dict | None:
     d["source_knowledge"] = jloads(d.pop("source_knowledge_json", "[]"), [])
     d["is_expired"] = _is_expired(d.get("expires_at"))
     d["freshness"] = freshness(d)
+    stored_quality = jloads(d.pop("quality_json", "{}"), {})
+    d["quality"] = knowledge_quality.evaluate_row(d, "workspace_knowledge")
+    if isinstance(stored_quality, dict) and stored_quality.get("llm"):
+        d["quality"]["llm"] = stored_quality["llm"]
+    d["legacy"] = bool(d["quality"].get("legacy"))
     return d
 
 
@@ -287,6 +296,49 @@ def _default_authority(kind: str) -> str:
     return "normative" if kind == "convention" else "reference"
 
 
+def channel_knowledge_dir(workspace_id: str) -> Path:
+    return Path(config.CHANNELS_DIR) / str(workspace_id) / "knowledge"
+
+
+def _write_card_file(card: dict, status: str | None = None) -> str:
+    """把频道知识卡写为文件（文件真相）；approved → cards/，其余 → proposed/。"""
+    status = status or str(card.get("status") or "proposed")
+    ws_id = str(card.get("workspace_id") or "")
+    if not ws_id or not card.get("id"):
+        return ""
+    sub = "cards" if status in ("approved", "active") else "proposed"
+    target_dir = channel_knowledge_dir(ws_id) / sub
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{card['id']}.md"
+    meta = {
+        "id": card["id"], "workspace_id": ws_id,
+        "repo": card.get("repo"), "kind": card.get("kind"),
+        "authority": card.get("authority"), "status": status,
+        "title": card.get("title"), "tldr": card.get("tldr"),
+        "tags": card.get("tags") or [], "fields": card.get("fields") or {},
+        "completeness": card.get("completeness", 0),
+        "quality_score": card.get("quality_score", 0),
+        "source_task_id": card.get("source_task_id"),
+        "source_subtask_id": card.get("source_subtask_id"),
+        "version": card.get("version", 1),
+        "review_at": card.get("review_at"),
+        "expires_at": card.get("expires_at"),
+        "created_at": card.get("created_at"),
+        "approved_at": card.get("approved_at"),
+    }
+    text = f"<!-- anvil: {json.dumps(meta, ensure_ascii=False)} -->\n{card.get('body_md') or ''}\n"
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, target)
+    other = channel_knowledge_dir(ws_id) / ("proposed" if sub == "cards" else "cards") / target.name
+    if other.exists():
+        try:
+            other.unlink()
+        except OSError:
+            pass
+    return str(target)
+
+
 def create(conn: sqlite3.Connection, workspace_id: str, *,
            title: str, tldr: str, kind: str,
            authority: str | None = None,
@@ -357,14 +409,24 @@ def create(conn: sqlite3.Connection, workspace_id: str, *,
     now = now_iso()
     if not review_at:
         review_at = _default_review_at(kind)
+    quality = knowledge_quality.evaluate_row({
+        "kind": kind, "title": title, "tldr": tldr, "body_md": body_md,
+        "fields": fields, "authority": authority, "status": status,
+        "source_task_id": source_task_id, "review_at": review_at,
+        "expires_at": expires_at,
+    }, "workspace_knowledge")
+    if for_approval and quality.get("blocking"):
+        raise knowledge_quality.QualityGateError(
+            "; ".join(quality["blocking"]), quality)
     conn.execute(
         "INSERT INTO workspace_knowledge "
         "(id, workspace_id, repo, kind, authority, title, tldr, body_md, fields_json, "
         "tags_json, source_task_id, source_subtask_id, source_knowledge_json, owner, "
         "related_json, supersedes_id, content_hash, status, version, created_by, origin, "
         "created_at, updated_at, approved_at, approved_by, expires_at, review_at, "
-        "conflicts_json, completeness, template_version) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "conflicts_json, completeness, quality_json, quality_score, quality_checked_at, "
+        "template_version) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             kid, workspace_id, repo, kind, authority, title, tldr, body_md,
             jdumps(fields), jdumps(tags or []), source_task_id, source_subtask_id, "[]",
@@ -372,7 +434,8 @@ def create(conn: sqlite3.Connection, workspace_id: str, *,
             actor, origin, now, now,
             now if status == "approved" else None,
             actor if status == "approved" else None,
-            expires_at, review_at, "[]", check["completeness"], 1,
+            expires_at, review_at, "[]", check["completeness"],
+            jdumps(quality), quality["score"], quality["checked_at"], 1,
         ),
     )
     conflicts = detect_conflicts(
@@ -385,6 +448,7 @@ def create(conn: sqlite3.Connection, workspace_id: str, *,
     knowledge = get(conn, kid)
     assert knowledge is not None
     _snapshot(conn, knowledge)
+    _write_card_file(knowledge, knowledge["status"])
     conn.commit()
     return knowledge
 
@@ -426,10 +490,18 @@ def update(conn: sqlite3.Connection, knowledge_id: str, *,
     new_tldr = tldr or old["tldr"]
     body_md = knowledge_card.render_markdown(new_title, new_tldr, new_kind, new_fields)
     check = knowledge_card.validate_card(new_kind, new_fields, for_approval=False)
+    quality = knowledge_quality.evaluate_row({
+        **old, "kind": new_kind, "title": new_title, "tldr": new_tldr,
+        "body_md": body_md, "fields": new_fields,
+        "authority": authority or old["authority"],
+        "review_at": review_at if review_at is not None else old.get("review_at"),
+        "expires_at": expires_at if expires_at is not None else old.get("expires_at"),
+    }, "workspace_knowledge")
     conn.execute(
         "UPDATE workspace_knowledge SET title=?, tldr=?, kind=?, authority=?, body_md=?, "
         "fields_json=?, tags_json=?, owner=?, review_at=?, expires_at=?, related_json=?, "
-        "content_hash=?, completeness=?, version=version+1, updated_at=? WHERE id=?",
+        "content_hash=?, completeness=?, quality_json=?, quality_score=?, "
+        "quality_checked_at=?, version=version+1, updated_at=? WHERE id=?",
         (
             new_title, new_tldr, new_kind, authority or old["authority"], body_md,
             jdumps(knowledge_card.normalize_fields(new_fields)),
@@ -439,7 +511,8 @@ def update(conn: sqlite3.Connection, knowledge_id: str, *,
             expires_at if expires_at is not None else old.get("expires_at"),
             jdumps(related if related is not None else old["related"]),
             knowledge_card.content_hash(new_title, new_tldr, body_md),
-            check["completeness"], now_iso(), knowledge_id,
+            check["completeness"], jdumps(quality), quality["score"],
+            quality["checked_at"], now_iso(), knowledge_id,
         ),
     )
     conflicts = detect_conflicts(
@@ -469,17 +542,22 @@ def approve(conn: sqlite3.Connection, knowledge_id: str, *,
             + "; resolve or reject the conflicting card first"
         )
     check = knowledge_card.validate_card(current["kind"], current["fields"], for_approval=True)
-    if check["errors"]:
-        raise ConflictError("; ".join(check["errors"]))
+    quality = knowledge_quality.evaluate_row(current, "workspace_knowledge")
+    blocking = list(dict.fromkeys(check["errors"] + quality.get("blocking", [])))
+    if blocking:
+        raise knowledge_quality.QualityGateError("; ".join(blocking), quality)
     if expected_version is not None and int(expected_version) != int(current["version"]):
         raise ConflictError(
             f"knowledge version changed: expected {expected_version}, current {current['version']}"
         )
     cur = conn.execute(
         "UPDATE workspace_knowledge SET status='approved', version=version+1, "
-        "approved_at=?, approved_by=?, completeness=?, updated_at=? "
+        "approved_at=?, approved_by=?, completeness=?, quality_json=?, "
+        "quality_score=?, quality_checked_at=?, updated_at=? "
         "WHERE id=? AND version=?",
-        (now_iso(), actor, check["completeness"], now_iso(), knowledge_id, current["version"]),
+        (now_iso(), actor, check["completeness"], jdumps(quality),
+         quality["score"], quality["checked_at"], now_iso(), knowledge_id,
+         current["version"]),
     )
     if cur.rowcount == 0:
         raise ConflictError("knowledge version changed; reload and retry")
@@ -499,6 +577,7 @@ def approve(conn: sqlite3.Connection, knowledge_id: str, *,
             if old is not None:
                 _snapshot(conn, old)
     _snapshot(conn, approved)
+    _write_card_file(approved, "approved")
     conn.commit()
     return approved
 
@@ -601,13 +680,10 @@ def render_for_task(conn: sqlite3.Connection, task: dict, *,
         repos.extend(scope.get("repos") or [])
     except Exception:  # noqa: BLE001 —— 检索范围失败不能阻断 CIC
         pass
-    if task.get("repo"):
-        repos.append(task["repo"])
-    if ws is not None:
-        if ws["repo"]:
-            repos.append(ws["repo"])
-        if ws["knowledge_repo"]:
-            repos.append(ws["knowledge_repo"])
+    # task.repo 现在是知识主题，已在 retrieval_scope 中；ws.repo 是执行来源，不参与
+    # 知识检索。频道只额外带入自己的 knowledge_repo。
+    if ws is not None and ws["knowledge_repo"]:
+        repos.append(ws["knowledge_repo"])
     repos = list(dict.fromkeys(r for r in repos if r))
     repo_clauses = []
     params: list = [now_iso()]
@@ -680,9 +756,19 @@ def harvest_from_task(conn: sqlite3.Connection, workspace_id: str, task_id: str,
         "evidence": task.get("description") or f"任务 {task['id']} 已完成",
         "lesson": task.get("description") or task["title"],
         "applicability": "、".join(task.get("tags") or []) or task.get("repo") or "当前频道",
+        "use_when": "、".join(task.get("tags") or []) or task.get("repo") or "同类已完成任务",
+        "expected_effect": "复用已完成任务的结论，减少同类任务的重复探索。",
         "counterexamples": "暂无已知反例",
     }
     status = "approved" if actor in (None, "human") else "proposed"
+    quality = knowledge_quality.evaluate_row({
+        "kind": "insight", "title": title, "tldr": tldr,
+        "body_md": knowledge_card.render_markdown(title, tldr, "insight", fields),
+        "fields": fields, "authority": "reference", "status": status,
+        "source_task_id": source_task_id,
+    }, "workspace_knowledge")
+    if status == "approved" and quality.get("blocking"):
+        status = "proposed"
     return create(
         conn, workspace_id, title=title, tldr=tldr, kind="insight",
         authority="reference", fields=fields, tags=task.get("tags") or [],
@@ -690,3 +776,21 @@ def harvest_from_task(conn: sqlite3.Connection, workspace_id: str, task_id: str,
         owner=actor, actor=actor, origin="human" if status == "approved" else "system",
         status=status,
     )
+
+
+def export_files(conn: sqlite3.Connection, workspace_id: str | None = None) -> dict:
+    """把 DB 中的频道知识卡导出为文件（文件真相）；用于迁移/修复。"""
+    sql = "SELECT * FROM workspace_knowledge"
+    params: list = []
+    if workspace_id:
+        sql += " WHERE workspace_id=?"
+        params.append(workspace_id)
+    rows = conn.execute(sql, params).fetchall()
+    written = 0
+    for row in rows:
+        card = _row(row)
+        if card is None:
+            continue
+        _write_card_file(card, card.get("status"))
+        written += 1
+    return {"exported": written}

@@ -2819,6 +2819,14 @@ def review_step(conn: sqlite3.Connection, wid: str, step_id: str, approve: bool,
         override_reason=override_reason,
     )
     conn.commit()
+    if not approve:
+        try:
+            from . import experience_capture
+            experience_capture.capture_rework(
+                conn, wf["task_id"], workflow_id=wid, step_id=step_id,
+                feedback=feedback, actor="human")
+        except Exception:  # noqa: BLE001 —— 捕获失败不影响评审
+            pass
     _finalize_if_done(conn, wid)
     return get_workflow(conn, wid)  # type: ignore[return-value]
 
@@ -2946,6 +2954,13 @@ def fail_step(conn: sqlite3.Connection, wid: str, step_id: str, reason: str,
     )
     leases.release(conn, step.get("lease_id"), commit=False)
     conn.commit()
+    try:
+        from . import experience_capture
+        experience_capture.capture_failure(
+            conn, wf["task_id"], run_id=step.get("run_id"), step_id=step_id,
+            failure_class=category, actor=step.get("role_slug"))
+    except Exception:  # noqa: BLE001 —— 捕获失败不影响失败处理
+        pass
 
 
 def gates(conn: sqlite3.Connection) -> list[dict]:

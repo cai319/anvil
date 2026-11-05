@@ -20,11 +20,11 @@ from ..util import jdumps, jloads, now_iso
 
 NOTE_KINDS = {
     "task_snapshot", "vulnerability_pattern", "failure_scenario",
-    "module_knowledge", "decision", "note",
+    "module_knowledge", "decision", "note", "personal_lesson",
 }
 NOTE_SCOPES = {"task", "role", "unclassified"}
 ROLE_KINDS = ("vulnerability_pattern", "failure_scenario", "module_knowledge",
-              "decision", "note")
+              "decision", "note", "personal_lesson")
 
 _SAFE_PATH_RE = re.compile(r"^[A-Za-z0-9_./\-一-鿿]+$")
 _TEXT_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[㐀-鿿]+")
@@ -122,6 +122,19 @@ def _task_segment_map(conn: sqlite3.Connection) -> dict[str, str | None]:
     return result
 
 
+def resolve_repo_id(conn: sqlite3.Connection, repo: str | None) -> str | None:
+    """把来源主题名称解析为注册表里的 canonical repo_id；不自动创建注册表。"""
+    name = str(repo or "").strip()
+    if not name:
+        return None
+    try:
+        from . import knowledge_repos  # 惰性导入，避免与 repo_catalog 循环依赖
+        row = knowledge_repos.get(conn, name)
+    except Exception:  # noqa: BLE001 —— 旧库/迁移中表缺失时按未知处理
+        return None
+    return str(row["id"]) if row else None
+
+
 def infer_metadata(conn: sqlite3.Connection, role: str, path: str, content: str,
                    *, explicit: dict | None = None,
                    task_id_hint: str | None = None,
@@ -197,6 +210,7 @@ def infer_metadata(conn: sqlite3.Connection, role: str, path: str, content: str,
     return {
         "kind": kind, "scope": scope, "task_id": task_id,
         "source_task": source_task, "tags": tags, "repo": repo,
+        "repo_id": resolve_repo_id(conn, repo),
         "module": module, "confidence": confidence,
         "updated_at": str(explicit.get("updated_at") or now_iso()),
         "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
@@ -301,7 +315,10 @@ def _row_hit(row, snippet: str, score: float, why: list[str],
         "id": row["id"], "path": row["path"], "kind": row["kind"],
         "scope": row["scope"], "task_id": row["task_id"],
         "source_task": row["source_task"], "tags": tags,
-        "repo": row["repo"], "module": row["module"],
+        "repo": row["repo"],
+        "repo_id": row["repo_id"] if "repo_id" in row.keys() else None,
+        "repo_display": row["repo"],
+        "module": row["module"],
         "confidence": row["confidence"], "created_at": row["created_at"],
         "updated_at": row["updated_at"] or row["created_at"],
         "hit_count": row["hit_count"] if "hit_count" in row.keys() else 0,
@@ -314,12 +331,31 @@ def _row_hit(row, snippet: str, score: float, why: list[str],
             "id": row["id"], "path": row["path"], "kind": row["kind"],
             "scope": row["scope"], "task_id": row["task_id"],
             "source_task": row["source_task"], "tags": tags,
-            "repo": row["repo"], "module": row["module"],
+            "repo": row["repo"],
+            "repo_id": row["repo_id"] if "repo_id" in row.keys() else None,
+            "module": row["module"],
             "updated_at": row["updated_at"] or row["created_at"],
             "confidence": row["confidence"],
         },
         "why": why,
     }
+
+
+def _attach_repo_display(conn: sqlite3.Connection, hits: list[dict]) -> list[dict]:
+    """用注册表的当前显示名展示来源主题（rename/merge 后仍可读）；不改写 repo 原值。"""
+    ids = {str(h.get("repo_id")) for h in hits if h.get("repo_id")}
+    if not ids:
+        return hits
+    try:
+        rows = conn.execute(
+            "SELECT id, display_name FROM knowledge_repos WHERE id IN "
+            f"({','.join('?' * len(ids))})", tuple(ids)).fetchall()
+    except sqlite3.Error:
+        return hits
+    names = {str(row["id"]): row["display_name"] for row in rows}
+    for hit in hits:
+        hit["repo_display"] = names.get(str(hit.get("repo_id"))) or hit.get("repo")
+    return hits
 
 
 def _snippet(content: str, terms: list[str], chars: int) -> str:
@@ -346,38 +382,34 @@ def _parse_ts(value: str | None) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def _bound_repos(conn, task_id: str | None) -> list[str]:
+def _bound_repo_refs(conn, task_id: str | None) -> tuple[list[str], list[str]]:
     if not task_id:
-        return []
+        return [], []
     try:
         rows = conn.execute(
-            "SELECT repo FROM task_knowledge_repos WHERE task_id=? AND status='applied' "
-            "ORDER BY score DESC", (task_id,)).fetchall()
+            "SELECT repo, repo_id FROM task_knowledge_repos "
+            "WHERE task_id=? AND status='applied' ORDER BY score DESC",
+            (task_id,)).fetchall()
     except sqlite3.Error:
-        return []
-    return [str(r["repo"]) for r in rows if r["repo"]]
+        return [], []
+    names = [str(r["repo"]) for r in rows if r["repo"]]
+    ids = [str(r["repo_id"]) for r in rows if r["repo_id"]]
+    return names, ids
+
+
+def _bound_repos(conn, task_id: str | None) -> list[str]:
+    return _bound_repo_refs(conn, task_id)[0]
 
 
 def scope_repos(conn, task_id: str | None, task_repo: str | None) -> list[str] | None:
-    """任务的知识检索范围；无任务默认不过滤，可配置只看 shared。"""
-    if not task_id:
-        if (getattr(config, "KNOWLEDGE_REPOS_ENABLED", True)
-                and str(getattr(config, "KNOWLEDGE_BINDING_MODE", "auto")).lower() != "off"
-                and str(getattr(config, "KNOWLEDGE_TASKLESS_SCOPE", "all")).lower() == "shared"):
-            return ["shared"]
-        return None
-    if not task_repo:
-        row = conn.execute("SELECT repo FROM tasks WHERE id=?", (task_id,)).fetchone()
-        task_repo = row["repo"] if row else None
-    if (not getattr(config, "KNOWLEDGE_REPOS_ENABLED", True)
-            or str(getattr(config, "KNOWLEDGE_BINDING_MODE", "auto")).lower() == "off"):
-        return [task_repo, "shared"] if task_repo else None
-    bound = _bound_repos(conn, task_id)
-    if bound:
-        return list(dict.fromkeys([*bound, *([task_repo] if task_repo else []), "shared"]))
-    if task_repo:
-        return [task_repo, "shared"]
-    return ["shared"]
+    """任务的知识检索范围；委托给 knowledge_binding.retrieval_scope。
+
+    无任务默认不过滤（legacy），可配置只看 shared。`task_repo` 现在是知识主题，
+    不再作为执行仓库参与检索。
+    """
+    from . import knowledge_binding
+    task = {"id": task_id, "repo": task_repo} if task_id else None
+    return knowledge_binding.retrieval_scope(conn, task).get("repos")
 
 
 def _task_context(conn, task_id: str | None) -> dict:
@@ -394,11 +426,14 @@ def _task_context(conn, task_id: str | None) -> dict:
     for path in scope_paths:
         parts = [p for p in path.split("/") if p and p not in ("*", "**")]
         modules.update(parts[:2])
+    bound_repos, bound_repo_ids = _bound_repo_refs(conn, task_id)
     return {
         "title": str(row["title"] or ""), "tags": tags,
-        "repo": row["repo"], "type": row["type"],
+        "repo": row["repo"], "repo_id": resolve_repo_id(conn, row["repo"]),
+        "type": row["type"],
         "scope_paths": scope_paths, "modules": modules,
-        "bound_repos": _bound_repos(conn, task_id),
+        "bound_repos": bound_repos,
+        "bound_repo_ids": bound_repo_ids,
     }
 
 
@@ -412,7 +447,9 @@ def _rank(candidates: list[dict], task_ctx: dict, limit: int,
     task_tags = {str(t).lower() for t in task_ctx.get("tags") or []}
     task_modules = {m.lower() for m in task_ctx.get("modules") or set()}
     repo = (task_ctx.get("repo") or "").lower()
+    repo_id = task_ctx.get("repo_id")
     bound_repos = {str(x).lower() for x in task_ctx.get("bound_repos") or []}
+    bound_repo_ids = {str(x) for x in task_ctx.get("bound_repo_ids") or []}
     now = datetime.now(timezone.utc)
     for c in candidates:
         r_lex = (c["_lex"] - lo) / span if span > 0 else 0.5
@@ -420,18 +457,23 @@ def _rank(candidates: list[dict], task_ctx: dict, limit: int,
         tag_hits = len(note_tags & task_tags)
         r_tag = tag_hits / max(1, len(task_tags)) if task_tags else 0.0
         owner_repo = (c.get("repo") or "").lower()
-        if bound_repos:
-            # 多 repo：执行仓库优先，绑定的知识仓库次之，shared 再次之。
-            if repo and owner_repo == repo:
+        owner_repo_id = c.get("repo_id")
+        if bound_repo_ids or repo_id or bound_repos or repo:
+            # 主知识主题优先，其次绑定主题库，shared 再次；旧数据回退到名称匹配。
+            if repo_id and owner_repo_id == repo_id:
                 r_repo = 1.0
-            elif owner_repo and owner_repo in bound_repos:
+            elif owner_repo_id and owner_repo_id in bound_repo_ids:
+                r_repo = 0.85
+            elif not owner_repo_id and repo and owner_repo == repo:
+                r_repo = 1.0
+            elif not owner_repo_id and owner_repo and owner_repo in bound_repos:
                 r_repo = 0.85
             elif owner_repo == "shared":
                 r_repo = 0.5
             else:
                 r_repo = 0.0
         else:
-            r_repo = 1.0 if repo and owner_repo == repo else 0.0
+            r_repo = 0.0
         module_tokens = set()
         if c.get("module"):
             module_tokens.update(str(c["module"]).lower().split("/"))
@@ -445,6 +487,7 @@ def _rank(candidates: list[dict], task_ctx: dict, limit: int,
         r_kind = {
             "vulnerability_pattern": 1.0, "failure_scenario": 1.0,
             "module_knowledge": 0.9, "decision": 0.7, "note": 0.5,
+            "personal_lesson": 0.85,
         }.get(kind, 0.0)
         same_task = 1.0 if task_id and (
             c.get("task_id") == task_id or c.get("source_task") == task_id) else 0.0
@@ -562,7 +605,9 @@ def search_knowledge(conn: sqlite3.Connection, role_slug: str, query: str, *,
                      repo_scope: str = "any",
                      repos: tuple[str, ...] | list[str] | None = None,
                      limit: int = 8,
-                     snippet_chars: int = 400) -> list[dict]:
+                     snippet_chars: int = 400,
+                     min_score: float = 0.0,
+                     allow_empty: bool = True) -> list[dict]:
     """检索角色知识；任务隔离在 SQL 与后置过滤两层执行。
 
     `include_task_snapshots` 是设计文档里的参数名，保留为
@@ -623,7 +668,7 @@ def search_knowledge(conn: sqlite3.Connection, role_slug: str, query: str, *,
         existing = {r["id"] for r in rows}
         rows.extend(r for r in like_rows if r["id"] not in existing)
     if not rows:
-        if terms:
+        if terms or not allow_empty:
             return []
         # No usable query: recent scoped notes, useful for browsing/index.
         sql = (
@@ -642,10 +687,19 @@ def search_knowledge(conn: sqlite3.Connection, role_slug: str, query: str, *,
         content = str(row["content"] or "")
         cand = dict(row)
         cand["tags"] = jloads(row["tags_json"], [])
+        if not cand.get("repo_id") and cand.get("repo"):
+            cand["repo_id"] = resolve_repo_id(conn, cand["repo"])
         cand["_lex"] = (-float(row["bm25"])) if row["bm25"] is not None else 0.3
         cand["snippet"] = _snippet(content, terms, snippet_chars)
         candidates.append(cand)
-    return _rank(candidates, task_ctx, limit, snippet_chars, task_id)
+    ranked = _rank(candidates, task_ctx, limit, snippet_chars, task_id)
+    if min_score > 0:
+        # 当前任务的 task-scoped 知识即使分数略低也保留（它就是这个任务的事实）；
+        # 跨任务 role 知识才受阈值约束。
+        ranked = [h for h in ranked
+                  if float(h.get("score") or 0) >= float(min_score)
+                  or (task_id and h.get("task_id") == task_id)]
+    return _attach_repo_display(conn, ranked)
 
 
 def latest_task_snapshot(conn: sqlite3.Connection, role_slug: str,
@@ -658,8 +712,9 @@ def latest_task_snapshot(conn: sqlite3.Connection, role_slug: str,
     if row is None:
         return None
     content = str(row["content"] or "")
-    return _row_hit(row, content[:4000], 1.0, ["task_snapshot"],
-                    snippet_chars=4000)
+    hit = _row_hit(row, content[:4000], 1.0, ["task_snapshot"],
+                   snippet_chars=4000)
+    return _attach_repo_display(conn, [hit])[0]
 
 
 def get_knowledge(conn: sqlite3.Connection, role_slug: str, note_id: str, *,
@@ -674,7 +729,8 @@ def get_knowledge(conn: sqlite3.Connection, role_slug: str, note_id: str, *,
         if not include_task_scope and (task_id is None or row["task_id"] != task_id):
             return None
     content = str(row["content"] or "")
-    return _row_hit(row, content[:4000], 1.0, ["show"], snippet_chars=4000)
+    hit = _row_hit(row, content[:4000], 1.0, ["show"], snippet_chars=4000)
+    return _attach_repo_display(conn, [hit])[0]
 
 
 def knowledge_index(conn: sqlite3.Connection, role_slug: str,
@@ -689,9 +745,12 @@ def knowledge_index(conn: sqlite3.Connection, role_slug: str,
             "AND scope='task' AND task_id=? GROUP BY kind",
             (role_slug, task_id)).fetchall()}
     top = conn.execute(
-        "SELECT id, path, kind, repo, updated_at, hit_count, last_hit_at FROM notes "
-        "WHERE role_slug=? AND scope='role' "
-        "ORDER BY COALESCE(updated_at, created_at) DESC LIMIT 8",
+        "SELECT n.id, n.path, n.kind, n.repo, n.repo_id, "
+        "COALESCE(kr.display_name, n.repo) AS repo_display, "
+        "n.updated_at, n.hit_count, n.last_hit_at "
+        "FROM notes n LEFT JOIN knowledge_repos kr ON kr.id=n.repo_id "
+        "WHERE n.role_slug=? AND n.scope='role' "
+        "ORDER BY COALESCE(n.updated_at, n.created_at) DESC LIMIT 8",
         (role_slug,)).fetchall()
     return {
         "role_counts": role_counts, "task_counts": task_counts,
@@ -706,10 +765,15 @@ def _format_hit(hit: dict, max_chars: int = 500) -> str:
     meta = f"{hit.get('kind')}"
     if hit.get("scope") == "task":
         meta += " · task"
-    if hit.get("repo"):
-        meta += f" · repo={hit['repo']}"
+    if hit.get("repo_display") or hit.get("repo"):
+        meta += f" · 来源主题={hit.get('repo_display') or hit.get('repo')}"
     if tags:
         meta += f" · tags={tags}"
+    if hit.get("confidence") is not None:
+        try:
+            meta += f" · conf={float(hit['confidence']):.2f}"
+        except (TypeError, ValueError):
+            pass
     if hit.get("updated_at"):
         meta += f" · {str(hit['updated_at'])[:19]}"
     return f"- [{meta}] {str(hit.get('snippet') or '')[:max_chars]} (path: {hit.get('path')})"
@@ -792,40 +856,76 @@ def step_knowledge_hint(conn: sqlite3.Connection, role_slug: str,
     return text[:max_chars]
 
 
-def pack_blocks(blocks: list[dict], max_chars: int,
-                reserve_index_chars: int = 0) -> str:
-    """按 priority 打包上下文块，按 order 输出。
+def _block_name(block: dict) -> str:
+    if block.get("name"):
+        return str(block["name"])
+    first = str(block.get("text") or "").strip().splitlines()[0] if block.get("text") else ""
+    return first[:80] or "block"
 
-    - priority 越小越先保留（关键块先占预算）；order 只决定最终展示顺序；
-    - 每个块有 cap/min；预算不足时低优先级块先被丢弃；
-    - truncate="tail" 用于最近消息：保留头部标题与最新内容，丢掉较旧的行。
-    """
+
+def pack_blocks_with_manifest(blocks: list[dict], max_chars: int,
+                              reserve_index_chars: int = 0) -> tuple[str, list[dict]]:
+    """打包上下文块，同时返回每块的注入/丢弃元数据（供 context_manifest）。"""
     indexed = list(enumerate(blocks))
     indexed.sort(key=lambda pair: (int(pair[1].get("priority", 100)), pair[0]))
     budget = max(0, int(max_chars) - int(reserve_index_chars))
     selected: list[tuple[int, int, str]] = []
+    manifest: list[dict] = []
     used = 0
     for idx, block in indexed:
-        text = str(block.get("text") or "")
-        if not text:
+        raw = str(block.get("text") or "")
+        entry = {
+            "name": _block_name(block),
+            "layer": block.get("layer"),
+            "kind": block.get("kind"),
+            "scope": block.get("scope"),
+            "tags": block.get("tags") or [],
+            "score": block.get("score"),
+            "priority": int(block.get("priority", 100)),
+            "order": int(block.get("order", block.get("priority", 100))),
+            "source_ids": block.get("source_ids") or [],
+            "path": block.get("path"),
+        }
+        if not raw:
+            entry.update({"chars": 0, "injected": False, "reason": "empty"})
+            manifest.append(entry)
             continue
-        cap = max(0, int(block.get("cap") or len(text)))
-        minimum = min(int(block.get("min") or 0), len(text))
+        cap = max(0, int(block.get("cap") or len(raw)))
+        minimum = min(int(block.get("min") or 0), len(raw))
         available = budget - used
         if available < minimum:
+            entry.update({"chars": 0, "injected": False, "reason": "budget"})
+            manifest.append(entry)
             continue
-        take = min(cap, len(text), available)
+        take = min(cap, len(raw), available)
         if take <= 0:
+            entry.update({"chars": 0, "injected": False, "reason": "budget"})
+            manifest.append(entry)
             continue
         truncate = str(block.get("truncate") or "head")
-        text = _truncate_block(text, take, truncate, minimum)
+        text = _truncate_block(raw, take, truncate, minimum)
         if not text:
+            entry.update({"chars": 0, "injected": False, "reason": "empty"})
+            manifest.append(entry)
             continue
         order = int(block.get("order", block.get("priority", 100)))
         selected.append((order, idx, text))
+        entry.update({
+            "chars": len(text), "injected": True,
+            "truncated": len(text) < len(raw),
+            "reason": "truncated" if len(text) < len(raw) else "included",
+        })
+        manifest.append(entry)
         used += len(text) + 2
     selected.sort(key=lambda item: (item[0], item[1]))
-    return "\n\n".join(text for _order, _idx, text in selected)[:max_chars]
+    text = "\n\n".join(t for _order, _idx, t in selected)[:max_chars]
+    return text, manifest
+
+
+def pack_blocks(blocks: list[dict], max_chars: int,
+                reserve_index_chars: int = 0) -> str:
+    """按 priority 打包上下文块，按 order 输出（兼容旧调用）。"""
+    return pack_blocks_with_manifest(blocks, max_chars, reserve_index_chars)[0]
 
 
 def _truncate_block(text: str, take: int, mode: str, minimum: int) -> str:
@@ -911,6 +1011,12 @@ def reindex_notes(conn: sqlite3.Connection, role_slug: str, *,
             conn, role_slug, rel, body, explicit=meta, for_reindex=True)
         seen.add(rel)
         old = existing.get(rel)
+        if old is not None and not inferred.get("repo") and old["repo"]:
+            # 旧文件没有 repo 元数据时，保留索引里的来源主题，避免 reindex 丢溯源。
+            inferred["repo"] = old["repo"]
+            inferred["repo_id"] = (
+                old["repo_id"] if "repo_id" in old.keys() else None
+            ) or resolve_repo_id(conn, old["repo"])
         if old is not None and old["content_hash"] == inferred["content_hash"] \
                 and old["kind"] == inferred["kind"] and old["scope"] == inferred["scope"] \
                 and old["task_id"] == inferred["task_id"]:
@@ -941,17 +1047,17 @@ def reindex_notes(conn: sqlite3.Connection, role_slug: str, *,
                   and (practice_task_id or practice_run_id) else None))
         conn.execute(
             "INSERT INTO notes (id, role_slug, path, content, created_at, kind, scope, "
-            "task_id, source_task, tags_json, repo, module, confidence, updated_at, "
-            "source, content_hash, title, tldr, fields_json, practice_task_id, "
-            "practice_run_id, outcome, verified_at, status, source_knowledge_json, "
-            "hit_count, last_hit_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "task_id, source_task, tags_json, repo, repo_id, module, confidence, "
+            "updated_at, source, content_hash, title, tldr, fields_json, "
+            "practice_task_id, practice_run_id, outcome, verified_at, status, "
+            "source_knowledge_json, hit_count, last_hit_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (hashlib.sha1(f"{role_slug}:{rel}:{inferred['content_hash']}".encode())
              .hexdigest()[:16], role_slug, rel, body, inferred["updated_at"],
              inferred["kind"], inferred["scope"], inferred["task_id"],
              inferred["source_task"], jdumps(inferred["tags"]), inferred["repo"],
-             inferred["module"], inferred["confidence"], inferred["updated_at"],
-             "reindex", inferred["content_hash"], title, tldr,
+             inferred.get("repo_id"), inferred["module"], inferred["confidence"],
+             inferred["updated_at"], "reindex", inferred["content_hash"], title, tldr,
              old["fields_json"] if old is not None else "{}",
              practice_task_id, practice_run_id, outcome, verified_at, status,
              old["source_knowledge_json"] if old is not None else "[]",

@@ -87,6 +87,7 @@ class Scheduler:
             ("reap_dead_runs", lambda: self._reap_dead_runs(conn)),
             ("reap_orphaned_step_runs", lambda: self._reap_orphaned_step_runs(conn)),
             ("reap_stalled_phases", lambda: self._reap_stalled_phases(conn)),
+            ("cleanup_workspaces", lambda: self._cleanup_workspaces(conn)),
             ("reconcile", lambda: self._reconcile(conn)),
         )
         try:
@@ -102,6 +103,27 @@ class Scheduler:
         finally:
             conn.close()
         publish("tick", {})  # 通知前端刷新运行/任务状态
+
+    def _cleanup_workspaces(self, conn: sqlite3.Connection) -> None:
+        """每天清理一次过期 task workspace；跳过 active/busy 槽。"""
+        if not config.TASK_WORKSPACE_ENABLED or not config.TASK_WORKSPACE_CLEANUP_ENABLED:
+            return
+        today = datetime.now(timezone.utc).date().isoformat()
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key='workspace.cleanup_date'").fetchone()
+        if row is not None and row["value"] == today:
+            return
+        from .services import task_workspace
+        result = task_workspace.cleanup_stale(conn)
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            ("workspace.cleanup_date", today, now_iso()),
+        )
+        conn.commit()
+        if result.get("removed"):
+            logger.info("workspace cleanup removed=%s skipped=%s",
+                        len(result["removed"]), len(result["skipped"]))
 
     def _backup_daily(self) -> None:
         """每天一次 SQLite 在线备份，并清理超过保留期的备份。"""

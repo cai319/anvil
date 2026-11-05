@@ -22,9 +22,11 @@ from pathlib import Path
 from langgraph.types import interrupt
 
 from .. import config
+from .. import config as app_config
 from ..db import open_conn
 from ..platform import factory
 from ..services import (
+    context_manifest as context_manifest_service,
     knowledge as knowledge_service,
     memory as memory_service,
     roles as roles_service,
@@ -94,6 +96,16 @@ def _persistent_session(conn: sqlite3.Connection, effective: dict) -> dict | Non
     return {"definition": definition, "session": sess, "runtime_id": runtime_id}
 
 
+def _workspace_env(role_slug: str, workspace_path: str) -> dict:
+    """运行时目录边界：任务 workspace（可写）/ 角色 home（私有）/ 知识库（只读）。"""
+    return {
+        "ANVIL_ROLE_HOME": str(config.AGENTS_DIR / role_slug),
+        "ANVIL_TASK_WORKSPACE": str(workspace_path),
+        "ANVIL_KNOWLEDGE_ROOT": str(config.KNOWLEDGE_REPOS_DIR),
+        "ANVIL_CHANNEL_ROOT": str(config.CHANNELS_DIR),
+    }
+
+
 def _render_persistent(conn: sqlite3.Connection, run: dict, task: dict | None,
                        effective: dict, role: dict, workspace_path: str):
     """常驻模式的启动模板：args_new / args_resume 由 daemon 在 spawn 时按 session_id 渲染。"""
@@ -124,6 +136,7 @@ def _render_persistent(conn: sqlite3.Connection, run: dict, task: dict | None,
     }
     cwd = render.render_template(str(inv.get("cwd") or workspace_path), ctx)
     env = {k: render.render_template(str(v), ctx) for k, v in (inv.get("env") or {}).items()}
+    env.update(_workspace_env(run["role_slug"], workspace_path))
     return (
         executable,
         list(sess.get("args_new") or []),
@@ -133,10 +146,24 @@ def _render_persistent(conn: sqlite3.Connection, run: dict, task: dict | None,
     )
 
 
-def _workspace_path(run: dict, role: dict) -> str:
+def _task_workspace_path(conn: sqlite3.Connection, run: dict) -> str:
+    """任务数据存储目录（不是知识库）；无 task_id 时返回空串。"""
+    task_id = run.get("task_id")
+    if not task_id:
+        return ""
+    from ..services import task_workspace as task_workspace_service
+    return task_workspace_service.resolve(conn, task_id, create=True)
+
+
+def _workspace_path(run: dict, role: dict, conn: sqlite3.Connection | None = None) -> str:
+    """执行目录优先级：run worktree → task workspace → 角色 home。"""
     wt = run.get("worktree_path")
     if wt and Path(wt).exists():
         return wt
+    if conn is not None:
+        tw = _task_workspace_path(conn, run)
+        if tw:
+            return tw
     return role.get("home_path") or str(config.AGENTS_DIR / run["role_slug"])
 
 
@@ -145,21 +172,33 @@ def _run_workspace_path(conn: sqlite3.Connection, run: dict, role: dict,
     """常驻运行：同一 (role, task) 复用第一次确定的 workspace/cwd。
 
     Claude Code 的会话按 cwd 分目录；如果每个 run 都建新 worktree，--resume 会
-    找不到旧会话。这里优先读取任务上下文槽里记录的 workspace_path。
+    找不到旧会话。优先级：
+    1) 该任务槽已记录的 workspace（且不是旧的共享角色 home）；
+    2) 本次 run 的 worktree（代码任务）；
+    3) 任务 workspace（每任务独立数据目录）；
+    4) 角色 home（回退/无任务运行）。
+    旧槽指向角色 home 时会被忽略，首次唤醒触发一次 CIC 轮换。
     """
+    role_home = str(role.get("home_path") or "")
     if _persistent_session(conn, effective) and run.get("task_id"):
         row = conn.execute(
             "SELECT workspace_path FROM role_task_sessions "
             "WHERE role_slug=? AND task_key=?",
             (run["role_slug"], run["task_id"]),
         ).fetchone()
-        # sqlite3.Row 没有 .get()；缺失列/值为 NULL 时按无槽处理。
         slot_ws = row["workspace_path"] if row is not None else None
         if slot_ws:
             p = Path(slot_ws)
-            if p.exists():
+            # 旧数据把角色 home 当作任务 workspace；迁移到 per-task dir。
+            if p.exists() and str(p) != role_home:
                 return str(p)
-    return _workspace_path(run, role)
+    wt = run.get("worktree_path")
+    if wt and Path(wt).exists():
+        return wt
+    tw = _task_workspace_path(conn, run)
+    if tw:
+        return tw
+    return role_home or str(config.AGENTS_DIR / run["role_slug"])
 
 
 def _instruction_md(role: dict) -> str:
@@ -392,6 +431,7 @@ def _render_invocation(conn: sqlite3.Connection, run: dict, task: dict | None,
     args = [render.render_template(str(a), ctx) for a in inv.get("args", [])]
     cwd = render.render_template(str(inv.get("cwd") or workspace_path), ctx)
     env = {k: render.render_template(str(v), ctx) for k, v in (inv.get("env") or {}).items()}
+    env.update(_workspace_env(run["role_slug"], workspace_path))
     return executable, args, cwd, env, timeout
 
 
@@ -495,36 +535,102 @@ def _allow_entries(allowlist: list[dict]) -> list[str]:
     return entries
 
 
+def _project_run(conn: sqlite3.Connection, run: dict, *,
+                 mark_status: bool = True) -> None:
+    """执行一次投影（CLAUDE.md/AGENTS.md + skills/MCP）；幂等。"""
+    run_id = run["id"]
+    role = roles_service.get(conn, run["role_slug"]) or {}
+    task = _task(conn, run.get("task_id"))
+    effective = _effective(conn, run)
+    workspace_path = _run_workspace_path(conn, run, role, effective)
+    proj = effective.get("projection") or {}
+    ctx = memory_service.context_for_task(conn, run["role_slug"], task)
+    # projection.instruction.target 由运行时 YAML 决定（Claude→CLAUDE.md，Codex→AGENTS.md…）
+    target_tpl = ((proj.get("instruction") or {}).get("target")
+                  or "{{workspace_path}}/CLAUDE.md")
+    target = Path(render.render_template(str(target_tpl), {"workspace_path": workspace_path}))
+    render.project_instruction(
+        target, _instruction_md(role), task or {},
+        system_prompt=proj.get("system_prompt") or "",
+        responsibilities=proj.get("responsibilities") or [],
+        capabilities=ctx.get("capabilities", ""),
+        memory=ctx["memory"], snapshot=ctx.get("snapshot", ""),
+        notes=ctx["notes"], lessons=ctx["lessons"],
+        channel_knowledge=ctx.get("channel_knowledge", ""),
+        task_knowledge=ctx.get("task_knowledge", ""),
+        topic_knowledge=ctx.get("topic_knowledge", ""),
+        knowledge_repos=ctx.get("knowledge_repos"),
+        prompt=run.get("prompt") or "",
+        protocol=_protocol_for_run(conn, run),
+    )
+    _project_catalog(conn, effective, workspace_path, run["role_slug"])
+    if app_config.CONTEXT_MANIFEST_ENABLED:
+        memory = str(ctx.get("memory") or "")
+        notes = "\n".join(str(x) for x in (ctx.get("notes") or []))
+        lessons = "\n".join(str(x) for x in (ctx.get("lessons") or []))
+        manifest = [
+            {"name": "identity", "layer": "L0", "kind": "identity",
+             "chars": len(str(proj.get("system_prompt") or "")) + len(_instruction_md(role))},
+            {"name": "capabilities", "layer": "L0", "kind": "capabilities",
+             "scope": "role", "chars": len(str(ctx.get("capabilities") or ""))},
+            {"name": "role_principles", "layer": "L3", "kind": "principles",
+             "scope": "role", "source_ids": [run["role_slug"]], "chars": len(memory)},
+            {"name": "related_knowledge", "layer": "L2", "kind": "knowledge",
+             "scope": "role_or_task", "chars": len(notes)},
+            {"name": "topic_knowledge", "layer": "L2", "kind": "topic_knowledge",
+             "scope": "topic",
+             "chars": len(str(ctx.get("topic_knowledge") or ""))},
+            {"name": "shared_lessons", "layer": "L4", "kind": "lesson",
+             "scope": "shared", "chars": len(lessons)},
+            {"name": "channel_knowledge", "layer": "L1", "kind": "channel_knowledge",
+             "scope": "channel", "chars": len(str(ctx.get("channel_knowledge") or ""))},
+            {"name": "task_knowledge", "layer": "L1", "kind": "task_knowledge",
+             "scope": "task", "chars": len(str(ctx.get("task_knowledge") or ""))},
+            {"name": "task", "layer": "L1", "kind": "task",
+             "scope": "task", "source_ids": [task.get("id")] if task else [],
+             "chars": len(str((task or {}).get("description") or ""))},
+            {"name": "protocol", "layer": "L0", "kind": "protocol",
+             "chars": len(_protocol_for_run(conn, run))},
+        ]
+        try:
+            context_manifest_service.record(
+                conn, run_id=run_id, role_slug=run["role_slug"],
+                task_id=run.get("task_id"), kind="projection",
+                budget_chars=0, total_chars=sum(int(b["chars"]) for b in manifest),
+                blocks=manifest)
+            conn.commit()
+        except Exception:  # noqa: BLE001 —— manifest 失败不影响投影
+            pass
+    if mark_status:
+        runs_service.set_status(conn, run_id, "projecting")
+
+
+def project_run_by_path(db_path: str, run_id: str) -> bool:
+    """供 daemon 在实际投递前调用：打开独立连接投影一次，幂等。"""
+    conn = open_conn(db_path)
+    try:
+        run = _run(conn, run_id)
+        if not run or run.get("native_session_id"):
+            return False
+        _project_run(conn, run, mark_status=False)
+        return True
+    finally:
+        conn.close()
+
+
 def project_node(state: dict, config) -> dict:
     run_id, conn = _ctx(config)
     try:
         run = _run(conn, run_id)
         if not run or run.get("native_session_id"):
             return {}  # 已 spawn 过（重入守卫）或 run 不存在
-        role = roles_service.get(conn, run["role_slug"]) or {}
-        task = _task(conn, run.get("task_id"))
         effective = _effective(conn, run)
-        workspace_path = _run_workspace_path(conn, run, role, effective)
-        proj = effective.get("projection") or {}
-        ctx = memory_service.context_for_task(conn, run["role_slug"], task)
-        # projection.instruction.target 由运行时 YAML 决定（Claude→CLAUDE.md，Codex→AGENTS.md…）
-        target_tpl = ((proj.get("instruction") or {}).get("target")
-                      or "{{workspace_path}}/CLAUDE.md")
-        target = Path(render.render_template(str(target_tpl), {"workspace_path": workspace_path}))
-        render.project_instruction(
-            target, _instruction_md(role), task or {},
-            system_prompt=proj.get("system_prompt") or "",
-            responsibilities=proj.get("responsibilities") or [],
-            memory=ctx["memory"], snapshot=ctx.get("snapshot", ""),
-            notes=ctx["notes"], lessons=ctx["lessons"],
-            channel_knowledge=ctx.get("channel_knowledge", ""),
-            task_knowledge=ctx.get("task_knowledge", ""),
-            knowledge_repos=ctx.get("knowledge_repos"),
-            prompt=run.get("prompt") or "",
-            protocol=_protocol_for_run(conn, run),
-        )
-        _project_catalog(conn, effective, workspace_path, run["role_slug"])
-        runs_service.set_status(conn, run_id, "projecting")
+        # 持久会话：投影推迟到 daemon 实际投递前，避免排队任务覆盖正在执行任务的
+        # 共享 CLAUDE.md/.claude。one-shot 仍在此投影。
+        if app_config.DEFERRED_PROJECTION and _persistent_session(conn, effective):
+            runs_service.set_status(conn, run_id, "projecting")
+            return {}
+        _project_run(conn, run)
         return {}
     finally:
         conn.close()

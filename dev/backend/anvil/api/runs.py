@@ -240,3 +240,13 @@ def release_run(rid: str, conn=Depends(get_db), auth: Auth = Depends(require_hum
     services.runs.set_native_session(conn, rid, None)
     services.runs.set_status(conn, rid, "abandoned", ended_at=now_iso())
     return None
+
+
+@router.get("/runs/{rid}/context-manifest")
+def context_manifest(rid: str, kind: str | None = None,
+                     conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    """本次 run 的 CIC/投影上下文清单（只含来源/预算元数据，不含正文）。"""
+    rows = services.context_manifest.list_for_run(conn, rid, kind=kind)
+    if not rows:
+        raise HTTPException(status_code=404, detail="context manifest not found")
+    return rows

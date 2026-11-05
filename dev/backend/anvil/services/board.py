@@ -745,6 +745,10 @@ def _land_tree(conn: sqlite3.Connection, node: dict, parent_id: str | None,
                 "INSERT OR IGNORE INTO task_assignees (task_id, role_slug, joined_at) VALUES (?,?,?)",
                 (tid, child["role"], now),
             )
+        from . import task_workspace
+        ws = task_workspace.ensure(
+            conn, tid, source_repo=repo, base_branch=base_branch,
+            create_dir=False, commit=False)
         try:
             if "knowledge_repos" in child or "knowledge_repos" in defaults:
                 selection = child["knowledge_repos"] if "knowledge_repos" in child else defaults.get("knowledge_repos")
@@ -755,8 +759,9 @@ def _land_tree(conn: sqlite3.Connection, node: dict, parent_id: str | None,
             else:
                 knowledge_binding.auto_bind(conn, {
                     "id": tid, "title": child.get("title", ""), "description": desc,
-                    "tags": tags, "repo": repo, "workspace_id": workspace_id,
-                    "parent_id": parent_id,
+                    "tags": tags, "repo": repo, "source_repo": repo,
+                    "workspace_id": workspace_id, "parent_id": parent_id,
+                    "workspace_path": ws.get("path") or "",
                 }, commit=False)
         except Exception:  # noqa: BLE001 —— 绑定失败不能阻断落板
             pass

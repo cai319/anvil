@@ -16,6 +16,10 @@ FULL_CONVENTION = {
     "examples": ["新增 /tasks 字段时更新 openapi.json"],
     "verification": "评审时检查 diff 是否包含文档变更。",
     "exceptions": "纯内部重构、不影响接口签名时可豁免。",
+    "use_when": "当前频道下的接口变更任务",
+    "expected_effect": "避免接口漂移，减少评审返工",
+    "evidence": "评审 diff 与 OpenAPI 变更记录",
+    "effect_type": "reduce_rework",
 }
 
 
@@ -437,6 +441,9 @@ async def test_review_candidates_report_aging_signals(client):
                     "examples": [f"{title}示例"],
                     "verification": f"{title}验证方式",
                     "exceptions": f"{title}例外情况",
+                    "use_when": "当前频道的同类任务",
+                    "expected_effect": "减少口径不一致与返工",
+                    "evidence": "任务评审记录",
                 },
                 **extra,
             },
@@ -535,6 +542,7 @@ async def test_list_filters(client):
             "title": "决策一", "tldr": "t", "kind": "decision",
             "fields": {
                 "context": "c", "decision": "d", "alternatives": ["a"], "consequences": "q",
+                "use_when": "测试场景", "expected_effect": "减少返工", "evidence": "测试证据",
             },
         },
         headers=human_headers(),

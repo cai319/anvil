@@ -27,6 +27,7 @@ def _mode() -> str:
 
 
 def _binding_row(row) -> dict:
+    keys = row.keys() if hasattr(row, "keys") else []
     return {
         "repo": row["repo"],
         "source": row["source"],
@@ -35,6 +36,10 @@ def _binding_row(row) -> dict:
         "score": float(row["score"] or 0),
         "matched_tags": jloads(row["matched_tags_json"] or "[]", []),
         "reason": row["reason"],
+        "scope": row["scope"] if "scope" in keys and row["scope"] else "shared",
+        "repo_id": row["repo_id"] if "repo_id" in keys else None,
+        "path": row["path"] if "path" in keys else None,
+        "is_primary": bool(row["is_primary"]) if "is_primary" in keys else False,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -152,14 +157,27 @@ def set_manual(conn: sqlite3.Connection, task_id: str, values: Any, *,
     refs = _refs(values)
     conn.execute("DELETE FROM task_knowledge_repos WHERE task_id=?", (task_id,))
     now = now_iso()
-    for ref in refs:
+    from . import knowledge_repos
+    for idx, ref in enumerate(refs):
+        repo_row = knowledge_repos.ensure(
+            conn, ref["repo"], created_by=source, commit=False)
         conn.execute(
             "INSERT INTO task_knowledge_repos "
             "(task_id, repo, source, status, confidence, score, matched_tags_json, reason, "
-            "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " scope, repo_id, is_primary, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (task_id, ref["repo"], source if source in _SOURCES else "human", "applied",
-             1.0, 1.0, "[]", ref.get("reason") or "人工指定", now, now),
+             1.0, 1.0, "[]", ref.get("reason") or "人工指定",
+             "shared", repo_row["id"], 1 if idx == 0 else 0, now, now),
         )
+    if refs:
+        conn.execute(
+            "UPDATE tasks SET repo=?, knowledge_mode='bound', updated_at=? WHERE id=?",
+            (refs[0]["repo"], now, task_id))
+    else:
+        conn.execute(
+            "UPDATE tasks SET repo=NULL, knowledge_mode='temp', updated_at=? WHERE id=?",
+            (now, task_id))
     if lock:
         conn.execute("UPDATE tasks SET knowledge_repos_locked=1, updated_at=? WHERE id=?",
                      (now, task_id))
@@ -264,6 +282,42 @@ def auto_bind(conn: sqlite3.Connection, task: dict, *, commit: bool = True) -> d
                 _replace_rows(conn, task_id, inherited, ("inherited",))
                 applied = inherited
 
+        # Phase 1：把绑定落到主题知识库注册表 / 任务级 local repo。
+        from . import knowledge_repos
+        for row in [*applied, *suggested]:
+            repo_row = knowledge_repos.ensure(
+                conn, row["repo"], created_by="auto", commit=False)
+            conn.execute(
+                "UPDATE task_knowledge_repos SET scope='shared', repo_id=? "
+                "WHERE task_id=? AND repo=?",
+                (repo_row["id"], task_id, row["repo"]))
+        if applied:
+            primary = applied[0]["repo"]
+            conn.execute(
+                "UPDATE task_knowledge_repos SET is_primary=CASE WHEN repo=? THEN 1 ELSE 0 END "
+                "WHERE task_id=?", (primary, task_id))
+            conn.execute(
+                "UPDATE tasks SET repo=?, knowledge_mode='bound', updated_at=? WHERE id=?",
+                (primary, now_iso(), task_id))
+        else:
+            create_mode = str(getattr(config, "KNOWLEDGE_REPO_CREATE_MODE", "auto")).lower()
+            threshold = float(getattr(config, "KNOWLEDGE_REPO_CREATE_THRESHOLD", 0.5))
+            signal = bool(has_tags or task.get("repo")
+                          or len(str(task.get("description") or "")) >= 80)
+            if (mode == "auto" and create_mode != "off"
+                    and top_score < threshold and signal):
+                try:
+                    knowledge_repos.create_local_for_task(
+                        conn, {**task, "id": task_id},
+                        workspace_path=str(task.get("workspace_path") or ""),
+                        commit=False)
+                except Exception:  # noqa: BLE001 —— 建目录失败不阻断任务
+                    pass
+            elif not applied:
+                conn.execute(
+                    "UPDATE tasks SET repo=NULL, knowledge_mode='temp', updated_at=? "
+                    "WHERE id=?", (now_iso(), task_id))
+
         _audit(conn, task_id, "task.knowledge_bind", {
             "mode": mode,
             "applied": [r["repo"] for r in applied],
@@ -315,6 +369,22 @@ def apply_cindy_draft(conn: sqlite3.Connection, task_id: str, tree: dict, *,
         "reason": ref.get("reason") or "Cindy 选择",
     } for ref in refs]
     _replace_rows(conn, task_id, rows, ("cindy",))
+    from . import knowledge_repos
+    for row in rows:
+        repo_row = knowledge_repos.ensure(
+            conn, row["repo"], created_by="cindy", commit=False)
+        conn.execute(
+            "UPDATE task_knowledge_repos SET scope='shared', repo_id=? "
+            "WHERE task_id=? AND repo=?",
+            (repo_row["id"], task_id, row["repo"]))
+    if rows:
+        primary = rows[0]["repo"]
+        conn.execute(
+            "UPDATE task_knowledge_repos SET is_primary=CASE WHEN repo=? THEN 1 ELSE 0 END "
+            "WHERE task_id=?", (primary, task_id))
+        conn.execute(
+            "UPDATE tasks SET repo=?, knowledge_mode='bound', updated_at=? WHERE id=?",
+            (primary, now_iso(), task_id))
     _audit(conn, task_id, "task.knowledge_bind_cindy", {
         "repos": refs, "tags": tags,
     })
@@ -386,19 +456,29 @@ def retrieval_scope(conn: sqlite3.Connection, task: dict | None) -> dict:
         return {"mode": "any", "repos": None, "repo": None}
     try:
         rows = conn.execute(
-            "SELECT repo FROM task_knowledge_repos WHERE task_id=? AND status='applied' "
-            "ORDER BY score DESC", (task["id"],)
+            "SELECT repo, repo_id, scope, path, is_primary FROM task_knowledge_repos "
+            "WHERE task_id=? AND status='applied' "
+            "ORDER BY is_primary DESC, score DESC, repo", (task["id"],)
         ).fetchall()
     except sqlite3.Error:
         rows = []
-    bound = [r["repo"] for r in rows]
-    exec_repo = task.get("repo")
-    if not exec_repo:
-        row = conn.execute("SELECT repo FROM tasks WHERE id=?", (task["id"],)).fetchone()
-        exec_repo = row["repo"] if row else None
-    if bound:
-        repos = list(dict.fromkeys([*bound, *([exec_repo] if exec_repo else []), "shared"]))
-        return {"mode": "multi", "repos": repos, "repo": None}
-    if exec_repo:
-        return {"mode": "legacy", "repos": [exec_repo, "shared"], "repo": exec_repo}
-    return {"mode": "shared", "repos": ["shared"], "repo": None}
+    shared = [r["repo"] for r in rows if (r["scope"] or "shared") == "shared"]
+    local = [{"repo": r["repo"], "repo_id": r["repo_id"], "path": r["path"]}
+             for r in rows if (r["scope"] or "shared") == "local"]
+    if shared:
+        repos = list(dict.fromkeys([*shared, "shared"]))
+        return {"mode": "multi", "repos": repos, "repo": None, "local": local}
+    # 没有绑定记录时，兼容旧数据：tasks.repo 若已是注册表中的主题则纳入。
+    primary = task.get("repo")
+    if primary:
+        from . import knowledge_repos
+        if knowledge_repos.get(conn, primary) is not None:
+            return {"mode": "multi", "repos": [primary, "shared"],
+                    "repo": None, "local": local}
+        # 直接 SQL/旧数据：knowledge_mode=auto/legacy 时把 tasks.repo 当 legacy
+        # 检索 scope；local 任务的知识在 task_knowledge，不混入 notes 检索。
+        mode = str(task.get("knowledge_mode") or "auto")
+        if mode in ("auto", "legacy", ""):
+            return {"mode": "legacy", "repos": [primary, "shared"],
+                    "repo": primary, "local": local}
+    return {"mode": "shared", "repos": ["shared"], "repo": None, "local": local}

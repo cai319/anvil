@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -29,6 +30,21 @@ _SESSION_ENV_KEYS = {"CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ATTENDED"}
 
 class UtilityError(RuntimeError):
     """运行时不可用或 utility 调用失败。"""
+
+
+def extract_json_object(text: str) -> dict | None:
+    """从运行时输出中取第一个完整 JSON 对象（兼容前后夹杂说明文字）。"""
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text or ""):
+        if ch != "{":
+            continue
+        try:
+            data, _ = decoder.raw_decode(text[i:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
 
 
 def get_default_runtime_id(conn: sqlite3.Connection) -> str:

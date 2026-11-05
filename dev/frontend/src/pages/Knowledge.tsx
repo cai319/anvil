@@ -7,6 +7,7 @@ import { confirmDialog } from "../components/dialogs";
 import { formatDateTime } from "../time";
 import { ChannelKnowledgeTab } from "./knowledge/ChannelKnowledgeTab";
 import { TaskKnowledgeTab } from "./knowledge/TaskKnowledgeTab";
+import { TopicKnowledgeTab } from "./knowledge/TopicKnowledgeTab";
 import { RoleKnowledgeTab } from "./knowledge/RoleKnowledgeTab";
 import { KnowledgeStatsTab } from "./knowledge/KnowledgeStatsTab";
 
@@ -269,11 +270,12 @@ function LessonList({ lessons, roles, empty, dateKey, onOpen, onDelete }: {
   );
 }
 
-type Scope = "channel" | "task" | "role" | "shared" | "proposals" | "stats";
+type Scope = "channel" | "task" | "topic" | "role" | "shared" | "proposals" | "stats";
 
 const SCOPES: { key: Scope; label: string }[] = [
   { key: "channel", label: "频道知识" },
   { key: "task", label: "任务知识" },
+  { key: "topic", label: "主题知识库" },
   { key: "role", label: "角色知识" },
   { key: "shared", label: "共享经验" },
   { key: "proposals", label: "演化提案" },
@@ -303,6 +305,8 @@ export function Knowledge() {
     (n: number) => setCounts((prev) => ({ ...prev, channel: n })), []);
   const setTaskTotal = useCallback(
     (n: number) => setCounts((prev) => ({ ...prev, task: n })), []);
+  const setTopicTotal = useCallback(
+    (n: number) => setCounts((prev) => ({ ...prev, topic: n })), []);
   const setRoleTotal = useCallback(
     (n: number) => setCounts((prev) => ({ ...prev, role: n })), []);
 
@@ -447,6 +451,7 @@ export function Knowledge() {
   const tabCount = (key: Scope): number | undefined => {
     if (key === "channel") return counts.channel;
     if (key === "task") return counts.task;
+    if (key === "topic") return counts.topic;
     if (key === "role") return counts.role;
     if (key === "shared") return sharedCount;
     if (key === "proposals") return pendingProposals;
@@ -458,7 +463,7 @@ export function Knowledge() {
       <PageHeader
         kicker="KNOWLEDGE"
         title="知识库"
-        subtitle="频道 / 任务 / 角色 / 共享经验"
+        subtitle="频道 / 任务 / 主题知识库 / 角色 / 共享经验"
         actions={scope === "shared" ? (
           <button className="primary propose-btn" onClick={openPropose}>
             <Icon name="plus" size={14} /> 提议升格
@@ -494,6 +499,11 @@ export function Knowledge() {
         {visited.has("task") && (
           <div hidden={scope !== "task"}>
             <TaskKnowledgeTab channels={channels} onTotal={setTaskTotal} />
+          </div>
+        )}
+        {visited.has("topic") && (
+          <div hidden={scope !== "topic"}>
+            <TopicKnowledgeTab channels={channels} onTotal={setTopicTotal} />
           </div>
         )}
         {visited.has("role") && (

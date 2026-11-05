@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     status           TEXT NOT NULL DEFAULT 'todo',  -- todo|in_progress|in_review|done|closed(人工终止)
     priority         TEXT,
     tags_json        TEXT NOT NULL DEFAULT '[]',
-    repo             TEXT,
+    repo             TEXT,                                -- 主知识主题（知识 repo 名）
+    knowledge_mode   TEXT NOT NULL DEFAULT 'auto',        -- auto|bound|local|temp|legacy
     base_branch      TEXT,
     scope_paths_json TEXT NOT NULL DEFAULT '[]',
     knowledge_repos_locked INTEGER NOT NULL DEFAULT 0,
@@ -71,6 +72,21 @@ CREATE TABLE IF NOT EXISTS tasks (
     archived_at      TEXT
 );
 
+-- 任务数据存储（与知识库完全分开）：每个任务一个 workspace 目录。
+CREATE TABLE IF NOT EXISTS task_workspaces (
+    id           TEXT PRIMARY KEY,
+    task_id      TEXT NOT NULL UNIQUE,
+    path         TEXT NOT NULL,
+    kind         TEXT NOT NULL DEFAULT 'data',   -- data|git_worktree
+    source_repo  TEXT,                            -- 可选 Git 来源；不是知识 repo
+    base_branch  TEXT,
+    status       TEXT NOT NULL DEFAULT 'active',  -- active|archived|deleted
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_workspaces_status
+    ON task_workspaces(status, updated_at);
+
 CREATE TABLE IF NOT EXISTS task_deps (
     task_id    TEXT NOT NULL,
     depends_on TEXT NOT NULL,
@@ -88,18 +104,130 @@ CREATE TABLE IF NOT EXISTS task_assignees (
 CREATE TABLE IF NOT EXISTS task_knowledge_repos (
     task_id           TEXT NOT NULL,
     repo              TEXT NOT NULL,
-    source            TEXT NOT NULL DEFAULT 'auto',     -- auto|cindy|human|inherited|agent
+    source            TEXT NOT NULL DEFAULT 'auto',     -- auto|cindy|human|inherited|agent|migrated
     status            TEXT NOT NULL DEFAULT 'applied',  -- applied|suggested|dismissed
     confidence        REAL NOT NULL DEFAULT 0,
     score             REAL NOT NULL DEFAULT 0,
     matched_tags_json TEXT NOT NULL DEFAULT '[]',
     reason            TEXT,
+    scope             TEXT NOT NULL DEFAULT 'shared',   -- shared=主题知识库只读；local=任务级 workspace 内
+    repo_id           TEXT,
+    path              TEXT,                              -- local repo 在 task workspace 内的路径
+    is_primary        INTEGER NOT NULL DEFAULT 0,
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
     PRIMARY KEY (task_id, repo)
 );
 CREATE INDEX IF NOT EXISTS idx_task_knowledge_repos_repo
     ON task_knowledge_repos(repo, status);
+
+-- 主题知识库注册表（跨任务；任务级 local repo 不在此表，晋升后才登记）。
+CREATE TABLE IF NOT EXISTS knowledge_repos (
+    id            TEXT PRIMARY KEY,           -- repo_key(display_name)
+    display_name  TEXT NOT NULL,
+    description   TEXT NOT NULL DEFAULT '',
+    status        TEXT NOT NULL DEFAULT 'active', -- active|merged|archived
+    merged_into   TEXT,
+    locked        INTEGER NOT NULL DEFAULT 0,
+    auto_created  INTEGER NOT NULL DEFAULT 0,
+    needs_review  INTEGER NOT NULL DEFAULT 0,
+    created_by    TEXT,
+    source_task_id TEXT,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS knowledge_repo_aliases (
+    alias_key  TEXT PRIMARY KEY,
+    repo_id    TEXT NOT NULL,
+    alias      TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+-- 主题知识库卡片（文件真相：data/knowledge-repos/<repo_id>/cards/*.md）。
+CREATE TABLE IF NOT EXISTS repo_knowledge (
+    id            TEXT PRIMARY KEY,
+    repo_id       TEXT NOT NULL,
+    repo          TEXT NOT NULL,               -- denormalized display name
+    kind          TEXT NOT NULL,
+    authority     TEXT NOT NULL DEFAULT 'reference',
+    status        TEXT NOT NULL DEFAULT 'proposed',
+    title         TEXT NOT NULL,
+    tldr          TEXT NOT NULL,
+    body_md       TEXT NOT NULL,
+    fields_json   TEXT NOT NULL DEFAULT '{}',
+    tags_json     TEXT NOT NULL DEFAULT '[]',
+    source_task_id TEXT,
+    source_step_id TEXT,
+    source_role   TEXT,
+    source_event  TEXT,
+    provenance_json TEXT NOT NULL DEFAULT '{}',
+    content_hash  TEXT,
+    version       INTEGER NOT NULL DEFAULT 1,
+    confidence    REAL NOT NULL DEFAULT 0.5,
+    completeness  REAL NOT NULL DEFAULT 0,
+    approved_at   TEXT,
+    approved_by   TEXT,
+    expires_at    TEXT,
+    review_at     TEXT,
+    conflicts_json TEXT NOT NULL DEFAULT '[]',
+    hit_count     INTEGER NOT NULL DEFAULT 0,
+    last_hit_at   TEXT,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_repo_knowledge_repo_status
+    ON repo_knowledge(repo_id, status, kind, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_repo_knowledge_source_task
+    ON repo_knowledge(source_task_id);
+CREATE TABLE IF NOT EXISTS repo_knowledge_versions (
+    knowledge_id TEXT NOT NULL,
+    version      INTEGER NOT NULL,
+    title        TEXT,
+    tldr         TEXT,
+    body_md      TEXT,
+    fields_json  TEXT,
+    authority    TEXT,
+    status       TEXT,
+    source_task_id TEXT,
+    source_step_id TEXT,
+    created_at   TEXT,
+    created_by   TEXT,
+    PRIMARY KEY (knowledge_id, version)
+);
+
+-- 角色耐久准则的 DB 镜像/审计（文件 PRINCIPLES.md 是真相）。
+CREATE TABLE IF NOT EXISTS role_principles (
+    role_slug    TEXT PRIMARY KEY,
+    content      TEXT NOT NULL,
+    content_hash TEXT,
+    updated_at   TEXT NOT NULL,
+    updated_by   TEXT
+);
+
+-- 经验捕获幂等账本（Phase 2）。
+CREATE TABLE IF NOT EXISTS knowledge_captures (
+    id          TEXT PRIMARY KEY,
+    task_id     TEXT NOT NULL,
+    trigger     TEXT NOT NULL,
+    trigger_key TEXT NOT NULL,
+    repo_id     TEXT,
+    card_id     TEXT,
+    target      TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'proposed',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    UNIQUE(task_id, trigger, trigger_key)
+);
+
+-- 旧 tasks.repo（执行仓库）→ 知识主题/任务 workspace 的迁移映射，支持回滚。
+CREATE TABLE IF NOT EXISTS repo_split_map (
+    task_id     TEXT PRIMARY KEY,
+    old_repo    TEXT,
+    new_repo    TEXT,
+    source_repo TEXT,
+    rule        TEXT NOT NULL,
+    migrated_at TEXT NOT NULL
+);
 
 -- 工作流（Cindy 生成，属于一个高层 Task）：步骤状态机，步骤不是独立 task 行。
 -- 跨角色可并行；同一角色的多个步骤由引擎串行调度。
@@ -256,7 +384,8 @@ CREATE TABLE IF NOT EXISTS lessons (
     tags_json   TEXT NOT NULL DEFAULT '[]',
     source_task TEXT,
     source_role TEXT,                             -- 提出者：角色 slug / human / NULL（旧数据）
-    repo        TEXT NOT NULL DEFAULT 'shared',  -- 归属共享仓库（shared = 全局经验）
+    repo        TEXT NOT NULL DEFAULT 'shared',  -- 归属知识主题（shared = 全局经验）
+    repo_id     TEXT,
     last_hit_at TEXT,
     hit_count   INTEGER NOT NULL DEFAULT 0,      -- 被检索命中并进入上下文的次数
     status      TEXT NOT NULL DEFAULT 'pending',  -- pending|approved|rejected
@@ -480,6 +609,24 @@ CREATE TABLE IF NOT EXISTS role_task_sessions (
     PRIMARY KEY (role_slug, task_key)
 );
 
+-- 上下文清单：记录每次 CIC/投影注入了哪些块（只存元数据，不存正文）。
+CREATE TABLE IF NOT EXISTS context_manifests (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id       TEXT,
+    role_slug    TEXT NOT NULL,
+    task_id      TEXT,
+    kind         TEXT NOT NULL,               -- cic|projection
+    budget_chars INTEGER NOT NULL,
+    total_chars  INTEGER NOT NULL,
+    blocks_json  TEXT NOT NULL DEFAULT '[]',
+    omitted_json TEXT NOT NULL DEFAULT '[]',
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_context_manifests_role
+    ON context_manifests(role_slug, task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_context_manifests_run
+    ON context_manifests(run_id);
+
 -- Action Cards：Agent 只能 prepare，自然人批准后以人的身份执行（HITL 一等原语）
 CREATE TABLE IF NOT EXISTS action_cards (
     id          TEXT PRIMARY KEY,
@@ -607,6 +754,7 @@ CREATE TABLE IF NOT EXISTS workspace_knowledge (
     id            TEXT PRIMARY KEY,
     workspace_id  TEXT NOT NULL,
     repo          TEXT,
+    repo_id       TEXT,
     kind          TEXT NOT NULL,
     authority     TEXT NOT NULL DEFAULT 'reference',
     title         TEXT NOT NULL,
@@ -748,6 +896,7 @@ CREATE TABLE IF NOT EXISTS notes (
     source_task   TEXT,
     tags_json     TEXT NOT NULL DEFAULT '[]',
     repo          TEXT,
+    repo_id       TEXT,
     module        TEXT,
     confidence    REAL NOT NULL DEFAULT 0.5,
     updated_at    TEXT,
@@ -1154,6 +1303,11 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_channel_knowledge_harvest_v2(conn)
     _migrate_issue_board_v1(conn)
     _migrate_knowledge_hits_v1(conn)
+    _migrate_task_workspace_v1(conn)
+    _migrate_knowledge_repos_v1(conn)
+    _migrate_notes_repo_ids_v2(conn)
+    _migrate_knowledge_quality_v1(conn)
+    _migrate_repo_split_v1(conn)
     conn.commit()
 
 
@@ -1386,6 +1540,390 @@ def _migrate_knowledge_hits_v1(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
     _set_setting(conn, "schema.knowledge_hits_v1", "1")
+    conn.commit()
+
+
+def _migrate_task_workspace_v1(conn: sqlite3.Connection) -> None:
+    """任务工作空间：role_task_sessions 增加 workspace_kind / 最近投影 run。
+
+    task_workspaces / context_manifests 由 SCHEMA 的 CREATE IF NOT EXISTS 创建，
+    这里只补既有表的列，保持旧库可升级。
+    """
+    if _setting(conn, "schema.task_workspace_v1"):
+        return
+    for spec in (
+        "workspace_kind TEXT",              # task_workspace|exec_worktree|role_home
+        "last_projected_run_id TEXT",
+    ):
+        try:
+            conn.execute(f"ALTER TABLE role_task_sessions ADD COLUMN {spec}")
+        except sqlite3.OperationalError:
+            pass
+    _set_setting(conn, "schema.task_workspace_v1", "1")
+    conn.commit()
+
+
+def _repo_key(name: str | None) -> str:
+    """与 services.repo_catalog.repo_key 保持一致的 canonical key（避免 db→services 依赖）。"""
+    import unicodedata
+    text = unicodedata.normalize("NFKC", str(name or "")).strip().replace("\\", "/")
+    text = text.rstrip("/").split("/")[-1]
+    if text.endswith(".git"):
+        text = text[:-4]
+    return re.sub(r"[\s_]+", "-", text.casefold()).strip("-")
+
+
+def _display_repo(name: str | None) -> str:
+    import unicodedata
+    text = unicodedata.normalize("NFKC", str(name or "")).strip().replace("\\", "/")
+    text = text.rstrip("/").split("/")[-1]
+    if text.endswith(".git"):
+        text = text[:-4]
+    return text or "shared"
+
+
+def _ensure_repo_knowledge_fts(conn: sqlite3.Connection) -> bool:
+    """主题知识库 FTS（trigram 优先）+ 同步触发器；失败回退 LIKE。"""
+    sql = (
+        "CREATE VIRTUAL TABLE IF NOT EXISTS repo_knowledge_fts USING fts5("
+        "knowledge_id UNINDEXED, repo_id UNINDEXED, kind UNINDEXED, tags, title, tldr, body_md, "
+        "tokenize='trigram')"
+    )
+    try:
+        conn.execute(sql)
+    except sqlite3.OperationalError:
+        try:
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS repo_knowledge_fts USING fts5("
+                "knowledge_id UNINDEXED, repo_id UNINDEXED, kind UNINDEXED, tags, title, tldr, body_md, "
+                "tokenize='unicode61')")
+        except sqlite3.OperationalError:
+            return False
+    for stmt in (
+        "CREATE TRIGGER IF NOT EXISTS repo_knowledge_fts_ai AFTER INSERT ON repo_knowledge BEGIN "
+        "INSERT INTO repo_knowledge_fts(rowid, knowledge_id, repo_id, kind, tags, title, tldr, body_md) "
+        "VALUES (new.rowid, new.id, new.repo_id, new.kind, new.tags_json, new.title, new.tldr, new.body_md); END",
+        "CREATE TRIGGER IF NOT EXISTS repo_knowledge_fts_ad AFTER DELETE ON repo_knowledge BEGIN "
+        "DELETE FROM repo_knowledge_fts WHERE rowid = old.rowid; END",
+        "CREATE TRIGGER IF NOT EXISTS repo_knowledge_fts_au AFTER UPDATE ON repo_knowledge BEGIN "
+        "DELETE FROM repo_knowledge_fts WHERE rowid = old.rowid; "
+        "INSERT INTO repo_knowledge_fts(rowid, knowledge_id, repo_id, kind, tags, title, tldr, body_md) "
+        "VALUES (new.rowid, new.id, new.repo_id, new.kind, new.tags_json, new.title, new.tldr, new.body_md); END",
+    ):
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+    return True
+
+
+def _collect_repo_names(conn: sqlite3.Connection) -> set[str]:
+    names: set[str] = set()
+    queries = (
+        "SELECT DISTINCT repo FROM notes WHERE repo IS NOT NULL AND repo<>''",
+        "SELECT DISTINCT repo FROM lessons WHERE repo IS NOT NULL AND repo<>''",
+        "SELECT DISTINCT repo FROM workspace_knowledge WHERE repo IS NOT NULL AND repo<>''",
+        "SELECT DISTINCT repo FROM workspaces WHERE repo IS NOT NULL AND repo<>''",
+        "SELECT DISTINCT knowledge_repo FROM workspaces WHERE knowledge_repo IS NOT NULL AND knowledge_repo<>''",
+        "SELECT DISTINCT repo FROM task_knowledge_repos WHERE repo IS NOT NULL AND repo<>''",
+    )
+    for sql in queries:
+        try:
+            for row in conn.execute(sql).fetchall():
+                name = _display_repo(row[0])
+                if name and _repo_key(name) != "shared":
+                    names.add(name)
+        except sqlite3.OperationalError:
+            continue
+    try:
+        from . import config
+        root = config.REPOS_DIR
+        if root.exists():
+            for p in root.iterdir():
+                if p.is_dir() and not p.name.startswith("."):
+                    name = _display_repo(p.name)
+                    if name and _repo_key(name) != "shared":
+                        names.add(name)
+    except Exception:  # noqa: BLE001
+        pass
+    return names
+
+
+
+
+def _migrate_knowledge_quality_v1(conn: sqlite3.Connection) -> None:
+    """知识质量门：质量缓存列 + 使用反馈表。"""
+    if _setting(conn, "schema.knowledge_quality_v1"):
+        return
+    for table, spec in (
+        ("repo_knowledge", "quality_json TEXT NOT NULL DEFAULT '{}'"),
+        ("repo_knowledge", "quality_score REAL NOT NULL DEFAULT 0"),
+        ("repo_knowledge", "quality_checked_at TEXT"),
+        ("task_knowledge", "quality_json TEXT NOT NULL DEFAULT '{}'"),
+        ("task_knowledge", "quality_score REAL NOT NULL DEFAULT 0"),
+        ("task_knowledge", "quality_checked_at TEXT"),
+        ("task_knowledge", "completeness REAL NOT NULL DEFAULT 0"),
+        ("task_knowledge", "content_hash TEXT"),
+        ("task_knowledge", "review_at TEXT"),
+        ("workspace_knowledge", "quality_json TEXT NOT NULL DEFAULT '{}'"),
+        ("workspace_knowledge", "quality_score REAL NOT NULL DEFAULT 0"),
+        ("workspace_knowledge", "quality_checked_at TEXT"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {spec}")
+        except sqlite3.OperationalError:
+            pass
+    for stmt in (
+        "CREATE INDEX IF NOT EXISTS idx_repo_knowledge_quality "
+        "ON repo_knowledge(status, quality_score DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_task_knowledge_quality "
+        "ON task_knowledge(status, quality_score DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_workspace_knowledge_quality "
+        "ON workspace_knowledge(status, quality_score DESC)",
+        """CREATE TABLE IF NOT EXISTS knowledge_feedback (
+            id TEXT PRIMARY KEY,
+            card_table TEXT NOT NULL,
+            card_id TEXT NOT NULL,
+            task_id TEXT,
+            run_id TEXT,
+            role_slug TEXT,
+            signal TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_knowledge_feedback_card "
+        "ON knowledge_feedback(card_table, card_id, created_at DESC)",
+    ):
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+    _set_setting(conn, "schema.knowledge_quality_v1", "1")
+    conn.commit()
+
+
+def _migrate_notes_repo_ids_v2(conn: sqlite3.Connection) -> None:
+    """回填迁移后新产生的 notes.repo_id（v1 只回填了当时已有行）。
+
+    解析顺序：alias 表 → 注册表 canonical id。仍无法解析的名称保持 NULL，
+    不自动创建主题库，避免把历史杂项写成正式主题。
+    """
+    if _setting(conn, "schema.notes_repo_id_v2"):
+        return
+    try:
+        rows = conn.execute(
+            "SELECT rowid, repo FROM notes "
+            "WHERE repo IS NOT NULL AND repo<>'' "
+            "AND (repo_id IS NULL OR repo_id='')"
+        ).fetchall()
+        for row in rows:
+            key = _repo_key(row["repo"])
+            if not key or key == "shared":
+                continue
+            hit = conn.execute(
+                "SELECT repo_id FROM knowledge_repo_aliases WHERE alias_key=?",
+                (key,)).fetchone()
+            repo_id = hit["repo_id"] if hit is not None else None
+            if not repo_id:
+                hit = conn.execute(
+                    "SELECT id FROM knowledge_repos WHERE id=?", (key,)).fetchone()
+                repo_id = hit["id"] if hit is not None else None
+            if repo_id:
+                conn.execute(
+                    "UPDATE notes SET repo_id=? WHERE rowid=?",
+                    (repo_id, row[0]))
+    except sqlite3.OperationalError:
+        pass
+    _set_setting(conn, "schema.notes_repo_id_v2", "1")
+    conn.commit()
+
+
+def _migrate_knowledge_repos_v1(conn: sqlite3.Connection) -> None:
+    """主题知识库注册表 + repo_id 回填 + repo_knowledge FTS。"""
+    if _setting(conn, "schema.knowledge_repos_v1"):
+        return
+    for table, spec in (
+        ("notes", "repo_id TEXT"),
+        ("lessons", "repo_id TEXT"),
+        ("workspace_knowledge", "repo_id TEXT"),
+        ("tasks", "knowledge_mode TEXT NOT NULL DEFAULT 'auto'"),
+        ("task_knowledge_repos", "scope TEXT NOT NULL DEFAULT 'shared'"),
+        ("task_knowledge_repos", "repo_id TEXT"),
+        ("task_knowledge_repos", "path TEXT"),
+        ("task_knowledge_repos", "is_primary INTEGER NOT NULL DEFAULT 0"),
+        ("task_knowledge", "repo_id TEXT"),
+        ("task_knowledge", "repo_key TEXT"),
+        ("task_knowledge", "path TEXT"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {spec}")
+        except sqlite3.OperationalError:
+            pass
+    for stmt in (
+        "CREATE INDEX IF NOT EXISTS idx_task_knowledge_repos_scope "
+        "ON task_knowledge_repos(task_id, scope, status)",
+        "CREATE INDEX IF NOT EXISTS idx_notes_repo_id ON notes(repo_id)",
+        "CREATE INDEX IF NOT EXISTS idx_lessons_repo_id ON lessons(repo_id)",
+        "CREATE INDEX IF NOT EXISTS idx_workspace_knowledge_repo_id "
+        "ON workspace_knowledge(repo_id)",
+    ):
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+    now = datetime.now(timezone.utc).isoformat()
+    for name in sorted(_collect_repo_names(conn)):
+        key = _repo_key(name)
+        if not key or key == "shared":
+            continue
+        conn.execute(
+            "INSERT OR IGNORE INTO knowledge_repos "
+            "(id, display_name, description, status, created_by, needs_review, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (key, name, "", "active", "migration", 1, now, now),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO knowledge_repo_aliases "
+            "(alias_key, repo_id, alias, created_at) VALUES (?,?,?,?)",
+            (key, key, name, now),
+        )
+    for table in ("notes", "lessons", "workspace_knowledge"):
+        try:
+            rows = conn.execute(
+                f"SELECT rowid, repo FROM {table} WHERE repo IS NOT NULL AND repo<>''"
+            ).fetchall()
+            for row in rows:
+                key = _repo_key(row[1])
+                if key and key != "shared":
+                    conn.execute(
+                        f"UPDATE {table} SET repo_id=? WHERE rowid=?", (key, row[0]))
+        except sqlite3.OperationalError:
+            pass
+    try:
+        conn.execute(
+            "UPDATE task_knowledge_repos SET scope='shared' "
+            "WHERE scope IS NULL OR scope=''")
+        rows = conn.execute(
+            "SELECT task_id, repo FROM task_knowledge_repos "
+            "WHERE repo IS NOT NULL AND repo<>''").fetchall()
+        for row in rows:
+            key = _repo_key(row[1])
+            if key and key != "shared":
+                conn.execute(
+                    "UPDATE task_knowledge_repos SET repo_id=? "
+                    "WHERE task_id=? AND repo=?", (key, row[0], row[1]))
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute(
+            "UPDATE workspaces SET knowledge_repo=repo "
+            "WHERE (knowledge_repo IS NULL OR knowledge_repo='') "
+            "AND repo IS NOT NULL AND repo<>''")
+    except sqlite3.OperationalError:
+        pass
+    _ensure_repo_knowledge_fts(conn)
+    _set_setting(conn, "schema.knowledge_repos_v1", "1")
+    conn.commit()
+
+
+def _migrate_repo_split_v1(conn: sqlite3.Connection) -> None:
+    """旧 `tasks.repo`（执行仓库）→ task_workspaces.source_repo + 主知识主题。"""
+    if _setting(conn, "schema.repo_split_v1"):
+        return
+    try:
+        from . import config
+    except Exception:  # noqa: BLE001
+        config = None
+    now = datetime.now(timezone.utc).isoformat()
+    tasks = conn.execute(
+        "SELECT id, repo, base_branch, parent_id FROM tasks ORDER BY created_at"
+    ).fetchall()
+    for task in tasks:
+        tid = str(task["id"])
+        old = str(task["repo"] or "").strip() or None
+        source_repo = old
+        # 为旧任务登记 task workspace（目录仍按需创建）。
+        has_ws = conn.execute(
+            "SELECT 1 FROM task_workspaces WHERE task_id=?", (tid,)).fetchone()
+        ws_path = ""
+        if config is not None:
+            ws_path = str(config.TASK_WORKSPACES_DIR / _safe_task_segment(tid))
+        if not has_ws:
+            conn.execute(
+                "INSERT OR IGNORE INTO task_workspaces "
+                "(id, task_id, path, kind, source_repo, base_branch, status, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (hashlib.sha1(tid.encode("utf-8")).hexdigest()[:16], tid,
+                 ws_path, "git_worktree" if old else "data", source_repo,
+                 task["base_branch"], "active", now, now),
+            )
+        elif old:
+            conn.execute(
+                "UPDATE task_workspaces SET source_repo=COALESCE(source_repo, ?), "
+                "kind=CASE WHEN kind='data' AND ? IS NOT NULL THEN 'git_worktree' ELSE kind END, "
+                "updated_at=? WHERE task_id=?",
+                (old, old, now, tid),
+            )
+        # 已有 applied 绑定优先；否则旧 repo 若在注册表则作为主题；否则任务级 local。
+        binding = conn.execute(
+            "SELECT repo, repo_id FROM task_knowledge_repos "
+            "WHERE task_id=? AND status='applied' ORDER BY score DESC, repo LIMIT 1",
+            (tid,)).fetchone()
+        registry_old = None
+        if old:
+            registry_old = conn.execute(
+                "SELECT id FROM knowledge_repos WHERE id=? AND status='active'",
+                (_repo_key(old),)).fetchone()
+        if binding is not None:
+            primary = str(binding["repo"])
+            rule, mode = "binding", "bound"
+        elif registry_old is not None:
+            primary = old
+            rule, mode = "topic", "bound"
+        elif old:
+            primary = old
+            rule, mode = "local", "local"
+        else:
+            primary = None
+            rule, mode = "temp", "temp"
+        conn.execute(
+            "UPDATE tasks SET repo=?, knowledge_mode=?, updated_at=? WHERE id=?",
+            (primary, mode, now, tid))
+        if primary:
+            existing = conn.execute(
+                "SELECT 1 FROM task_knowledge_repos WHERE task_id=? AND repo=?",
+                (tid, primary)).fetchone()
+            key = _repo_key(primary)
+            if existing is None:
+                conn.execute(
+                    "INSERT INTO task_knowledge_repos "
+                    "(task_id, repo, source, status, confidence, score, matched_tags_json, "
+                    " reason, scope, repo_id, path, is_primary, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (tid, primary, "migrated", "applied", 1.0, 1.0, "[]",
+                     f"migrated:{rule}", "local" if mode == "local" else "shared",
+                     key, (f"{ws_path}/knowledge/{key}" if mode == "local" else None),
+                     1, now, now),
+                )
+            else:
+                conn.execute(
+                    "UPDATE task_knowledge_repos SET repo_id=COALESCE(repo_id, ?), "
+                    "scope=?, path=COALESCE(path, ?), is_primary=1, updated_at=? "
+                    "WHERE task_id=? AND repo=?",
+                    (key, "local" if mode == "local" else "shared",
+                     (f"{ws_path}/knowledge/{key}" if mode == "local" else None),
+                     now, tid, primary),
+                )
+            conn.execute(
+                "UPDATE task_knowledge_repos SET is_primary=0 "
+                "WHERE task_id=? AND repo<>?", (tid, primary))
+        conn.execute(
+            "INSERT OR REPLACE INTO repo_split_map "
+            "(task_id, old_repo, new_repo, source_repo, rule, migrated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (tid, old, primary, source_repo, rule, now),
+        )
+    _set_setting(conn, "schema.repo_split_v1", "1")
     conn.commit()
 
 

@@ -22,6 +22,14 @@ def _assert_task_bound(conn: sqlite3.Connection, auth: Auth, tid: str) -> None:
         raise HTTPException(status_code=403, detail="session is bound to another task")
 
 
+def assert_task_bound(conn: sqlite3.Connection, auth: Auth, tid: str) -> None:
+    """只校验运行级 token 的任务绑定；用于 claim 等“可竞争”操作。
+
+    任务被他人认领时由 claim 返回 409（可换任务），而不是 403（越权）。
+    """
+    _assert_task_bound(conn, auth, tid)
+
+
 def assert_task_read(conn: sqlite3.Connection, auth: Auth, tid: str) -> None:
     """Agent 读取任务数据前校验参与范围；人类直接放行。"""
     if not is_agent(auth):

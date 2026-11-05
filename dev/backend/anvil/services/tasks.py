@@ -16,7 +16,8 @@ from pathlib import Path
 
 from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
-from . import governance, knowledge, knowledge_binding, ledger, repo_catalog, workspace
+from . import (governance, knowledge, knowledge_binding, ledger, repo_catalog,
+               task_workspace, workspace)
 
 LEASE_SECONDS = 1800  # design §5.5 租期 30 分钟
 TERMINAL_TASK_STATUSES = ("done", "closed")
@@ -108,7 +109,8 @@ def audit_create(conn: sqlite3.Connection, tid: str, actor: str | None, *,
 
 def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
            type: str | None = None, priority=None, tags: list[str] | None = None,
-           repo: str | None = None, workspace_id: str | None = None, base_branch: str | None = None,
+           repo: str | None = None, source_repo: str | None = None,
+           workspace_id: str | None = None, base_branch: str | None = None,
            scope_paths: list[str] | None = None, description: str | None = None,
            acceptance: list[str] | None = None, assignee: str | None = None,
            assignees: list[str] | None = None,
@@ -146,6 +148,19 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
         repo = parent.get("repo")
         workspace_id = parent.get("workspace_id")
         base_branch = parent.get("base_branch")
+        parent_ws = conn.execute(
+            "SELECT source_repo FROM task_workspaces WHERE task_id=?",
+            (parent_id,)).fetchone()
+        parent_source = parent_ws["source_repo"] if parent_ws is not None else None
+        if source_repo is not None and parent_source is not None \
+                and source_repo != parent_source:
+            raise ConflictError(
+                f"subtask source_repo must inherit parent {parent_id}: "
+                f"expected {parent_source!r}, got {source_repo!r}")
+        effective_source_repo = parent_source or source_repo or repo
+    else:
+        # `repo` 是知识主题；`source_repo` 是可选的 Git 数据来源（不再叫执行 repo）。
+        effective_source_repo = source_repo if source_repo is not None else repo
     board_enabled = bool(issue_board_enabled)
     conn.execute(
         """INSERT INTO tasks (id, title, type, status, priority, tags_json, repo, workspace_id,
@@ -167,6 +182,10 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
     for a in (assignees or []):
         conn.execute("INSERT OR IGNORE INTO task_assignees (task_id, role_slug, joined_at) VALUES (?,?,?)", (tid, a, now))
     _init_role_claims(conn, tid, list(assignees or []), now)
+    # 任务数据存储（与知识库完全分开）：先登记 workspace，目录在首次执行时创建。
+    ws = task_workspace.ensure(
+        conn, tid, source_repo=effective_source_repo, base_branch=base_branch,
+        create_dir=False, commit=False)
     # 显式指定是人工决策：落库并加锁，后续 auto/Cindy 不再覆盖。
     if knowledge_repos:
         knowledge_binding.set_manual(
@@ -175,7 +194,9 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
     else:
         knowledge_binding.auto_bind(conn, {
             "id": tid, "title": title, "description": description, "tags": tags,
-            "repo": repo, "workspace_id": workspace_id, "parent_id": parent_id,
+            "repo": repo, "source_repo": effective_source_repo,
+            "workspace_id": workspace_id, "parent_id": parent_id,
+            "workspace_path": ws.get("path") or "",
         }, commit=False)
     conn.commit()
     repo_catalog.invalidate_catalog()
@@ -205,6 +226,11 @@ def get(conn: sqlite3.Connection, tid: str) -> dict | None:
         "SELECT role_slug FROM task_reviewers WHERE task_id=? ORDER BY added_at, role_slug",
         (tid,)).fetchall()]
     _attach_workspaces(conn, [d])
+    ws = conn.execute(
+        "SELECT source_repo, path, kind, status FROM task_workspaces WHERE task_id=?",
+        (tid,)).fetchone()
+    d["source_repo"] = ws["source_repo"] if ws is not None else None
+    d["task_workspace"] = dict(ws) if ws is not None else None
     knowledge_binding.attach_bindings(conn, [d])
     return d
 
@@ -689,6 +715,14 @@ def review(conn: sqlite3.Connection, tid: str, approve: bool, role: str | None =
             )
     _audit(conn, role, tid, "review", {"approve": approve})
     conn.commit()
+    try:
+        from . import experience_capture
+        if approve:
+            experience_capture.capture_task_completion(conn, tid, actor=role)
+        else:
+            experience_capture.capture_review_rejection(conn, tid, reviewer=role, actor=role)
+    except Exception:  # noqa: BLE001 —— 捕获失败不影响评审
+        pass
     if approve:
         notify_downstream(conn, tid)  # 完成后 @提及下游角色，触发交接
     return get(conn, tid)  # type: ignore[return-value]
@@ -1018,6 +1052,8 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
     conn.execute("DELETE FROM role_inbox_cursors WHERE task_id=?", (tid,))
     # 任务上下文槽（daemon 未启用/角色已停机时也要清，避免孤儿槽被下次同名任务复用）
     conn.execute("DELETE FROM role_task_sessions WHERE task_key=?", (tid,))
+    # 任务数据目录保留到保留期结束（可审计/可恢复）；标记 deleted，由定期清理删除。
+    task_workspace.mark_deleted(conn, tid, commit=False)
     conn.execute("DELETE FROM audit WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM tasks WHERE id=?", (tid,))
     # 留一条删除审计（task_id 仍可读，便于知道这个 id 曾经存在）

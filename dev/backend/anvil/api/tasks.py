@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import ClaimIn, CommentIn, DepIn, ReviewIn, SubmitIn, TaskIn, TaskOut, TaskPatch
-from ..services import repo_catalog
+from ..services import knowledge_quality, repo_catalog
 from ..services.tasks import ConflictError
 from ..util import now_iso
 from . import access, events
@@ -108,7 +108,8 @@ def create_task(body: TaskIn, conn=Depends(get_db),
     try:
         task = services.tasks.create(
         conn, id=body.id, title=body.title, type=body.type, priority=body.priority,
-        tags=body.tags, repo=body.repo, workspace_id=body.workspace_id, base_branch=body.base_branch,
+        tags=body.tags, repo=body.repo, source_repo=body.source_repo,
+        workspace_id=body.workspace_id, base_branch=body.base_branch,
         scope_paths=body.scope_paths, description=body.description,
         acceptance=body.acceptance, assignee=body.assignee, assignees=body.assignees,
         plan_first=body.plan_first, planner=body.planner, plan_seed=body.plan_seed,
@@ -258,6 +259,23 @@ def get_task(tid: str, conn=Depends(get_db)):
     return t
 
 
+@router.get("/{tid}/knowledge/explain")
+def explain_task_knowledge(tid: str, role: str | None = None,
+                           conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    """解释该任务起始上下文会带哪些知识（检索 scope/绑定/主题卡片）。"""
+    task = services.tasks.get(conn, tid)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
+    if is_real_agent and not services.tasks.is_task_participant(conn, tid, auth.role):
+        raise HTTPException(status_code=403, detail="agent is not a participant of this task")
+    try:
+        return services.context_explain.explain_task(
+            conn, tid, role=role or (auth.role if is_real_agent else None))
+    except LookupError:
+        raise HTTPException(status_code=404, detail="task not found")
+
+
 @router.get("/{tid}/knowledge")
 def list_task_knowledge(tid: str, include_subtasks: bool = False, deep: bool = False,
                         conn=Depends(get_db), auth: Auth = Depends(get_auth)):
@@ -296,11 +314,82 @@ def create_task_knowledge(tid: str, body: dict, conn=Depends(get_db),
             fields=body.get("fields") or {},
             tags=body.get("tags") or [],
             source_role=auth.role,
+            # 显式 API 写入默认 active（任务参与角色共享，无需预审批）；
+            # 自动捕获走 experience_capture，显式传 status='proposed'。
+            status=str(body.get("status") or "active"),
         )
     except LookupError:
         raise HTTPException(status_code=404, detail="task not found")
     except services.tasks.ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post("/{tid}/knowledge/{kid}/approve")
+def approve_task_knowledge(tid: str, kid: str, conn=Depends(get_db),
+                           auth: Auth = Depends(require_human)):
+    """人工批准任务级知识草稿（proposed → active）。"""
+    task = services.tasks.get(conn, tid)
+    card = services.task_knowledge.get(conn, kid)
+    if task is None or card is None or card.get("task_id") != tid:
+        raise HTTPException(status_code=404, detail="knowledge not found")
+    try:
+        return services.task_knowledge.approve(
+            conn, kid, actor=auth.role or "human")
+    except knowledge_quality.QualityGateError as exc:
+        raise HTTPException(status_code=409, detail={
+            "message": str(exc), "quality": exc.quality,
+        }) from exc
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.patch("/{tid}/knowledge/{kid}")
+def update_task_knowledge(tid: str, kid: str, body: dict,
+                          conn=Depends(get_db),
+                          auth: Auth = Depends(require_human)):
+    """人工补全 proposed 任务知识，用于批准或晋升前修订。"""
+    task = services.tasks.get(conn, tid)
+    card = services.task_knowledge.get(conn, kid)
+    if task is None or card is None or card.get("task_id") != tid:
+        raise HTTPException(status_code=404, detail="knowledge not found")
+    try:
+        return services.task_knowledge.update(
+            conn, kid, title=body.get("title"), tldr=body.get("tldr"),
+            fields=body.get("fields"), tags=body.get("tags"),
+            review_at=body.get("review_at"),
+            expected_version=body.get("expected_version"),
+            actor=auth.role or "human")
+    except knowledge_quality.QualityGateError as exc:
+        raise HTTPException(status_code=409, detail={
+            "message": str(exc), "quality": exc.quality,
+        }) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="knowledge not found") from exc
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/{tid}/knowledge/{kid}/promote")
+def promote_task_knowledge(tid: str, kid: str, body: dict,
+                           conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    """任务级知识卡 → 主题知识库草稿（人工/角色都可 propose，人工批准生效）。"""
+    from ..services import harvest
+    card = services.task_knowledge.get(conn, kid)
+    if card is None or card.get("task_id") != tid:
+        raise HTTPException(status_code=404, detail="knowledge not found")
+    repo = str(body.get("repo") or "").strip()
+    if not repo:
+        raise HTTPException(status_code=422, detail="repo is required")
+    is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
+    if is_real_agent and auth.role != card.get("source_role"):
+        raise HTTPException(status_code=403, detail="agent did not author this card")
+    try:
+        return harvest.task_card_to_repo(
+            conn, kid, repo, actor=auth.role or "human", status="proposed")
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="knowledge not found") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.delete("/{tid}/knowledge/{kid}", status_code=204)
@@ -566,7 +655,8 @@ def dismiss_suggested_repo(tid: str, repo: str, conn=Depends(get_db),
 
 @router.post("/{tid}/claim", response_model=TaskOut)
 def claim_task(tid: str, body: ClaimIn, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
-    _assert_session_task(conn, auth, tid)
+    # claim 是可竞争操作：只校验运行级 token 绑定；已被他人认领时由 claim 返回 409。
+    access.assert_task_bound(conn, auth, tid)
     try:
         result = services.tasks.claim(conn, tid, auth.role or "qa-role", body.paths)
     except LookupError:

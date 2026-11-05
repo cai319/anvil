@@ -373,6 +373,11 @@ export function Lobby() {
                       )}
                       <div className="card-tags">
                         <span className="card-tag" title="所属频道"># {channelName(t.workspace_id)}</span>
+                        <span className="card-tag" title={
+                          t.knowledge_mode === "local" ? "任务级知识库（工作空间内）"
+                            : t.knowledge_mode === "temp" ? "临时知识空间"
+                              : "主题知识库"
+                        }>◎ {t.repo || "临时知识"}</span>
                       </div>
                       {t.updated_at && (
                         <div className="card-foot">

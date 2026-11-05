@@ -126,6 +126,8 @@ def library_stats(conn: sqlite3.Connection) -> dict:
         "SELECT COUNT(DISTINCT role_slug) FROM notes WHERE scope='role' AND status='active'"
     ).fetchone()[0]
 
+    from . import knowledge_quality
+    repo_quality = knowledge_quality.summary(conn)["totals"]
     totals["hit_rate"] = _rate(totals["used"], totals["approved"])
     totals["avg_hits_per_card"] = _rate(totals["hits"], totals["approved"])
 
@@ -159,6 +161,7 @@ def library_stats(conn: sqlite3.Connection) -> dict:
             "hit_rate": _rate(int(role_used), int(role_notes_total)),
             "usage_tracked": True,
         },
+        "repo_quality": repo_quality,
         "generated_at": now,
         "note": (
             "hit_count 统计知识被检索命中并加入 CIC/one-shot 上下文的次数，"

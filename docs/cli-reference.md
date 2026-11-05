@@ -273,6 +273,12 @@ anvil knowledge repo-show --repo <name>
 anvil knowledge repo-suggest "任务标题"
 anvil knowledge card-template --kind <kind>
 anvil knowledge card-validate --file card.json [--for-approval]
+anvil knowledge quality [--repo <repo>] [--json]
+anvil knowledge clean --id <card-id> [--dry-run|--apply] [--runtime <id>]
+anvil knowledge clean --repo <repo> [--kind proposed] [--limit 5] [--dry-run|--apply]
+anvil knowledge feedback --id <card-id> --signal applied|helpful|unhelpful|no_effect
+anvil knowledge review [--repo <repo>]                 # 查看到期/低反馈/legacy
+anvil knowledge review --id <card-id> --review-action keep|deprecate|refresh
 ```
 
 规则：

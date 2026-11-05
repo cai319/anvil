@@ -15,6 +15,7 @@ export function TaskKnowledgeTab({ channels, onTotal }: {
   const [status, setStatus] = useState("active");
   const [workspaceId, setWorkspaceId] = useState("");
   const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const onTotalRef = useRef(onTotal);
   useEffect(() => { onTotalRef.current = onTotal; }, [onTotal]);
@@ -41,13 +42,27 @@ export function TaskKnowledgeTab({ channels, onTotal }: {
 
   useEffect(() => { void load(); }, [load]);
 
+  const approve = async (card: TaskKnowledge) => {
+    setBusy(card.id);
+    setError(null);
+    try {
+      await api.approveTaskKnowledge(card.task_id, card.id);
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <div>
       <div className="knowledge-scope-toolbar">
         <input type="search" value={query} onChange={(e) => setQuery(e.target.value)}
           placeholder="搜索知识标题、摘要或任务名" aria-label="搜索任务知识" />
         <select value={status} onChange={(e) => setStatus(e.target.value)} aria-label="按状态筛选">
-          <option value="active">进行中任务</option>
+          <option value="active">已生效</option>
+          <option value="proposed">待审批草稿</option>
           <option value="archived">已归档任务</option>
           <option value="all">全部</option>
         </select>
@@ -70,7 +85,10 @@ export function TaskKnowledgeTab({ channels, onTotal }: {
           hint="任务参与角色可在任务详情页写入任务知识。" />
       ) : (
         <ul className="knowledge-record-list">
-          {cards.map((card) => <TaskKnowledgeRow key={card.id} card={card} />)}
+          {cards.map((card) => (
+            <TaskKnowledgeRow key={card.id} card={card}
+              busy={busy === card.id} onApprove={approve} />
+          ))}
         </ul>
       )}
     </div>

@@ -58,6 +58,10 @@ async def _card(client, ws_id: str, title: str, *, kind: str = "convention") -> 
         "observation": title, "evidence": "测试", "lesson": title,
         "applicability": "测试", "counterexamples": "暂无",
     }
+    fields = {
+        "use_when": "测试场景", "expected_effect": "减少返工",
+        "evidence": "测试证据", **fields,
+    }
     r = await client.post(
         f"{API}/workspaces/{ws_id}/knowledge",
         json={"title": title, "tldr": f"{title} 摘要", "kind": kind, "fields": fields},
@@ -104,6 +108,7 @@ async def test_cards_aggregate_filters_and_pagination(client, app):
             "fields": {
                 "observation": "覆盖率", "evidence": "100%", "lesson": "保持覆盖",
                 "applicability": "测试", "counterexamples": "暂无",
+                "use_when": "测试场景", "expected_effect": "保持覆盖",
             },
         },
         headers=human_headers(),
@@ -115,6 +120,7 @@ async def test_cards_aggregate_filters_and_pagination(client, app):
             "fields": {
                 "observation": "观察", "evidence": "证据", "lesson": "结论",
                 "applicability": "测试", "counterexamples": "暂无",
+                "use_when": "测试场景", "expected_effect": "减少返工",
             },
         },
         headers=_agent_headers(app),
@@ -244,6 +250,7 @@ async def test_knowledge_stats_cover_usage_and_coverage(client, app):
             "fields": {
                 "observation": "观察", "evidence": "证据", "lesson": "结论",
                 "applicability": "测试", "counterexamples": "暂无",
+                "use_when": "测试场景", "expected_effect": "减少返工",
             },
         },
         headers=_agent_headers(app),

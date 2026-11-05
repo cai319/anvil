@@ -298,6 +298,8 @@ class _Role:
     # API 报错后自适应收紧的窗口（只调小不调大）；用于修正模型名推断不准的情况。
     adaptive_window: int | None = None
     cic_pending: bool = False
+    # 最近一次已完成投影的 run；同一 run 的重复投递不重复投影。
+    last_projected_run_id: str | None = None
     context_overflow: bool = False
     context_overflow_reason: str | None = None
     suppress_exit: bool = False
@@ -323,6 +325,9 @@ class DaemonManager:
         # 回调(role, run_id, reason)：上下文溢出被主动/被动终止后，由 create_app
         # 负责清 run 的会话标记并用 CIC 新会话重投；daemon 不直接依赖编排器。
         self.on_context_overflow = None
+        # 回调(role, run_id, task_id, workspace_path)：实际投递前投影当前任务。
+        # 由 create_app 注入，避免 daemon 反向依赖 graph/nodes。
+        self.on_project = None
         self._roles: dict[str, _Role] = {}
         self._guard = threading.Lock()
         self._stop = threading.Event()
@@ -855,10 +860,17 @@ class DaemonManager:
         return max(1, min(windows))
 
     def _cic_threshold(self, r: _Role) -> int:
-        """冷唤醒/CIC 重置阈值：显式配置优先，否则按策略窗口比例。"""
+        """冷唤醒/CIC 重置阈值：显式配置优先，否则按策略窗口比例。
+
+        Phase 3：`ANVIL_TASK_CONTEXT_BUDGET_TOKENS > 0` 时把单任务预算作为上限，
+        避免 1M 窗口下单个任务积累几十万 token 的历史。
+        """
         if config.CIC_THRESHOLD_TOKENS > 0:
-            return int(config.CIC_THRESHOLD_TOKENS)
-        return max(1, int(self._context_window(r) * config.CIC_RESET_RATIO))
+            base = int(config.CIC_THRESHOLD_TOKENS)
+        else:
+            base = max(1, int(self._context_window(r) * config.CIC_RESET_RATIO))
+        budget = int(getattr(config, "TASK_CONTEXT_BUDGET_TOKENS", 0) or 0)
+        return min(base, budget) if budget > 0 else base
 
     def _hint_threshold(self, r: _Role) -> int:
         return max(1, int(self._context_window(r) * config.CONTEXT_HINT_RATIO))
@@ -957,6 +969,26 @@ class DaemonManager:
         else:
             self._switch_context_locked(conn, r, item)
 
+    def _project_before_delivery(self, conn, r: _Role, item: _Queued) -> None:
+        """实际投递前投影当前任务；失败不阻断投递（spawn 仍可用旧投影）。"""
+        if not item.run_id or self.on_project is None:
+            return
+        if r.last_projected_run_id == item.run_id:
+            return
+        try:
+            self.on_project(
+                r.role, item.run_id, item.task_id,
+                item.spec.workspace_path or item.spec.cwd)
+            r.last_projected_run_id = item.run_id
+        except Exception:  # noqa: BLE001 —— 投影失败不阻断消息
+            self._log(r.role, f"[anvil] projection failed for run {item.run_id}")
+            try:
+                self._audit_session(
+                    conn, r.role, item.task_id, "projection.error",
+                    {"run_id": item.run_id})
+            except Exception:  # noqa: BLE001
+                pass
+
     def _switch_context_locked(self, conn, r: _Role, item: _Queued) -> None:
         """在 turn 边界切换任务上下文：保存当前槽 → 重开进程 → 恢复目标槽。"""
         target_key = task_key(item.task_id)
@@ -1022,11 +1054,13 @@ class DaemonManager:
             r.role,
             f"[anvil] context switch → {target_key} "
             f"({'resume ' + str(r.session_id) if resume else 'new session + CIC'})")
-        # 4) 拉起目标槽并投递
+        # 4) 拉起目标槽并投递（投递前投影当前任务，避免排队任务互相覆盖 CLAUDE.md）
+        self._project_before_delivery(conn, r, item)
         self._spawn(conn, r, item.spec)
         self._send_locked(conn, r, item)
 
     def _send_locked(self, conn, r: _Role, item: _Queued) -> None:
+        self._project_before_delivery(conn, r, item)
         spec = item.spec
         r.loaded_spec = spec
         if spec.model_pool:
@@ -1040,7 +1074,8 @@ class DaemonManager:
             "（环境变量 ANVIL_TASK_ID 可能已过期，请以此为准）\n\n"
             if item.task_id else "")
         if r.cic_pending:
-            prefix = self._build_cic(conn, r.role, item.task_id) + "\n\n" + task_prefix
+            prefix = self._build_cic(
+                conn, r.role, item.task_id, run_id=item.run_id) + "\n\n" + task_prefix
             r.cic_pending = False
         else:
             prefix = (r.handoff_pending
@@ -1634,14 +1669,18 @@ class DaemonManager:
         finally:
             conn.close()
 
-    def _build_cic(self, conn, role: str, task_id: str | None) -> str:
+    def _build_cic(self, conn, role: str, task_id: str | None,
+                   run_id: str | None = None) -> str:
         """Constructed Initial Context：任务知识 + 可复用知识 + 最近消息/动作。
 
         三条负规则：不宣布重置、不列未决问题清单、超过 2 小时的内容只给指针。
         task-scoped 内容只允许当前 task_id；role-scoped 可复用知识可跨任务。
         """
         from . import knowledge as knowledge_service  # 惰性导入避免循环
+        from . import knowledge_binding as knowledge_binding_service
+        from . import knowledge_repos as knowledge_repos_service
         from . import memory as memory_service
+        from . import repo_knowledge as repo_knowledge_service
         from . import task_knowledge as task_knowledge_service
         from . import workspace_knowledge as workspace_knowledge_service
 
@@ -1654,6 +1693,18 @@ class DaemonManager:
         repos = knowledge_service.scope_repos(
             conn, task_id, task["repo"] if task else None)
         blocks: list[dict] = []
+        try:
+            from . import roles as roles_service
+            capabilities = roles_service.capability_summary(conn, role)
+            if capabilities:
+                blocks.append({
+                    "priority": 6, "order": 8, "cap": 900, "min": 120,
+                    "text": "## 可用能力\n" + capabilities,
+                    "name": "capabilities", "layer": "L0", "kind": "capabilities",
+                    "scope": "role", "source_ids": [role],
+                })
+        except Exception:  # noqa: BLE001 —— 能力清单失败不阻断 CIC
+            pass
 
         if task is not None:
             header = (f"## 当前任务\n- {task['title']}（{task_id}）\n"
@@ -1665,7 +1716,10 @@ class DaemonManager:
             if repos:
                 header += "\n- 知识仓库：" + "、".join(repos)
             blocks.append({
-                "priority": 5, "order": 5, "cap": 500, "min": 120, "text": header})
+                "priority": 5, "order": 5, "cap": 500, "min": 120, "text": header,
+                "name": "current_task", "layer": "L1", "kind": "task_header",
+                "scope": "task", "source_ids": [task_id] if task_id else [],
+            })
 
             channel_knowledge = workspace_knowledge_service.render_for_task(
                 conn, dict(task), budget_chars=config.CHANNEL_KNOWLEDGE_CIC_CHARS)
@@ -1673,18 +1727,45 @@ class DaemonManager:
                 blocks.append({
                     "priority": 45, "order": 35, "cap": config.CHANNEL_KNOWLEDGE_CIC_CHARS,
                     "min": 200, "text": channel_knowledge,
+                    "name": "channel_knowledge", "layer": "L1", "kind": "channel_knowledge",
                 })
             task_shared = task_knowledge_service.render_for_task(conn, task_id, budget_chars=800)
             if task_shared:
                 blocks.append({
                     "priority": 42, "order": 36, "cap": 800, "min": 150, "text": task_shared,
+                    "name": "task_knowledge", "layer": "L1", "kind": "task_knowledge",
+                    "scope": "task", "source_ids": [task_id] if task_id else [],
                 })
+            # 主题知识库：任务绑定的共享 repo 已批准卡片（只读，不复制文件）。
+            try:
+                scope = knowledge_binding_service.retrieval_scope(conn, dict(task))
+                repo_ids = []
+                for name in scope.get("repos") or []:
+                    if not name or name == "shared":
+                        continue
+                    repo_row = knowledge_repos_service.get(conn, name)
+                    if repo_row is not None:
+                        repo_ids.append(repo_row["id"])
+                topic_text = repo_knowledge_service.render_for_task(
+                    conn, dict(task), repo_ids, budget_chars=2000)
+                if topic_text:
+                    blocks.append({
+                        "priority": 35, "order": 50, "cap": 2500, "min": 200,
+                        "text": topic_text,
+                        "name": "topic_knowledge", "layer": "L2",
+                        "kind": "topic_knowledge", "scope": "topic",
+                        "source_ids": repo_ids,
+                    })
+            except Exception:  # noqa: BLE001 —— 主题知识失败不阻断 CIC
+                pass
 
             snap = knowledge_service.latest_task_snapshot(conn, role, task_id)
             if snap:
                 blocks.append({
                     "priority": 20, "order": 30, "cap": 4000, "min": 600,
                     "text": "## 最近知识快照（自动整理）\n" + str(snap["content"])[:3900],
+                    "name": "task_snapshot", "layer": "L1", "kind": "task_snapshot",
+                    "scope": "task", "source_ids": [snap.get("id") or task_id],
                 })
 
             query = " ".join([str(task["title"] or ""), *tags,
@@ -1692,7 +1773,8 @@ class DaemonManager:
             hits = knowledge_service.search_knowledge(
                 conn, role, query, task_id=task_id, scope="auto",
                 limit=5, snippet_chars=600, repo_scope="bound_or_shared",
-                repos=repos) if query else []
+                repos=repos, min_score=config.KNOWLEDGE_MIN_SCORE,
+                allow_empty=False) if query else []
             if hits:
                 knowledge_service.record_hits(conn, [hit["id"] for hit in hits])
             hit_text = knowledge_service.format_hits(
@@ -1701,6 +1783,9 @@ class DaemonManager:
                 blocks.append({
                     "priority": 40, "order": 40, "cap": 4000, "min": 400,
                     "text": "## 相关记忆（按任务检索）\n" + hit_text,
+                    "name": "related_knowledge", "layer": "L2", "kind": "knowledge",
+                    "scope": "role_or_task",
+                    "source_ids": [hit.get("id") for hit in hits if hit.get("id")],
                 })
 
             wf = conn.execute(
@@ -1730,13 +1815,15 @@ class DaemonManager:
                     blocks.append({
                         "priority": 50, "order": 50, "cap": 4000, "min": 500,
                         "text": "## 工作流进度与决策\n" + "\n".join(lines),
+                        "name": "workflow", "layer": "L1", "kind": "workflow",
+                        "scope": "task", "source_ids": [wf["id"]],
                     })
         else:
             # 无任务（reminder/直聊）：只取 role-scoped 的最近知识，不碰 task scope。
             hits = knowledge_service.search_knowledge(
                 conn, role, "", task_id=None, scope="role",
                 limit=5, snippet_chars=300, repo_scope="bound_or_shared",
-                repos=repos)
+                repos=repos, min_score=0.0, allow_empty=True)
             if hits:
                 knowledge_service.record_hits(conn, [hit["id"] for hit in hits])
             hit_text = knowledge_service.format_hits(
@@ -1745,6 +1832,9 @@ class DaemonManager:
                 blocks.append({
                     "priority": 40, "order": 40, "cap": 1800, "min": 200,
                     "text": "## 相关记忆（角色知识库）\n" + hit_text,
+                    "name": "role_knowledge", "layer": "L3", "kind": "knowledge",
+                    "scope": "role",
+                    "source_ids": [hit.get("id") for hit in hits if hit.get("id")],
                 })
 
         lessons = memory_service.shared_lessons(
@@ -1756,14 +1846,18 @@ class DaemonManager:
             blocks.append({
                 "priority": 60, "order": 60, "cap": 1500, "min": 200,
                 "text": "## 共享经验（已批准）\n" + "\n".join(lesson_lines),
+                "name": "shared_lessons", "layer": "L4", "kind": "lesson",
+                "scope": "shared", "source_ids": [x["id"] for x in lessons],
             })
 
-        # 留出块标题的长度，保证 MEMORY.md 的最新尾部（最重要的内容）不被截掉。
-        mem = memory_service.read_memory_file(role, 3900).strip()
-        if mem:
+        # 耐久准则：小预算、始终注入；完整 MEMORY.md 不再进入上下文。
+        principles = memory_service.read_principles(role).strip()
+        if principles:
             blocks.append({
-                "priority": 10, "order": 10, "cap": 4000, "min": 800,
-                "text": "## 记忆（MEMORY.md 尾部，无需重读全文）\n" + mem,
+                "priority": 8, "order": 10, "cap": 2048, "min": 400,
+                "text": "## 角色准则（长期）\n" + principles,
+                "name": "role_principles", "layer": "L3", "kind": "principles",
+                "scope": "role", "source_ids": [role],
             })
 
         if task is not None:
@@ -1794,6 +1888,8 @@ class DaemonManager:
                     "priority": 30, "order": 70, "cap": 4000, "min": 500,
                     "truncate": "tail",
                     "text": "## 最近 25 条消息\n" + "\n".join(reversed(picked)),
+                    "name": "recent_messages", "layer": "L1", "kind": "messages",
+                    "scope": "task", "source_ids": [r["id"] for r in rows],
                 })
             acts = conn.execute(
                 "SELECT role_slug, action FROM audit WHERE task_id=? ORDER BY id DESC LIMIT 12",
@@ -1804,13 +1900,16 @@ class DaemonManager:
                     "text": "## 最近动作\n" + "\n".join(
                         f"- {a['role_slug'] or 'system'}: {a['action']}"
                         for a in reversed(acts)),
+                    "name": "recent_actions", "layer": "L1", "kind": "actions",
+                    "scope": "task",
                 })
 
         idx = knowledge_service.knowledge_index(conn, role, task_id)
         if idx["total_role"] or idx["total_task"]:
             labels = {"vulnerability_pattern": "漏洞模式",
                       "failure_scenario": "故障场景", "module_knowledge": "模块知识",
-                      "decision": "决策", "note": "笔记"}
+                      "decision": "决策", "note": "笔记",
+                      "personal_lesson": "个人经验"}
             role_counts = " / ".join(
                 f"{labels.get(k, k)} {v}" for k, v in sorted(idx["role_counts"].items()) if v)
             task_counts = " / ".join(
@@ -1831,9 +1930,21 @@ class DaemonManager:
             blocks.append({
                 "priority": 70, "order": 20, "cap": 1200, "min": 300,
                 "text": "\n".join(index_lines),
+                "name": "knowledge_index", "layer": "L5", "kind": "index",
+                "scope": "role_or_task",
             })
 
-        return knowledge_service.pack_blocks(blocks, 32000)
+        text, manifest = knowledge_service.pack_blocks_with_manifest(blocks, 32000)
+        try:
+            from . import context_manifest as manifest_service
+            manifest_service.record(
+                conn, run_id=run_id, role_slug=role, task_id=task_id,
+                kind="cic", budget_chars=32000, total_chars=len(text),
+                blocks=manifest)
+            conn.commit()
+        except Exception:  # noqa: BLE001 —— manifest 失败不影响 CIC
+            pass
+        return text
 
     def _db_upsert(self, conn, r: _Role, status: str, pid: int | None = -1,
                    error: str | None = None) -> None:

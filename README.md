@@ -24,18 +24,24 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 ## 1. 核心特性
 
 - **运行时发现**：内置 Claude Code / Codex CLI / Gemini CLI 定义，自动发现，也可用 YAML 扩展。
-- **角色**：独立私有 home（`instruction.md`、`MEMORY.md`、`notes/`、日志），绑定自己的运行时和技能/MCP。
+- **角色**：独立私有 home（`instruction.md`、`PRINCIPLES.md`、`memory/cards/`、`notes/`、日志），绑定自己的运行时和技能/MCP。
 - **常驻会话**：每个角色一个长期存活的 CLI 进程；唤醒 = 投递消息；空闲 15 分钟退出，下次 `--resume` 恢复。
 - **上下文与模型窗口**：自动识别实际模型与窗口；支持 `model_pool` / 窗口下限；角色可自主重置上下文。
 - **任务与工作流**：任务板、认领/租约、多角色协作；Cindy 先规划 workflow，人类批准后按依赖执行。
 - **切片闭环**：`plan_slices + loop`。Cindy 定义 loop 的角色/阶段；运行期切片只决定粒度与轮数，不能覆盖角色。
-- **记忆与知识**：`MEMORY.md` + FTS5 + 四层知识作用域（global / channel / task / role）+
-  知识卡模板、审批、版本、过期/复核/冲突检测；角色知识必须经过“成功实践 + 提炼”门控。
+- **记忆与知识**：`PRINCIPLES.md`（耐久准则）+ 角色经验卡 + FTS5 + 分层知识作用域
+  （频道 / 主题知识库 / 任务级知识库 / 角色 / 共享）；知识卡模板、审批、版本、过期/复核/冲突检测；
+  角色知识必须经过“成功实践 + 提炼”门控。任务起始上下文以角色画像与能力为主，历史知识按
+  tag/相关性检索带入，不再整段注入 `MEMORY.md`。
+- **任务隔离**：每个任务有独立的 Task Workspace（`data/task-workspaces/<task-id>/`），
+  代码/产物/任务级知识草稿互不串扰；无强相关主题时在 workspace 内创建任务级知识库，
+  人工批准后可晋升为主题知识库/频道/共享经验。
 - **频道与任务归档**：频道承载任务归属、领域 repo、knowledge repo 与参与角色；频道约定对绑定
   任务是“约束”、对只引用 knowledge repo 的任务是“参考”；未绑定频道的任务进入内置「#无主题」。
   任务可按终态归档，归档任务在所属频道任务页签或「#无主题」中查看。
-- **知识库与效果评估**：`/knowledge` 统一浏览频道知识、任务知识、角色知识、共享经验、演化提案
-  和总体效果评估；具体知识条目显示单条命中次数/最近命中，评估页展示命中覆盖率、零命中、
+- **知识库与效果评估**：`/knowledge` 统一浏览频道知识、任务知识、主题知识库、角色知识、
+  共享经验、演化提案和总体效果评估；主题知识库页提供待审批队列、批量批准/拒绝、
+  晋升/收割入口；具体知识条目显示单条命中次数/最近命中，评估页展示命中覆盖率、零命中、
   治理待处理与任务知识覆盖率。
 - **HITL**：评审、审批、删除、重置等只接受自然人身份，Agent 令牌返回 403。
 - **可观测**：SSE 事件、审计、运行日志、Token 统计、全场冻结。
@@ -193,12 +199,14 @@ anvil init --with-roles
   `ANVIL_CONTEXT_RESET_MAX_RETRIES` 次则交给步骤自动恢复队列（不 @human）。因此不会再以
   `prompt is too long` 的形式失败。
 - **长期知识（按作用域隔离）**：换会话/重置前，Anvil 会把当前任务的工作流步骤摘要、最近结论与
-  交接自动写成 `notes/knowledge/<task-id>/<时间>-<触发>.md`，并写入 FTS 索引。新会话的 CIC 会
-  注入本角色 `MEMORY.md` 尾部、按任务检索到的相关记忆、工作流决策、任务共享知识、频道知识
-  和最近知识快照；角色也可用 `anvil memory append "关键结论..."` 主动沉淀长期知识。
-  `MEMORY.md`、`notes/` 和个人知识按 `role_slug` 隔离；任务知识在同一任务的参与角色间共享；
-  频道知识对绑定该频道的任务是约束、对其他引用其 knowledge repo 的任务是参考；跨角色共享
-  还可通过人工批准的 lessons（`anvil lesson propose`）。角色不能直接导入他人的 notes。
+  交接自动写成 `notes/knowledge/<task-id>/<时间>-<触发>.md`，并写入 FTS 索引。新会话的 CIC 以
+  角色画像、工作方式与可用 skill/MCP 清单开头，再注入耐久准则（`PRINCIPLES.md` ≤2KB）、
+  按 tag/相关性检索到的经验卡与主题知识卡、任务工作集、工作流决策与最近消息；不再整段注入
+  `MEMORY.md`。角色可用 `anvil memory append "关键结论..."` 沉淀经验卡，
+  `--durable` 写耐久准则。`PRINCIPLES.md`、`memory/cards/`、`notes/` 按 `role_slug` 隔离；
+  任务级知识只对当前任务可见；主题知识库按绑定共享；频道知识对绑定频道的任务是约束、
+  对其他引用其 knowledge repo 的任务是参考；跨角色共享还需人工批准的 lessons。
+  角色不能直接导入他人的 notes。
 - 常驻进程已死但 run 仍卡在 `running` 时，调度器在 `ANVIL_RUN_DEAD_GRACE_SECONDS`
   （默认 60 秒）后强制转为 `suspended`，并标记下一次唤醒使用全新 CIC 会话；
   步骤看门狗随后续跑。
@@ -277,18 +285,23 @@ anvil knowledge card-validate --file card.json --for-approval
 
 | 场景 | 工作目录 |
 |---|---|
-| 任务没有 `repo` | 角色私有 home：`data/agents/<slug>/` |
-| 任务配置了 `repo` | 独立 worktree：`data/worktrees/<run_id>/`，分支 `agent/<slug>/<task>` |
+| 任意任务 | 任务工作空间：`data/task-workspaces/<task-id>/`（代码在 `work/`，任务级知识在 `knowledge/`） |
+| 配置了 Git 来源的任务 | 在任务工作空间 `work/` 内创建 worktree/checkout，分支 `agent/<slug>/<task>` |
+| 知识主题 | 只读访问 `data/knowledge-repos/<repo>/`，不在工作空间内建链接或副本 |
 
-运行日志：`data/agents/<slug>/logs/run-<run_id>.log`。
+运行日志：`data/agents/<slug>/logs/run-<run_id>.log`。任务工作空间按
+`ANVIL_TASK_WORKSPACE_RETENTION_DAYS`（默认 30 天）清理归档任务的目录，不删除 active 任务。
 
 ### 3.8 知识库与效果评估
 
-「知识库」页面按作用域提供六个页签：
+「知识库」页面按作用域提供七个页签：
 
 - **频道知识**：跨频道浏览/筛选，待批准卡可直接批准/拒绝；
-- **任务知识**：任务参与角色共享的知识，只读审计；
+- **任务知识**：任务参与角色共享的知识；可筛选待审批草稿并批准；
+- **主题知识库**：跨任务主题知识作用域；展示待审批队列、批量批准/拒绝、任务级草稿晋升、
+  已批准卡收割到频道/共享经验，以及主题库锁定与新建；
 - **角色知识**：按角色查看最近笔记或搜索 notes，仅作人工审计，不导入他人知识；
+  每条记录显示“归属：角色私有”和“来源主题”；来源主题只用于溯源与相关性排序，不是知识库绑定；
 - **共享经验**：lessons 的提案、审批与删除；
 - **演化提案**：角色自我演化建议的审批；
 - **效果评估**：只展示总体指标，不展示单条明细。
@@ -305,6 +318,25 @@ anvil knowledge card-validate --file card.json --for-approval
 
 效果评估页的总体指标包括：知识利用率（命中覆盖）、累计命中、零命中、过期/复核/冲突、
 任务知识覆盖率。任务归档后，终态任务的共享知识仍在任务知识页签中可见（标记为归档）。
+主题知识库卡片与任务级草稿都以 Markdown 文件为真相（`data/knowledge-repos/<repo>/cards/`、
+`data/task-workspaces/<task-id>/knowledge/<repo>/cards|drafts/`），DB/FTS 只是可重建索引。
+
+### 3.9 知识质量门与 LLM 清洗
+
+- **质量字段**：每条知识卡展示/校验 `use_when`（使用场景）、`expected_effect`（具体作用）、
+  `evidence`（任务/步骤/文件/命令/评审证据）；旧字段 `scope/applicability/reuse_scope`、
+  `outcome/consequences` 作为兼容别名。
+- **硬门禁**：主题/频道/任务审批缺少上述字段时返回 409；人工在「主题知识库」页补全后
+  再批准。存量已批准卡标记为 legacy，不追溯撤销。
+- **可读性**：标题 ≤80 字、TLDR ≤200 字、正文 ≤4000 字；模糊措辞、原始日志堆叠、
+  缺少边界会给出警告；质量分只用于排序，不替代人工。
+- **经验捕获**：完成/失败/返工/驳回自动生成结构化 `proposed` 草稿，缺项可见；
+  不会自动批准。
+- **LLM 清洗**：默认关闭（工具页「LLM 知识清洗」）。开启后人工对单张 proposed 卡
+  预览字段/正文 diff 与引用，确认后写回 proposed；不自动批准、不编造证据。
+  CLI：`anvil knowledge quality`、`anvil knowledge clean`。
+- **反馈/复核**：`anvil knowledge feedback <card-id> --signal helpful|unhelpful`；
+  `anvil knowledge review` 查看到期/低反馈/legacy 卡片；复核动作仍由人工确认。
 
 ## 4. 配置
 
@@ -343,6 +375,26 @@ anvil knowledge card-validate --file card.json --for-approval
 | `ANVIL_RUN_TIMEOUT` | `600` | 运行超时兜底（秒） |
 | `ANVIL_BACKUP` | `1` | 是否每天自动备份 SQLite |
 | `ANVIL_BACKUP_KEEP_DAYS` | `7` | 数据库备份保留天数 |
+
+### 4.1 运行时功能开关（工具页）
+
+以下开关可在「工具」页直接切换，**无需重启**；修改会持久化到 `settings`，下次启动继续生效。
+环境变量只提供初始默认值，用户覆盖优先。
+
+| 开关 | 默认 | 作用 |
+|---|---|---|
+| 自动经验捕获 | 开 | 任务完成/实质失败/返工/评审驳回时生成 `proposed` 草稿；不自动批准 |
+| 主题知识库自动绑定 | 开 | 建任务时自动匹配主题知识库；低相关时创建任务级知识库 |
+| 任务知识注入 | 开 | 当前任务的任务共享知识进入 CIC / one-shot 上下文 |
+| 频道知识注入 | 关 | 绑定频道的任务在 CIC/规划中读取频道知识（关闭只影响注入） |
+| 上下文来源清单 | 开 | 记录 CIC/投影注入了哪些知识、来源、字符数和丢弃原因 |
+| 延迟投影 | 开 | 持久会话在实际投递前才写 `CLAUDE.md`，避免跨任务覆盖 |
+| 任务独立工作空间 | 开 | 每个任务使用 `data/task-workspaces/<task-id>/`，隔离代码/产物/知识草稿 |
+| 工作空间自动清理 | 开 | 按保留天数清理已归档任务目录，active 任务不清理 |
+| LLM 知识清洗 | 关 | 人工按需预览/应用 proposed 卡的场景/效果/证据整理；不自动批准 |
+
+API：`GET /api/v1/features`、`PUT/DELETE /api/v1/features/{key}`（人工身份）。
+每个开关的完整说明和关闭影响在工具页悬停问号查看。
 
 ## 5. 测试与打包
 
@@ -521,6 +573,7 @@ anvil init --with-roles
 - [design.md](design.md)：架构、数据模型、工作流引擎、上下文与模型策略
 - [docs/cli-reference.md](docs/cli-reference.md)：CLI 命令、参数、规则、错误处理与示例
 - [docs/v1.30-channel-knowledge.md](docs/v1.30-channel-knowledge.md)：频道、知识作用域、知识卡、归档与效果评估方案
+- [docs/v1.40.0-release.md](docs/v1.40.0-release.md)：v1.40.0 任务上下文隔离、分层知识库、质量门与 LLM 清洗变更方案
 - [docs/workflow-revision.md](docs/workflow-revision.md)：运行中 workflow 的增量修订（安全变更不重启任务）
 - [docs/operations.md](docs/operations.md)：打包、备份/迁移/重置、卸载
 - [docs/troubleshooting.md](docs/troubleshooting.md)：详细排查

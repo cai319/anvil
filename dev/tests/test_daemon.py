@@ -536,7 +536,11 @@ def test_model_context_window_and_thresholds(env, monkeypatch):
 
     r.model_id = "deepseek-flash[1m]"
     assert mgr._context_window(r) == 1_000_000
+    # Phase 3：单任务预算 200k 作为 CIC 阈值上限。
+    assert mgr._cic_threshold(r) == 200_000
+    monkeypatch.setattr(config, "TASK_CONTEXT_BUDGET_TOKENS", 0)
     assert mgr._cic_threshold(r) == 800_000
+    monkeypatch.setattr(config, "TASK_CONTEXT_BUDGET_TOKENS", 200_000)
     assert mgr._hint_threshold(r) == 500_000
 
     # 模型池里最小的模型决定保守策略窗口

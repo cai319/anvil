@@ -18,6 +18,7 @@ import { UNBOUND_CHANNEL_VIEW } from "../channelView";
 import {
   AUTHORITY_LABEL,
   KNOWLEDGE_CARD_FIELDS,
+  KNOWLEDGE_QUALITY_FIELDS,
   KNOWLEDGE_FIELD_HINT,
   KNOWLEDGE_KINDS,
   KNOWLEDGE_KIND_LABEL,
@@ -355,7 +356,7 @@ export function Channels() {
             {t.parent_id && <span className="muted">子任务</span>}
             {t.archived_at && <span className="chip">已归档</span>}
             <small className="muted">
-              {t.repo || "无 repo"}
+              {t.repo || "临时知识空间"}
               {t.archived_at ? ` · 归档 ${t.archived_at.slice(0, 10)}` : ""}
             </small>
           </span>
@@ -525,9 +526,11 @@ export function Channels() {
                           <option value="reference">reference</option>
                         </select>
                       </label>
-                      {KNOWLEDGE_CARD_FIELDS[cardKind].map((f) => (
+                      {[...KNOWLEDGE_QUALITY_FIELDS,
+                        ...KNOWLEDGE_CARD_FIELDS[cardKind]].map((f) => (
                         <label key={f.key}>
-                          <FieldLabel label={f.label} hint={KNOWLEDGE_FIELD_HINT[f.key]} />
+                          <FieldLabel label={f.label}
+                            hint={KNOWLEDGE_FIELD_HINT[f.key] || (f as { hint?: string }).hint || ""} />
                           <textarea rows={2} value={cardFields[f.key] || ""}
                             onChange={(e) => setCardFields({ ...cardFields, [f.key]: e.target.value })} />
                         </label>

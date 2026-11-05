@@ -47,7 +47,8 @@ def test_build_cic_includes_long_term_knowledge(tmp_path, monkeypatch):
     data = tmp_path / "data"
     home = data / "agents" / "dev"
     home.mkdir(parents=True)
-    # MEMORY 头部是很久以前的内容；CIC 应取尾部（最近整理过的知识）
+    # 耐久准则来自 PRINCIPLES.md；legacy MEMORY.md 不再整段注入。
+    (home / "PRINCIPLES.md").write_text("TAIL-MARK\n", encoding="utf-8")
     (home / "MEMORY.md").write_text(
         "HEAD-MARK\n" + ("填充" * 3000) + "\nTAIL-MARK\n", encoding="utf-8")
     monkeypatch.setattr(config, "DATA_DIR", data)
@@ -131,12 +132,12 @@ def test_cic_isolates_task_scoped_knowledge(tmp_path, monkeypatch):
 
 
 def test_cic_budget_keeps_memory_snapshot_and_messages(tmp_path, monkeypatch):
-    """CIC 总长受限；预算紧张时仍保留 MEMORY、任务快照与最近消息。"""
+    """CIC 总长受限；预算紧张时仍保留角色准则、任务快照与最近消息。"""
     data = tmp_path / "data"
     home = data / "agents" / "dev"
     home.mkdir(parents=True)
-    (home / "MEMORY.md").write_text(
-        ("填充" * 4000) + "\nMEMORYTAILUNIQUE\n", encoding="utf-8")
+    (home / "PRINCIPLES.md").write_text(
+        "PRINCIPLESUNIQUE\n" + ("填充" * 400), encoding="utf-8")
     monkeypatch.setattr(config, "DATA_DIR", data)
     monkeypatch.setattr(config, "AGENTS_DIR", data / "agents")
 
@@ -158,7 +159,7 @@ def test_cic_budget_keeps_memory_snapshot_and_messages(tmp_path, monkeypatch):
     mgr = DaemonManager(db_path, enabled=False)
     cic = mgr._build_cic(conn, "dev", "T1")
     assert len(cic) <= 32000
-    assert "MEMORYTAILUNIQUE" in cic
+    assert "PRINCIPLESUNIQUE" in cic
     assert "SNAPSHOTHEADUNIQUE" in cic
     assert "## 最近 25 条消息" in cic and "MSG39:" in cic
     assert "## 最近动作" in cic or "## 最近 25 条消息" in cic

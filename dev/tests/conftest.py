@@ -28,6 +28,30 @@ TEST_ROLE = "qa-role"
 TEST_RUNTIME = "claude-code"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_data_dirs(tmp_path, monkeypatch):
+    """所有测试默认把数据目录指向 tmp，避免写真实 data/（尤其是 task workspace）。"""
+    from anvil import config as app_config
+    data = tmp_path / "anvil-isolated-data"
+    monkeypatch.setattr(app_config, "DATA_DIR", data)
+    monkeypatch.setattr(app_config, "AGENTS_DIR", data / "agents")
+    monkeypatch.setattr(app_config, "REPOS_DIR", data / "repos")
+    monkeypatch.setattr(app_config, "TASK_WORKSPACES_DIR", data / "task-workspaces")
+    monkeypatch.setattr(app_config, "KNOWLEDGE_REPOS_DIR", data / "knowledge-repos")
+    monkeypatch.setattr(app_config, "CHANNELS_DIR", data / "channels")
+    monkeypatch.setattr(app_config, "SQLITE_PATH", data / "anvil.db")
+    return data
+
+
+@pytest.fixture(autouse=True)
+def _reset_feature_flags():
+    """功能开关是进程级 config；每个用例前后恢复启动默认值，避免跨用例泄漏。"""
+    from anvil.services import features as feature_service
+    feature_service.reset_runtime()
+    yield
+    feature_service.reset_runtime()
+
+
 @pytest.fixture
 def app(tmp_path):
     """构建一个隔离的 FastAPI app（临时 SQLite + 测试鉴权旁路）。"""

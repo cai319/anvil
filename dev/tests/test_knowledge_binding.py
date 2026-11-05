@@ -33,9 +33,12 @@ def test_auto_bind_uses_other_evidence_not_new_task_itself(conn):
     task = tasks_service.create(
         conn, title="OpenSSL ASan 误报复现", description="核实 ASan 报告",
         tags=["openssl", "asan"], repo="openssl-4.0.1")
-    # 只有任务自身、没有 lesson/workspace/文件系统证据：不能自证绑定。
-    assert task["knowledge_repos"] == []
-    assert task["knowledge_binding_state"] == "fallback"
+    # 只有任务自身、没有 lesson/workspace/文件系统证据：不能自证绑定到共享主题；
+    # 新模型下会退到任务级 local repo（不污染全局注册表）。
+    applied = [r for r in task["knowledge_repos"] if r["status"] == "applied"]
+    assert applied
+    assert all((r.get("scope") or "shared") == "local" for r in applied)
+    assert all(r["repo"] != "openssl-4.0.1" for r in applied)
 
 
 def test_auto_bind_applies_strong_tag_match(conn):
@@ -107,19 +110,21 @@ def test_off_mode_rolls_back_to_old_scope(conn, monkeypatch):
     assert knowledge_binding.retrieval_scope(conn, task)["mode"] == "multi"
     monkeypatch.setattr(config, "KNOWLEDGE_BINDING_MODE", "off")
     scope = knowledge_binding.retrieval_scope(conn, task)
-    assert scope["mode"] == "any"
-    assert scope["repos"] is None
+    # 新模型：set_manual 会把主知识主题写入 tasks.repo；off 模式回退到 legacy scope。
+    assert scope["mode"] == "legacy"
+    assert scope["repos"] == ["gomoku", "shared"]
     from anvil.services import knowledge as knowledge_service
-    assert knowledge_service.scope_repos(conn, task["id"], None) is None
+    assert knowledge_service.scope_repos(conn, task["id"], None) == ["gomoku", "shared"]
 
 
 def test_retrieval_scope_modes(conn):
     t1 = tasks_service.create(conn, title="无仓库")
     assert knowledge_binding.retrieval_scope(conn, t1)["mode"] == "shared"
+    # 低相关任务建任务级 local repo；它不进入共享检索 scope。
     t2 = tasks_service.create(conn, title="执行仓库", repo="app")
     scope = knowledge_binding.retrieval_scope(conn, t2)
-    assert scope["mode"] == "legacy"
-    assert scope["repos"] == ["app", "shared"]
+    assert scope["mode"] == "shared"
+    assert scope["local"]
     t3 = tasks_service.create(conn, title="绑定", knowledge_repos=["gomoku"])
     scope = knowledge_binding.retrieval_scope(conn, t3)
     assert scope["mode"] == "multi"

@@ -81,11 +81,12 @@ def test_role_long_term_memory_is_isolated(env):
     tester_hits = memory.search_memory(conn, "tester", "devprivatemarker")
     assert tester_hits == []
 
-    # 文件也是各角色 home 独立
-    assert "devprivatemarker" in (agents / "dev" / "MEMORY.md").read_text()
-    tester_memory = agents / "tester" / "MEMORY.md"
-    if tester_memory.exists():
-        assert "devprivatemarker" not in tester_memory.read_text()
+    # 文件也是各角色 home 独立（默认写经验卡，不再追加 MEMORY.md）
+    dev_cards = list((agents / "dev" / "notes" / "memory" / "cards").glob("*.md"))
+    assert any("devprivatemarker" in p.read_text(encoding="utf-8") for p in dev_cards)
+    tester_cards = list((agents / "tester" / "notes" / "memory" / "cards").glob("*.md"))
+    assert not any("devprivatemarker" in p.read_text(encoding="utf-8")
+                   for p in tester_cards)
 
     mgr = DaemonManager(str(agents.parent / "t.db"), enabled=False)
     dev_cic = mgr._build_cic(conn, "dev", "T1")

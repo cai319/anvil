@@ -36,6 +36,13 @@ DATA_DIR = Path(_env("ANVIL_DATA_DIR", str(ROOT_DIR.parent / "data"))).expanduse
 SQLITE_PATH = Path(_env("ANVIL_SQLITE_PATH", str(DATA_DIR / "anvil.db"))).expanduser()
 AGENTS_DIR = Path(_env("ANVIL_AGENTS_DIR", str(DATA_DIR / "agents"))).expanduser()
 REPOS_DIR = Path(_env("ANVIL_REPOS_DIR", str(DATA_DIR / "repos"))).expanduser()
+# 任务数据存储（与知识库完全分开）。task_workspaces 表 + 每任务目录。
+TASK_WORKSPACES_DIR = Path(
+    _env("ANVIL_TASK_WORKSPACES_DIR", str(DATA_DIR / "task-workspaces"))).expanduser()
+# 主题知识库（跨任务）与 Channel 知识库的文件根目录。
+KNOWLEDGE_REPOS_DIR = Path(
+    _env("ANVIL_KNOWLEDGE_REPOS_DIR", str(DATA_DIR / "knowledge-repos"))).expanduser()
+CHANNELS_DIR = Path(_env("ANVIL_CHANNELS_DIR", str(DATA_DIR / "channels"))).expanduser()
 
 # LangGraph 检查点独立文件（与 anvil.db 隔离，见 graph/__init__.py）。
 GRAPH_DB_PATH = Path(_env("ANVIL_GRAPH_DB_PATH", str(DATA_DIR / "anvil-graph.db"))).expanduser()
@@ -146,6 +153,22 @@ KNOWLEDGE_BINDING_HIGH = float(_env("ANVIL_KNOWLEDGE_BINDING_HIGH", "0.62"))
 KNOWLEDGE_BINDING_SUGGEST = float(_env("ANVIL_KNOWLEDGE_BINDING_SUGGEST", "0.38"))
 KNOWLEDGE_BINDING_MAX_REPOS = int(_env("ANVIL_KNOWLEDGE_BINDING_MAX_REPOS", "3"))
 KNOWLEDGE_BINDING_GAP = float(_env("ANVIL_KNOWLEDGE_BINDING_GAP", "0.15"))
+# Phase 1：主题知识库自动识别/创建；<50% 时在 task workspace 内建任务级知识库。
+KNOWLEDGE_REPO_CREATE_MODE = _env("ANVIL_KNOWLEDGE_REPO_CREATE_MODE", "auto")  # auto|suggest|off
+KNOWLEDGE_REPO_CREATE_THRESHOLD = float(
+    _env("ANVIL_KNOWLEDGE_REPO_CREATE_THRESHOLD", "0.5"))
+# Phase 2：任务执行经验自动草稿（proposed，人工批准）；默认开启，可在「工具」页关闭。
+EXPERIENCE_CAPTURE_ENABLED = _env("ANVIL_EXPERIENCE_CAPTURE", "1") == "1"
+EXPERIENCE_CAPTURE_LLM = _env("ANVIL_EXPERIENCE_CAPTURE_LLM", "0") == "1"
+# 知识质量：人工按需 LLM 清洗（默认关闭；不自动批准）。
+KNOWLEDGE_LLM_CLEANING_ENABLED = _env(
+    "ANVIL_KNOWLEDGE_LLM_CLEANING", "0") == "1"
+
+# Phase 3：检索最低分 + 单任务上下文预算（0=关闭，按模型窗口 CIC 阈值）。
+# 基线校准：BM25/元数据重排后的分数偏低；0.05 只过滤明显噪声，保留精确关键词命中。
+KNOWLEDGE_MIN_SCORE = float(_env("ANVIL_KNOWLEDGE_MIN_SCORE", "0.05"))
+TASK_CONTEXT_BUDGET_TOKENS = int(
+    _env("ANVIL_TASK_CONTEXT_BUDGET_TOKENS", "200000"))
 KNOWLEDGE_CATALOG_TTL = float(_env("ANVIL_KNOWLEDGE_CATALOG_TTL", "30"))
 KNOWLEDGE_CATALOG_MAX_REPOS = int(_env("ANVIL_KNOWLEDGE_CATALOG_MAX_REPOS", "200"))
 # tagless：无 tags 的任务走 Cindy；always：所有新任务都走；off：只做确定性匹配。
@@ -161,6 +184,17 @@ CHANNEL_KNOWLEDGE_CIC_CHARS = int(_env("ANVIL_CHANNEL_KNOWLEDGE_CIC_CHARS", "120
 CHANNEL_KNOWLEDGE_PLANNING_CHARS = int(
     _env("ANVIL_CHANNEL_KNOWLEDGE_PLANNING_CHARS", "2200"))
 TASK_KNOWLEDGE_ENABLED = _env("ANVIL_TASK_KNOWLEDGE", "1") != "0"
+
+# Phase 0：任务工作空间 / 延迟投影 / 上下文清单 / 角色准则。
+TASK_WORKSPACE_ENABLED = _env("ANVIL_TASK_WORKSPACE", "1") != "0"
+TASK_WORKSPACE_RETENTION_DAYS = int(
+    _env("ANVIL_TASK_WORKSPACE_RETENTION_DAYS", "30"))
+TASK_WORKSPACE_CLEANUP_ENABLED = _env(
+    "ANVIL_TASK_WORKSPACE_CLEANUP", "1") != "0"
+DEFERRED_PROJECTION = _env("ANVIL_DEFERRED_PROJECTION", "1") != "0"
+CONTEXT_MANIFEST_ENABLED = _env("ANVIL_CONTEXT_MANIFEST", "1") != "0"
+MEMORY_PRINCIPLES_MAX_CHARS = int(
+    _env("ANVIL_MEMORY_PRINCIPLES_MAX_CHARS", "2048"))
 
 # Runtime definitions (design §2.6 存储分层)：
 #   - 内置（随包分发）：backend/anvil/runtimes/*.yaml
@@ -195,5 +229,7 @@ AUTH_TOKEN = _env("ANVIL_AUTH_TOKEN", "")
 
 
 def ensure_dirs() -> None:
-    for d in (DATA_DIR, USER_RUNTIMES_DIR, AGENTS_DIR, REPOS_DIR, SQLITE_PATH.parent):
+    for d in (DATA_DIR, USER_RUNTIMES_DIR, AGENTS_DIR, REPOS_DIR,
+              TASK_WORKSPACES_DIR, KNOWLEDGE_REPOS_DIR, CHANNELS_DIR,
+              SQLITE_PATH.parent):
         d.mkdir(parents=True, exist_ok=True)

@@ -15,6 +15,19 @@ const NOTE_KIND_LABEL: Record<string, string> = {
   note: "笔记",
 };
 
+function RepoSource({ repo, display }: {
+  repo?: string | null;
+  display?: string | null;
+}) {
+  if (!repo && !display) return null;
+  return (
+    <span className="repo-source"
+      title="写入时所在任务的知识主题，仅用于溯源与相关性排序；不代表知识归属、访问权限或存储绑定。">
+      来源主题：{display || repo}
+    </span>
+  );
+}
+
 export function RoleKnowledgeTab({ roles, onTotal }: {
   roles: Role[];
   onTotal: (total: number) => void;
@@ -85,7 +98,8 @@ export function RoleKnowledgeTab({ roles, onTotal }: {
         </span>
       </div>
       <p className="muted">
-        角色知识私有，仅作人工审计；完整文件和版本在角色工坊查看，不会导入其他角色的知识库。
+        角色知识归该角色私有，仅作人工审计；来源主题只用于溯源与相关性排序，
+        不是知识库绑定，也不会改变归属。完整文件和版本在角色工坊查看，不会导入其他角色的知识库。
       </p>
       {error && <p className="error">{error}</p>}
       {loading ? (
@@ -101,7 +115,7 @@ export function RoleKnowledgeTab({ roles, onTotal }: {
                   <span className="knowledge-record-title mono">{hit.path}</span>
                   <span className="knowledge-record-meta">
                     <span className="chip">{NOTE_KIND_LABEL[hit.kind] ?? hit.kind}</span>
-                    {hit.repo && <span>repo={hit.repo}</span>}
+                    <RepoSource repo={hit.repo} display={hit.repo_display} />
                     {hit.updated_at && <span>{formatDateTime(hit.updated_at)}</span>}
                     <span className="knowledge-record-hits"
                       title="角色知识被检索命中并加入上下文的次数">
@@ -118,6 +132,7 @@ export function RoleKnowledgeTab({ roles, onTotal }: {
       ) : index ? (
         <>
           <div className="knowledge-role-stats">
+            <span className="chip">归属：角色私有</span>
             <span className="chip">角色笔记 {index.total_role}</span>
             {Object.entries(index.role_counts).map(([kind, count]) => (
               <span key={kind} className="chip">{NOTE_KIND_LABEL[kind] ?? kind} {count}</span>
@@ -135,7 +150,7 @@ export function RoleKnowledgeTab({ roles, onTotal }: {
                     <span className="knowledge-record-title">{note.path}</span>
                     <span className="knowledge-record-meta">
                       <span className="chip">{NOTE_KIND_LABEL[note.kind] ?? note.kind}</span>
-                      {note.repo && <span>repo={note.repo}</span>}
+                      <RepoSource repo={note.repo} display={note.repo_display} />
                       {note.updated_at && <span>{formatDateTime(note.updated_at)}</span>}
                       <span className="knowledge-record-hits"
                         title="角色知识被检索命中并加入上下文的次数">

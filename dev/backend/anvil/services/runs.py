@@ -313,7 +313,12 @@ def _create_worktree(conn: sqlite3.Connection, run_id: str, role_slug: str, task
     if not task_id:
         return False
     task = tasks_service.get(conn, task_id)
-    repo_name = (task or {}).get("repo")
+    # 执行数据来源优先取 task workspace.source_repo；旧数据/直接插入回退 tasks.repo。
+    ws = conn.execute(
+        "SELECT source_repo FROM task_workspaces WHERE task_id=?", (task_id,)
+    ).fetchone()
+    repo_name = (ws["source_repo"] if ws is not None else None) \
+        or (task or {}).get("repo")
     if not repo_name:
         return False
     repo_path = config.REPOS_DIR / "".join(

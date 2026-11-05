@@ -503,6 +503,49 @@ def get_tools(conn: sqlite3.Connection, slug: str) -> dict:
     }
 
 
+def capability_summary(conn: sqlite3.Connection, slug: str,
+                       max_chars: int = 900) -> str:
+    """L0 能力清单：working_mode/capabilities + 勾选 skills/MCP（名称+一句话）。"""
+    role = get(conn, slug)
+    if role is None:
+        return ""
+    definition = role.get("definition") or {}
+    lines: list[str] = []
+    working = str(definition.get("working_mode") or "").strip()
+    if working:
+        lines.append(f"- 工作方式：{working[:200]}")
+    caps = definition.get("capabilities")
+    if isinstance(caps, dict) and caps:
+        pairs = sorted(caps.items(), key=lambda kv: (-float(kv[1] or 0), str(kv[0])))
+        lines.append("- 能力：" + "、".join(
+            f"{k}({float(v or 0):.2f})" for k, v in pairs[:8]))
+    tools = get_tools(conn, slug)
+    skill_desc: dict[str, str] = {}
+    mcp_desc: dict[str, str] = {}
+    try:
+        from . import runtime as runtime_service
+        runtime = definition.get("runtime")
+        rid = runtime.get("id") if isinstance(runtime, dict) else runtime
+        if rid:
+            catalog = runtime_service.catalog(conn, str(rid))
+            skill_desc = {s.get("name"): s.get("description") or ""
+                          for s in catalog.get("skills") or []}
+            mcp_desc = {s.get("name"): s.get("description") or ""
+                        for s in catalog.get("mcp_servers") or []}
+    except Exception:  # noqa: BLE001 —— catalog 失败不阻断能力清单
+        pass
+    for name in tools.get("skills") or []:
+        desc = str(skill_desc.get(name) or "").strip()
+        lines.append(f"- skill: {name}" + (f" — {desc[:160]}" if desc else ""))
+    for name in tools.get("mcp") or []:
+        desc = str(mcp_desc.get(name) or "").strip()
+        lines.append(f"- mcp: {name}" + (f" — {desc[:160]}" if desc else ""))
+    if not lines:
+        return ""
+    text = "\n".join(lines)
+    return text[:max_chars] if len(text) > max_chars else text
+
+
 def update_catalog(conn: sqlite3.Connection, slug: str, skills: list[str], mcp: list[str]) -> dict:
     """保存角色选择的 skill / MCP（全量替换）。"""
     if get(conn, slug) is None:

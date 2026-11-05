@@ -8,6 +8,7 @@ lesson 升格（§8.3）：pending → 人工审批 → approved，写入共享�
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -18,7 +19,7 @@ from pathlib import Path
 from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
 from . import knowledge as knowledge_service
-from . import knowledge_binding, repo_catalog
+from . import knowledge_binding, knowledge_repos, repo_catalog, repo_knowledge
 
 LESSON_CAP = 80
 
@@ -84,30 +85,73 @@ def append_memory(conn: sqlite3.Connection, role: str, content: str, *,
                   practice_run_id: str | None = None,
                   outcome: str | None = None,
                   source_knowledge: list | None = None,
-                  status: str = "active") -> dict:
-    mid = new_id()
+                  status: str = "active",
+                  durable: bool = False,
+                  tags: list | None = None,
+                  kind: str = "personal_lesson",
+                  repo: str | None = None) -> dict:
+    """写入角色记忆。
+
+    - 默认：写一张角色经验卡（notes scope=role + notes_fts），不做全量注入；
+    - `durable=True`：写 `PRINCIPLES.md` 耐久准则（≤ MEMORY_PRINCIPLES_MAX_CHARS）；
+    - 相同内容（content hash）在同一角色下只保留一份，重复写入返回已有卡片。
+    """
     text = (content or "").strip()
+    if not text:
+        raise ValueError("memory content is empty")
+    if durable:
+        return write_principles(conn, role, text, mode="append")
+
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    existing = conn.execute(
+        "SELECT id, path, status FROM notes WHERE role_slug=? AND content_hash=? "
+        "AND scope='role' AND status='active' LIMIT 1",
+        (role, digest),
+    ).fetchone()
+    if existing is not None:
+        return {
+            "id": existing["id"], "card_id": existing["id"],
+            "role_slug": role, "content": text, "owner": role,
+            "status": existing["status"], "path": existing["path"],
+            "deduped": True,
+        }
+
+    # 经验卡落入 notes（文件真相 + notes_fts），默认不被整段注入。
+    card_path = f"memory/cards/{new_id()}.md"
+    note = write_note(
+        conn, role, card_path, text,
+        kind=kind if kind else "personal_lesson", scope="role",
+        tags=tags or [], repo=repo, confidence=0.6, source="agent",
+        practice_task_id=practice_task_id,
+        practice_run_id=practice_run_id,
+        outcome=outcome,
+        source_knowledge=source_knowledge,
+        status=status,
+    )
+
+    # legacy memories/memory_fts 仅用于兼容 anvil memory search；不再追加 MEMORY.md。
+    mid = new_id()
+    now = now_iso()
     title = text.splitlines()[0][:80] if text else ""
     tldr = " ".join(text.split())[:200]
-    now = now_iso()
     conn.execute(
         "INSERT INTO memories (id, role_slug, content, owner, created_at, title, tldr, "
         "fields_json, practice_task_id, practice_run_id, outcome, verified_at, status, "
         "source_knowledge_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            mid, role, content, role, now, title, tldr, "{}",
+            mid, role, text, role, now, title, tldr, "{}",
             practice_task_id, practice_run_id, outcome,
             now if status == "active" and (practice_task_id or practice_run_id) else None,
             status, jdumps(source_knowledge or []),
         ),
     )
     if status == "active":
-        _index_fts(conn, role, content)
-        _append_to_home_file(role, "MEMORY.md", content)
+        _index_fts(conn, role, text)
     conn.commit()
     return {
-        "id": mid, "role_slug": role, "content": content, "owner": role,
-        "status": status, "verified_at": now if status == "active" else None,
+        **note, "id": mid, "card_id": note["id"], "owner": role,
+        "deduped": False,
+        "verified_at": now if status == "active" else None,
     }
 
 
@@ -170,6 +214,7 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
         "kind": meta["kind"], "scope": meta["scope"],
         "task_id": meta.get("task_id"), "source_task": meta.get("source_task"),
         "tags": meta.get("tags") or [], "repo": meta.get("repo"),
+        "repo_id": meta.get("repo_id"),
         "module": meta.get("module"), "confidence": meta.get("confidence"),
         "updated_at": now, "source": source, "status": status,
         "practice_task_id": practice_task_id, "practice_run_id": practice_run_id,
@@ -190,14 +235,15 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
     values = (
         nid, role, clean_path, body, created_at, meta["kind"], meta["scope"],
         meta.get("task_id"), meta.get("source_task"),
-        jdumps(meta.get("tags") or []), meta.get("repo"), meta.get("module"),
-        meta.get("confidence"), now, source, meta.get("content_hash"),
-        title, tldr, "{}", practice_task_id, practice_run_id, outcome, verified_at,
-        status, jdumps(source_knowledge or []),
+        jdumps(meta.get("tags") or []), meta.get("repo"), meta.get("repo_id"),
+        meta.get("module"), meta.get("confidence"), now, source,
+        meta.get("content_hash"), title, tldr, "{}", practice_task_id,
+        practice_run_id, outcome, verified_at, status,
+        jdumps(source_knowledge or []),
     )
     columns = (
         "id, role_slug, path, content, created_at, kind, scope, "
-        "task_id, source_task, tags_json, repo, module, confidence, updated_at, "
+        "task_id, source_task, tags_json, repo, repo_id, module, confidence, updated_at, "
         "source, content_hash, title, tldr, fields_json, practice_task_id, "
         "practice_run_id, outcome, verified_at, status, source_knowledge_json"
     )
@@ -208,7 +254,8 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
             "ON CONFLICT(role_slug, path) DO UPDATE SET "
             "content=excluded.content, kind=excluded.kind, scope=excluded.scope, "
             "task_id=excluded.task_id, source_task=excluded.source_task, "
-            "tags_json=excluded.tags_json, repo=excluded.repo, module=excluded.module, "
+            "tags_json=excluded.tags_json, repo=excluded.repo, "
+            "repo_id=excluded.repo_id, module=excluded.module, "
             "confidence=excluded.confidence, updated_at=excluded.updated_at, "
             "source=excluded.source, content_hash=excluded.content_hash, "
             "title=excluded.title, tldr=excluded.tldr, fields_json=excluded.fields_json, "
@@ -233,6 +280,7 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
         "kind": meta["kind"], "scope": meta["scope"],
         "task_id": meta.get("task_id"), "source_task": meta.get("source_task"),
         "tags": meta.get("tags") or [], "repo": meta.get("repo"),
+        "repo_id": meta.get("repo_id"),
         "module": meta.get("module"), "confidence": meta.get("confidence"),
         "updated_at": now, "created_at": row["created_at"] if row else created_at,
         "content_hash": meta.get("content_hash"), "status": status,
@@ -333,8 +381,201 @@ def search_memory(conn: sqlite3.Connection, role: str, q: str,
     return merged
 
 
+def principles_path(role: str) -> Path:
+    return config.AGENTS_DIR / role / "PRINCIPLES.md"
+
+
+def read_principles(role: str, max_chars: int | None = None) -> str:
+    """读角色耐久准则；缺失时回退 MEMORY.md 的**头部** 2KB（legacy）。
+
+    与旧的 read_memory_file（尾部）不同：准则文件是整理过的固定块，取全文；
+    legacy MEMORY.md 取头部，避免把最近追加的任务流水账当成准则。
+    """
+    limit = int(max_chars or config.MEMORY_PRINCIPLES_MAX_CHARS)
+    p = principles_path(role)
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        legacy = config.AGENTS_DIR / role / "MEMORY.md"
+        try:
+            text = legacy.read_text(encoding="utf-8")[:limit]
+        except OSError:
+            return ""
+    return text[:limit] if len(text) > limit else text
+
+
+def write_principles(conn: sqlite3.Connection, role: str, content: str, *,
+                     mode: str = "replace", actor: str | None = None) -> dict:
+    """写 `PRINCIPLES.md`：耐久准则，容量受限、去重、可审计。"""
+    limit = int(config.MEMORY_PRINCIPLES_MAX_CHARS)
+    text = (content or "").strip()
+    if not text:
+        raise ValueError("principles content is empty")
+    if mode == "append":
+        current = read_principles(role, max_chars=0)
+        lines = [line for line in current.splitlines() if line.strip()]
+        if text not in lines:
+            lines.append(text)
+        text = "\n".join(lines).strip()
+    if len(text) > limit:
+        raise ValueError(
+            f"principles exceed {limit} chars; move details to memory cards")
+    _replace_home_file(role, "PRINCIPLES.md", text + "\n")
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (actor or role, None, "memory.principles",
+         jdumps({"chars": len(text), "mode": mode}), now),
+    )
+    conn.commit()
+    return {
+        "role_slug": role, "content": text, "chars": len(text),
+        "status": "principles", "path": "PRINCIPLES.md", "updated_at": now,
+    }
+
+
+_PRINCIPLE_RE = re.compile(
+    r"(必须|禁止|不要|务必|一律|始终|绝不|原则|规则|约定|准则|never|always|must|do not)",
+    re.IGNORECASE)
+_PRINCIPLE_HEADINGS = ("工作准则", "快速判定", "原则", "准则", "规则", "rules", "principles")
+
+
+def _dedupe_lines(text: str) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in str(text or "").splitlines():
+        line = raw.rstrip()
+        if not line.strip():
+            if out and out[-1] != "":
+                out.append("")
+            continue
+        key = line.strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(line)
+    return out
+
+
+def _split_blocks(lines: list[str]) -> list[str]:
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in lines:
+        if not line.strip():
+            if current:
+                blocks.append("\n".join(current).strip())
+                current = []
+            continue
+        current.append(line)
+    if current:
+        blocks.append("\n".join(current).strip())
+    return [b for b in blocks if b]
+
+
+def migrate_memory_file(conn: sqlite3.Connection, role: str, *,
+                        dry_run: bool = False) -> dict:
+    """把 legacy MEMORY.md 拆成 PRINCIPLES.md + 经验卡，并去重。
+
+    - 优先提取 `## 工作准则/快速判定/原则/规则` 等章节作为准则；
+    - 没有章节时，提取短小、含规则关键词的行；
+    - 其余按空行分块写经验卡（相同 content hash 自动去重）；
+    - 原文归档到 `memory/archive/MEMORY-<timestamp>.md`；
+    - `dry_run=True` 只返回预览，不写任何文件/DB。
+    """
+    home = config.AGENTS_DIR / role
+    source = home / "MEMORY.md"
+    if not source.exists():
+        return {"role": role, "skipped": "no MEMORY.md", "dry_run": dry_run}
+    raw = source.read_text(encoding="utf-8")
+    lines = _dedupe_lines(raw)
+    blocks = _split_blocks(lines)
+
+    principle_parts: list[str] = []
+    used_blocks: set[str] = set()
+    in_principle = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            title = stripped[3:].strip().lower()
+            in_principle = any(h.lower() in title for h in _PRINCIPLE_HEADINGS)
+            continue
+        if in_principle and stripped and not stripped.startswith("#"):
+            principle_parts.append(stripped)
+    if not principle_parts:
+        principle_parts = [
+            b for b in blocks
+            if len(b) <= 240 and _PRINCIPLE_RE.search(b)
+        ]
+    principles = "\n".join(principle_parts).strip()
+    limit = int(config.MEMORY_PRINCIPLES_MAX_CHARS)
+    if len(principles) > limit:
+        principles = principles[:limit].rstrip()
+    principle_set = {p.strip() for p in principle_parts}
+    used_blocks.update(principle_set)
+
+    card_blocks = [
+        b for b in blocks
+        if b not in used_blocks and len(b) >= 20
+    ]
+    # Keep migration bounded; remaining content stays in the archived file.
+    card_blocks = card_blocks[:200]
+    preview = {
+        "role": role,
+        "dry_run": bool(dry_run),
+        "source_lines": len(raw.splitlines()),
+        "deduped_lines": len(lines),
+        "principles_chars": len(principles),
+        "cards": len(card_blocks),
+        "principles_preview": principles[:800],
+        "card_titles": [b.splitlines()[0][:100] for b in card_blocks[:10]],
+    }
+    if dry_run:
+        return preview
+
+    now = now_iso()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    archive_path = f"memory/archive/MEMORY-{stamp}.md"
+    _replace_home_file(role, archive_path, raw)
+    if principles:
+        write_principles(conn, role, principles, mode="replace", actor=role)
+
+    created = 0
+    deduped = 0
+    for block in card_blocks:
+        result = append_memory(
+            conn, role, block, kind="personal_lesson",
+            tags=["migrated"], status="active")
+        if result.get("deduped"):
+            deduped += 1
+        else:
+            created += 1
+
+    # 原文件替换为指针，避免 legacy 内容被再次当成准则；归档保留全文。
+    # 没有提取到准则时保留原文件，作为 read_principles 的 legacy 回退。
+    if principles:
+        _replace_home_file(
+            role, "MEMORY.md",
+            "# MEMORY.md 已迁移\n\n"
+            "- 耐久准则：`PRINCIPLES.md`\n"
+            "- 经验卡：`notes/memory/cards/`\n"
+            f"- 原文归档：`{archive_path}`\n")
+    conn.execute(
+        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (role, None, "memory.migrate",
+         jdumps({"principles_chars": len(principles), "cards": created,
+                 "deduped": deduped, "archive": archive_path}), now),
+    )
+    conn.commit()
+    return {
+        **preview, "dry_run": False, "cards_created": created,
+        "cards_deduped": deduped, "archive": archive_path,
+    }
+
+
 def read_memory_file(role: str, max_chars: int = 4000) -> str:
-    """读角色 MEMORY.md（尾部 max_chars），用于注入上下文。"""
+    """读角色 MEMORY.md（尾部 max_chars）；仅保留给 legacy/清理逻辑。"""
     p = config.AGENTS_DIR / role / "MEMORY.md"
     try:
         text = p.read_text(encoding="utf-8")
@@ -450,11 +691,13 @@ def context_for_task(conn: sqlite3.Connection, role: str, task: dict | None,
     task_hits = knowledge_service.search_knowledge(
         conn, role, query, task_id=task_id, scope="auto",
         limit=6, snippet_chars=800, repo_scope="bound_or_shared",
-        repos=repos) if query else []
+        repos=repos, min_score=config.KNOWLEDGE_MIN_SCORE,
+        allow_empty=False) if query else []
     role_hits = knowledge_service.search_knowledge(
         conn, role, query, task_id=None, scope="role",
         limit=6, snippet_chars=800, repo_scope="bound_or_shared",
-        repos=repos) if query else []
+        repos=repos, min_score=config.KNOWLEDGE_MIN_SCORE,
+        allow_empty=False) if query else []
     merged: list[dict] = []
     seen: set[str] = set()
     for hit in [*task_hits, *role_hits]:
@@ -470,6 +713,7 @@ def context_for_task(conn: sqlite3.Connection, role: str, task: dict | None,
         merged, max_item_chars=800, max_total_chars=4000)
     channel_knowledge = ""
     task_knowledge = ""
+    topic_knowledge = ""
     if task_id:
         try:
             from . import task_knowledge as task_knowledge_service
@@ -478,6 +722,15 @@ def context_for_task(conn: sqlite3.Connection, role: str, task: dict | None,
                 conn, task, budget_chars=config.CHANNEL_KNOWLEDGE_CIC_CHARS)
             task_knowledge = task_knowledge_service.render_for_task(
                 conn, task_id, budget_chars=800)
+            repo_ids = []
+            for name in repos or []:
+                if not name or name == "shared":
+                    continue
+                repo_row = knowledge_repos.get(conn, name)
+                if repo_row is not None:
+                    repo_ids.append(repo_row["id"])
+            topic_knowledge = repo_knowledge.render_for_task(
+                conn, task, repo_ids, budget_chars=2000)
         except Exception:  # noqa: BLE001 —— 投影失败不阻断 run
             pass
     lessons = shared_lessons(conn, tags, repo=task.get("repo"), repos=repos, limit=8)
@@ -492,14 +745,24 @@ def context_for_task(conn: sqlite3.Connection, role: str, task: dict | None,
         lesson_ids.append(lesson["id"])
         used += len(line) + 1
     record_lesson_hits(conn, lesson_ids)
+    capabilities = ""
+    try:
+        from . import roles as roles_service
+        capabilities = roles_service.capability_summary(conn, role)
+    except Exception:  # noqa: BLE001 —— 能力清单失败不阻断投影
+        pass
     return {
-        "memory": read_memory_file(role),
+        # 投影只注入耐久准则；完整 MEMORY.md 不再进入上下文（经验卡按相关性检索）。
+        "memory": read_principles(role),
+        "capabilities": capabilities,
+        "principles": read_principles(role),
         # 保留键位以兼容 project_instruction 调用方；按计划投影不注入任务快照。
         "snapshot": "",
         "notes": [notes_text] if notes_text else [],
         "lessons": lesson_lines,
         "channel_knowledge": channel_knowledge,
         "task_knowledge": task_knowledge,
+        "topic_knowledge": topic_knowledge,
         "knowledge_repos": repos or [],
         "retrieval_scope": scope.get("mode"),
     }
