@@ -161,6 +161,8 @@ export interface IssueTrackerTestResult {
   endpoint?: string;
   status?: number;
   latency_ms?: number;
+  elapsed_ms?: number;
+  error_type?: string;
   message?: string;
   body?: Record<string, unknown>;
 }

@@ -58,6 +58,17 @@ LEASE_TTL_SECONDS = float(_env("ANVIL_LEASE_TTL", str(RUN_TIMEOUT_SECONDS)))
 # Utility LLM 调用（AI 生成画像/角色）经默认 CLI 运行时执行；同步请求的超时（秒）。
 UTILITY_TIMEOUT_SECONDS = float(_env("ANVIL_UTILITY_TIMEOUT", "120"))
 
+# 问题板 → 外部问题跟踪服务器。测试只发空 list，给较短超时；正式提交可能批量较大。
+# connect 单独限制：DNS/TCP 建连慢时不必耗掉整个读超时，报错也能区分阶段。
+ISSUE_TRACKER_TIMEOUT_SECONDS = float(_env("ANVIL_ISSUE_TRACKER_TIMEOUT", "30"))
+ISSUE_TRACKER_TEST_TIMEOUT_SECONDS = float(
+    _env("ANVIL_ISSUE_TRACKER_TEST_TIMEOUT", "10"))
+ISSUE_TRACKER_CONNECT_TIMEOUT_SECONDS = float(
+    _env("ANVIL_ISSUE_TRACKER_CONNECT_TIMEOUT", "5"))
+# 出站请求与 curl 一致：读取 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY；
+# 未配置代理时由本机路由表选择出口网卡。此项可显式覆盖代理（留空则使用环境变量）。
+ISSUE_TRACKER_PROXY = _env("ANVIL_ISSUE_TRACKER_PROXY", "").strip()
+
 # 常驻角色运行时（persistent daemon）：默认随生产服务启用；测试环境（create_app 未开
 # scheduler）不启用，保持 one-shot 假进程路径可测。
 PERSISTENT_RUNTIME = _env("ANVIL_PERSISTENT_RUNTIME", "auto")  # auto | 1 | 0

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 
+import httpx
 import pytest
 
 from anvil.services import issue_tracker
@@ -156,6 +157,25 @@ async def test_export_permissions_and_tooling_test(client, app, monkeypatch):
     finally:
         conn.close()
     assert left == 0
+
+
+async def test_export_timeout_reports_stage(client, app, monkeypatch):
+    reviewer = await _seed(client, app)
+    fid = await _next_id(client, reviewer)
+    await _configure(client)
+
+    def timeout_post(endpoint, payload, timeout=15):
+        raise httpx.ConnectTimeout("connect slow")
+
+    monkeypatch.setattr(issue_tracker, "_post_request", timeout_post)
+    r = await client.post(
+        f"{API}/tasks/T-IB/findings/{fid}/external-submit",
+        headers=human_headers())
+    assert r.status_code == 504
+    detail = r.json()["detail"]
+    assert "连接超时" in detail
+    assert "DNS" in detail
+    assert "http://127.0.0.1:9/api/draft/bulkCreate" in detail
 
 
 async def test_export_failure_records_history(client, app, monkeypatch):

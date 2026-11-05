@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  api, type Finding, type FindingBoard, type FindingSchema, type FindingSummary,
+  api, type Finding, type FindingBoard, type FindingExportResult,
+  type FindingSchema, type FindingSummary, type IssueTrackerSettings,
 } from "../api/client";
 import { FindingDrawer, FINDING_STATUS_LABEL, riskLabel, severityLabel, sortFindings } from "../components/FindingDrawer";
 import { Icon } from "../components/Icon";
 import { confirmDialog } from "../components/dialogs";
-import type { IssueTrackerSettings } from "../api/client";
 
 const STATUS_FILTERS: { key: string; label: string }[] = [
   { key: "", label: "全部状态" },
@@ -40,10 +40,11 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string | null>(initialFindingId || null);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [tracker, setTracker] = useState<IssueTrackerSettings | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [exportResult, setExportResult] = useState<FindingExportResult | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -114,15 +115,14 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
     });
     if (!ok) return;
     setBulkBusy(true);
-    setError(null);
-    setNotice(null);
+    setExportResult(null);
+    setExportError(null);
     try {
       const result = await api.exportFindings(taskId);
-      setNotice(`已提交 ${result.submitted.length} 条`
-        + (result.failed.length ? `，失败 ${result.failed.length} 条` : ""));
+      setExportResult(result);
       notifyChanged();
     } catch (e) {
-      setError(String(e));
+      setExportError(String(e));
     } finally {
       setBulkBusy(false);
     }
@@ -144,15 +144,95 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
             你在这里逐条确认真实问题或误报；全部确认后任务才能最终通过。
           </p>
         </div>
-        <div className="finding-board-reviewers">
-          <span className="muted">审核者</span>
-          {summary?.reviewers?.length ? (
-            summary.reviewers.map((r) => <span key={r} className="chip">{r}</span>)
-          ) : (
-            <span className="muted">尚未指定（Cindy 规划时指定）</span>
+        <div className="finding-board-head-side">
+          {summary && summary.total !== 0 && (
+            <div className="finding-board-submit">
+              <button type="button" className="primary"
+                disabled={!tracker?.configured || eligible.length === 0 || bulkBusy}
+                onClick={() => { void exportAll(); }}>
+                <Icon name="send" size={14} />
+                {bulkBusy ? "提交中…" : `提交全部可提交问题（${eligible.length}）`}
+              </button>
+              {!tracker?.configured ? (
+                <a className="small button-like" href="/tooling">
+                  去工具页配置问题跟踪服务器
+                </a>
+              ) : (
+                <span className="muted finding-board-target">
+                  目标：{tracker.server_url}
+                </span>
+              )}
+            </div>
           )}
+          <div className="finding-board-reviewers">
+            <span className="muted">审核者</span>
+            {summary?.reviewers?.length ? (
+              summary.reviewers.map((r) => <span key={r} className="chip">{r}</span>)
+            ) : (
+              <span className="muted">尚未指定（Cindy 规划时指定）</span>
+            )}
+          </div>
         </div>
       </div>
+
+      {exportResult && (
+        <div
+          className={`finding-submit-result ${
+            exportResult.failed.length > 0 ? "is-error" : "is-success"
+          }`}
+          role={exportResult.failed.length > 0 ? "alert" : "status"}
+          aria-live="polite">
+          <Icon name={exportResult.failed.length > 0 ? "alert" : "check"} size={16} />
+          <div className="finding-submit-result-body">
+            <strong>
+              {exportResult.submitted.length > 0
+                ? `已提交 ${exportResult.submitted.length} 条问题`
+                : `提交失败：${exportResult.failed.length} 条问题未提交`}
+              {exportResult.submitted.length > 0 && exportResult.failed.length > 0
+                ? `，${exportResult.failed.length} 条失败`
+                : ""}
+              {exportResult.submitted.length > 0 && exportResult.failed.length === 0
+                ? "，全部成功"
+                : ""}
+            </strong>
+            <span className="muted">
+              目标：{tracker?.server_url || "问题跟踪服务器"}
+              {" · "}{exportResult.submitted_at}
+            </span>
+            {exportResult.submitted.length > 0 && (
+              <span className="muted">
+                外部 ID：{exportResult.submitted
+                  .map((item) => item.external_id).join("、")}
+              </span>
+            )}
+            {exportResult.failed.length > 0 && (
+              <ul className="finding-submit-failures">
+                {exportResult.failed.map((item) => (
+                  <li key={item.finding_id}>{item.finding_id}：{item.error}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <button type="button" className="finding-submit-dismiss"
+            aria-label="关闭提交结果" onClick={() => setExportResult(null)}>
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+      )}
+
+      {exportError && (
+        <div className="finding-submit-result is-error" role="alert">
+          <Icon name="alert" size={16} />
+          <div className="finding-submit-result-body">
+            <strong>提交失败</strong>
+            <span>{exportError}</span>
+          </div>
+          <button type="button" className="finding-submit-dismiss"
+            aria-label="关闭提交错误" onClick={() => setExportError(null)}>
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+      )}
 
       <div className="finding-board-stats">
         <div className="finding-stat is-total">
@@ -212,19 +292,6 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
 
       {summary?.total !== 0 && (
         <>
-          <div className="finding-board-actions">
-            <button type="button" className="primary"
-              disabled={!tracker?.configured || eligible.length === 0 || bulkBusy}
-              onClick={() => { void exportAll(); }}>
-              {bulkBusy ? "提交中…" : `提交全部可提交问题（${eligible.length}）`}
-            </button>
-            {!tracker?.configured ? (
-              <a className="small button-like" href="/tooling">去工具页配置问题跟踪服务器</a>
-            ) : (
-              <span className="muted">目标：{tracker.server_url}</span>
-            )}
-            {notice && <span className="tooling-notice">{notice}</span>}
-          </div>
           <div className="finding-board-filters">
             <label className="finding-search">
               <Icon name="search" size={13} />

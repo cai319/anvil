@@ -340,12 +340,18 @@ anvil knowledge card-validate --file card.json --for-approval
 
 ### 3.10 问题板外部提交
 
-- 在「工具」页配置问题跟踪服务器地址（如 `http://host/api`），可保存并测试连通性；
+- 在「工具」页配置问题跟踪服务器 base 地址（如 `http://host/api` 或
+  `http://host:5000`），系统自动追加 `/draft/bulkCreate`；可保存并测试连通性，
   测试只验证接口可达，不创建草稿。
+- 提交/测试超时可用 `ANVIL_ISSUE_TRACKER_TIMEOUT`、`ANVIL_ISSUE_TRACKER_TEST_TIMEOUT`、
+  `ANVIL_ISSUE_TRACKER_CONNECT_TIMEOUT` 调整；请求与 curl 一致，读取
+  `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY`，也可用 `ANVIL_ISSUE_TRACKER_PROXY`
+  显式指定代理。测试结果会区分连接超时/读取超时，
+  排查见 [docs/troubleshooting.md](docs/troubleshooting.md) Q20。
 - 任务问题板支持：
   - 单条 finding：详情抽屉底部「提交到问题跟踪」；
-  - 批量：问题板「提交全部可提交问题」，默认提交 `submitted/confirmed/changes_requested`，
-    排除 `draft/false_positive`。
+  - 批量：问题板右上角「提交全部可提交问题」，默认提交 `submitted/confirmed/changes_requested`，
+    排除 `draft/false_positive`；提交后显示成功/失败汇总、目标地址、时间和外部 ID。
 - 每次提交都会带上 `anvil:<task_id>:<timestamp>` 作为 `source`，由外部服务端去重；
   本地不做跳过/去重，只保留提交历史与最新外部 ID。
 - 外部 `description_md` 包含该 finding 的完整详情；外部 API 使用
@@ -588,6 +594,7 @@ anvil init --with-roles
 - [docs/v1.30-channel-knowledge.md](docs/v1.30-channel-knowledge.md)：频道、知识作用域、知识卡、归档与效果评估方案
 - [docs/v1.40.0-release.md](docs/v1.40.0-release.md)：v1.40.0 任务上下文隔离、分层知识库、质量门与 LLM 清洗变更方案
 - [docs/v1.41.0-release.md](docs/v1.41.0-release.md)：v1.41.0 问题板外部问题跟踪提交
+- [docs/v1.41.1-release.md](docs/v1.41.1-release.md)：v1.41.1 问题板提交反馈、tracker 超时/代理诊断与 CLI 帮助修复
 - [docs/workflow-revision.md](docs/workflow-revision.md)：运行中 workflow 的增量修订（安全变更不重启任务）
 - [docs/operations.md](docs/operations.md)：打包、备份/迁移/重置、卸载
 - [docs/troubleshooting.md](docs/troubleshooting.md)：详细排查

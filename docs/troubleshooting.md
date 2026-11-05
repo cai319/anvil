@@ -419,4 +419,58 @@ FROM roles WHERE slug IN ('workflow','system','human');
 确认它是误创建后，在角色工坊删除或调用人类身份的角色删除端点；不要直接删 home，
 先确认其中是否有需要保留的 notes。
 
+### Q20. 问题板提交/「测试连接」超时（504）
+
+问题板的外部提交是 **Anvil 后端 → 问题跟踪服务器**，浏览器不会直接请求 tracker，
+因此浏览器 CORS 不是根因。工具页「测试连接」即使 tracker 不可达也返回 HTTP 200 +
+`{"ok": false, "message": ...}`；如果这个请求本身返回 504，504 通常来自 Anvil 前面的
+网关/反向代理，而不是 Anvil 业务代码。
+
+先看工具页测试结果里的 `error_type` 和耗时：
+
+- `ConnectTimeout`：Anvil 后端无法与 tracker 建立 TCP 连接。检查 DNS、防火墙、
+  安全组、地址/端口；确认 tracker 是从 **Anvil 后端所在机器**可访问，
+  而不是只从浏览器所在机器可访问。
+- `ReadTimeout`：TCP 已连接，但 tracker 在超时时间内没有返回。可能是 tracker 处理慢，
+  或 tracker 前面的网关返回慢；可调大超时（见下）。
+- `HTTP 504`：tracker 或其上游网关返回 504，属于外部服务问题；Anvil 会保留失败记录，
+  并把提交标记为失败。
+- `HTTP 502` / `ConnectError`：连接被拒绝、DNS 失败、证书/协议错误或代理拒绝。
+
+在 Anvil 后端所在机器直接验证（不要把 URL 写死为示例）：
+
+```bash
+# 正式接口通常以 /draft/bulkCreate 结尾；工具页填 base（例如 http://host:5000）
+curl -v --max-time 30 -X POST 'http://<tracker>/draft/bulkCreate' \
+  -H 'Content-Type: application/json' \
+  -d '{"source":"anvil-probe","list":[]}'
+
+# 默认不使用 HTTP(S)_PROXY/ALL_PROXY；需要确认代理环境是否仍在影响其他工具
+env | grep -i proxy
+```
+
+Tracker 请求与 `curl` 的行为一致：默认读取 `HTTP_PROXY` / `HTTPS_PROXY` /
+`ALL_PROXY` / `NO_PROXY`；未配置代理时由本机路由表选择出口网卡。若 Anvil 服务进程
+没有继承到所需代理变量，可设置 `ANVIL_ISSUE_TRACKER_PROXY` 显式指定代理
+（例如 `http://proxy.local:8080`），它会覆盖环境变量；留空则继续使用环境变量。
+用户保证网络连通时，优先检查代理变量是否与服务进程实际网络环境一致。
+
+超时可通过环境变量调整，修改后重启后端：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `ANVIL_ISSUE_TRACKER_TIMEOUT` | 30 | 正式批量提交的读写超时（秒） |
+| `ANVIL_ISSUE_TRACKER_TEST_TIMEOUT` | 10 | 「测试连接」的空 list 探测超时（秒） |
+| `ANVIL_ISSUE_TRACKER_CONNECT_TIMEOUT` | 5 | TCP 建连超时（秒）；与读超时分开，便于定位 |
+| `ANVIL_ISSUE_TRACKER_PROXY` | 空 | 显式出站代理；留空时读取 `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` |
+
+如果浏览器 Network 中 `/api/v1/...` 的 504 响应来自 nginx/Ingress（响应头有
+`server: nginx`、`via` 等，响应体是 HTML），需要把该代理的读超时调到大于
+`ANVIL_ISSUE_TRACKER_TIMEOUT`，例如 nginx：
+
+```nginx
+proxy_read_timeout 60s;
+proxy_send_timeout 60s;
+```
+
 ---

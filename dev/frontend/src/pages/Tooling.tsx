@@ -292,7 +292,10 @@ export function Tooling() {
             <h2>问题跟踪服务器</h2>
             <p>
               配置后可在任务问题板把 finding 提交到开发问题跟踪系统。
-              地址示例：<code>http://xxx.xxx.xxx.xxx/api</code>；测试只检查接口连通性，不会创建草稿。
+              填 base 地址，例如 <code>http://xxx.xxx.xxx.xxx/api</code> 或{" "}
+              <code>http://xxx.xxx.xxx.xxx:5000</code>；系统会自动追加{" "}
+              <code>/draft/bulkCreate</code>，不要填写完整接口路径。
+              测试只检查接口连通性，不会创建草稿。
             </p>
           </div>
           <span className={`chip ${tracker?.configured ? "is-on" : ""}`}>
@@ -329,7 +332,12 @@ export function Tooling() {
           <p className="muted">
             端点：<code>{trackerTest.endpoint}</code>
             {trackerTest.status !== undefined ? ` · HTTP ${trackerTest.status}` : ""}
-            {trackerTest.latency_ms !== undefined ? ` · ${trackerTest.latency_ms}ms` : ""}
+            {trackerTest.latency_ms !== undefined
+              ? ` · ${trackerTest.latency_ms}ms`
+              : trackerTest.elapsed_ms !== undefined
+                ? ` · ${trackerTest.elapsed_ms}ms`
+                : ""}
+            {trackerTest.error_type ? ` · ${trackerTest.error_type}` : ""}
           </p>
         )}
       </section>

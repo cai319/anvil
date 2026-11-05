@@ -17,6 +17,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
+from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
 from . import findings, governance
 
@@ -24,8 +25,9 @@ SETTING_URL = "issue_tracker.url"
 SOURCE_PREFIX = "anvil"
 ELIGIBLE_STATUSES = ("submitted", "confirmed", "changes_requested")
 MAX_BATCH = 200
-DEFAULT_TIMEOUT = 15.0
-TEST_TIMEOUT = 8.0
+DEFAULT_TIMEOUT = config.ISSUE_TRACKER_TIMEOUT_SECONDS
+TEST_TIMEOUT = config.ISSUE_TRACKER_TEST_TIMEOUT_SECONDS
+CONNECT_TIMEOUT = config.ISSUE_TRACKER_CONNECT_TIMEOUT_SECONDS
 
 logger = logging.getLogger("anvil.issue_tracker")
 
@@ -99,8 +101,33 @@ def save_settings(conn: sqlite3.Connection, url: str, *, actor: str = "human") -
 
 def _post_request(endpoint: str, payload: dict,
                   timeout: float = DEFAULT_TIMEOUT) -> httpx.Response:
-    with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+    # connect 单独限时，避免 DNS/TCP 建连慢时占用全部读超时；其余阶段共享 timeout。
+    limits = httpx.Timeout(timeout, connect=min(timeout, CONNECT_TIMEOUT))
+    # 与 curl 一致：trust_env=True 读取系统代理环境变量；未配置代理时由本机
+    # 路由表选择出口网卡。ANVIL_ISSUE_TRACKER_PROXY 可显式覆盖环境变量。
+    with httpx.Client(
+        timeout=limits,
+        follow_redirects=False,
+        trust_env=True,
+        proxy=config.ISSUE_TRACKER_PROXY or None,
+    ) as client:
         return client.post(endpoint, json=payload)
+
+
+def _timeout_message(exc: httpx.TimeoutException, timeout: float,
+                     endpoint: str) -> str:
+    """把 httpx 超时拆成可操作的阶段，方便区分网络与外部服务问题。"""
+    if isinstance(exc, httpx.ConnectTimeout):
+        return (f"连接超时：{CONNECT_TIMEOUT:g}s 内无法连接 {endpoint}"
+                "（检查 Anvil 后端的 DNS、防火墙、出站代理或地址/端口）")
+    if isinstance(exc, httpx.ReadTimeout):
+        return (f"读取超时：已连接 {endpoint}，但 {timeout:g}s 内未收到响应"
+                "（外部服务处理过慢，或反向代理未及时返回）")
+    if isinstance(exc, httpx.WriteTimeout):
+        return f"发送超时：{timeout:g}s 内未把请求体发送到 {endpoint}"
+    if isinstance(exc, httpx.PoolTimeout):
+        return f"连接池超时：{timeout:g}s 内没有可用连接"
+    return f"请求超时（{timeout:g}s）：{endpoint}"
 
 
 def _stamp() -> str:
@@ -311,19 +338,24 @@ def export_findings(conn: sqlite3.Connection, task_id: str,
     payload = {"source": source, "list": items}
     # 网络调用前释放本地事务，避免长时间持有 SQLite 锁。
     conn.commit()
+    endpoint = endpoint_url(settings["server_url"])
 
     try:
-        response = _post_request(endpoint_url(settings["server_url"]), payload)
+        response = _post_request(endpoint, payload)
     except httpx.TimeoutException as exc:
+        message = _timeout_message(exc, DEFAULT_TIMEOUT, endpoint)
+        logger.warning("issue tracker submit timeout task=%s endpoint=%s type=%s",
+                       task_id, endpoint, type(exc).__name__)
         _fail_all(conn, task_id=task_id, items=candidates, source=source,
-                  error=f"external server timeout: {exc}", response={},
-                  actor=actor)
-        raise IssueTrackerTimeout(str(exc)) from exc
+                  error=message, response={}, actor=actor)
+        raise IssueTrackerTimeout(message) from exc
     except httpx.HTTPError as exc:
+        message = f"请求失败（{type(exc).__name__}）：{endpoint}"
+        logger.warning("issue tracker submit failed task=%s endpoint=%s error=%s",
+                       task_id, endpoint, exc)
         _fail_all(conn, task_id=task_id, items=candidates, source=source,
-                  error=f"external server request failed: {exc}", response={},
-                  actor=actor)
-        raise IssueTrackerError(str(exc)) from exc
+                  error=message, response={}, actor=actor)
+        raise IssueTrackerError(message) from exc
 
     try:
         body = response.json()
@@ -389,11 +421,19 @@ def test_connection(conn: sqlite3.Connection | None, url: str | None = None,
     try:
         response = _post_request(endpoint, payload, timeout=timeout)
     except httpx.TimeoutException as exc:
-        return {"ok": False, "endpoint": endpoint,
-                "message": f"连接超时：{exc}"}
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        message = _timeout_message(exc, timeout, endpoint)
+        logger.warning("issue tracker test timeout endpoint=%s type=%s elapsed_ms=%s",
+                       endpoint, type(exc).__name__, elapsed_ms)
+        return {"ok": False, "endpoint": endpoint, "elapsed_ms": elapsed_ms,
+                "error_type": type(exc).__name__, "message": message}
     except httpx.HTTPError as exc:
-        return {"ok": False, "endpoint": endpoint,
-                "message": f"无法连接：{exc}"}
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        message = f"无法连接（{type(exc).__name__}）：{endpoint}：{exc}"
+        logger.warning("issue tracker test failed endpoint=%s error=%s",
+                       endpoint, exc)
+        return {"ok": False, "endpoint": endpoint, "elapsed_ms": elapsed_ms,
+                "error_type": type(exc).__name__, "message": message}
     latency_ms = int((time.monotonic() - started) * 1000)
     try:
         body = response.json()
@@ -404,6 +444,9 @@ def test_connection(conn: sqlite3.Connection | None, url: str | None = None,
     expected_validation = status in (400, 422) and (
         "list" in message.lower() or "不能为空" in message or "source" in message.lower())
     ok = 200 <= status < 300 or expected_validation
+    if not ok:
+        logger.warning("issue tracker test rejected endpoint=%s status=%s message=%s",
+                       endpoint, status, message[:200])
     result = {
         "ok": ok,
         "endpoint": endpoint,

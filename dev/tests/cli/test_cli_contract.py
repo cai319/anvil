@@ -175,7 +175,9 @@ def test_unknown_task_action_lists_reviewers():
 
 @pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
 def test_unknown_knowledge_action_shows_supported_actions():
-    """拼错 action 时给出可用动作，避免 Agent 只拿到一句 unknown 后盲试。"""
+    """拼错 action 时给出全部可用动作，避免 Agent 只拿到一句 unknown 后盲试。"""
+    from anvil_cli.main import KNOWLEDGE_ACTIONS
+
     env = {**os.environ, "ANVIL_ENDPOINT": "http://127.0.0.1:1"}
     r = subprocess.run(
         [ANVIL_BIN, "knowledge", "bogus"], env=env,
@@ -183,7 +185,20 @@ def test_unknown_knowledge_action_shows_supported_actions():
     )
     assert r.returncode == EXIT["usage"]
     assert "unknown knowledge action: bogus" in r.stderr
-    assert "search" in r.stderr and "list" in r.stderr
+    missing = [action for action in KNOWLEDGE_ACTIONS if action not in r.stderr]
+    assert not missing, (missing, r.stderr)
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+def test_knowledge_help_lists_all_actions():
+    """-h 的动作清单必须覆盖已实现 action，避免更新 CLI 后帮助残留旧清单。"""
+    from anvil_cli.main import KNOWLEDGE_ACTIONS
+
+    r = subprocess.run([ANVIL_BIN, "knowledge", "-h"], capture_output=True,
+                       text=True, timeout=30)
+    assert r.returncode == EXIT["ok"], r.stderr
+    missing = [action for action in KNOWLEDGE_ACTIONS if action not in r.stdout]
+    assert not missing, (missing, r.stdout)
 
 
 @pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")

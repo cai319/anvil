@@ -95,6 +95,42 @@ def test_connection_rejects_missing_endpoint(monkeypatch):
     assert result["ok"] is False
 
 
+def test_post_request_honors_proxy_config(monkeypatch):
+    """读取代理环境变量（与 curl 一致）；显式代理可覆盖环境变量。"""
+    captured: dict = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, endpoint, json):
+            captured["endpoint"] = endpoint
+            captured["payload"] = json
+            return object()
+
+    monkeypatch.setattr(issue_tracker.httpx, "Client", FakeClient)
+    monkeypatch.setattr(issue_tracker.config, "ISSUE_TRACKER_PROXY", "")
+    issue_tracker._post_request(
+        "http://1.2.3.4/api/draft/bulkCreate", {"source": "x", "list": []})
+    assert captured["trust_env"] is True
+    assert captured["proxy"] is None
+    assert captured["endpoint"].endswith("/draft/bulkCreate")
+
+    captured.clear()
+    monkeypatch.setattr(issue_tracker.config, "ISSUE_TRACKER_PROXY",
+                        "http://proxy.local:8080")
+    issue_tracker._post_request(
+        "http://1.2.3.4/api/draft/bulkCreate", {"source": "x", "list": []})
+    assert captured["trust_env"] is True
+    assert captured["proxy"] == "http://proxy.local:8080"
+
+
 def test_connection_timeout(monkeypatch):
     def timeout(*args, **kwargs):
         raise httpx.TimeoutException("slow")
@@ -103,3 +139,24 @@ def test_connection_timeout(monkeypatch):
     result = issue_tracker.test_connection(None, "http://1.2.3.4/api")
     assert result["ok"] is False
     assert "超时" in result["message"]
+    assert result["elapsed_ms"] >= 0
+
+
+def test_connection_classifies_connect_and_read_timeout(monkeypatch):
+    def connect_timeout(*args, **kwargs):
+        raise httpx.ConnectTimeout("connect slow")
+
+    monkeypatch.setattr(issue_tracker, "_post_request", connect_timeout)
+    result = issue_tracker.test_connection(None, "http://1.2.3.4/api")
+    assert "连接超时" in result["message"]
+    assert "DNS" in result["message"]
+    assert result["error_type"] == "ConnectTimeout"
+
+    def read_timeout(*args, **kwargs):
+        raise httpx.ReadTimeout("read slow")
+
+    monkeypatch.setattr(issue_tracker, "_post_request", read_timeout)
+    result = issue_tracker.test_connection(None, "http://1.2.3.4/api")
+    assert "读取超时" in result["message"]
+    assert "未收到响应" in result["message"]
+    assert result["error_type"] == "ReadTimeout"

@@ -102,6 +102,14 @@ STEP_EPILOG = """\b
   · 工作流步骤不要 task claim / task submit，也不要在切片里指定角色。
 """
 
+# 未知 action 提示与 -h 的动作用同一份清单，避免新增命令后只更新一处。
+KNOWLEDGE_ACTIONS = (
+    "search", "show", "index", "list", "reindex",
+    "repo-list", "repo-show", "repo-suggest", "repo-create", "repo-cards",
+    "card-create", "card-template", "card-validate", "card-approve", "card-reject",
+    "quality", "clean", "feedback", "review", "explain",
+)
+
 KNOWLEDGE_EPILOG = """\b
 动作:
   search "关键词" --task ID             检索自己的角色/任务知识
@@ -111,13 +119,26 @@ KNOWLEDGE_EPILOG = """\b
   repo-list                             知识仓库列表
   repo-show --repo <name>               仓库详情
   repo-suggest "任务标题"               推荐知识仓库
+  repo-create <name> --fields '{...}'   创建主题知识仓库
+  repo-cards --repo <name>              主题下的知识卡（--kind 过滤状态）
+  card-create <repo> --file card.json   创建主题知识卡
   card-template --kind convention       知识卡模板
   card-validate --file card.json        校验知识卡
+  quality [--repo <name>]               知识质量概览
+  clean --id <card-id> [--apply]        LLM 清洗单卡（默认 dry-run）
+  clean --repo <name> [--kind proposed] 批量清洗（默认 dry-run）
+  feedback --id <card-id> --signal ...  记录知识反馈
+  review [--repo <name>]                查看到期/低反馈/legacy 卡片
+  review --id <id> --review-action ...  复核单卡（keep/deprecate/refresh）
+  card-approve | card-reject --id <id>  human 审批/驳回主题卡
+  explain --task <id>                   解释本任务注入了哪些知识
 
 示例:
   anvil knowledge search "登录 超时" --task $ANVIL_TASK_ID --limit 5
-  anvil knowledge list
-  anvil knowledge card-template --kind sop
+  anvil knowledge quality --repo openssl
+  anvil knowledge clean --id K-1 --apply
+  anvil knowledge feedback --id K-1 --signal helpful
+  anvil knowledge review --repo openssl
 """
 
 NOTE_EPILOG = """\b
@@ -382,7 +403,7 @@ def _role_exists(slug: str) -> bool:
 
 
 @app.command("self", help="当前身份、会话与自我维护。", epilog=SELF_EPILOG,
-              short_help="身份/会话：show/reset-context")
+              short_help="身份/会话：show/edit-instruction/propose/reset-context")
 def self_cmd(
     action: str = typer.Argument("show"),
     file: str = typer.Option(None, "--file", help="instruction / proposal 内容文件"),
@@ -847,8 +868,9 @@ def note_cmd(
         raise typer.Exit(2)
 
 
-@app.command("knowledge", help="知识检索、索引与知识卡。", epilog=KNOWLEDGE_EPILOG,
-              short_help="知识：检索/索引/仓库/知识卡")
+@app.command("knowledge", help="知识检索、索引、知识卡与质量审批。",
+              epilog=KNOWLEDGE_EPILOG,
+              short_help="知识：检索/索引/仓库/质量/审批")
 def knowledge_cmd(
     action: str = typer.Argument("search"),
     query: str = typer.Argument(None),
@@ -908,7 +930,7 @@ def knowledge_cmd(
     json_out: bool = typer.Option(False, "--json", help="输出 JSON",
                                   rich_help_panel="输出"),
 ):
-    """anvil knowledge <search|show|index|list|reindex|repo-list|repo-show|repo-suggest|card-template|card-validate> ..."""
+    """anvil knowledge <search|show|index|list|reindex|repo-*|card-*|quality|clean|feedback|review|explain> ..."""
     if action == "search":
         params = {
             "q": query or "", "scope": scope, "limit": limit,
@@ -1109,9 +1131,8 @@ def knowledge_cmd(
     else:
         _usage_error(
             f"unknown knowledge action: {action}",
-            "可用动作: search/show/index/list/reindex/repo-list/repo-show/"
-            "repo-suggest/card-template/card-validate/quality/clean/feedback/review。"
-            "运行 `anvil knowledge -h` 查看示例。")
+            "可用动作: " + "/".join(KNOWLEDGE_ACTIONS) +
+            "。运行 `anvil knowledge -h` 查看示例。")
 
 
 @app.command("lesson", help="提议一条共享经验（human 审批）。", epilog=LESSON_EPILOG,

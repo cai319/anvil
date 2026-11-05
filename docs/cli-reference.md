@@ -10,6 +10,25 @@
 - 所有命令支持 `-h` / `--help`
 - 文档与实现不一致时，以 `anvil <command> -h` 为准
 
+### 升级 CLI
+
+Anvil CLI **没有** `anvil update` 子命令，它跟随后端源码一起发布：
+
+```bash
+# 开发安装（editable）：更新代码后立即生效，无需重新安装
+git pull
+# 如果换了 Python 环境或入口失效，再执行：
+pip install -e dev/agentcli
+
+# 打包安装：在启动后端的同一 venv 中重装
+pip install --force-reinstall <anvil-cli-wheel-or-sdist>
+```
+
+升级后检查：`anvil --version` 应与 `dev/VERSION` 一致；`anvil <command> -h`
+应显示新动作。命令/选项列表由 Typer 从源码生成；各命令的示例（epilog）和
+参数错误提示（`error:` / `hint:`）在 `dev/agentcli/anvil_cli/main.py` 中维护；
+`docs/cli-reference.md` 为人工维护，新增/修改 CLI 命令时需同步更新。
+
 ## 1. 身份与环境
 
 | 环境变量 | 作用 |
@@ -271,8 +290,14 @@ anvil knowledge reindex [--dry-run] [--prune] [--self | --all]
 anvil knowledge repo-list
 anvil knowledge repo-show --repo <name>
 anvil knowledge repo-suggest "任务标题"
+anvil knowledge repo-create <name> [--fields '{"description":"..."}']
+anvil knowledge repo-cards --repo <name> [--kind <status>]
+anvil knowledge card-create <repo> --file card.json
 anvil knowledge card-template --kind <kind>
 anvil knowledge card-validate --file card.json [--for-approval]
+anvil knowledge card-approve --id <card-id>      # human
+anvil knowledge card-reject --id <card-id>       # human
+anvil knowledge explain --task <task-id>
 anvil knowledge quality [--repo <repo>] [--json]
 anvil knowledge clean --id <card-id> [--dry-run|--apply] [--runtime <id>]
 anvil knowledge clean --repo <repo> [--kind proposed] [--limit 5] [--dry-run|--apply]
