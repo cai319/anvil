@@ -4,6 +4,8 @@ import {
 } from "../api/client";
 import { FindingDrawer, FINDING_STATUS_LABEL, riskLabel, severityLabel, sortFindings } from "../components/FindingDrawer";
 import { Icon } from "../components/Icon";
+import { confirmDialog } from "../components/dialogs";
+import type { IssueTrackerSettings } from "../api/client";
 
 const STATUS_FILTERS: { key: string; label: string }[] = [
   { key: "", label: "全部状态" },
@@ -38,7 +40,10 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string | null>(initialFindingId || null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [tracker, setTracker] = useState<IssueTrackerSettings | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -64,6 +69,12 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId]);
 
+  useEffect(() => {
+    api.getIssueTrackerSettings()
+      .then(setTracker)
+      .catch(() => setTracker(null));
+  }, []);
+
   const notifyChanged = () => {
     load();
     onChanged();
@@ -88,6 +99,34 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
   const counts = summary?.counts || {};
   const pending = (counts.submitted || 0) + (counts.changes_requested || 0);
   const completed = board?.status === "completed";
+  const eligible = items.filter((f) => (
+    f.status === "submitted" || f.status === "confirmed"
+    || f.status === "changes_requested"
+  ));
+
+  const exportAll = async () => {
+    if (!tracker?.configured || eligible.length === 0) return;
+    const ok = await confirmDialog({
+      title: "提交问题到外部跟踪系统？",
+      message: `将向 ${tracker.server_url} 提交 ${eligible.length} 条 finding。`
+        + "这是外部操作，会创建草稿记录；重复点击会再次提交。",
+      confirmLabel: "提交",
+    });
+    if (!ok) return;
+    setBulkBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await api.exportFindings(taskId);
+      setNotice(`已提交 ${result.submitted.length} 条`
+        + (result.failed.length ? `，失败 ${result.failed.length} 条` : ""));
+      notifyChanged();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBulkBusy(false);
+    }
+  };
 
   return (
     <div className="finding-board">
@@ -173,6 +212,19 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
 
       {summary?.total !== 0 && (
         <>
+          <div className="finding-board-actions">
+            <button type="button" className="primary"
+              disabled={!tracker?.configured || eligible.length === 0 || bulkBusy}
+              onClick={() => { void exportAll(); }}>
+              {bulkBusy ? "提交中…" : `提交全部可提交问题（${eligible.length}）`}
+            </button>
+            {!tracker?.configured ? (
+              <a className="small button-like" href="/tooling">去工具页配置问题跟踪服务器</a>
+            ) : (
+              <span className="muted">目标：{tracker.server_url}</span>
+            )}
+            {notice && <span className="tooling-notice">{notice}</span>}
+          </div>
           <div className="finding-board-filters">
             <label className="finding-search">
               <Icon name="search" size={13} />
@@ -221,6 +273,9 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
                     </span>
                     <span className="chip">{riskLabel(schema, f.risk_type)}</span>
                     <span className="chip">置信度 {f.confidence}%</span>
+                    {f.external_id && (
+                      <span className="chip finding-external-badge">外部 #{f.external_id}</span>
+                    )}
                     <span className="muted">by {f.author_role} · {f.updated_at}</span>
                   </span>
                 </span>
@@ -239,6 +294,7 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
           taskId={taskId}
           findingId={selected}
           schema={schema}
+          trackerConfigured={Boolean(tracker?.configured)}
           onClose={() => setSelected(null)}
           onChanged={notifyChanged}
         />

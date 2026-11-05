@@ -221,3 +221,27 @@ async def import_mcp(
 @router.get("/tools/presets")
 def list_tool_presets():
     return services.tooling.load_presets()
+
+
+@router.get("/tooling/issue-tracker")
+def get_issue_tracker(conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    return services.issue_tracker.get_settings(conn)
+
+
+@router.put("/tooling/issue-tracker")
+def save_issue_tracker(body: dict, conn=Depends(get_db),
+                       auth: Auth = Depends(require_human)):
+    try:
+        return services.issue_tracker.save_settings(
+            conn, str(body.get("server_url") or ""), actor=auth.role or "human")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/tooling/issue-tracker/test")
+def test_issue_tracker(body: dict | None = None, conn=Depends(get_db),
+                       auth: Auth = Depends(require_human)):
+    url = (body or {}).get("server_url")
+    return services.issue_tracker.test_connection(
+        conn, str(url).strip() if url is not None else None,
+        actor=auth.role or "human")

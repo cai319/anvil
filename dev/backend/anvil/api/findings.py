@@ -144,6 +144,50 @@ def list_findings(tid: str, status: str | None = None, severity: str | None = No
     return {**summary, "items": items}
 
 
+def _external_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, services.issue_tracker.IssueTrackerTimeout):
+        return HTTPException(status_code=504, detail=str(exc))
+    if isinstance(exc, services.issue_tracker.IssueTrackerError):
+        return HTTPException(status_code=502, detail=str(exc))
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=422, detail=str(exc))
+    return _conflict(exc, not_found=True)
+
+
+@router.post("/tasks/{tid}/findings/external-submit")
+def external_submit_findings(tid: str, body: dict | None = None,
+                             conn=Depends(get_db),
+                             auth: Auth = Depends(require_human)):
+    """人工把问题板中可提交的 findings 批量提交到外部问题跟踪服务器。"""
+    access.assert_task_read(conn, auth, tid)
+    ids = (body or {}).get("finding_ids")
+    if ids is not None and not isinstance(ids, list):
+        raise HTTPException(status_code=422, detail="finding_ids must be a list")
+    try:
+        return services.issue_tracker.export_findings(
+            conn, tid, ids, actor=auth.role or "human")
+    except (LookupError, PermissionError, ConflictError,
+            services.issue_tracker.IssueTrackerError, ValueError) as exc:
+        raise _external_error(exc)
+
+
+@router.post("/tasks/{tid}/findings/{fid}/external-submit")
+def external_submit_finding(tid: str, fid: str, conn=Depends(get_db),
+                            auth: Auth = Depends(require_human)):
+    """人工把单条 finding 提交到外部问题跟踪服务器。"""
+    access.assert_task_read(conn, auth, tid)
+    try:
+        services.issue_tracker.export_findings(
+            conn, tid, [fid], actor=auth.role or "human")
+        finding = findings_service.get_finding(conn, fid, tid)
+        if finding is None:
+            raise HTTPException(status_code=404, detail="finding not found")
+        return finding
+    except (LookupError, PermissionError, ConflictError,
+            services.issue_tracker.IssueTrackerError, ValueError) as exc:
+        raise _external_error(exc)
+
+
 @router.post("/tasks/{tid}/findings", status_code=201)
 def create_finding(tid: str, body: FindingIn, conn=Depends(get_db),
                    auth: Auth = Depends(get_auth)):

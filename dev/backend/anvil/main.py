@@ -93,7 +93,8 @@ def _cleanup_orphans(conn) -> None:
         conn.execute("DELETE FROM workflow_steps WHERE workflow_id=?", (wf["id"],))
         conn.execute("DELETE FROM workflows WHERE id=?", (wf["id"],))
     for table in ("task_deps", "task_assignees", "task_role_claims", "task_knowledge_repos",
-                  "task_reviewers", "task_finding_boards", "task_findings"):
+                  "task_reviewers", "task_finding_boards", "task_findings",
+                  "task_finding_submissions"):
         conn.execute(f"DELETE FROM {table} WHERE task_id NOT IN (SELECT id FROM tasks)")
     conn.execute(
         "DELETE FROM task_deps WHERE depends_on NOT IN (SELECT id FROM tasks)")

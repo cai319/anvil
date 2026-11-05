@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { api, type FeatureFlag, type Runtime } from "../api/client";
+import { api, type FeatureFlag, type IssueTrackerSettings, type IssueTrackerTestResult, type Runtime } from "../api/client";
 import { PageHeader } from "../components/ui";
 
 const directoryProps = { webkitdirectory: "", directory: "" } as Record<string, string>;
@@ -81,6 +81,12 @@ export function Tooling() {
   const [flagBusy, setFlagBusy] = useState<string | null>(null);
   const [flagError, setFlagError] = useState<string | null>(null);
   const [flagNotice, setFlagNotice] = useState<string | null>(null);
+  const [tracker, setTracker] = useState<IssueTrackerSettings | null>(null);
+  const [trackerUrl, setTrackerUrl] = useState("");
+  const [trackerBusy, setTrackerBusy] = useState<"save" | "test" | null>(null);
+  const [trackerNotice, setTrackerNotice] = useState<string | null>(null);
+  const [trackerError, setTrackerError] = useState<string | null>(null);
+  const [trackerTest, setTrackerTest] = useState<IssueTrackerTestResult | null>(null);
   const skillDirRef = useRef<HTMLInputElement>(null);
   const skillArchiveRef = useRef<HTMLInputElement>(null);
   const mcpDirRef = useRef<HTMLInputElement>(null);
@@ -109,6 +115,61 @@ export function Tooling() {
       .then((data) => setFlags(data.flags ?? []))
       .catch((e) => setFlagError(String(e)));
   }, []);
+
+  useEffect(() => {
+    api.getIssueTrackerSettings()
+      .then((data) => {
+        setTracker(data);
+        setTrackerUrl(data.server_url || "");
+      })
+      .catch((e) => setTrackerError(String(e)));
+  }, []);
+
+  const trackerUrlValid = !trackerUrl.trim()
+    || /^https?:\/\/[^/\s]+/i.test(trackerUrl.trim());
+
+  const saveTracker = async () => {
+    setTrackerBusy("save");
+    setTrackerError(null);
+    setTrackerNotice(null);
+    setTrackerTest(null);
+    try {
+      const data = await api.saveIssueTrackerSettings(trackerUrl.trim());
+      setTracker(data);
+      setTrackerUrl(data.server_url || "");
+      setTrackerNotice(data.configured
+        ? `问题跟踪服务器已保存：${data.server_url}`
+        : "问题跟踪服务器地址已清空。");
+    } catch (e) {
+      setTrackerError(String(e));
+    } finally {
+      setTrackerBusy(null);
+    }
+  };
+
+  const testTracker = async () => {
+    setTrackerBusy("test");
+    setTrackerError(null);
+    setTrackerNotice(null);
+    setTrackerTest(null);
+    try {
+      const result = await api.testIssueTracker(trackerUrl.trim() || undefined);
+      setTrackerTest(result);
+      if (result.ok) {
+        const detail = [
+          result.status !== undefined ? `HTTP ${result.status}` : "",
+          result.latency_ms !== undefined ? `${result.latency_ms}ms` : "",
+        ].filter(Boolean).join(" · ");
+        setTrackerNotice(detail ? `连接成功（${detail}）` : "连接成功");
+      } else {
+        setTrackerError(result.message || "连接失败");
+      }
+    } catch (e) {
+      setTrackerError(String(e));
+    } finally {
+      setTrackerBusy(null);
+    }
+  };
 
   const updateFlag = async (flag: FeatureFlag, value: boolean) => {
     setFlagBusy(flag.key);
@@ -222,6 +283,54 @@ export function Tooling() {
               );
             })}
           </div>
+        )}
+      </section>
+
+      <section className="tool-import-card tooling-tracker-card">
+        <div className="tool-import-head">
+          <div>
+            <h2>问题跟踪服务器</h2>
+            <p>
+              配置后可在任务问题板把 finding 提交到开发问题跟踪系统。
+              地址示例：<code>http://xxx.xxx.xxx.xxx/api</code>；测试只检查接口连通性，不会创建草稿。
+            </p>
+          </div>
+          <span className={`chip ${tracker?.configured ? "is-on" : ""}`}>
+            {tracker?.configured ? "已配置" : "未配置"}
+          </span>
+        </div>
+        <div className="tooling-tracker-form">
+          <label>
+            服务器地址
+            <input
+              type="url"
+              value={trackerUrl}
+              placeholder="http://xxx.xxx.xxx.xxx/api"
+              onChange={(e) => { setTrackerUrl(e.target.value); setTrackerNotice(null); setTrackerTest(null); }}
+            />
+          </label>
+        </div>
+        <div className="card-actions">
+          <button type="button" className="primary"
+            disabled={trackerBusy !== null || !trackerUrlValid}
+            onClick={() => { void saveTracker(); }}>保存</button>
+          <button type="button"
+            disabled={trackerBusy !== null || !trackerUrlValid || (!trackerUrl.trim() && !tracker?.configured)}
+            onClick={() => { void testTracker(); }}>测试连接</button>
+          {trackerBusy === "save" && <span className="muted">保存中…</span>}
+          {trackerBusy === "test" && <span className="muted">测试中…</span>}
+        </div>
+        {tracker?.configured && tracker.server_url !== trackerUrl.trim() && (
+          <p className="muted">当前已保存：{tracker.server_url}</p>
+        )}
+        {trackerError && <p className="error">{trackerError}</p>}
+        {trackerNotice && <p className="tooling-notice">{trackerNotice}</p>}
+        {trackerTest && (
+          <p className="muted">
+            端点：<code>{trackerTest.endpoint}</code>
+            {trackerTest.status !== undefined ? ` · HTTP ${trackerTest.status}` : ""}
+            {trackerTest.latency_ms !== undefined ? ` · ${trackerTest.latency_ms}ms` : ""}
+          </p>
         )}
       </section>
 

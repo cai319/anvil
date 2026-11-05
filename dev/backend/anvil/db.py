@@ -1302,6 +1302,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_channel_knowledge_v1(conn)
     _migrate_channel_knowledge_harvest_v2(conn)
     _migrate_issue_board_v1(conn)
+    _migrate_finding_external_submit_v1(conn)
     _migrate_knowledge_hits_v1(conn)
     _migrate_task_workspace_v1(conn)
     _migrate_knowledge_repos_v1(conn)
@@ -1505,6 +1506,44 @@ def _migrate_channel_knowledge_harvest_v2(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
     _set_setting(conn, "schema.workspace_knowledge_harvest_v2", "1")
+    conn.commit()
+
+
+
+def _migrate_finding_external_submit_v1(conn: sqlite3.Connection) -> None:
+    """问题板 finding → 外部问题跟踪服务器的提交历史与最新外部引用。"""
+    if _setting(conn, "schema.finding_external_submit_v1"):
+        return
+    for spec in (
+        "external_id TEXT",
+        "external_source TEXT",
+        "external_submitted_at TEXT",
+    ):
+        try:
+            conn.execute(f"ALTER TABLE task_findings ADD COLUMN {spec}")
+        except sqlite3.OperationalError:
+            pass
+    try:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS task_finding_submissions (
+                id           TEXT PRIMARY KEY,
+                task_id      TEXT NOT NULL,
+                finding_id   TEXT NOT NULL,
+                source       TEXT NOT NULL,
+                external_id  TEXT,
+                status       TEXT NOT NULL,
+                error        TEXT,
+                request_json TEXT NOT NULL DEFAULT '{}',
+                response_json TEXT NOT NULL DEFAULT '{}',
+                submitted_by TEXT,
+                created_at   TEXT NOT NULL
+            )""")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_finding_submissions "
+            "ON task_finding_submissions(task_id, finding_id, created_at DESC)")
+    except sqlite3.OperationalError:
+        pass
+    _set_setting(conn, "schema.finding_external_submit_v1", "1")
     conn.commit()
 
 

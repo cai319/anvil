@@ -139,12 +139,38 @@ export interface Finding {
   created_at: string;
   updated_at: string;
   submitted_at: string | null;
+  external_id?: string | number | null;
+  external_source?: string | null;
+  external_submitted_at?: string | null;
 }
 
 export type FindingInput = Partial<Omit<Finding,
   "id" | "task_id" | "author_role" | "status" | "version" |
   "created_at" | "updated_at" | "submitted_at" | "decided_by" |
-  "decided_at" | "decision_note">>;
+  "decided_at" | "decision_note" | "external_id" | "external_source" |
+  "external_submitted_at">>;
+
+export interface IssueTrackerSettings {
+  server_url: string;
+  configured: boolean;
+  source_prefix: string;
+}
+
+export interface IssueTrackerTestResult {
+  ok: boolean;
+  endpoint?: string;
+  status?: number;
+  latency_ms?: number;
+  message?: string;
+  body?: Record<string, unknown>;
+}
+
+export interface FindingExportResult {
+  source: string;
+  submitted_at: string;
+  submitted: { finding_id: string; external_id: string }[];
+  failed: { finding_id: string; error: string }[];
+}
 
 export interface FindingBoard {
   task_id: string;
@@ -606,6 +632,13 @@ export const api = {
     req("PATCH", `/tasks/${taskId}/findings/${fid}`, body).then((r) => json<Finding>(r)),
   submitFinding: (taskId: string, fid: string): Promise<Finding> =>
     req("POST", `/tasks/${taskId}/findings/${fid}/submit`, {}).then((r) => json<Finding>(r)),
+  exportFinding: (taskId: string, fid: string): Promise<Finding> =>
+    req("POST", `/tasks/${taskId}/findings/${fid}/external-submit`, {})
+      .then((r) => json<Finding>(r)),
+  exportFindings: (taskId: string, findingIds?: string[]): Promise<FindingExportResult> =>
+    req("POST", `/tasks/${taskId}/findings/external-submit`,
+      findingIds ? { finding_ids: findingIds } : {})
+      .then((r) => json<FindingExportResult>(r)),
   confirmFinding: (taskId: string, fid: string, note?: string): Promise<Finding> =>
     req("POST", `/tasks/${taskId}/findings/${fid}/confirm`, { note }).then((r) => json<Finding>(r)),
   falsePositiveFinding: (taskId: string, fid: string, note?: string): Promise<Finding> =>
@@ -1027,6 +1060,15 @@ export const api = {
     req("PUT", `/features/${encodeURIComponent(key)}`, { value }).then((r) => json<FeatureFlag>(r)),
   resetFeatureFlag: (key: string): Promise<FeatureFlag> =>
     req("DELETE", `/features/${encodeURIComponent(key)}`).then((r) => json<FeatureFlag>(r)),
+  getIssueTrackerSettings: (): Promise<IssueTrackerSettings> =>
+    authFetch(`${BASE}/tooling/issue-tracker`).then((r) => json<IssueTrackerSettings>(r)),
+  saveIssueTrackerSettings: (serverUrl: string): Promise<IssueTrackerSettings> =>
+    req("PUT", "/tooling/issue-tracker", { server_url: serverUrl })
+      .then((r) => json<IssueTrackerSettings>(r)),
+  testIssueTracker: (serverUrl?: string): Promise<IssueTrackerTestResult> =>
+    req("POST", "/tooling/issue-tracker/test",
+      serverUrl !== undefined ? { server_url: serverUrl } : {})
+      .then((r) => json<IssueTrackerTestResult>(r)),
 
   // role extras
   getRoleHome: (slug: string): Promise<{ slug: string; home_path: string; files: string[] }> =>

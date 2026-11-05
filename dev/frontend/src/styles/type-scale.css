@@ -2946,3 +2946,31 @@ details.replay-event-body > div { margin-top: 4px; }
   .feature-panel-head { flex-direction: column; }
   .feature-groups { grid-template-columns: 1fr; }
 }
+
+/* 工具治理：问题跟踪服务器配置 */
+.tooling-tracker-card { margin-bottom: clamp(16px, 1.3vw, 24px); }
+.tooling-tracker-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.tooling-tracker-form label {
+  display: grid;
+  gap: 4px;
+  color: var(--text-on-paper-muted);
+  font-size: var(--fs-hint);
+}
+.tooling-tracker-form input {
+  width: 100%;
+  min-height: var(--control-h-sm);
+  padding: 0 10px;
+  border: var(--stroke) solid var(--ink-900);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--text-on-paper);
+  font-size: var(--fs-meta);
+}
+.tooling-tracker-card .tool-import-head .chip.is-on {
+  border-color: var(--green-on-paper, #15803d);
+  color: var(--green-on-paper, #15803d);
+}

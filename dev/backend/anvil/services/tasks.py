@@ -1047,6 +1047,7 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
     conn.execute("DELETE FROM task_reviewers WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM task_finding_boards WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM task_findings WHERE task_id=?", (tid,))
+    conn.execute("DELETE FROM task_finding_submissions WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM activities WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM sessions WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM role_inbox_cursors WHERE task_id=?", (tid,))

@@ -33,10 +33,12 @@ export function riskLabel(schema: FindingSchema | null, value: string): string {
 }
 
 /** 单条 finding 详情与人工决策。Web 侧只读展示；写入由审核者通过 CLI 完成。 */
-export function FindingDrawer({ taskId, findingId, schema, onClose, onChanged }: {
+export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = false,
+  onClose, onChanged }: {
   taskId: string;
   findingId: string;
   schema: FindingSchema | null;
+  trackerConfigured?: boolean;
   onClose: () => void;
   onChanged: () => void;
 }) {
@@ -65,6 +67,21 @@ export function FindingDrawer({ taskId, findingId, schema, onClose, onChanged }:
     setError(null);
     try {
       const updated = await fn();
+      setFinding(updated);
+      setReloadKey((n) => n + 1);
+      onChanged();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const exportFinding = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await api.exportFinding(taskId, findingId);
       setFinding(updated);
       setReloadKey((n) => n + 1);
       onChanged();
@@ -166,6 +183,8 @@ export function FindingDrawer({ taskId, findingId, schema, onClose, onChanged }:
   const detailFields = fields.filter((f) => f.group === "detail");
   const actionable = finding?.status === "submitted";
   const decided = finding?.status === "confirmed" || finding?.status === "false_positive";
+  const canExport = finding?.status === "submitted"
+    || finding?.status === "confirmed" || finding?.status === "changes_requested";
 
   return createPortal(
     <div className="modal-overlay finding-drawer-overlay"
@@ -186,6 +205,11 @@ export function FindingDrawer({ taskId, findingId, schema, onClose, onChanged }:
                 </span>
                 <span className="chip">置信度 {finding.confidence}%</span>
                 <span className="chip">{riskLabel(schema, finding.risk_type)}</span>
+                {finding.external_id && (
+                  <span className="chip finding-external-badge">
+                    外部 #{finding.external_id}
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -274,7 +298,7 @@ export function FindingDrawer({ taskId, findingId, schema, onClose, onChanged }:
           </div>
         )}
 
-        {finding && (actionable || decided) && (
+        {finding && (actionable || decided || canExport) && (
           <div className="finding-drawer-footer">
             {actionable && (
               <div className="finding-decisions">
@@ -286,6 +310,22 @@ export function FindingDrawer({ taskId, findingId, schema, onClose, onChanged }:
             {decided && (
               <div className="finding-decisions">
                 <button className="small" disabled={busy} onClick={reopen}>推翻结论，重新评估</button>
+              </div>
+            )}
+            {canExport && (
+              <div className="finding-decisions finding-drawer-external">
+                <button className="primary" disabled={busy || !trackerConfigured}
+                  onClick={() => { void exportFinding(); }}>
+                  提交到问题跟踪
+                </button>
+                {finding.external_id ? (
+                  <span className="muted">
+                    已提交 #{finding.external_id}
+                    {finding.external_submitted_at ? ` · ${finding.external_submitted_at}` : ""}
+                  </span>
+                ) : !trackerConfigured ? (
+                  <a className="small button-like" href="/tooling">去工具页配置问题跟踪服务器</a>
+                ) : null}
               </div>
             )}
           </div>

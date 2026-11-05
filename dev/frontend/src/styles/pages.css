@@ -1362,3 +1362,26 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
   .topic-layout { grid-template-columns: 1fr; }
   .knowledge-inline-form { flex-wrap: wrap; }
 }
+
+/* 问题板：外部问题跟踪提交 */
+.finding-board-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0 10px;
+}
+.finding-board-actions .tooling-notice {
+  margin: 0;
+  padding: 4px 8px;
+}
+.finding-external-badge {
+  border-color: var(--green-on-paper, #15803d);
+  color: var(--green-on-paper, #15803d);
+}
+.finding-drawer-external {
+  border-top: 1px dashed var(--border);
+  padding-top: 8px;
+  margin-top: 4px;
+}
+.finding-drawer-external .muted { align-self: center; }

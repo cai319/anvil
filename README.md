@@ -338,6 +338,19 @@ anvil knowledge card-validate --file card.json --for-approval
 - **反馈/复核**：`anvil knowledge feedback <card-id> --signal helpful|unhelpful`；
   `anvil knowledge review` 查看到期/低反馈/legacy 卡片；复核动作仍由人工确认。
 
+### 3.10 问题板外部提交
+
+- 在「工具」页配置问题跟踪服务器地址（如 `http://host/api`），可保存并测试连通性；
+  测试只验证接口可达，不创建草稿。
+- 任务问题板支持：
+  - 单条 finding：详情抽屉底部「提交到问题跟踪」；
+  - 批量：问题板「提交全部可提交问题」，默认提交 `submitted/confirmed/changes_requested`，
+    排除 `draft/false_positive`。
+- 每次提交都会带上 `anvil:<task_id>:<timestamp>` 作为 `source`，由外部服务端去重；
+  本地不做跳过/去重，只保留提交历史与最新外部 ID。
+- 外部 `description_md` 包含该 finding 的完整详情；外部 API 使用
+  `POST {server_url}/draft/bulkCreate`。
+
 ## 4. 配置
 
 所有配置通过环境变量读取（完整列表见 `dev/backend/anvil/config.py`）。常用项：
@@ -574,6 +587,7 @@ anvil init --with-roles
 - [docs/cli-reference.md](docs/cli-reference.md)：CLI 命令、参数、规则、错误处理与示例
 - [docs/v1.30-channel-knowledge.md](docs/v1.30-channel-knowledge.md)：频道、知识作用域、知识卡、归档与效果评估方案
 - [docs/v1.40.0-release.md](docs/v1.40.0-release.md)：v1.40.0 任务上下文隔离、分层知识库、质量门与 LLM 清洗变更方案
+- [docs/v1.41.0-release.md](docs/v1.41.0-release.md)：v1.41.0 问题板外部问题跟踪提交
 - [docs/workflow-revision.md](docs/workflow-revision.md)：运行中 workflow 的增量修订（安全变更不重启任务）
 - [docs/operations.md](docs/operations.md)：打包、备份/迁移/重置、卸载
 - [docs/troubleshooting.md](docs/troubleshooting.md)：详细排查
