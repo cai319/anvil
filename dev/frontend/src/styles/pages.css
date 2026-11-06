@@ -1096,7 +1096,21 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
   border-bottom: 1px solid var(--paper-2);
   background: var(--paper);
 }
-.finding-drawer-head h2 { margin: 2px 0 8px; font-size: var(--fs-h2); }
+.finding-drawer-head > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.finding-drawer-head h2 {
+  margin: 2px 0 8px;
+  font-size: var(--fs-h2);
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+.finding-drawer-head .modal-close {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  margin-top: 2px;
+}
 .finding-drawer-kicker {
   font-size: 10px;
   letter-spacing: 0.14em;
@@ -1202,6 +1216,7 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
   font-weight: 700;
   line-height: 1.4;
   overflow-wrap: anywhere;
+  white-space: pre-line;
 }
 .finding-location-card p {
   margin: 0;
@@ -1209,6 +1224,7 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
   font-weight: 600;
   line-height: 1.5;
   overflow-wrap: anywhere;
+  white-space: pre-line;
 }
 .finding-location-card.is-file p {
   font-family: var(--font-mono);

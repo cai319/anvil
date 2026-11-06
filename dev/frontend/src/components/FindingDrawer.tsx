@@ -32,6 +32,106 @@ export function riskLabel(schema: FindingSchema | null, value: string): string {
   return schema?.risk_types?.[value] || value || "未分类";
 }
 
+const ENTRY_SEPARATORS = /[；;：:，,。.]/;
+const ENTRY_NUMBERS: Record<string, number> = {
+  一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5,
+  六: 6, 七: 7, 八: 8, 九: 9,
+};
+
+function parseEntryNumber(raw: string): number | null {
+  if (/^\d+$/.test(raw)) return Number(raw);
+  let total = 0;
+  let current = 0;
+  for (const ch of raw) {
+    if (ch === "百") {
+      total += (current || 1) * 100;
+      current = 0;
+    } else if (ch === "十") {
+      total += (current || 1) * 10;
+      current = 0;
+    } else if (ENTRY_NUMBERS[ch]) {
+      current = ENTRY_NUMBERS[ch];
+    } else {
+      return null;
+    }
+  }
+  total += current;
+  return total || null;
+}
+
+/**
+ * 仅用于展示：把「（1）...；（2）...」这类分条内容拆成多行。
+ *
+ * 严格按序号链识别：只在 1→2→3 的连续编号前拆行，且要求编号前最近的非空白字符
+ * 是分隔符（或已有换行）。单条内容内部的普通分隔符、内部子列表不会被当作边界。
+ * 原始 finding 字段不做修改。
+ */
+export function formatFindingEntries(text: string): string {
+  if (!text) return text;
+  const normalized = text.replace(/\r\n/g, "\n");
+  const markerRe = /([（(【\[])\s*(\d+|[一二三四五六七八九十百两]+)\s*([）)】\]])|(\d+|[一二三四五六七八九十百两]+)(\.(?!\d)|[、)])/g;
+  type EntryMarker = {
+    start: number;
+    end: number;
+    number: number;
+    style: "paren" | "bare";
+  };
+  const markers: EntryMarker[] = [];
+  for (const match of normalized.matchAll(markerRe)) {
+    const start = match.index ?? 0;
+    const rawNumber = match[2] ?? match[4] ?? "";
+    const number = parseEntryNumber(rawNumber);
+    if (number === null) continue;
+    markers.push({
+      start,
+      end: start + match[0].length,
+      number,
+      style: match[1] ? "paren" : "bare",
+    });
+  }
+
+  const chains: EntryMarker[][] = [];
+  for (let i = 0; i < markers.length; i++) {
+    if (markers[i].number !== 1) continue;
+    const chain = [markers[i]];
+    let expected = 2;
+    for (let j = i + 1; j < markers.length; j++) {
+      const candidate = markers[j];
+      if (candidate.style !== chain[0].style || candidate.number !== expected) {
+        continue;
+      }
+      const previous = chain[chain.length - 1];
+      const between = normalized.slice(previous.end, candidate.start);
+      const tail = between.replace(/[ \t]+$/, "").slice(-1);
+      // 条目边界只认编号前最近的分隔符；已有换行也视为边界。
+      if (!tail || (!ENTRY_SEPARATORS.test(tail) && tail !== "\n")) continue;
+      chain.push(candidate);
+      expected += 1;
+    }
+    if (chain.length >= 2) chains.push(chain);
+  }
+  const chain = chains.sort(
+    (a, b) => b.length - a.length || a[0].start - b[0].start,
+  )[0];
+  if (!chain) return normalized;
+
+  let out = normalized;
+  const cuts = chain
+    .map((marker) => marker.start)
+    .filter((position) => {
+      const prefix = normalized.slice(0, position).replace(/[ \t]+$/, "");
+      const tail = prefix.slice(-1);
+      // 冒号/分隔符在编号前时，把编号换到下一行；已有换行则不重复插入。
+      return Boolean(tail && ENTRY_SEPARATORS.test(tail));
+    })
+    .sort((a, b) => b - a);
+  for (const position of cuts) {
+    const before = out.slice(0, position).replace(/[ \t]+$/, "");
+    out = `${before}\n${out.slice(position)}`;
+  }
+  return out.replace(/\n{3,}/g, "\n\n");
+}
+
 /** 单条 finding 详情与人工决策。Web 侧只读展示；写入由审核者通过 CLI 完成。 */
 export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = false,
   onClose, onChanged }: {
@@ -249,7 +349,7 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
                 {summaryFields.map((f) => (
                   <div key={f.label} className="finding-summary-card">
                     <h3>{f.label}</h3>
-                    <p>{f.value || "—"}</p>
+                    <p>{formatFindingEntries(f.value) || "—"}</p>
                   </div>
                 ))}
               </div>
@@ -265,7 +365,7 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
                   <div key={f.label}
                     className={`finding-location-card ${f.wide ? "is-file" : ""}`}>
                     <h3>{f.label}</h3>
-                    <p>{f.value || "—"}</p>
+                    <p>{formatFindingEntries(f.value) || "—"}</p>
                   </div>
                 ))}
               </div>
@@ -280,7 +380,7 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
                 {detailFields.map((f) => (
                   <section key={f.label} className="finding-field">
                     <h3>{f.label}</h3>
-                    <pre>{f.value || "—"}</pre>
+                    <pre>{formatFindingEntries(f.value) || "—"}</pre>
                   </section>
                 ))}
               </div>
