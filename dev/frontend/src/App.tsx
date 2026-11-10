@@ -327,6 +327,15 @@ export default function App() {
         </nav>
 
         <div className="sidebar-foot">
+          <div className="sidebar-credit" title="Developed by 基站平台安全测试团队">
+            <span className="sidebar-credit-icon" aria-hidden="true">
+              <Icon name="anvil" size={16} />
+            </span>
+            <span className="sidebar-credit-text">
+              <span className="sidebar-credit-kicker">Developed by</span>
+              <span className="sidebar-credit-org">基站平台安全测试团队</span>
+            </span>
+          </div>
           <button
             type="button"
             className="rail-btn"

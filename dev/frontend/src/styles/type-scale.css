@@ -37,7 +37,8 @@
 
 /* ── 次级功能文字：按钮 / 页签 / 区块标题 ───────── */
 .nav-item { font-size: var(--nav-item-size); }
-.nav-label { font-size: var(--nav-label-size); }
+/* 分组标题使用正文字体，比导航项略小，避免等宽大间距破坏中文排版。 */
+.nav-label { font-size: clamp(12px, 0.2vw + 9.2px, 17px); }
 .nav-badge { font-size: var(--nav-label-size); }
 
 button,
