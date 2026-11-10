@@ -637,6 +637,7 @@ anvil init --with-roles
 - [docs/v1.42.0-release.md](docs/v1.42.0-release.md)：v1.42.0 切片上下文隔离、独立派遣任务与自动回切
 - [docs/v1.42.1-release.md](docs/v1.42.1-release.md)：v1.42.1 失败恢复与重启修复
 - [docs/v1.42.2-release.md](docs/v1.42.2-release.md)：v1.42.2 问题板实时刷新与五色状态语义统一
+- [docs/v1.42.3-release.md](docs/v1.42.3-release.md)：v1.42.3 当前运行会话选择与空白 run 日志说明
 - [docs/workflow-revision.md](docs/workflow-revision.md)：运行中 workflow 的增量修订（安全变更不重启任务）
 - [docs/operations.md](docs/operations.md)：打包、备份/迁移/重置、卸载
 - [docs/troubleshooting.md](docs/troubleshooting.md)：详细排查

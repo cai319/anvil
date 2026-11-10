@@ -7,6 +7,7 @@ import {
 import { roleStatusFromWorkflow } from "../workflowStatus";
 import { roleLiveDot, roleLiveState, stateClassForTone, type RoleLiveState } from "../roleLive";
 import { formatClock, formatShort } from "../time";
+import { HEADER_ONLY_RUN_LOG_HINT, isHeaderOnlyRunLog } from "../runLog";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
 
@@ -161,7 +162,12 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
           .filter((r) => r.role_slug === slug
             && (r.slice_key ?? null) === (rt?.context_slice_key ?? null))
           .sort((a, b) => (b.started_at ?? "").localeCompare(a.started_at ?? ""))[0];
-        const run = sliceRun
+        // 优先展示角色此刻真正执行的 run；排队/尚未投递的新 run 只有启动头。
+        const currentRun = rt?.current_run_id && rt.current_task_id === task.id
+          ? runs.find((r) => r.id === rt.current_run_id)
+          : undefined;
+        const run = currentRun
+          || sliceRun
           || (stepRunId && runs.find((r) => r.id === stepRunId))
           || latestByRole.get(slug);
         const busyElsewhere = Boolean(
@@ -328,7 +334,16 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
                   }}>刷新日志</button>
                 </div>
                 {subTab === "log" && (
-                  <pre className="run-log">{logs[run.id] ?? "加载中…"}</pre>
+                  logs[run.id] === undefined ? (
+                    <p className="muted">加载中…</p>
+                  ) : isHeaderOnlyRunLog(logs[run.id]) ? (
+                    <>
+                      <p className="muted">{HEADER_ONLY_RUN_LOG_HINT}</p>
+                      <pre className="run-log">{logs[run.id]}</pre>
+                    </>
+                  ) : (
+                    <pre className="run-log">{logs[run.id]}</pre>
+                  )
                 )}
                 {subTab === "timeline" && (
                   <ul className="rs-timeline">

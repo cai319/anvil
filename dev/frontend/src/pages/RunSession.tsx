@@ -3,6 +3,7 @@ import { api, subscribeEvents, type Run, type TimelineEvent } from "../api/clien
 import { formatClock, formatDateTime, parseTime, useNow } from "../time";
 import { Icon } from "../components/Icon";
 import { confirmDialog } from "../components/dialogs";
+import { HEADER_ONLY_RUN_LOG_HINT, isHeaderOnlyRunLog } from "../runLog";
 
 const RUN_LABEL: Record<string, string> = {
   created: "已创建",
@@ -152,6 +153,11 @@ export function RunSession({ id }: { id: string }) {
         <h2 className="pane-title">输出日志（stdout/stderr）</h2>
         {!log?.exists ? (
           <p className="muted">无日志内容。</p>
+        ) : isHeaderOnlyRunLog(log.content) ? (
+          <>
+            <p className="muted">{HEADER_ONLY_RUN_LOG_HINT}</p>
+            <pre className="run-log">{log.content}</pre>
+          </>
         ) : (
           <pre className="run-log">{log.content}</pre>
         )}

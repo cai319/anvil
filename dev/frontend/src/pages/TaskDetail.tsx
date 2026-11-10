@@ -1300,11 +1300,16 @@ export function TaskDetail({ id }: { id: string }) {
       : undefined;
     const wfState = roleStatusFromWorkflow(workflow, slug, wfSlice);
     const taskClosed = task.status === "closed" || workflow?.status === "terminated";
-    const latestRun = runs
-      .filter((r) => r.role_slug === slug
-        && (ctxList.length === 0
-          || (r.slice_key ?? null) === (wfSlice ?? null)))
-      .sort((a, b) => String(b.started_at ?? "").localeCompare(String(a.started_at ?? "")))[0]
+    // 优先展示角色此刻真正执行的 run；排队/尚未投递的新 run 只有启动头。
+    const currentRun = rt?.current_run_id && rt.current_task_id === task.id
+      ? runs.find((r) => r.id === rt.current_run_id)
+      : undefined;
+    const latestRun = currentRun
+      ?? runs
+        .filter((r) => r.role_slug === slug
+          && (ctxList.length === 0
+            || (r.slice_key ?? null) === (wfSlice ?? null)))
+        .sort((a, b) => String(b.started_at ?? "").localeCompare(String(a.started_at ?? "")))[0]
       ?? runs
         .filter((r) => r.role_slug === slug)
         .sort((a, b) => String(b.started_at ?? "").localeCompare(String(a.started_at ?? "")))[0];
