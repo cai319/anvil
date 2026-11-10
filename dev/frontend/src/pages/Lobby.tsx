@@ -54,26 +54,41 @@ const AVATAR_STATUS_LABEL: Record<string, string> = {
   pending: "待认领",
   working: "进行中",
   running: "进行中",
-  queued: "等待中",
+  projecting: "准备中",
+  queued: "排队中",
   submitted: "待评审",
   approved: "已通过",
   completed: "已完成",
   released: "已释放",
   closed: "已终止",
+  abandoned: "已放弃",
   failed: "失败",
+  error: "失败",
+  idle: "空闲",
 };
 
+/** 运行状态 → 五色语义：绿=空闲/成功，橙=处理中，黄=等人工，红=失败，灰=结束。 */
 function runStatusClass(status: string): string {
-  if (status === "running" || status === "projecting") return "running";
+  if (status === "created" || status === "projecting" || status === "running") return "running";
   if (status === "submitted" || status === "reviewing") return "submitted";
   if (status === "failed" || status === "error") return "error";
+  if (status === "abandoned" || status === "closed") return "abandoned";
+  if (status === "completed") return "approved";
+  return "idle";
+}
+
+/** 运行卡片指示灯 class；与徽标/头像使用同一套五色语义。 */
+function runStatusLight(status: string): string {
+  const cls = runStatusClass(status);
+  if (cls === "running" || cls === "submitted" || cls === "error") return cls;
+  if (cls === "abandoned") return "closed";
   return "idle";
 }
 
 /**
  * 单张任务卡上某个角色的阴影状态。结合角色运行时：
- * - 角色正忙在这张卡上 → running（绿）
- * - 角色正忙在别的卡上，且这张卡已派给它或在它的队列里 → queued（橙，等待）
+ * - 角色正忙在这张卡上 → running（橙，处理中）
+ * - 角色正忙在别的卡上，本任务消息等待 → queued（红，排队/繁忙）
  * - 已提交/已通过/已完成优先于“忙碌”
  */
 function taskRoleStatus(task: Task, slug: string, rt?: RoleRuntimeStatus): string {
@@ -471,7 +486,7 @@ export function Lobby() {
           {visibleRuns.map((r) => {
             const task = tasks.find((t) => t.id === r.task_id);
             const roleName = roles.find((x) => x.slug === r.role_slug)?.display_name ?? r.role_slug;
-            const live = r.status === "running" || r.status === "projecting";
+            const live = r.status === "created" || r.status === "running" || r.status === "projecting";
             return (
               <a key={r.id} className="run-card" href={`/runs/${r.id}`} title="查看该会话详情">
                 <RoleAvatar
@@ -489,7 +504,7 @@ export function Lobby() {
                   </div>
                   <div className="muted run-sub">{task?.title ?? "无任务会话"} · {fmtElapsed(r.started_at, now)}</div>
                 </div>
-                <span className={`status-light ${live ? "running" : "idle"}`} />
+                <span className={`status-light ${runStatusLight(r.status)}`} />
               </a>
             );
           })}

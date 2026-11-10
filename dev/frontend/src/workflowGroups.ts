@@ -4,13 +4,14 @@ import type { WorkflowStep } from "./api/client";
 export const STATUS_META: Record<WorkflowStep["status"], {
   label: string; color: string; bg: string;
 }> = {
-  pending:   { label: "待办",   color: "#8b94a9", bg: "rgba(139,148,169,.14)" },
-  running:   { label: "进行中", color: "#60a5fa", bg: "rgba(96,165,250,.16)" },
-  submitted: { label: "待审核", color: "#fbbf24", bg: "rgba(251,191,36,.16)" },
-  approved:  { label: "完成",   color: "#34d399", bg: "rgba(52,211,153,.14)" },
-  rejected:  { label: "已驳回", color: "#fb923c", bg: "rgba(251,146,60,.16)" },
+  // 绿=空闲/成功，橙=处理中，黄=等待人工，红=排队/繁忙/失败，灰=结束/未开始
+  pending:   { label: "待办",   color: "#8b8496", bg: "rgba(139,132,150,.14)" },
+  running:   { label: "进行中", color: "#fb923c", bg: "rgba(251,146,60,.16)" },
+  submitted: { label: "待审核", color: "#facc15", bg: "rgba(250,204,21,.16)" },
+  approved:  { label: "完成",   color: "#4ade80", bg: "rgba(74,222,128,.14)" },
+  rejected:  { label: "已驳回", color: "#f87171", bg: "rgba(248,113,113,.16)" },
   failed:    { label: "失败",   color: "#f87171", bg: "rgba(248,113,113,.16)" },
-  skipped:   { label: "跳过",   color: "#5c6579", bg: "rgba(92,101,121,.12)" },
+  skipped:   { label: "跳过",   color: "#8b8496", bg: "rgba(139,132,150,.12)" },
 };
 
 export function isDoneStatus(status: WorkflowStep["status"]): boolean {

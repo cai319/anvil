@@ -186,7 +186,7 @@ export function GateReviewDrawer({
                     {AUTHORITY_LABEL[authority] || authority}
                   </span>
                   <span className="badge">第 {packet.revision} 版</span>
-                  <span className={`badge ${packet.status === "pending_human" ? "badge-in_progress" : "badge-todo"}`}>
+                  <span className={`badge ${packet.status === "pending_human" ? "badge-in_review" : packet.status === "pending_ai" ? "badge-in_progress" : "badge-todo"}`}>
                     {packet.status === "pending_human" ? "等待人工" : packet.status === "pending_ai" ? "等待 AI" : "已决策"}
                   </span>
                   {stale && <span className="badge gate-stale">证据过期</span>}

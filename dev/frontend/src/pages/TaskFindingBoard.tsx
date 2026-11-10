@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  api, type Finding, type FindingBoard, type FindingExportResult,
+  api, subscribeEvents, type Finding, type FindingBoard, type FindingExportResult,
   type FindingSchema, type FindingSummary, type IssueTrackerSettings,
 } from "../api/client";
 import { FindingDrawer, FINDING_STATUS_LABEL, riskLabel, severityLabel, sortFindings } from "../components/FindingDrawer";
@@ -46,8 +46,8 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
   const [exportResult, setExportResult] = useState<FindingExportResult | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
 
-  const load = useCallback(() => {
-    setLoading(true);
+  const load = useCallback((silent = false) => {
+    if (!silent) setLoading(true);
     setError(null);
     Promise.all([
       api.listFindings(taskId),
@@ -57,7 +57,7 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
       setSummary(data);
       setSchema(s);
     }).catch((e) => setError(String(e)))
-      .finally(() => setLoading(false));
+      .finally(() => { if (!silent) setLoading(false); });
   }, [taskId, schema]);
 
   useEffect(() => {
@@ -69,6 +69,14 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
     // schema 只加载一次；load 内部复用已加载的 schema，避免循环。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId]);
+
+  // CLI/其他角色写入 finding 后，列表与统计要实时刷新，不能等用户切页。
+  useEffect(() => {
+    return subscribeEvents((ev) => {
+      if (ev.topic !== "task" || ev.payload.id !== taskId) return;
+      if (ev.payload.kind === "finding") load(true);
+    });
+  }, [taskId, load]);
 
   useEffect(() => {
     api.getIssueTrackerSettings()

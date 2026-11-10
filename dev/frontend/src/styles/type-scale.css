@@ -493,31 +493,31 @@ select { height: var(--control-h); }
   --avatar-font: calc(var(--avatar-live) * 0.4);
 }
 .role-avatar {
-  box-shadow: 2px 2px 0 var(--role-status, var(--cyan));
+  box-shadow: 2px 2px 0 var(--role-status, #8b8496);
 }
+/* 绿=空闲/成功，橙=处理中，黄=等待人工，红=排队/繁忙/失败，灰=结束/未开始 */
 .role-avatar[data-role-status="working"],
 .role-avatar[data-role-status="running"],
-.role-avatar[data-role-status="projecting"] { --role-status: var(--green); }
+.role-avatar[data-role-status="projecting"] { --role-status: var(--orange); }
 .role-avatar[data-role-status="submitted"],
 .role-avatar[data-role-status="in_review"],
 .role-avatar[data-role-status="reviewing"] { --role-status: var(--yellow); }
-/* 已派发但角色正忙在别的任务上：等待中。 */
-.role-avatar[data-role-status="queued"] { --role-status: #fb923c; }
+.role-avatar[data-role-status="queued"] { --role-status: var(--red); }
 .role-avatar[data-role-status="approved"],
 .role-avatar[data-role-status="completed"],
-.role-avatar[data-role-status="done"] { --role-status: var(--cyan); }
+.role-avatar[data-role-status="done"],
+.role-avatar[data-role-status="idle"] { --role-status: var(--green); }
 .role-avatar[data-role-status="pending"],
 .role-avatar[data-role-status="released"],
 .role-avatar[data-role-status="closed"],
-.role-avatar[data-role-status="abandoned"],
-.role-avatar[data-role-status="idle"] { --role-status: #8b8496; }
+.role-avatar[data-role-status="abandoned"] { --role-status: #8b8496; }
 .role-avatar[data-role-status="failed"],
 .role-avatar[data-role-status="error"],
 .role-avatar[data-role-status="red"] { --role-status: var(--red); }
 /* 兼容既有点灯状态类：green / amber / blue / gray。 */
 .role-avatar[data-role-status="green"] { --role-status: var(--green); }
 .role-avatar[data-role-status="amber"] { --role-status: var(--yellow); }
-.role-avatar[data-role-status="blue"] { --role-status: var(--blue); }
+.role-avatar[data-role-status="blue"] { --role-status: var(--green); }
 .role-avatar[data-role-status="gray"] { --role-status: #8b8496; }
 
 .session-head {

@@ -255,8 +255,8 @@ def _writable_board(conn: sqlite3.Connection, task_id: str, role: str) -> dict:
         raise ConflictError("issue board is completed; reopen it before adding findings")
     now = now_iso()
     conn.execute(
-        "UPDATE task_finding_boards SET status='in_progress', reopened_by=?, "
-        "reopened_at=?, updated_at=? WHERE task_id=?",
+        "UPDATE task_finding_boards SET status='in_progress', completed_at=NULL, "
+        "reopened_by=?, reopened_at=?, updated_at=? WHERE task_id=?",
         (role, now, now, task_id),
     )
     _audit(conn, role, task_id, "finding_board.auto_reopen",
@@ -473,8 +473,8 @@ def request_changes(conn: sqlite3.Connection, task_id: str, finding_id: str,
         (by, now, note.strip(), now, finding_id),
     )
     conn.execute(
-        "UPDATE task_finding_boards SET status='in_progress', reopened_by=?, "
-        "reopened_at=?, updated_at=? WHERE task_id=?",
+        "UPDATE task_finding_boards SET status='in_progress', completed_at=NULL, "
+        "reopened_by=?, reopened_at=?, updated_at=? WHERE task_id=?",
         (by, now, now, task_id),
     )
     conn.execute(
@@ -502,8 +502,9 @@ def reopen_board(conn: sqlite3.Connection, task_id: str, by: str,
         return board
     now = now_iso()
     conn.execute(
-        "UPDATE task_finding_boards SET status='in_progress', reopened_by=?, "
-        "reopened_at=?, summary=COALESCE(summary, ?), updated_at=? WHERE task_id=?",
+        "UPDATE task_finding_boards SET status='in_progress', completed_at=NULL, "
+        "reopened_by=?, reopened_at=?, summary=COALESCE(summary, ?), updated_at=? "
+        "WHERE task_id=?",
         (by, now, (note or "").strip() or None, now, task_id),
     )
     conn.execute(

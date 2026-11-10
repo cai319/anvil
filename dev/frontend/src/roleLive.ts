@@ -1,17 +1,17 @@
 import type { RoleRuntimeStatus } from "./api/client";
 
-/** 任务内角色状态点灯：绿=本任务，红=其他任务，琥珀=切换中，蓝=空闲有上下文，灰=空闲/冷启动。 */
+/** 任务内角色状态点灯：绿=空闲/成功，橙=处理中，黄=等待人工，红=排队/繁忙/失败，灰=结束/未开始。 */
 export interface RoleLiveDot {
-  cls: "green" | "red" | "amber" | "blue" | "gray";
+  cls: "green" | "orange" | "yellow" | "red" | "gray";
   title: string;
 }
 
 /**
- * 任务内角色状态徽标：颜色沿用任务状态的语义（蓝=进行中，灰=待办，红=繁忙）。
- * 队列全属于本任务时不显示「排队中」：有进程 → 进行中；无进程 → 等待唤醒。
+ * 任务内角色状态徽标：与实时点灯一致。
+ * 绿=空闲/成功，橙=处理中，黄=等待人工，红=排队/繁忙/失败，灰=结束/未开始。
  */
 export type RoleLiveTone =
-  | "in_progress" | "busy" | "queued" | "done" | "todo" | "in_review"
+  | "idle" | "in_progress" | "busy" | "queued" | "done" | "todo" | "in_review"
   | "failed" | "abandoned" | "closed" | "unknown";
 
 export interface RoleLiveState {
@@ -35,18 +35,29 @@ export function roleLiveState(
     queueAhead?: number;
     runStatus?: string | null;
     retryWait?: boolean;
+    stepFailed?: boolean;
     taskClosed?: boolean;
     taskDone?: boolean;
+    taskInReview?: boolean;
+    hasReviewStep?: boolean;
+    hasContext?: boolean;
   } = {},
 ): RoleLiveState {
   // 终止/完成/失败优先于实时忙碌；否则完成后的历史 failed run 会把角色染红。
   if (options.taskClosed) return state("已终止", "closed");
   if (options.taskDone) return state("完成", "done");
-  if (options.retryWait) return state("等待重试", "queued");
   if (options.runStatus === "failed") return state("失败", "failed");
   if (options.runStatus === "abandoned") return state("已放弃", "abandoned");
+  // 步骤失败/返工：红色，需要处理（标签由调用方按 workflow 状态覆盖）。
+  if (options.stepFailed) return state("失败", "failed");
+  // 黄色只表示 HITL：等人工评审/确认。
+  if (options.taskInReview || options.hasReviewStep
+      || options.runStatus === "submitted" || options.runStatus === "reviewing") {
+    return state("等待人工", "in_review");
+  }
+  if (options.retryWait) return state("等待重试", "queued");
   if (!rt) return state("未知/加载中", "unknown");
-  if (rt.switching) return state("切换上下文", "queued");
+  if (rt.switching) return state("切换上下文", "in_progress");
   const busy = rt.alive && rt.status === "busy";
   if (busy && rt.current_task_id === taskId) return state("进行中", "in_progress");
   if (busy && rt.current_task_id && rt.current_task_id !== taskId) {
@@ -64,6 +75,8 @@ export function roleLiveState(
     return state("进行中", "in_progress");
   }
   if (options.allDone) return state("完成", "done");
+  // 进程活着或上下文仍保留：空闲（绿），不是待办。
+  if (rt.alive || options.hasContext) return state("空闲", "idle");
   return state("待办", "todo");
 }
 
@@ -81,10 +94,10 @@ export function stateClassForTone(tone: RoleLiveTone): string {
 /** 兼容旧调用：点灯颜色只用于圆点，不再决定徽标颜色。 */
 export function stateClassForDot(dot: RoleLiveDot["cls"]): string {
   switch (dot) {
-    case "green": return "done";
+    case "green": return "idle";
+    case "orange": return "in_progress";
+    case "yellow": return "in_review";
     case "red": return "busy";
-    case "amber": return "queued";
-    case "blue": return "in_progress";
     default: return "todo";
   }
 }
@@ -92,21 +105,39 @@ export function stateClassForDot(dot: RoleLiveDot["cls"]): string {
 export function roleLiveDot(
   rt: RoleRuntimeStatus | undefined,
   taskId: string,
-  hasContext: boolean,
-  hasOpenStep = false,
-  failed = false,
-  runStatus: string | null = null,
-  taskClosed = false,
-  queueAhead = 0,
-  retryWait = false,
+  options: {
+    hasContext?: boolean;
+    hasOpenStep?: boolean;
+    allDone?: boolean;
+    failed?: boolean;
+    runStatus?: string | null;
+    taskClosed?: boolean;
+    taskDone?: boolean;
+    queueAhead?: number;
+    retryWait?: boolean;
+    taskInReview?: boolean;
+    hasReviewStep?: boolean;
+    queuedHere?: number;
+  } = {},
 ): RoleLiveDot {
-  if (taskClosed) return { cls: "gray", title: "任务已终止" };
+  const hasContext = Boolean(options.hasContext);
+  if (options.taskClosed) return { cls: "gray", title: "任务已终止" };
+  if (options.taskDone) return { cls: "green", title: "任务已完成" };
+  if (options.runStatus === "failed") {
+    return { cls: "red", title: "本任务 run 失败，需要处理" };
+  }
+  if (options.runStatus === "abandoned") {
+    return { cls: "gray", title: "本任务 run 已放弃/已中断" };
+  }
+  if (options.failed) return { cls: "red", title: "本任务步骤失败/返工，需要处理" };
+  // 黄色只表示 HITL：任务/步骤/run 在等人工评审或确认。
+  if (options.taskInReview || options.hasReviewStep
+      || options.runStatus === "submitted" || options.runStatus === "reviewing") {
+    return { cls: "yellow", title: "等待人工评审/确认" };
+  }
+  if (options.retryWait) return { cls: "red", title: "等待自动恢复重试" };
   if (!rt) return { cls: "gray", title: "状态加载中…" };
-  if (rt.switching) return { cls: "amber", title: "正在切换任务上下文…" };
-  if (retryWait) return { cls: "amber", title: "等待自动恢复重试" };
-  if (runStatus === "failed") return { cls: "red", title: "本任务 run 失败，需要处理" };
-  if (runStatus === "abandoned") return { cls: "gray", title: "本任务 run 已放弃/已中断" };
-  if (failed) return { cls: "red", title: "本任务步骤失败，需要处理" };
+  if (rt.switching) return { cls: "orange", title: "正在切换任务上下文…" };
   const busy = rt.alive && rt.status === "busy";
   const workingHere = Boolean(busy && rt.current_task_id === taskId);
   const workingElsewhere = Boolean(
@@ -120,17 +151,28 @@ export function roleLiveDot(
   }
   if (workingHere) {
     return {
-      cls: "green",
+      cls: "orange",
       title: rt.current_step_id
         ? `正在本任务工作 · 步骤 ${rt.current_step_id}`
         : "正在本任务工作",
     };
   }
   // turn 之间但子任务尚未提交：上下文仍绑在本任务，视为仍在执行该子任务。
-  if (hasOpenStep && rt.alive && rt.context_task_id === taskId) {
-    return { cls: "green", title: "本任务子任务进行中（等待下一轮）" };
+  if (options.hasOpenStep && rt.alive && rt.context_task_id === taskId) {
+    return { cls: "orange", title: "本任务子任务进行中（等待下一轮）" };
   }
-  if (queueAhead > 0) return { cls: "amber", title: "本任务消息排在其它任务之后" };
-  if (hasContext) return { cls: "blue", title: "空闲 · 本任务上下文已保留" };
-  return { cls: "gray", title: "空闲 · 首次进入将新建上下文" };
+  const queueAhead = options.queueAhead ?? 0;
+  if (queueAhead > 0) {
+    return { cls: "red", title: "本任务消息排在其它任务之后" };
+  }
+  if ((options.queuedHere ?? 0) > 0 && rt.alive) {
+    return { cls: "orange", title: "下一轮将处理本任务" };
+  }
+  if (options.allDone) return { cls: "green", title: "本任务步骤已完成" };
+  if (rt.alive || hasContext) {
+    return { cls: "green", title: hasContext
+      ? "空闲 · 本任务上下文已保留"
+      : "空闲 · 可安排任务" };
+  }
+  return { cls: "gray", title: "待办 · 尚未开始（首次进入将新建上下文）" };
 }

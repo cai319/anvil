@@ -10,9 +10,18 @@ from ..schemas import (
 )
 from ..services import findings as findings_service
 from ..services.tasks import ConflictError
-from . import access
+from . import access, events
 
 router = APIRouter()
+
+
+def _publish_finding(tid: str, action: str,
+                     finding_id: str | None = None) -> None:
+    """问题板变更实时通知：CLI/其他角色写入后，Web 列表与抽屉立即刷新。"""
+    events.publish("task", {
+        "id": tid, "kind": "finding", "action": action,
+        "finding_id": finding_id,
+    })
 
 
 def _conflict(exc: Exception, *, not_found: bool = False) -> HTTPException:
@@ -120,9 +129,11 @@ def complete_finding_board(tid: str, body: FindingCompleteIn,
     access.assert_task_read(conn, auth, tid)
     _reviewer(conn, auth, tid)
     try:
-        return findings_service.complete_board(conn, tid, auth.role or "", body.summary)
+        board = findings_service.complete_board(conn, tid, auth.role or "", body.summary)
     except (LookupError, ConflictError) as exc:
         raise _conflict(exc, not_found=True)
+    _publish_finding(tid, "board_complete")
+    return board
 
 
 @router.post("/tasks/{tid}/findings/reopen")
@@ -136,6 +147,7 @@ def reopen_finding_board(tid: str, body: FindingDecisionIn, request: Request,
     for role in findings_service.reviewer_roles(conn, tid):
         _wake_finding_reviewer(request, conn, tid, role,
                                (body.note or "").strip() or "问题板已退回，请复核 findings。")
+    _publish_finding(tid, "board_reopen")
     return board
 
 
@@ -174,11 +186,13 @@ def external_submit_findings(tid: str, body: dict | None = None,
     if ids is not None and not isinstance(ids, list):
         raise HTTPException(status_code=422, detail="finding_ids must be a list")
     try:
-        return services.issue_tracker.export_findings(
+        result = services.issue_tracker.export_findings(
             conn, tid, ids, actor=auth.role or "human")
     except (LookupError, PermissionError, ConflictError,
             services.issue_tracker.IssueTrackerError, ValueError) as exc:
         raise _external_error(exc)
+    _publish_finding(tid, "external_submit")
+    return result
 
 
 @router.post("/tasks/{tid}/findings/{fid}/external-submit")
@@ -192,10 +206,11 @@ def external_submit_finding(tid: str, fid: str, conn=Depends(get_db),
         finding = findings_service.get_finding(conn, fid, tid)
         if finding is None:
             raise HTTPException(status_code=404, detail="finding not found")
-        return finding
     except (LookupError, PermissionError, ConflictError,
             services.issue_tracker.IssueTrackerError, ValueError) as exc:
         raise _external_error(exc)
+    _publish_finding(tid, "external_submit", fid)
+    return finding
 
 
 @router.post("/tasks/{tid}/findings", status_code=201)
@@ -204,11 +219,13 @@ def create_finding(tid: str, body: FindingIn, conn=Depends(get_db),
     access.assert_task_read(conn, auth, tid)
     _reviewer(conn, auth, tid)
     try:
-        return findings_service.create_finding(
+        finding = findings_service.create_finding(
             conn, tid, auth.role or "", body.model_dump(),
             workflow_id=body.workflow_id, step_id=body.step_id, run_id=body.run_id)
     except (LookupError, ConflictError) as exc:
         raise _conflict(exc, not_found=True)
+    _publish_finding(tid, "create", finding.get("id"))
+    return finding
 
 
 @router.get("/tasks/{tid}/findings/{fid}")
@@ -226,10 +243,12 @@ def update_finding(tid: str, fid: str, body: FindingPatch, conn=Depends(get_db),
     access.assert_task_read(conn, auth, tid)
     _reviewer(conn, auth, tid)
     try:
-        return findings_service.update_finding(
+        finding = findings_service.update_finding(
             conn, tid, fid, auth.role or "", body.model_dump(exclude_unset=True))
     except (LookupError, ConflictError) as exc:
         raise _conflict(exc, not_found=True)
+    _publish_finding(tid, "update", fid)
+    return finding
 
 
 @router.post("/tasks/{tid}/findings/{fid}/submit")
@@ -237,9 +256,11 @@ def submit_finding(tid: str, fid: str, conn=Depends(get_db), auth: Auth = Depend
     access.assert_task_read(conn, auth, tid)
     _reviewer(conn, auth, tid)
     try:
-        return findings_service.submit_finding(conn, tid, fid, auth.role or "")
+        finding = findings_service.submit_finding(conn, tid, fid, auth.role or "")
     except (LookupError, ConflictError) as exc:
         raise _conflict(exc, not_found=True)
+    _publish_finding(tid, "submit", fid)
+    return finding
 
 
 @router.post("/tasks/{tid}/findings/{fid}/confirm")
@@ -247,9 +268,12 @@ def confirm_finding(tid: str, fid: str, body: FindingDecisionIn,
                     conn=Depends(get_db), auth: Auth = Depends(require_human)):
     access.assert_task_read(conn, auth, tid)
     try:
-        return findings_service.confirm_finding(conn, tid, fid, auth.role or "human", body.note)
+        finding = findings_service.confirm_finding(
+            conn, tid, fid, auth.role or "human", body.note)
     except (LookupError, ConflictError) as exc:
         raise _conflict(exc, not_found=True)
+    _publish_finding(tid, "confirm", fid)
+    return finding
 
 
 @router.post("/tasks/{tid}/findings/{fid}/false-positive")
@@ -257,10 +281,12 @@ def false_positive_finding(tid: str, fid: str, body: FindingDecisionIn,
                            conn=Depends(get_db), auth: Auth = Depends(require_human)):
     access.assert_task_read(conn, auth, tid)
     try:
-        return findings_service.mark_false_positive(
+        finding = findings_service.mark_false_positive(
             conn, tid, fid, auth.role or "human", body.note)
     except (LookupError, ConflictError) as exc:
         raise _conflict(exc, not_found=True)
+    _publish_finding(tid, "false_positive", fid)
+    return finding
 
 
 @router.post("/tasks/{tid}/findings/{fid}/request-changes")
@@ -274,6 +300,7 @@ def request_finding_changes(tid: str, fid: str, body: FindingDecisionIn, request
         raise _conflict(exc, not_found=True)
     _wake_finding_author(request, conn, tid, finding["author_role"],
                          (body.note or "").strip() or "请重新评估该 finding。")
+    _publish_finding(tid, "request_changes", fid)
     return finding
 
 
@@ -288,6 +315,7 @@ def reopen_finding(tid: str, fid: str, body: FindingDecisionIn, request: Request
         raise _conflict(exc, not_found=True)
     _wake_finding_author(request, conn, tid, finding["author_role"],
                          (body.note or "").strip() or "请重新评估该 finding。")
+    _publish_finding(tid, "reopen", fid)
     return finding
 
 
@@ -304,6 +332,7 @@ def delete_finding(tid: str, fid: str, conn=Depends(get_db),
             raise HTTPException(
                 status_code=409, detail="only draft/changes_requested findings can be deleted")
     findings_service.delete_finding(conn, tid, fid, auth.role or "human")
+    _publish_finding(tid, "delete", fid)
     return None
 
 
@@ -317,10 +346,12 @@ def set_reviewers(tid: str, body: ReviewersIn, conn=Depends(get_db),
     _can_manage_reviewers(conn, auth, tid, task)
     source = "human" if auth.role in (None, "human") else "cindy"
     try:
-        return findings_service.add_reviewers(
+        result = findings_service.add_reviewers(
             conn, tid, body.roles, by=auth.role or "human", source=source)
     except (LookupError, ConflictError) as exc:
         raise _conflict(exc, not_found=True)
+    _publish_finding(tid, "reviewers")
+    return result
 
 
 @router.delete("/tasks/{tid}/reviewers/{role}", status_code=200)
@@ -328,7 +359,9 @@ def remove_reviewer(tid: str, role: str, conn=Depends(get_db),
                     auth: Auth = Depends(require_human)):
     access.assert_task_read(conn, auth, tid)
     try:
-        return findings_service.remove_reviewer(
+        result = findings_service.remove_reviewer(
             conn, tid, role, by=auth.role or "human")
     except (LookupError, ConflictError) as exc:
         raise _conflict(exc, not_found=True)
+    _publish_finding(tid, "reviewers")
+    return result

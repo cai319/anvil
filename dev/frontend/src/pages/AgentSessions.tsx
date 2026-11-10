@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, subscribeEvents, type Role, type Run, type Task } from "../api/client";
+import { api, subscribeEvents, type Role, type RoleRuntimeStatus, type Run, type Task } from "../api/client";
 import { formatClock, parseTime, useNow } from "../time";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
@@ -30,6 +30,7 @@ export function AgentSessions({ slug }: { slug: string }) {
   const [role, setRole] = useState<Role | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [tasks, setTasks] = useState<Map<string, Task>>(new Map());
+  const [runtime, setRuntime] = useState<RoleRuntimeStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const now = useNow(30_000); // 运行时长按系统当前时间刷新
 
@@ -40,7 +41,10 @@ export function AgentSessions({ slug }: { slug: string }) {
         setRuns(rns);
         setTasks(new Map(ts.map((t) => [t.id, t])));
       })
-      .catch((e) => setError(String(e)));
+      .catch((e) => setError(String(e)))
+      .finally(() => {
+        api.getRoleRuntime(slug).then(setRuntime).catch(() => {});
+      });
 
   useEffect(() => {
     refresh();
@@ -52,7 +56,20 @@ export function AgentSessions({ slug }: { slug: string }) {
   if (error) return <p className="error">{error}</p>;
   if (!role) return <p className="muted">加载中…</p>;
 
-  const active = runs.some((r) => ["created", "projecting", "running", "submitted", "reviewing"].includes(r.status));
+  // 头像阴影/指示灯与任务卡、RoleSessions 使用同一五色语义。
+  const headerStatus = runs.some((r) => ["created", "projecting", "running"].includes(r.status))
+    ? "running"
+    : runs.some((r) => ["submitted", "reviewing"].includes(r.status))
+      ? "submitted"
+      : (runtime?.alive ? "idle" : "closed");
+  const headerLight = headerStatus === "running" || headerStatus === "submitted"
+    ? headerStatus
+    : headerStatus === "idle" ? "idle" : "closed";
+  const headerTitle = headerStatus === "running"
+    ? "处理中"
+    : headerStatus === "submitted"
+      ? "等待人工评审/确认"
+      : headerStatus === "idle" ? "空闲" : "未运行";
 
   return (
     <div className="session">
@@ -66,10 +83,10 @@ export function AgentSessions({ slug }: { slug: string }) {
             avatar={role.avatar}
             color={role.avatar_color}
             size={34}
-            status={active ? "green" : "gray"}
+            status={headerStatus}
           />
           <h1>{role.display_name}</h1>
-          <span className={`status-light ${active ? "running" : "idle"}`} title={active ? "运行中" : "空闲"} />
+          <span className={`status-light ${headerLight}`} title={headerTitle} />
         </div>
         <div className="session-meta">
           <span className="mono">{slug}</span>

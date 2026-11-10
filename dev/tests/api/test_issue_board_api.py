@@ -195,7 +195,11 @@ async def test_confidence_zero_is_a_valid_value(client, app):
     assert submitted.json()["confidence"] == 0
 
 
-async def test_request_changes_reopens_board(client, app):
+async def test_request_changes_reopens_board(client, app, monkeypatch):
+    from anvil.api import events
+    published = []
+    monkeypatch.setattr(events, "publish",
+                        lambda topic, payload=None: published.append((topic, payload)))
     reviewer = await _seed(client, app, "T-IB-REWORK")
     created = await client.post(f"{API}/tasks/T-IB-REWORK/findings",
                                 json=finding_payload(), headers=reviewer)
@@ -209,11 +213,14 @@ async def test_request_changes_reopens_board(client, app):
         json={"note": "请让开发确认 source 是否可达"}, headers=human_headers())
     assert changed.status_code == 200, changed.text
     assert changed.json()["status"] == "changes_requested"
+    assert ("task", {"id": "T-IB-REWORK", "kind": "finding",
+                     "action": "request_changes", "finding_id": fid}) in published
     task = (await client.get(f"{API}/tasks/T-IB-REWORK", headers=human_headers())).json()
     assert task["status"] == "in_progress"
     summary = (await client.get(f"{API}/tasks/T-IB-REWORK/findings/summary",
                                 headers=human_headers())).json()
     assert summary["board"]["status"] == "in_progress"
+    assert summary["board"].get("completed_at") is None
 
     # reviewer 补证后重交，再完成 board → 可最终通过
     await client.patch(f"{API}/tasks/T-IB-REWORK/findings/{fid}",

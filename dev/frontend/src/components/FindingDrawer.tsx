@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { api, type Finding, type FindingSchema } from "../api/client";
+import { api, subscribeEvents, type Finding, type FindingSchema } from "../api/client";
 import { confirmDialog, promptDialog } from "../components/dialogs";
 import { Icon } from "../components/Icon";
 
@@ -155,6 +155,15 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
       .catch((e) => { if (alive) setError(String(e)); });
     return () => { alive = false; };
   }, [taskId, findingId, reloadKey]);
+
+  useEffect(() => {
+    return subscribeEvents((ev) => {
+      if (ev.topic !== "task" || ev.payload.id !== taskId) return;
+      if (ev.payload.kind !== "finding") return;
+      if (ev.payload.finding_id && ev.payload.finding_id !== findingId) return;
+      setReloadKey((n) => n + 1);
+    });
+  }, [taskId, findingId]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };

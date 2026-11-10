@@ -144,11 +144,11 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
         <>
           <p className="muted">每个角色的当前会话状态；点击行展开执行日志与历史上下文。</p>
           <div className="role-live-legend" aria-label="角色状态图例">
-            <span><i className="role-live-dot green" />进行中（本任务）</span>
-            <span><i className="role-live-dot red" />繁忙（其他任务）/ 失败</span>
-            <span><i className="role-live-dot amber" />切换上下文 / 排队 / 等待唤醒 / 等待重试</span>
-            <span><i className="role-live-dot blue" />空闲 · 上下文已保留</span>
-            <span><i className="role-live-dot gray" />待办 / 冷启动 / 已终止</span>
+            <span><i className="role-live-dot green" />空闲 / 完成</span>
+            <span><i className="role-live-dot orange" />正在处理 / 切换上下文</span>
+            <span><i className="role-live-dot yellow" />等待人工评审/确认</span>
+            <span><i className="role-live-dot red" />排队 / 繁忙 / 失败</span>
+            <span><i className="role-live-dot gray" />待办 / 已结束 / 已终止</span>
           </div>
         </>
       )}
@@ -183,6 +183,7 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
         const wfState = roleStatusFromWorkflow(workflow, slug, wfSlice);
         const taskClosed = task.status === "closed" || workflow?.status === "terminated";
         const retryWait = wfState?.label === "等待重试";
+        const stepFailed = wfState?.cls === "failed";
         const live = roleLiveState(rt, task.id, {
           hasOpenStep: wfState?.cls === "in_progress",
           allDone: wfState?.cls === "done",
@@ -190,27 +191,44 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
           queueAhead,
           runStatus: run?.status ?? null,
           retryWait,
+          stepFailed,
           taskClosed,
           taskDone: task.status === "done",
+          taskInReview: task.status === "in_review",
+          hasReviewStep: wfState?.cls === "in_review",
+          hasContext: Boolean(ctxHere?.has_session),
         });
         // 点灯表达实时运行态；徽标优先表达终止/完成/失败。
         let st = live;
-        if (wfState?.cls === "closed" && task.status !== "done" && !taskClosed) {
-          st = { label: wfState.label, cls: "failed", tone: "failed" };
+        if (stepFailed && task.status !== "done" && !taskClosed) {
+          st = { label: wfState?.label ?? "失败", cls: "failed", tone: "failed" };
         } else if (live.tone === "todo" && !taskClosed) {
           st = wfState?.cls === "done"
             ? { label: "完成", cls: "done", tone: "done" }
             : roleStatus(claim, run);
         }
-        const dot = roleLiveDot(
-          rt, task.id, Boolean(ctxHere?.has_session),
-          wfState?.cls === "in_progress", wfState?.cls === "closed",
-          run?.status ?? null, taskClosed, queueAhead, retryWait,
-        );
+        const dot = roleLiveDot(rt, task.id, {
+          hasContext: Boolean(ctxHere?.has_session),
+          hasOpenStep: wfState?.cls === "in_progress",
+          allDone: wfState?.cls === "done",
+          failed: stepFailed,
+          runStatus: run?.status ?? null,
+          taskClosed, taskDone: task.status === "done",
+          queueAhead, retryWait,
+          taskInReview: task.status === "in_review",
+          hasReviewStep: wfState?.cls === "in_review",
+          queuedHere,
+        });
         const isOpen = expanded === run?.id && !!run;
         let detail = "";
         if (rt?.switching) {
           detail = "正在切换任务上下文…";
+        } else if (live.tone === "in_review") {
+          detail = "等待人工评审/确认";
+        } else if (live.tone === "idle") {
+          detail = ctxHere?.has_session
+            ? "空闲 · 本任务上下文已保留"
+            : "空闲 · 可安排任务";
         } else if (busyElsewhere) {
           detail = `繁忙 · 正在处理「${rt?.current_task?.title ?? rt?.current_task_id}」`;
           if (queuedHere) detail += `，本任务有 ${queuedHere} 条消息排队`;
@@ -229,7 +247,9 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
                 ? `本任务有 ${queuedHere} 条消息待处理`
                 : "等待上下文切换");
         } else if (live.tone === "failed") {
-          detail = "最近一次 run 失败，等待重试或人工处理";
+          detail = wfState?.label === "返工"
+            ? "步骤被驳回，等待返工"
+            : "最近一次 run/步骤失败，等待重试或人工处理";
         } else if (live.tone === "closed") {
           detail = "任务已终止";
         } else if (!rt) {

@@ -174,9 +174,9 @@ const DISPATCH_STATUS_LABEL: Record<string, string> = {
 };
 
 function DispatchCard({ d }: { d: TaskDispatch }) {
-  const statusCls = d.status === "returned" || d.status === "no_return"
-    ? (d.status === "returned" ? "done" : "closed")
-    : "in_progress";
+  const statusCls = d.status === "returned"
+    ? "done"
+    : d.status === "no_return" || d.status === "cancelled" ? "closed" : "in_progress";
   return (
     <div className="delegation-card">
       <div className="delegation-head">
@@ -1312,6 +1312,7 @@ export function TaskDetail({ id }: { id: string }) {
     const queued = queueInfo?.count ?? 0;
     const queueAhead = queueInfo?.ahead_count ?? 0;
     const retryWait = wfState?.label === "等待重试";
+    const stepFailed = wfState?.cls === "failed";
     const live = roleLiveState(rt, task.id, {
       hasOpenStep: wfState?.cls === "in_progress",
       allDone: wfState?.cls === "done",
@@ -1319,21 +1320,35 @@ export function TaskDetail({ id }: { id: string }) {
       queueAhead,
       runStatus: latestRun?.status ?? null,
       retryWait,
+      stepFailed,
       taskClosed,
       taskDone: task.status === "done",
+      taskInReview: task.status === "in_review",
+      hasReviewStep: wfState?.cls === "in_review",
+      hasContext: Boolean(ctxHere?.has_session),
     });
     let state = live;
-    if (wfState?.cls === "closed" && task.status !== "done" && !taskClosed) {
-      state = { label: wfState.label, cls: "failed", tone: "failed" };
+    if (stepFailed && task.status !== "done" && !taskClosed) {
+      state = { label: wfState?.label ?? "失败", cls: "failed", tone: "failed" };
     }
-    const dot = roleLiveDot(
-      rt, task.id, Boolean(ctxHere?.has_session),
-      wfState?.cls === "in_progress", wfState?.cls === "closed",
-      latestRun?.status ?? null, taskClosed, queueAhead, retryWait,
-    );
+    const dot = roleLiveDot(rt, task.id, {
+      hasContext: Boolean(ctxHere?.has_session),
+      hasOpenStep: wfState?.cls === "in_progress",
+      allDone: wfState?.cls === "done",
+      failed: stepFailed,
+      runStatus: latestRun?.status ?? null,
+      taskClosed, taskDone: task.status === "done",
+      queueAhead, retryWait,
+      taskInReview: task.status === "in_review",
+      hasReviewStep: wfState?.cls === "in_review",
+      queuedHere: queued,
+    });
     const display = roles.find((r) => r.slug === slug)?.display_name ?? slug;
     let detail = "";
     if (rt?.switching) detail = "正在切换任务上下文…";
+    else if (live.tone === "in_review") detail = "等待人工评审/确认";
+    else if (live.tone === "idle") detail = ctxHere?.has_session
+      ? "空闲 · 本任务上下文已保留" : "空闲 · 可安排任务";
     else if (live.tone === "busy") {
       detail = `正在处理「${rt?.current_task?.title ?? rt?.current_task_id}」`;
       if (queued) detail += ` · 本任务排队 ${queued} 条`;
@@ -1347,7 +1362,9 @@ export function TaskDetail({ id }: { id: string }) {
           ? "等待自动恢复重试"
           : (queued > 0 ? `本任务待处理 ${queued} 条` : "等待上下文切换");
     } else if (live.tone === "failed") {
-      detail = "最近一次 run 失败，等待重试或人工处理";
+      detail = wfState?.label === "返工"
+        ? "步骤被驳回，等待返工"
+        : "最近一次 run/步骤失败，等待重试或人工处理";
     } else if (live.tone === "closed") {
       detail = "任务已终止";
     } else if (!rt) {
@@ -1584,8 +1601,7 @@ export function TaskDetail({ id }: { id: string }) {
       : status === "running" ? "in_progress"
       : status === "submitted" ? "in_review"
       : status === "pending" ? "todo"
-      : status === "rejected" ? "in_review"
-      : "closed";
+      : status; // rejected/failed=红，skipped=终结灰，统一走 components.css
 
   const isReviewable = (st: WorkflowStep) =>
     !isViewingHistory && (
