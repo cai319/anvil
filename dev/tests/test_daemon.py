@@ -35,6 +35,7 @@ context_error = os.environ.get("FAKE_CONTEXT_ERROR", "")
 attachment_chars = int(os.environ.get("FAKE_ATTACHMENT_CHARS", "0"))
 result_text = os.environ.get("FAKE_RESULT_TEXT", "OK")
 warn_line = os.environ.get("FAKE_WARN_LINE", "")
+exit_once_file = os.environ.get("FAKE_EXIT_ONCE_FILE", "")
 print(json.dumps({"type": "system", "subtype": "init", "session_id": sid,
                   "model": init_model}), flush=True)
 if warn_line:
@@ -42,6 +43,9 @@ if warn_line:
 turn = 0
 for line in sys.stdin:
     turn += 1
+    if exit_once_file and not os.path.exists(exit_once_file):
+        open(exit_once_file, "w").close()
+        break
     time.sleep(turn_delay)
     model = switch_model if (switch_model and turn >= 2) else init_model
     usage = {"input_tokens": 10, "output_tokens": 2}
@@ -888,6 +892,28 @@ def test_busy_role_queues_other_task_until_turn_end(env):
     assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended", timeout=6)
     assert mgr.status("qa-role")["context_task_id"] == tb["id"]
     assert [x[0] for x in _argv_lines(log)] == ["new", "new"]
+
+
+def test_queued_message_resumes_after_process_exits(env):
+    """进程在 turn 中退出时，剩余队列不能被丢在内存里；退出后应自动续投下一条。"""
+    conn, mgr, fake, log = env
+    task = tasks_service.create(conn, title="Task A")
+    ra = runs_service.create_run(conn, "qa-role", task["id"])
+    rb = runs_service.create_run(conn, "qa-role", task["id"])
+    exit_once = fake.parent / "exit-once.marker"
+
+    _deliver(mgr, conn, fake, log, ra["id"], "A1", task_id=task["id"],
+             extra_env={"FAKE_TURN_DELAY": "0.5",
+                        "FAKE_EXIT_ONCE_FILE": str(exit_once)})
+    assert _wait(lambda: mgr.status("qa-role")["status"] == "busy", timeout=2)
+    _deliver(mgr, conn, fake, log, rb["id"], "A2", task_id=task["id"])
+    assert mgr.status("qa-role")["queue_len"] == 1
+
+    assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended",
+                 timeout=10), "退出后遗留队列应被重新投递并完成"
+    st = mgr.status("qa-role")
+    assert st["queue_len"] == 0
+    assert st["context_task_id"] == task["id"]
 
 
 def test_reset_session_only_clears_target_task(env):

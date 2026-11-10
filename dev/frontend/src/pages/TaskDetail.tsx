@@ -1216,8 +1216,11 @@ export function TaskDetail({ id }: { id: string }) {
       if (queued) detail += ` · 本任务排队 ${queued} 条`;
     } else if (live.cls === "in_progress") {
       detail = rt?.current_step_id ? `当前步骤 ${rt.current_step_id}` : "正在本任务工作";
+      if (queued > 0) detail += ` · 本任务待处理 ${queued} 条`;
     } else if (live.cls === "queued") {
-      detail = queued > 0 ? `本任务排队 ${queued} 条` : "等待上下文切换";
+      detail = live.label === "等待唤醒"
+        ? `等待唤醒后处理本任务 ${queued} 条消息`
+        : (queued > 0 ? `本任务待处理 ${queued} 条` : "等待上下文切换");
     } else if (!rt) {
       detail = "状态加载中…";
     } else if (ctxHere?.has_session) {
@@ -1248,8 +1251,8 @@ export function TaskDetail({ id }: { id: string }) {
       </span>
       <span className="role-live-name">{live.slug}</span>
       {live.queued > 0 && (
-        <span className="role-live-queue" title={`本任务有 ${live.queued} 条消息排队，等当前轮结束`}>
-          排队 {live.queued}
+        <span className="role-live-queue" title={`本任务有 ${live.queued} 条消息待处理`}>
+          待处理 {live.queued}
         </span>
       )}
     </span>

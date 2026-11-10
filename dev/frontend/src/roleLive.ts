@@ -6,7 +6,10 @@ export interface RoleLiveDot {
   title: string;
 }
 
-/** 任务内角色状态徽标：颜色沿用任务状态的语义（蓝=进行中，灰=待办，红=繁忙）。 */
+/**
+ * 任务内角色状态徽标：颜色沿用任务状态的语义（蓝=进行中，灰=待办，红=繁忙）。
+ * 队列全属于本任务时不显示「排队中」：有进程 → 进行中；无进程 → 等待唤醒。
+ */
 export interface RoleLiveState {
   label: string;
   cls: "in_progress" | "busy" | "queued" | "done" | "todo";
@@ -27,7 +30,17 @@ export function roleLiveState(
   if (options.hasOpenStep && rt.alive && rt.context_task_id === taskId) {
     return { label: "进行中", cls: "in_progress" };
   }
-  if ((options.queuedHere ?? 0) > 0) return { label: "排队中", cls: "queued" };
+  const queuedHere = options.queuedHere ?? 0;
+  if (queuedHere > 0) {
+    const queuedTotal = Math.max(queuedHere, rt.queue_len ?? 0);
+    // 队列里全是本任务消息时，不存在“排在别的任务后面”；不能显示为排队。
+    if (queuedTotal <= queuedHere) {
+      return rt.alive
+        ? { label: "进行中", cls: "in_progress" }
+        : { label: "等待唤醒", cls: "queued" };
+    }
+    return { label: "排队中", cls: "queued" };
+  }
   if (options.allDone) return { label: "完成", cls: "done" };
   return { label: "待办", cls: "todo" };
 }

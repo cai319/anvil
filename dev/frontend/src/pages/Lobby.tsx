@@ -85,16 +85,18 @@ function taskRoleStatus(task: Task, slug: string, rt?: RoleRuntimeStatus): strin
 
   const busy = Boolean(rt?.alive && rt.status === "busy");
   const assigned = (task.assignees ?? []).includes(slug) || task.assignee === slug;
-  const queuedHere = Boolean(
-    rt?.queue_tasks?.some((q) => q.id === task.id)
-    || (rt?.switching && assigned),
-  );
+  const queuedCount = rt?.queue_tasks?.find((q) => q.id === task.id)?.count ?? 0;
+  const queuedHere = Boolean(queuedCount > 0 || (rt?.switching && assigned));
+  const queueTotal = Math.max(queuedCount, rt?.queue_len ?? 0);
 
   if (busy && rt?.current_task_id === task.id) return "running";
-  if (queuedHere) return "queued";
+  // 角色正在别的任务上：本任务再排多少条也仍是等待，不能显示为本任务进行中。
   if (busy && rt?.current_task_id && rt.current_task_id !== task.id && assigned) {
     return "queued";
   }
+  // 队列全是当前任务的消息：角色不是排在别的任务后面，仍在处理本任务。
+  if (queuedCount > 0 && queueTotal <= queuedCount && rt?.alive) return "running";
+  if (queuedHere) return "queued";
   if (claim === "working") return "running";
   return claim;
 }

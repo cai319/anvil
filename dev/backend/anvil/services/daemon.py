@@ -19,6 +19,7 @@ one-shot 仍作为不支持流式协议的运行时的回退路径。
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import secrets
@@ -47,6 +48,8 @@ _SESSION_ENV_KEYS = {
 
 # 模型别名的上下文变体后缀，例如 deepseek-flash[1m] / foo[200k]。
 _MODEL_VARIANT_SUFFIX = re.compile(r"\[(?:1m|200k|128k)\]$", re.IGNORECASE)
+
+logger = logging.getLogger("anvil.daemon")
 
 
 def _clean_env(extra: dict[str, str]) -> dict[str, str]:
@@ -1350,6 +1353,49 @@ class DaemonManager:
                 self.on_exit(r.role, 0 if code is None else code)
             except Exception:  # noqa: BLE001
                 pass
+        # 进程退出时如果还有排队消息（例如运行时每个 turn 后自行退出），
+        # 不能只把角色标成 dead 等下一次外部唤醒；否则队列会永久悬空。
+        if (not self._shutting_down and not suppress and not overflow_run_id
+                and r.queue):
+            threading.Thread(
+                target=self._resume_queue_after_exit, args=(r.role,),
+                daemon=True, name=f"anvil-queue-{r.role}").start()
+
+    def _resume_queue_after_exit(self, role: str) -> None:
+        """进程退出后恢复遗留队列：短暂等待 on_exit 的回调投递，再接管剩余消息。"""
+        if self._shutting_down or self._stop.is_set():
+            return
+        # 给 on_exit 回调一个同步投递的机会；若它已拉起新进程，下面会检测到并跳过。
+        if self._stop.wait(0.2):
+            return
+        r = self._roles.get(role)
+        if r is None:
+            return
+        with r.lock:
+            if (self._shutting_down or r.proc is not None or r.busy
+                    or r.switching or not r.queue):
+                return
+            queued = len(r.queue)
+            logger.info(
+                "role queue resume after process exit role=%s queued=%s",
+                r.role, queued,
+            )
+            self._log(
+                r.role,
+                f"[anvil] process exit left {queued} queued message(s); resuming queue",
+            )
+        conn = open_conn(self.db_path)
+        try:
+            with r.lock:
+                if (self._shutting_down or r.proc is not None or r.busy
+                        or r.switching or not r.queue):
+                    return
+                self._flush_next_locked(conn, r)
+        except Exception:  # noqa: BLE001 —— 恢复失败不能让 daemon 崩溃
+            self._log(r.role, "[anvil] queued resume failed:\n"
+                              + traceback.format_exc())
+        finally:
+            conn.close()
 
     def _append_run_log(self, r: _Role, text: str | None) -> None:
         if not text or not r.current_log_path:
@@ -1633,7 +1679,29 @@ class DaemonManager:
             for r in list(self._roles.values()):
                 with r.lock:
                     # 锁内重查：扫描到上锁之间可能已完成一次上下文切换/新唤醒。
-                    if r.proc is None or r.busy or r.switching:
+                    if r.switching:
+                        continue
+                    if not r.busy and r.queue:
+                        # 兜底：正常情况下 queue 会在 turn 边界或进程退出时刷新；
+                        # 若因异常窗口留下“空闲但有队列”，不能在 idle 扫描里忽略。
+                        logger.warning(
+                            "stale role queue detected role=%s queued=%s; resuming",
+                            r.role, len(r.queue),
+                        )
+                        self._log(
+                            r.role,
+                            f"[anvil] stale queue detected ({len(r.queue)}); resuming",
+                        )
+                        conn = open_conn(self.db_path)
+                        try:
+                            self._flush_next_locked(conn, r)
+                        except Exception:  # noqa: BLE001
+                            self._log(r.role, "[anvil] stale queue resume failed:\n"
+                                              + traceback.format_exc())
+                        finally:
+                            conn.close()
+                        continue
+                    if r.proc is None or r.busy:
                         continue
                     idle_minutes = (now - (r.last_active or now)) / 60.0
                     if idle_minutes >= self.idle_release_minutes:

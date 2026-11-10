@@ -190,10 +190,13 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
           detail = rt?.current_step_id
             ? `正在处理本任务 · 步骤 ${rt.current_step_id}`
             : "正在处理本任务";
+          if (queuedHere > 0) detail += ` · 本任务待处理 ${queuedHere} 条`;
         } else if (live.cls === "queued") {
-          detail = queuedHere > 0
-            ? `本任务有 ${queuedHere} 条消息排队`
-            : "等待上下文切换";
+          detail = live.label === "等待唤醒"
+            ? `等待唤醒后处理本任务 ${queuedHere} 条消息`
+            : (queuedHere > 0
+              ? `本任务有 ${queuedHere} 条消息待处理`
+              : "等待上下文切换");
         } else if (!rt) {
           detail = "状态加载中…";
         } else if (ctxHere?.has_session) {
