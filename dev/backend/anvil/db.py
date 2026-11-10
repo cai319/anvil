@@ -1310,6 +1310,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_task_workspace_v1(conn)
     _migrate_slice_context_v1(conn)
     _migrate_slice_context_v2(conn)
+    _migrate_run_recovery_v1(conn)
     _migrate_knowledge_repos_v1(conn)
     _migrate_notes_repo_ids_v2(conn)
     _migrate_knowledge_quality_v1(conn)
@@ -1799,6 +1800,35 @@ def _migrate_slice_context_v2(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
     _set_setting(conn, "schema.slice_context_v2", "1")
+    conn.commit()
+
+
+def _migrate_run_recovery_v1(conn: sqlite3.Connection) -> None:
+    """非 workflow run 失败后的自动恢复元数据。"""
+    if _setting(conn, "schema.run_recovery_v1"):
+        return
+    for spec in (
+        "recovery_count INTEGER NOT NULL DEFAULT 0",
+        "next_retry_at TEXT",
+        "recovered_by TEXT",
+        "recovery_of_run_id TEXT",
+        "recovery_exhausted INTEGER NOT NULL DEFAULT 0",
+    ):
+        try:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {spec}")
+        except sqlite3.OperationalError:
+            pass
+    for stmt in (
+        "CREATE INDEX IF NOT EXISTS idx_runs_recovery "
+        "ON runs(status, ended_at)",
+        "CREATE INDEX IF NOT EXISTS idx_runs_recovered_by "
+        "ON runs(recovered_by)",
+    ):
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+    _set_setting(conn, "schema.run_recovery_v1", "1")
     conn.commit()
 
 

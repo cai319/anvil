@@ -1,3 +1,3 @@
 """Anvil CLI package."""
 
-__version__ = "1.42.0"
+__version__ = "1.42.1"

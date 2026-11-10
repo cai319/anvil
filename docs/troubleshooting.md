@@ -153,6 +153,15 @@ venv 缺少 `langgraph`。执行 `pip install -r backend/requirements.txt`，再
 - 只想重启进程但保留上下文：Run 详情 → **重启进程（保留上下文）**；
 - 要连记忆一起清：Run 详情 → **全量重置（清记忆）**（先备份 home）；
 - 设为 `ANVIL_RESET_SESSION_ON_FAILURE=0` 可关闭失败后的自动清理。
+- **workflow step run 失败**：`fail_step` 会把 step 重置为 pending 并清空 run_id。
+  此时“重启进程”必须先恢复 step 的 running/lease/run_id；当前版本已自动处理，
+  若返回 409，说明 step 已提交/完成或 workflow 已终止，应使用步骤「重试」或重启 workflow。
+- **普通 task/reply/dispatch run 失败**：scheduler 会按指数退避自动创建恢复 run
+  （默认最多 3 次，第二次起换新 CIC）。可用
+  `ANVIL_RUN_AUTO_RECOVER=0` 关闭，或用 `ANVIL_RUN_AUTO_RECOVER_MAX_ATTEMPTS`
+  调整次数；HITL/权限/范围类失败不会自动重试。
+- 恢复 run 的失败原因会写入一次性 wake_note；任务时间线有 `run.auto_recovery`
+  运行事件；耗尽后只写非阻塞 comment，不 @human。
 
 > 重置会话不会删除角色的 `instruction.md`、profile、`MEMORY.md` 或 `notes/`。
 

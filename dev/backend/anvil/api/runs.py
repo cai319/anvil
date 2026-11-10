@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..platform import factory
-from ..util import now_iso
+from ..util import ConflictError, now_iso
 from . import access
 
 router = APIRouter()
@@ -154,7 +154,17 @@ def _reset(run_id: str, mode: str, request: Request, conn) -> dict:
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     from ..services import daemon as daemon_service
+    from ..services import workflow as workflow_service
 
+    # workflow step 的 run 失败后，step 已被 fail_step 重置；单纯把 run 改回 created
+    # 会被 scheduler 当作 orphaned_step_run 再次回收。先校验/恢复 step 状态。
+    rebind_step = False
+    if run.get("workflow_id") and run.get("step_id"):
+        try:
+            rebind_step = workflow_service.check_step_run_restart(
+                conn, run["workflow_id"], run["step_id"], run_id)
+        except ConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
     mgr = daemon_service.get_manager()
     _terminate(run)
     if mode == "session":
@@ -188,7 +198,17 @@ def _reset(run_id: str, mode: str, request: Request, conn) -> dict:
     elif mode == "full":
         daemon_service.clear_session(conn, run["role_slug"], "full reset")
 
+    if rebind_step:
+        workflow_service.rebind_run_to_step(
+            conn, run["workflow_id"], run["step_id"], run_id)
+
     services.runs.set_native_session(conn, run_id, None)
+    # 人工显式重启：清理失败/恢复标记，让 UI 不再显示旧的失败徽标。
+    conn.execute(
+        "UPDATE runs SET failure_class=NULL, ended_at=NULL, "
+        "recovery_exhausted=0, next_retry_at=NULL, recovered_by=NULL "
+        "WHERE id=?", (run_id,))
+    conn.commit()
 
     backup = None
     if mode == "full":

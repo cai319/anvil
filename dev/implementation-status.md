@@ -589,4 +589,4 @@ cd frontend && npm run build         # tsc + vite build
   `design.md` §6.1、角色上下文/状态机 spec、CLI reference 同步。
 - 测试：`tests/test_slice_context.py`、`tests/test_context_router.py`、
   `tests/test_dispatch_task.py`、`tests/test_auto_return.py`、
-  `tests/api/test_dispatch_api.py`，全量 778 passed / 58 skipped；前端构建通过。
+  `tests/api/test_dispatch_api.py`，全量 781 passed / 58 skipped；前端构建通过。

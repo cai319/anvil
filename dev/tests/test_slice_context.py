@@ -252,6 +252,9 @@ def test_migration_v2_adds_note_slice_and_inbox_scope(tmp_path, monkeypatch):
         assert "slice_key" in cols
         cols = {r[1] for r in conn.execute("PRAGMA table_info(role_inbox_cursors)")}
         assert "slice_key" in cols
+        run_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+        assert {"recovery_count", "recovered_by", "recovery_of_run_id",
+                "recovery_exhausted"} <= run_cols
         row = conn.execute(
             "SELECT last_activity_id FROM role_inbox_cursors "
             "WHERE role_slug='dev' AND task_id='T1' AND slice_key=''").fetchone()

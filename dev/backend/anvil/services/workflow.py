@@ -2897,6 +2897,78 @@ def retry_step(conn: sqlite3.Connection, wid: str, step_id: str) -> dict:
     return get_workflow(conn, wid)  # type: ignore[return-value]
 
 
+def check_step_run_restart(conn: sqlite3.Connection, wid: str, step_id: str,
+                           run_id: str) -> bool:
+    """校验失败 run 能否重新绑定回 workflow step；返回是否需要 rebind。
+
+    这是“重启进程”按钮和 workflow step 状态机之间的桥：失败 run 的 step 已被
+    fail_step 重置为 pending/failed，单纯把 run 改回 created 会被 scheduler 当作
+    orphaned_step_run 再次回收。必须先恢复 step 的 running/lease/run_id。
+    """
+    wf = get_workflow(conn, wid)
+    if wf is None:
+        raise ConflictError(f"workflow not found: {wid}")
+    if wf["status"] != "running":
+        raise ConflictError(f"workflow {wid} is {wf['status']}; cannot restart its step run")
+    task = conn.execute(
+        "SELECT status, archived_at FROM tasks WHERE id=?", (wf["task_id"],)).fetchone()
+    if task is None or task["status"] in ("done", "closed") or task["archived_at"]:
+        raise ConflictError("task is terminal; cannot restart its step run")
+    step = next((s for s in wf.get("steps") or [] if s["step_id"] == step_id), None)
+    if step is None:
+        raise ConflictError(f"step not found: {step_id}")
+    status = step["status"]
+    if status == "running":
+        if str(step.get("run_id") or "") != str(run_id):
+            raise ConflictError(
+                f"step {step_id} is running with another run "
+                f"({step.get('run_id')}); retry the step instead")
+        return False
+    if status in ("failed", "rejected", "pending"):
+        other = step.get("run_id")
+        if status == "pending" and other and str(other) != str(run_id):
+            row = conn.execute("SELECT status FROM runs WHERE id=?", (other,)).fetchone()
+            if row is not None and row["status"] not in ("completed", "failed", "abandoned"):
+                raise ConflictError(
+                    f"step {step_id} is already being retried by run {other}")
+        return True
+    raise ConflictError(
+        f"step {step_id} is {status}; only running/failed/rejected/pending "
+        "step runs can be restarted")
+
+
+def rebind_run_to_step(conn: sqlite3.Connection, wid: str, step_id: str,
+                       run_id: str) -> dict:
+    """把 manual restart 的 run 重新绑定为 step 的 running run（含新 lease/fence）。"""
+    if not check_step_run_restart(conn, wid, step_id, run_id):
+        return get_workflow(conn, wid)  # type: ignore[return-value]
+    wf = get_workflow(conn, wid)
+    step = next(s for s in (wf.get("steps") or []) if s["step_id"] == step_id)
+    leases.release(conn, step.get("lease_id"), commit=False)
+    lease = leases.acquire(
+        conn, "step", f"{wid}:{step_id}", holder_type="role",
+        holder=step["role_slug"], run_id=run_id,
+        meta={"task_id": wf["task_id"], "workflow_id": wid, "step_id": step_id},
+        commit=False)
+    now = now_iso()
+    conn.execute(
+        "UPDATE workflow_steps SET status='running', run_id=?, started_at=?, "
+        "ended_at=NULL, next_retry_at=NULL, recovery_count=0, nudge_count=0, "
+        "last_nudge_at=NULL, lease_id=?, fence_token=?, updated_at=?, "
+        "rework_count=CASE WHEN kind='decision' THEN 0 ELSE rework_count END "
+        "WHERE workflow_id=? AND step_id=?",
+        (run_id, now, lease["id"], int(lease["fence"]), now, wid, step_id))
+    ledger.emit(
+        conn, "step.run_rebound", task_id=wf["task_id"], workflow_id=wid,
+        execution_no=wf.get("execution_no"), step_id=step_id, run_id=run_id,
+        actor_type="human", actor="human",
+        payload={"lease_id": lease["id"], "fence": lease["fence"],
+                 "prev_run_id": step.get("run_id")},
+        mirror_activity=True, activity_kind="step", activity_role=step["role_slug"])
+    conn.commit()
+    return get_workflow(conn, wid)  # type: ignore[return-value]
+
+
 def _retry_backoff_seconds(attempt: int) -> float:
     """指数退避：base, 2×base, 4×base… 上限 max。"""
     base = max(1.0, float(config.AUTO_RECOVER_BACKOFF_SECONDS))

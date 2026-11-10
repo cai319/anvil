@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import config
@@ -87,6 +87,7 @@ class Scheduler:
                 conn, lambda rid, ev: self._pump(rid, ev))),
             ("resolve_context_returns", lambda: dispatch_service.resolve_context_returns(
                 conn, lambda rid, ev: self._pump(rid, ev))),
+            ("recover_failed_runs", lambda: self._recover_failed_runs(conn)),
             ("pump_created", lambda: self._pump_created(conn)),
             ("monitor", lambda: self._monitor(conn)),
             ("clear_terminal_role_runs", lambda: self._clear_terminal_role_runs(conn)),
@@ -394,6 +395,121 @@ class Scheduler:
                  __import__("json").dumps({"workflow_id": r["workflow_id"],
                                            "step_id": r["step_id"]}, ensure_ascii=False),
                  now.isoformat()))
+            conn.commit()
+
+    _RUN_NON_RETRYABLE = {
+        "human_rejected", "cancelled", "canceled", "out_of_scope",
+        "permission_denied", "spec_error", "contract_violation",
+        "governance_denied", "abandoned_by_user",
+    }
+
+    @staticmethod
+    def _run_recovery_backoff(attempt: int) -> float:
+        base = max(1.0, float(config.AUTO_RECOVER_BACKOFF_SECONDS))
+        cap = max(base, float(config.AUTO_RECOVER_MAX_BACKOFF_SECONDS))
+        return min(cap, base * (2 ** max(0, int(attempt) - 1)))
+
+    def _recover_failed_runs(self, conn) -> None:
+        """普通任务/回复/派遣 run 失败后的自恢复：有限次 + 指数退避 + 新上下文。"""
+        if not config.RUN_AUTO_RECOVER_ENABLED:
+            return
+        now_dt = datetime.now(timezone.utc)
+        cutoff = (now_dt - timedelta(
+            seconds=config.RUN_AUTO_RECOVER_MAX_AGE_SECONDS)).isoformat()
+        rows = conn.execute(
+            "SELECT r.* FROM runs r JOIN tasks t ON t.id=r.task_id "
+            "WHERE r.status='failed' AND r.task_id IS NOT NULL "
+            "AND (r.step_id IS NULL OR r.step_id='') "
+            "AND COALESCE(r.recovered_by,'')='' "
+            "AND COALESCE(r.recovery_exhausted,0)=0 "
+            "AND t.status='in_progress' AND t.archived_at IS NULL "
+            "AND COALESCE(r.ended_at,r.started_at) >= ? "
+            "ORDER BY COALESCE(r.ended_at,r.started_at) LIMIT 20",
+            (cutoff,)).fetchall()
+        from .services import ledger
+        for raw in rows:
+            run = dict(raw)
+            role = run["role_slug"]
+            task_id = run["task_id"]
+            slice_key = run.get("slice_key")
+            attempts = int(run.get("recovery_count") or 0) + 1
+            fc = str(run.get("failure_class") or "")
+            if fc in self._RUN_NON_RETRYABLE:
+                conn.execute(
+                    "UPDATE runs SET recovery_exhausted=1 WHERE id=?", (run["id"],))
+                ledger.emit(
+                    conn, "run.recovery_exhausted", task_id=task_id,
+                    slice_key=slice_key, run_id=run["id"],
+                    actor_type="system", actor="scheduler",
+                    payload={"reason": "non_retryable", "failure_class": fc},
+                    mirror_activity=True, activity_kind="comment",
+                    activity_role="system")
+                conn.commit()
+                continue
+            # 同一 context 已有活跃/HITL run：不并发恢复。
+            q = ("SELECT 1 FROM runs WHERE role_slug=? AND task_id=? AND id<>? "
+                 "AND status IN ('created','projecting','running','submitted','reviewing')")
+            params: list = [role, task_id, run["id"]]
+            if slice_key:
+                q += " AND slice_key=?"
+                params.append(slice_key)
+            else:
+                q += " AND slice_key IS NULL"
+            if conn.execute(q + " LIMIT 1", params).fetchone():
+                continue
+            # 等 human 的 HITL 场景不自动重试。
+            if self._waiting_for_human(conn, task_id, role, slice_key):
+                continue
+            last = run.get("ended_at") or run.get("started_at")
+            if last:
+                try:
+                    last_dt = datetime.fromisoformat(last)
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                    if (now_dt - last_dt).total_seconds() < self._run_recovery_backoff(attempts):
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            if attempts > max(1, int(config.RUN_AUTO_RECOVER_MAX_ATTEMPTS)):
+                conn.execute(
+                    "UPDATE runs SET recovery_exhausted=1 WHERE id=?", (run["id"],))
+                ledger.emit(
+                    conn, "run.recovery_exhausted", task_id=task_id,
+                    slice_key=slice_key, run_id=run["id"],
+                    actor_type="system", actor="scheduler",
+                    payload={"reason": "max_attempts", "attempts": attempts - 1,
+                             "failure_class": fc},
+                    mirror_activity=True, activity_kind="comment",
+                    activity_role="system")
+                conn.commit()
+                continue
+            if attempts >= 2:
+                # 连续失败：换新上下文，但保留 CIC/MEMORY/知识快照。
+                try:
+                    daemon_service.get_manager().mark_needs_fresh_context(
+                        role, f"run auto recovery #{attempts}",
+                        task_id=task_id, slice_key=slice_key)
+                except Exception:  # noqa: BLE001
+                    pass
+            note = (
+                f"上一次运行失败（{fc or 'failed'}），这是自动恢复第 {attempts} 次。"
+                "请先检查失败原因/现场，再继续未完成的工作；不要重复提交已完成内容。")
+            new = runs_service.create_run(
+                conn, role, task_id, prompt=run.get("prompt"),
+                slice_key=slice_key, origin=run.get("origin") or "recovery")
+            conn.execute(
+                "UPDATE runs SET recovery_count=?, recovery_of_run_id=?, "
+                "wake_note=? WHERE id=?",
+                (attempts, run["id"], note, new["id"]))
+            conn.execute(
+                "UPDATE runs SET recovered_by=?, next_retry_at=NULL WHERE id=?",
+                (new["id"], run["id"]))
+            ledger.emit(
+                conn, "run.auto_recovery", task_id=task_id, slice_key=slice_key,
+                run_id=new["id"], actor_type="system", actor="scheduler",
+                payload={"recovered_run_id": run["id"], "attempt": attempts,
+                         "failure_class": fc},
+                mirror_activity=True, activity_kind="run", activity_role=role)
             conn.commit()
 
     def _pump_created(self, conn) -> None:

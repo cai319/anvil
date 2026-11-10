@@ -76,7 +76,7 @@ Cindy 在规划时从已选角色中指定 reviewer，并保证 workflow 覆盖�
 ## 当前实现状态
 
 详见 `implementation-status.md`（各里程碑的已实现 / 未实现清单）。当前自动化测试：
-**778 passed + 58 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；未设置时相关用例跳过）。
+**781 passed + 58 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；未设置时相关用例跳过）。
 
 切片上下文与独立派遣任务默认已启用显式入口（`anvil task dispatch` /
 `POST /tasks/{id}/dispatches`）。`anvil task mention` 默认复用/切换当前切片上下文，

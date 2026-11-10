@@ -442,3 +442,69 @@ def test_awaiting_external_work_blocks_nudge(tmp_path, monkeypatch):
     conn.commit()
     assert sched._awaiting_external_work(conn, "R-E", "dev") is True
     conn.close()
+
+
+def test_recover_failed_run_creates_backoff_run(tmp_path, monkeypatch):
+    """普通任务 run 失败后自动创建恢复 run（有限次、带失败说明）。"""
+    monkeypatch.setattr(config, "RUN_AUTO_RECOVER_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(config, "RUN_AUTO_RECOVER_MAX_AGE_SECONDS", 86400)
+    env = make_env(tmp_path, monkeypatch)
+    conn = open_conn(env["db_path"])
+    from datetime import datetime, timedelta, timezone
+    now = now_iso()
+    old = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    conn.execute(
+        "INSERT INTO tasks (id,title,status,scope_paths_json,acceptance_json,"
+        "created_at,updated_at) VALUES ('T-R','t','in_progress','[]','[]',?,?)",
+        (now, now))
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,started_at,ended_at,"
+        "failure_class) VALUES ('R-F','dev','T-R','failed',?,?, 'agent_exit_1')",
+        (now, old))
+    conn.commit()
+
+    Scheduler(env["db_path"], env["orch"])._recover_failed_runs(conn)
+    new = conn.execute(
+        "SELECT * FROM runs WHERE task_id='T-R' AND id<>'R-F'").fetchone()
+    assert new is not None
+    assert new["status"] == "created"
+    assert new["recovery_count"] == 1
+    assert new["recovery_of_run_id"] == "R-F"
+    assert "自动恢复第 1 次" in (new["wake_note"] or "")
+    old = conn.execute("SELECT recovered_by FROM runs WHERE id='R-F'").fetchone()
+    assert old["recovered_by"] == new["id"]
+
+    # 同一失败 run 不会被重复恢复。
+    Scheduler(env["db_path"], env["orch"])._recover_failed_runs(conn)
+    count = conn.execute(
+        "SELECT COUNT(*) AS n FROM runs WHERE task_id='T-R'").fetchone()["n"]
+    assert count == 2
+    conn.close()
+
+
+def test_recover_failed_run_skips_workflow_step_and_non_retryable(tmp_path, monkeypatch):
+    env = make_env(tmp_path, monkeypatch)
+    conn = open_conn(env["db_path"])
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO tasks (id,title,status,scope_paths_json,acceptance_json,"
+        "created_at,updated_at) VALUES ('T-S','t','in_progress','[]','[]',?,?)",
+        (now, now))
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,started_at,ended_at,"
+        "step_id,failure_class) VALUES ('R-STEP','dev','T-S','failed',?,?,'S1','x')",
+        (now, now))
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,started_at,ended_at,"
+        "failure_class) VALUES ('R-HUMAN','dev','T-S','failed',?,?,'human_rejected')",
+        (now, now))
+    conn.commit()
+    sched = Scheduler(env["db_path"], env["orch"])
+    sched._recover_failed_runs(conn)
+    count = conn.execute(
+        "SELECT COUNT(*) AS n FROM runs WHERE task_id='T-S'").fetchone()["n"]
+    assert count == 2
+    human = conn.execute(
+        "SELECT recovery_exhausted FROM runs WHERE id='R-HUMAN'").fetchone()
+    assert human["recovery_exhausted"] == 1
+    conn.close()

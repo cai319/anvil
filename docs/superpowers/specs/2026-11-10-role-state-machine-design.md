@@ -412,3 +412,51 @@ Step：`pending 待办 / running 进行中 / submitted 待确认 / approved 完�
   跨切片临时处理的回切用 `runs.context_return_*`，与 `task_dispatches` 分开。
 
 详细设计见 `docs/superpowers/specs/2026-11-10-slice-context-dispatch-design.md`。
+
+## 15. 失败自恢复与手动重启（2026-11-10 修订）
+
+### 15.1 两类失败路径
+
+| 类型 | 状态迁移 | 恢复方式 |
+|---|---|---|
+| workflow step run 失败 | `fail_step`：run failed，step 回 `pending` + `next_retry_at`，超预算后 step `failed` | 自动指数退避重派；人工可 `step retry` |
+| 普通 task/reply/dispatch run 失败 | run failed，task 仍 `in_progress` | `recover_failed_runs` 自动创建恢复 run |
+| 人工“重启进程” | run failed → created | 必须先恢复所属 step 的 `running/lease/run_id`，否则会被 orphan reaper 再次判死 |
+
+### 15.2 普通 run 自恢复
+
+`Scheduler._recover_failed_runs` 每轮扫描：
+
+- 只处理 `runs.status='failed'`、`step_id` 为空、task 仍在 `in_progress` 的 run；
+- 同一 `(role, task, slice)` 已有 active/HITL run 时跳过；
+- 等 human 的 HITL 场景不自动重试；
+- 不自动重试的 failure_class：`human_rejected/cancelled/out_of_scope/
+  permission_denied/spec_error/contract_violation/governance_denied`；
+- 指数退避复用 `ANVIL_AUTO_RECOVER_BACKOFF_SECONDS` /
+  `ANVIL_AUTO_RECOVER_MAX_BACKOFF_SECONDS`；
+- 最大次数 `ANVIL_RUN_AUTO_RECOVER_MAX_ATTEMPTS`（默认 3），
+  失败超过 `ANVIL_RUN_AUTO_RECOVER_MAX_AGE_SECONDS`（默认 24h）不再扫描；
+- 第 2 次起先 `mark_needs_fresh_context`（保留 MEMORY/CIC/知识快照），
+  再创建新 run；新 run 带 `recovery_count/recovery_of_run_id` 和失败说明 wake_note；
+- 旧 run 写 `recovered_by`，避免同一失败 run 重复恢复；
+- 耗尽后写非阻塞 comment，不 @human。
+
+### 15.3 手动重启失败 run
+
+`POST /runs/{id}/restart|session-reset|full-reset`：
+
+- 若 run 属于 workflow step：
+  - step `running` 且 `run_id` 匹配 → 普通重启；
+  - step `pending/failed/rejected` → 取消旧 lease/自动重试，重新 acquire lease，
+    把 step 恢复为 `running` 并绑定该 run；
+  - step `submitted/approved/skipped` 或 workflow/task 终止 → 409，拒绝重启；
+- 清理 `failure_class/ended_at/recovery_exhausted/next_retry_at/recovered_by`；
+- 然后才把 run 置 `created` 并 pump。这样 `_reap_orphaned_step_runs` 不会把它当孤儿。
+
+### 15.4 为什么之前“重启进程”不恢复
+
+失败 workflow step 的 run 已经被 `fail_step` 标为 failed，step 被重置为 pending、
+`run_id=NULL`。旧实现只把 run 改回 created：
+`_reap_orphaned_step_runs` 发现 step 不是 running 或 `run_id != run.id`，
+立即再次把 run 标 failed，所以 UI 看起来“重启无效”。修复的核心是恢复
+run 与 step 的双向绑定，而不是单独复活 run。
