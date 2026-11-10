@@ -181,11 +181,21 @@ def _run_workspace_path(conn: sqlite3.Connection, run: dict, role: dict,
     """
     role_home = str(role.get("home_path") or "")
     if _persistent_session(conn, effective) and run.get("task_id"):
+        from ..services import daemon as daemon_service
+        # 同一 task 的 workspace 在 slice 间共享；优先精确槽，再回退同 task 任意槽。
+        target_key = daemon_service.context_key(run["task_id"], run.get("slice_key"))
         row = conn.execute(
             "SELECT workspace_path FROM role_task_sessions "
             "WHERE role_slug=? AND task_key=?",
-            (run["role_slug"], run["task_id"]),
+            (run["role_slug"], target_key),
         ).fetchone()
+        if row is None:
+            row = conn.execute(
+                "SELECT workspace_path FROM role_task_sessions "
+                "WHERE role_slug=? AND task_id=? "
+                "ORDER BY COALESCE(last_active_at, updated_at) DESC LIMIT 1",
+                (run["role_slug"], run["task_id"]),
+            ).fetchone()
         slot_ws = row["workspace_path"] if row is not None else None
         if slot_ws:
             p = Path(slot_ws)
@@ -223,14 +233,28 @@ def _clip_text(text: str, max_chars: int) -> str:
     return "…（更早的会话已省略）\n" + tail
 
 
+def _timeline_in_scope(entry: dict, slice_key: str | None,
+                       task_wide: bool = False) -> bool:
+    if task_wide:
+        return True
+    value = entry.get("slice_key")
+    if slice_key:
+        return value in (None, slice_key)
+    return value is None
+
+
 def _conversation_transcript(conn: sqlite3.Connection, task_id: str | None,
-                             max_chars: int = 4000) -> str:
+                             max_chars: int = 4000,
+                             slice_key: str | None = None,
+                             task_wide: bool = False) -> str:
     """把任务会话时间线（评论 + @提及 + 认领/提交/评审）拼成对话记录，作为续跑上下文。"""
     if not task_id:
         return ""
     tl = tasks_service.timeline(conn, task_id)
     lines: list[str] = []
     for e in tl:
+        if not _timeline_in_scope(e, slice_key, task_wide):
+            continue
         role = e["role"] or "system"
         p = e["payload"] or {}
         if e["kind"] == "comment":
@@ -256,11 +280,13 @@ def _prompt(task: dict | None, transcript: str = "", extra: str = "",
 
 
 def _recent_transcript(conn: sqlite3.Connection, task_id: str | None, limit: int = 24,
-                       max_chars: int = 1800) -> str:
+                       max_chars: int = 1800, slice_key: str | None = None,
+                       task_wide: bool = False) -> str:
     """最近 N 条任务会话（评论/@提及/提交/评审），用于步骤/回复上下文注入。"""
     if not task_id:
         return ""
-    tl = tasks_service.timeline(conn, task_id)
+    tl = [e for e in tasks_service.timeline(conn, task_id)
+          if _timeline_in_scope(e, slice_key, task_wide)]
     lines: list[str] = []
     for e in tl[-limit:]:
         role = e["role"] or "system"
@@ -305,6 +331,14 @@ def _is_finding_reviewer(conn: sqlite3.Connection, task: dict | None,
     ).fetchone() is not None
 
 
+def _with_wake_note(run: dict, text: str) -> str:
+    """自动回切的一次性 continuation 放在 prompt 顶部，不改变原协议识别。"""
+    note = str(run.get("wake_note") or "").strip()
+    if not note:
+        return text
+    return ("## 回到原切片上下文\n" + note + "\n\n" + text).strip()
+
+
 def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> str:
     """按 run 类型选择协议：
     - 工作流步骤：步骤说明 + 最近会话（含 @ 反馈）+ STEP_PROTOCOL
@@ -317,15 +351,19 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
         body = prompt[len("[anvil:findings]"):].strip()
         head = "\n".join(p for p in ((task or {}).get("title"),
                                      (task or {}).get("description")) if p)
-        return "\n\n".join(p for p in (head, body, render.FINDING_PROTOCOL) if p)
+        return _with_wake_note(
+            run, "\n\n".join(p for p in (head, body, render.FINDING_PROTOCOL) if p))
     if run.get("step_id"):
         from ..services import agent_inbox
         task_id = run.get("task_id")
         parts = [prompt]
         if task_id:
-            unread = agent_inbox.unread_count(conn, run["role_slug"], task_id)
+            unread = agent_inbox.unread_count(
+                conn, run["role_slug"], task_id, slice_key=run.get("slice_key"))
             if unread:
-                items = agent_inbox.items(conn, run["role_slug"], task_id, limit=3)
+                items = agent_inbox.items(
+                    conn, run["role_slug"], task_id, limit=3,
+                    slice_key=run.get("slice_key"))
                 lines = "\n".join(f"- [{i['role']}] {i['text'][:300]}" for i in items)
                 parts.append(
                     f"## 未读会话（{unread} 条，最近 3 条）\n{lines}\n\n"
@@ -337,15 +375,15 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
         parts.append(render.STEP_PROTOCOL)
         if _is_finding_reviewer(conn, task, run.get("role_slug")):
             parts.append(render.STEP_FINDING_PROTOCOL)
-        return "\n\n".join(p for p in parts if p)
+        return _with_wake_note(run, "\n\n".join(p for p in parts if p))
     # 规划 run（Cindy / planner）：不能因为任务已有 workflow 就被误判为回复。
     from ..services import planning as planning_service
     if prompt.startswith(planning_service.PLAN_MARKER):
         body = prompt[len(planning_service.PLAN_MARKER):].strip()
-        base = _prompt(task, _conversation_transcript(conn, run.get("task_id")), body,
-                       protocol=None)
+        base = _prompt(task, _conversation_transcript(
+            conn, run.get("task_id"), task_wide=True), body, protocol=None)
         hint = _knowledge_hint(conn, run, task)
-        return "\n\n".join(p for p in (base, hint) if p)
+        return _with_wake_note(run, "\n\n".join(p for p in (base, hint) if p))
     # 工作流任务上的非步骤 run = 被 @ 的会话回复（包括历史遗留无标记的 run），
     # 一律用 REPLY_PROTOCOL，避免误 claim/submit 任务。
     is_reply = prompt.startswith("[anvil:reply]")
@@ -357,15 +395,18 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
             is_reply = False
     if is_reply:
         body = prompt[len("[anvil:reply]"):].strip() if prompt.startswith("[anvil:reply]") else prompt
-        recent = _recent_transcript(conn, run.get("task_id"))
+        recent = _recent_transcript(
+            conn, run.get("task_id"), slice_key=run.get("slice_key"))
         head = "\n".join(p for p in ((task or {}).get("title"), (task or {}).get("description")) if p)
         parts = [head, body or "你在任务会话中被 @，请阅读最近会话并回复。",
                  ("## 最近会话\n" + recent) if recent else "",
                  _knowledge_hint(conn, run, task), render.REPLY_PROTOCOL]
-        return "\n\n".join(p for p in parts if p)
+        return _with_wake_note(run, "\n\n".join(p for p in parts if p))
     hint = _knowledge_hint(conn, run, task)
     body = prompt + ("\n\n" + hint if hint else "")
-    return _prompt(task, _conversation_transcript(conn, run.get("task_id")), body)
+    return _with_wake_note(
+        run, _prompt(task, _conversation_transcript(
+            conn, run.get("task_id"), slice_key=run.get("slice_key")), body))
 
 
 def _protocol_for_run(conn: sqlite3.Connection, run: dict) -> str:
@@ -560,7 +601,8 @@ def _project_run(conn: sqlite3.Connection, run: dict, *,
         task_knowledge=ctx.get("task_knowledge", ""),
         topic_knowledge=ctx.get("topic_knowledge", ""),
         knowledge_repos=ctx.get("knowledge_repos"),
-        prompt=run.get("prompt") or "",
+        prompt=((str(run.get("wake_note") or "").strip() + "\n\n")
+                if run.get("wake_note") else "") + (run.get("prompt") or ""),
         protocol=_protocol_for_run(conn, run),
     )
     _project_catalog(conn, effective, workspace_path, run["role_slug"])
@@ -595,7 +637,8 @@ def _project_run(conn: sqlite3.Connection, run: dict, *,
         try:
             context_manifest_service.record(
                 conn, run_id=run_id, role_slug=run["role_slug"],
-                task_id=run.get("task_id"), kind="projection",
+                task_id=run.get("task_id"), slice_key=run.get("slice_key"),
+                kind="projection",
                 budget_chars=0, total_chars=sum(int(b["chars"]) for b in manifest),
                 blocks=manifest)
             conn.commit()
@@ -636,6 +679,32 @@ def project_node(state: dict, config) -> dict:
         conn.close()
 
 
+def _delivery_priority(conn: sqlite3.Connection, run: dict) -> int:
+    """队列优先级：回切 > 步骤 > findings > mention > 默认。"""
+    run_id = run.get("id")
+    if run.get("wake_note"):
+        if conn.execute(
+                "SELECT 1 FROM task_dispatches WHERE return_run_id=? "
+                "AND status IN ('open','return_ready','returning') LIMIT 1",
+                (run_id,)).fetchone():
+            return 10
+        if conn.execute(
+                "SELECT 1 FROM runs WHERE context_return_run_id=? "
+                "AND context_return_after_turn=1 LIMIT 1",
+                (run_id,)).fetchone():
+            return 10
+    if run.get("step_id") or run.get("origin") == "step":
+        return 20
+    prompt = str(run.get("prompt") or "")
+    if prompt.startswith("[anvil:findings]") or run.get("origin") == "findings":
+        return 40
+    if run.get("origin") in ("mention", "dispatch") or run.get("dispatch_id"):
+        return 50
+    if run.get("wake_note"):
+        return 50
+    return 100
+
+
 def spawn_node(state: dict, config) -> dict:
     run_id, conn = _ctx(config)
     try:
@@ -655,16 +724,22 @@ def spawn_node(state: dict, config) -> dict:
                  window_floor, runtime_id, ws_path) = _render_persistent(
                     conn, run, task, effective, role, workspace_path)
                 prompt = _prompt_for_run(conn, run, task)
-                daemon_service.get_manager().ensure_and_deliver(
+                delivery = daemon_service.get_manager().ensure_and_deliver(
                     conn, run["role_slug"], executable=exe, args_new=args_new,
                     args_resume=args_resume, ctx=pctx, cwd=cwd, env=env, prompt=prompt,
                     run_id=run_id, task_id=run.get("task_id"),
+                    slice_key=run.get("slice_key"),
+                    priority=_delivery_priority(conn, run),
                     model_pool=model_pool, context_window_floor=window_floor,
                     runtime_id=runtime_id, workspace_path=ws_path)
             except Exception:  # noqa: BLE001 —— 无法拉起/投递即失败
                 logger.exception("persistent spawn failed for run %s", run_id)
                 runs_service.set_status(conn, run_id, "failed", ended_at=now_iso(),
                                         failure_class="spawn_error")
+                return {}
+            if delivery.get("error"):
+                logger.warning("persistent delivery failed for run %s: %s",
+                               run_id, delivery.get("error"))
                 return {}
             runs_service.mark_spawned(conn, run_id, f"rs:{run['role_slug']}",
                                       timeout_seconds=timeout)
@@ -689,6 +764,8 @@ def spawn_node(state: dict, config) -> dict:
         # P0-1/P0-2：写会话+冻结超时+重置 started_at（续跑重新计时），再置 running
         runs_service.mark_spawned(conn, run_id, result.native_session_id, timeout_seconds=timeout)
         runs_service.set_status(conn, run_id, "running")
+        conn.execute("UPDATE runs SET wake_note=NULL WHERE id=?", (run_id,))
+        conn.commit()
         return {}
     finally:
         conn.close()
@@ -736,7 +813,8 @@ def review_node(state: dict, config) -> dict:
         decision = state.get("review_decision") or {}
         approve = decision.get("approve", False) if isinstance(decision, dict) else bool(decision)
         if approve:
-            runs_service.set_status(conn, run_id, "completed", ended_at=now_iso())
+            if runs_service.set_status(conn, run_id, "completed", ended_at=now_iso()):
+                _clear_terminal_role_state(run, run_id)
         else:
             # 驳回：终止旧会话、清 native_session_id → 回 project 重新投影 + 重新 spawn
             if run.get("native_session_id"):
@@ -749,6 +827,17 @@ def review_node(state: dict, config) -> dict:
         return {}
     finally:
         conn.close()
+
+
+def _clear_terminal_role_state(run: dict, run_id: str) -> None:
+    """run 终态后同步清掉 daemon 上对应的 busy/current 状态。"""
+    try:
+        from ..services import daemon as daemon_service
+        mgr = daemon_service.get_manager()
+        if mgr is not None:
+            mgr.clear_run(run["role_slug"], run_id)
+    except Exception:  # noqa: BLE001 —— 清理失败不影响 run 状态
+        logger.exception("clear terminal role state failed run=%s", run_id)
 
 
 def process_exit_node(state: dict, config) -> dict:
@@ -766,16 +855,32 @@ def process_exit_node(state: dict, config) -> dict:
             return {}
         # 依据 run 自身状态，而非 task 状态：已终态/已提交（评审流接管）/挂起（suspended）则不动。
         if run["status"] in ("completed", "failed", "abandoned", "submitted", "reviewing", "suspended"):
+            if run["status"] in ("failed", "abandoned"):
+                _clear_terminal_role_state(run, run_id)
+            elif run["status"] in ("submitted", "reviewing", "suspended"):
+                # 进程在提交/评审/挂起期间退出：角色不该继续显示这个 run 为 current。
+                try:
+                    from ..services import daemon as daemon_service
+                    mgr = daemon_service.get_manager()
+                    if mgr is not None:
+                        mgr.clear_current(run["role_slug"], run_id)
+                except Exception:  # noqa: BLE001
+                    pass
             return {}
         # 上下文溢出由 daemon 回调自动换会话重投；monitor 可能在同一时刻泵 process_exit，
         # 这里必须让路，否则会把待重投的 run 判死（或与重投竞态）。
         rs = conn.execute(
             "SELECT last_error FROM role_sessions WHERE role_slug=?",
             (run["role_slug"],)).fetchone()
-        if rs and str(rs["last_error"] or "").startswith("context overflow"):
+        last_error = str((rs["last_error"] if rs else "") or "")
+        # 新溢出标记绑定具体 run；旧格式（无 run=）保留兼容，避免升级窗口误判。
+        if (last_error.startswith("context overflow")
+                and ("run=" not in last_error or f"run={run_id}" in last_error)):
             return {}
         # 挂起：若该角色最后 @提及了某个角色（等待响应），则保持 running，等 @回来再 resume。
-        if _waiting_for_reply(conn, run.get("task_id"), run["role_slug"]):
+        if _waiting_for_reply(
+                conn, run.get("task_id"), run["role_slug"],
+                slice_key=run.get("slice_key")):
             return {}
         exit_code = payload.get("exit_code")
         # §7.4：退出但未 submit 永不 completed；非零→failed，否则 abandoned。
@@ -786,6 +891,7 @@ def process_exit_node(state: dict, config) -> dict:
                                     failure_class=failure_class)
         else:
             runs_service.set_status(conn, run_id, "abandoned", ended_at=now_iso())
+        _clear_terminal_role_state(run, run_id)
         return {}
     finally:
         conn.close()
@@ -816,7 +922,8 @@ def resume_node(state: dict, config) -> dict:
         conn.close()
 
 
-def _waiting_for_reply(conn: sqlite3.Connection, task_id: str | None, role_slug: str) -> bool:
+def _waiting_for_reply(conn: sqlite3.Connection, task_id: str | None,
+                       role_slug: str, slice_key: str | None = None) -> bool:
     """该角色最后一条 @提及是否在等待响应（角色或 human）。
 
     等待 human 确认也是合法的挂起态（HITL / plan_confirm_execute），不能判为 abandoned；
@@ -824,7 +931,8 @@ def _waiting_for_reply(conn: sqlite3.Connection, task_id: str | None, role_slug:
     """
     if not task_id:
         return False
-    tl = tasks_service.timeline(conn, task_id)
+    tl = [e for e in tasks_service.timeline(conn, task_id)
+          if _timeline_in_scope(e, slice_key)]
     # 只看该角色自己发出的最后一条 @提及；系统/工作流通知（role=workflow）不算等待响应。
     own = [i for i, e in enumerate(tl)
            if e["kind"] == "mention" and e["role"] == role_slug]

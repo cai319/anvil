@@ -74,6 +74,13 @@ export interface Task {
   depends_on: string[];
   parent_id: string | null;
   parent_step_id?: string | null;
+  source_task_id?: string | null;
+  source_slice_key?: string | null;
+  source_step_id?: string | null;
+  requested_by?: string | null;
+  dispatch_status?: "none" | "open" | "return_ready" | "returning" | "returned" |
+    "no_return" | "cancelled" | null;
+  dispatch_reason?: string | null;
   due_at?: string | null;
   issue_board_enabled?: boolean;
   reviewer_roles?: string[];
@@ -256,7 +263,10 @@ export interface Role {
 }
 
 export interface RoleTaskContext {
+  context_key?: string | null;
   task_id: string | null;
+  slice_key?: string | null;
+  slice_title?: string | null;
   task_title: string;
   task_status: string | null;
   has_session: boolean;
@@ -271,15 +281,29 @@ export interface RoleTaskContext {
 export interface RoleRuntimeStatus {
   role_slug: string;
   alive: boolean;
-  status: string;
+  status: "dead" | "idle" | "busy" | string;
   busy_since: string | null;
   current_task_id: string | null;
   current_task: { id: string; title: string; status: string | null } | null;
   current_run_id: string | null;
+  current_run_status?: string | null;
+  current_run_failure_class?: string | null;
   current_step_id: string | null;
+  current_slice_key?: string | null;
+  context_key?: string | null;
   context_task_id: string | null;
+  context_slice_key?: string | null;
   queue_len: number;
-  queue_tasks: { id: string; title: string; status: string | null; count: number }[];
+  queue_global_count?: number;
+  queue_tasks: {
+    id: string; title: string; status: string | null; count: number;
+    ahead_count?: number;
+  }[];
+  queue_contexts?: {
+    task_id: string | null; slice_key: string | null; count: number;
+    ahead_count?: number;
+  }[];
+  busy_scope?: "task" | "global" | null;
   contexts: RoleTaskContext[];
   switching?: boolean;
   context_tokens: number;
@@ -611,6 +635,24 @@ export const api = {
     req("POST", `/tasks/${id}/comment`, { body }, role).then((r) => json<Task>(r)),
   mentionTask: (id: string, target: string, message: string, role?: string): Promise<Task> =>
     req("POST", `/tasks/${id}/mention`, { target, message }, role).then((r) => json<Task>(r)),
+  createDispatch: (
+    id: string,
+    payload: {
+      target_role: string;
+      message: string;
+      title?: string;
+      acceptance?: string[];
+      scope_paths?: string[];
+      slice_key?: string | null;
+      context_mode?: "auto" | "reuse" | "switch" | "dispatch";
+      force?: boolean;
+    },
+    role?: string,
+  ): Promise<{ task: Task; run: Run; dispatch: TaskDispatch; reused: boolean }> =>
+    req("POST", `/tasks/${id}/dispatches`, payload, role)
+      .then((r) => json<{ task: Task; run: Run; dispatch: TaskDispatch; reused: boolean }>(r)),
+  listDispatches: (id: string): Promise<TaskDispatch[]> =>
+    authFetch(`${BASE}/tasks/${id}/dispatches`).then((r) => json<TaskDispatch[]>(r)),
 
   // issue board / findings
   getFindingSchema: (taskId: string): Promise<FindingSchema> =>
@@ -1419,8 +1461,39 @@ export interface Run {
   prompt: string | null;
   timeout_seconds: number | null;
   failure_class: string | null;
+  slice_key?: string | null;
+  origin?: string | null;
+  dispatch_id?: string | null;
+  wake_note?: string | null;
+  context_return_context_key?: string | null;
+  context_return_after_turn?: number;
+  context_returned_at?: string | null;
   started_at: string | null;
   ended_at: string | null;
+}
+
+export interface TaskDispatch {
+  id: string;
+  source_task_id: string;
+  source_workflow_id: string | null;
+  source_step_id: string | null;
+  source_slice_key: string | null;
+  requester_run_id: string | null;
+  requested_by: string | null;
+  target_task_id: string;
+  target_role: string | null;
+  target_title?: string | null;
+  target_status?: string | null;
+  return_context_key: string | null;
+  return_run_id: string | null;
+  return_step_id: string | null;
+  reason_code: string;
+  reason_json: string;
+  status: "open" | "return_ready" | "returning" | "returned" | "no_return" | "cancelled";
+  attempts: number;
+  returned_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface AnvilEvent {
@@ -1611,6 +1684,9 @@ export interface WorkflowStep {
   lease_expires_at?: string | null;
   lease_fence?: number | null;
   failure_reason: string | null;
+  recovery_count?: number;
+  next_retry_at?: string | null;
+  run_status?: string | null;
   status: "pending" | "running" | "submitted" | "approved" | "rejected" | "failed" | "skipped";
   run_id: string | null;
   summary: string | null;
@@ -1999,6 +2075,7 @@ export interface ContextManifest {
   run_id?: string | null;
   role_slug: string;
   task_id?: string | null;
+  slice_key?: string | null;
   kind: string;
   budget_chars: number;
   total_chars: number;

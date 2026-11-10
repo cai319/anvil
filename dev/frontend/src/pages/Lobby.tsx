@@ -59,6 +59,8 @@ const AVATAR_STATUS_LABEL: Record<string, string> = {
   approved: "已通过",
   completed: "已完成",
   released: "已释放",
+  closed: "已终止",
+  failed: "失败",
 };
 
 function runStatusClass(status: string): string {
@@ -76,7 +78,8 @@ function runStatusClass(status: string): string {
  */
 function taskRoleStatus(task: Task, slug: string, rt?: RoleRuntimeStatus): string {
   const claim = task.role_claims.find((c) => c.role_slug === slug)?.status ?? "pending";
-  if (task.status === "done" || task.status === "closed") {
+  if (task.status === "closed") return "closed";
+  if (task.status === "done") {
     return claim === "approved" ? "approved" : "completed";
   }
   if (claim === "approved") return "approved";
@@ -85,17 +88,19 @@ function taskRoleStatus(task: Task, slug: string, rt?: RoleRuntimeStatus): strin
 
   const busy = Boolean(rt?.alive && rt.status === "busy");
   const assigned = (task.assignees ?? []).includes(slug) || task.assignee === slug;
-  const queuedCount = rt?.queue_tasks?.find((q) => q.id === task.id)?.count ?? 0;
+  const queueInfo = rt?.queue_tasks?.find((q) => q.id === task.id);
+  const queuedCount = queueInfo?.count ?? 0;
+  const queueAhead = queueInfo?.ahead_count ?? 0;
   const queuedHere = Boolean(queuedCount > 0 || (rt?.switching && assigned));
-  const queueTotal = Math.max(queuedCount, rt?.queue_len ?? 0);
 
   if (busy && rt?.current_task_id === task.id) return "running";
-  // 角色正在别的任务上：本任务再排多少条也仍是等待，不能显示为本任务进行中。
-  if (busy && rt?.current_task_id && rt.current_task_id !== task.id && assigned) {
+  // 角色正在别的任务/系统任务上：本任务再排多少条也仍是等待。
+  if (busy && assigned
+      && (!rt?.current_task_id || rt.current_task_id !== task.id)) {
     return "queued";
   }
-  // 队列全是当前任务的消息：角色不是排在别的任务后面，仍在处理本任务。
-  if (queuedCount > 0 && queueTotal <= queuedCount && rt?.alive) return "running";
+  // 只有本任务前面确实排着其他消息才是 queued；ahead_count=0 表示下一条就是本任务。
+  if (queuedCount > 0 && queueAhead === 0 && rt?.alive) return "running";
   if (queuedHere) return "queued";
   if (claim === "working") return "running";
   return claim;
@@ -329,6 +334,14 @@ export function Lobby() {
                   >
                     <a className="card-link" href={`/tasks/${t.id}`} draggable={false}>
                       <strong className="card-title" title={t.title}>{t.title}</strong>
+                      {t.source_task_id && (
+                        <div className="card-tags" title="独立派遣任务：软关联来源，不是父子任务">
+                          <span className="card-tag">
+                            独立任务 · 来自 {t.source_task_id.slice(0, 8)}
+                            {t.source_slice_key ? ` / ${t.source_slice_key}` : ""}
+                          </span>
+                        </div>
+                      )}
                       <div className="card-meta">
                         {t.assignees?.length ? (
                           <span className="card-roles">

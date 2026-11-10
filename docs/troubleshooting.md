@@ -349,6 +349,11 @@ reader 遇到解码/管道异常时会记录完整 traceback 到 `role-session.l
   - `anvil task comment` 检测到 `@` 会打印 warning，提示改用 mention；
   - 前端会把评论正文里命中角色的 `@slug` / `@显示名` 标黄（只是视觉提示）；
   - 需要对方行动时，请用 `anvil task mention`。
+- `mention` 默认按来源/当前切片路由：同 task 同 slice 复用上下文，同 task 已知
+  slice 切回该槽；需要新上下文/新任务卡时用 `anvil task dispatch`，它不会把
+  请求塞进当前切片。
+- `anvil inbox check` 默认只拉当前切片；如果角色看不到其他切片消息，先确认是否
+  需要显式 `--task-wide`，不要误以为消息丢失。
 
 **2. @ 的对象没有被识别为任务参与者**
 

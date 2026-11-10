@@ -863,3 +863,18 @@ def test_advance_is_serialized(conn):
     for t in threads:
         t.join()
     assert started == ["S1"]
+
+
+def test_static_slice_steps_persist_slice_key(conn):
+    """静态 slices 也写 slice_key；source_step_id 只属于运行期动态切片。"""
+    definition = {"slices": [{
+        "id": "A", "title": "模块 A",
+        "execute_role": "developer", "verify_role": "tester",
+        "decision_role": "pm",
+    }]}
+    wf = wf_service.create_workflow(
+        conn, "T1", definition, enforce_role_coverage=False)
+    assert wf["steps"]
+    for step in wf["steps"]:
+        assert step["slice_key"] == "A"
+        assert not step.get("source_step_id")

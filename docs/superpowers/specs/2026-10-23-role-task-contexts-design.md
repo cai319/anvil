@@ -405,3 +405,23 @@ POST /api/v1/me/session/reset              # 只清当前任务槽（角色自�
 - `npm run build`（`dev/frontend`）：通过；
 - 新增 daemon 用例覆盖 A/B 切换、排队、按任务 reset、空闲释放后分别 resume、
   首次进入任务的 CIC、切回任务的增量交接。
+
+## 15. 2026-11-10 扩展：切片级上下文
+
+任务上下文槽从 `(role, task)` 扩展为 `(role, task, slice)`：
+
+- `task_key` 变为不透明 context key：`task_id` 或 `task_id::slice::<slice_key>`；
+  `role_task_sessions` 新增显式 `task_id/slice_key` 列，task 级清理不再解析字符串。
+- 同一 task 的不同 workflow slice 各有独立会话；同一 slice 的
+  scope/execute/verify/fix/verify2/decide 共享会话。
+- `role_sessions` 新增 `current_context_key/current_slice_key`；`current_task_id`
+  仍表示任务语义。
+- `Runs` 新增 `slice_key/origin/dispatch_id`；workflow starter 从
+  `workflow_steps.slice_key` 传入。
+- CIC/最近消息按 slice 过滤；task-wide 蒸馏知识仍可跨 slice 带入。
+- task reset/delete 清全部 slice；slice reset 只清一个；workspace/cwd 仍按 task 共享。
+- 静态 `slices` 也补 `slice_key`，但不补 `source_step_id`（后者只标识运行期动态切片）。
+- workflow 重启/新 execution 清旧 slice 槽，避免 resume 上一次执行的对话。
+
+独立派遣任务和自动回切见
+`docs/superpowers/specs/2026-11-10-slice-context-dispatch-design.md`。

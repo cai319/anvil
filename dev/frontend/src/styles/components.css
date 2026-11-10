@@ -333,6 +333,8 @@ select { height: 34px; }
 .status-todo, .badge-todo,
 .status-closed, .badge-closed,
 .status-abandoned, .badge-abandoned,
+.status-suspended, .badge-suspended,
+.status-unknown, .badge-unknown,
 .status-missing {
   background: var(--paper-2);
   color: var(--text-on-paper-soft);
@@ -366,6 +368,15 @@ select { height: 34px; }
 .status-projecting,
 .status-created {
   background: var(--cyan);
+  color: var(--ink-900);
+}
+/* 角色 chip：进行中是蓝色，待确认是黄色；与任务状态徽标的黄色进行中区分。 */
+.status.role-live-state.status-in_progress {
+  background: var(--blue);
+  color: var(--ink-900);
+}
+.status.role-live-state.status-in_review {
+  background: var(--yellow);
   color: var(--ink-900);
 }
 .review-flag {

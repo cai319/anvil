@@ -645,6 +645,17 @@ Agent 可以创建子任务。子任务与父任务构成依赖，父任务在�
 > 父 step 提交前必须等委派完成。派发者验收，负责人不能验收自己的产出；父任务最终评审
 > 仍由 human 完成。step 内只读并行优先用运行时原生 subagent，Anvil 只要求汇总与证据路径；
 > 平台级 worker/spawn 作为后续能力。
+>
+> **切片上下文与独立派遣任务（owner 2026-11-10）**：workflow 的每个 `slice_key`
+> 是独立上下文单元，context key 为 `task_id::slice::<slice_key>`；同一 slice 的
+> scope/execute/verify/fix/verify2/decide 共享会话，不同 slice 不共享原始对话。
+> 同 task 同 slice 的复核复用当前上下文；同 task 已知 slice 的反馈切回该 slice 槽。
+> 与当前切片弱相关、需要新上下文/新任务卡的工作，创建**独立顶层任务卡**
+> （`type=dispatched`，无 `parent_id/parent_step_id`，不阻塞来源 workflow），只保留
+> `source_task_id/source_slice_key/requested_by` 软关联；完成后原切片仍 running 且
+> run 仍 suspended 时自动回切一次。该能力**不是**“子任务/侧任务”，不改变委派工单
+> 的阻塞与验收语义。完整设计见
+> `docs/superpowers/specs/2026-11-10-slice-context-dispatch-design.md`。
 
 ### 5.2 任务字段
 
@@ -820,9 +831,11 @@ def tick_once():
 > 多个任务，但**任意时刻只执行一个 turn**；忙时状态绑定到具体任务/步骤，其它任务看到的
 > 是「忙碌于任务 A」，B 的 @ 与步骤派发排队等待，不抢占、不失败。运行时把会话从
 > 「每角色一个」升级为 **`(role_slug, task_key)` 的任务上下文槽**（`role_task_sessions`）：
-> 同一任务内复用进程/会话；切换到另一任务时先固化当前槽，再 `kill → spawn`，有该任务
-> 会话且 cwd 一致则 `--resume`，否则新建会话并注入该任务的 CIC（记忆/工作流决策/
-> 知识快照/最近消息）。切回旧任务时恢复其会话，并补一段「离开期间的新进展」增量；
+> 同一任务内复用进程/会话；workflow 内再按 `slice_key` 分槽（`(role, task, slice)`），
+> 不同 slice 的对话隔离、同 slice 各 phase 连续。切换到另一任务/切片时先固化当前槽，
+> 再 `kill → spawn`，有该槽会话且 cwd 一致则 `--resume`，否则新建会话并注入该槽的 CIC
+> （记忆/当前 slice 步骤/工作流决策/task-wide 知识快照/本 slice 最近消息）。切回旧槽时
+> 恢复其会话，并补一段「离开期间的新进展」增量；
 > 任务级 reset/溢出/崩溃只清当前任务槽，其它任务上下文保留。`__global__` 槽承载
 > reminder/直聊等无任务工作。同一 `(role, task)` 的后续 run 复用第一次确定的
 > workspace/cwd（Claude Code 的会话按 cwd 分目录，cwd 变了无法 resume）。任务详情
@@ -871,12 +884,15 @@ def tick_once():
 
 ```
 created → projecting → running → submitted → reviewing → completed
-                          │                                  ▲
-                          ├── failed（非零退出/超时） ─────────┘
-                          └── abandoned（租约回收）
+                          │  ▲                                ▲
+                          │  └── suspended（等待下一条消息）───┘
+                          ├── failed（非零退出/超时/溢出耗尽）──┘
+                          └── abandoned（正常退出未提交/租约回收）
 ```
 
-该 8 态由 LangGraph `StateGraph` 承载：`project`→`spawn`（拉起子进程）→ 图结束；`submit` 事件重入 → `submit`→`await_review`（`interrupt()` 挂起等人审）→`review`；`process_exit` 事件重入 → `failed`/`abandoned`（依据 run 自身状态，非 task 状态）。每次状态迁移落为 `activities`（kind=`run`）事件供时间线消费。
+该 9 态由 LangGraph `StateGraph` 承载：`project`→`spawn`（拉起子进程）→ 图结束；`submit` 事件重入 → `submit`→`await_review`（`interrupt()` 挂起等人审）→`review`；`process_exit` 事件重入 → `failed`/`abandoned`（依据 run 自身状态，非 task 状态）。每次状态迁移落为 `activities`（kind=`run`）事件供时间线消费。
+
+> **2026-11-10 修正**：`suspended` 是正常活跃态（等待下一条消息），不是失败；完整 9 态、角色进程/上下文槽/队列/UI 的规范见 `docs/superpowers/specs/2026-11-10-role-state-machine-design.md`。`running` 只表示“已派发/活跃”，真正执行中的唯一判据是 daemon `current_run_id`。
 
 > **实现口径（owner 2026-10-23）：不允许“永久 running”**
 >
@@ -1666,3 +1682,4 @@ M3 的工具治理看你实际挂多少工具决定，M4 的长程能力看你�
 | 2026-10-23 | 多任务角色调度、任务上下文槽、实时点灯 | §6.1 / §6.3 / `docs/superpowers/specs/2026-10-23-role-task-contexts-design.md` |
 | 2026-11-03 | 交付件清单（性质/内容简介/绝对路径）与 check 环节核验 | §6.1 / §7.4 |
 | 2026-11-03 | 子任务 = 执行期委派工单；step 内只读 fan-out 用运行时原生 subagent | §5.1 / §6.1 |
+| 2026-11-10 | 切片上下文隔离（`task::slice::key`）、独立派遣任务、自动回切 | §6.1 / `docs/superpowers/specs/2026-11-10-slice-context-dispatch-design.md` |

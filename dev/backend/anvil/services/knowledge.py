@@ -703,12 +703,20 @@ def search_knowledge(conn: sqlite3.Connection, role_slug: str, query: str, *,
 
 
 def latest_task_snapshot(conn: sqlite3.Connection, role_slug: str,
-                         task_id: str) -> dict | None:
+                         task_id: str, slice_key: str | None = None) -> dict | None:
+    """最近任务快照；slice_key 给定时只看本切片 + task-wide 快照。"""
+    clause = ""
+    params: list = [role_slug, task_id]
+    if slice_key:
+        clause = "AND (slice_key=? OR slice_key IS NULL) "
+        params.append(slice_key)
+    else:
+        clause = "AND slice_key IS NULL "
     row = conn.execute(
         "SELECT * FROM notes WHERE role_slug=? AND kind='task_snapshot' "
-        "AND task_id=? AND scope='task' "
+        "AND task_id=? AND scope='task' " + clause +
         "ORDER BY created_at DESC, rowid DESC LIMIT 1",
-        (role_slug, task_id)).fetchone()
+        params).fetchone()
     if row is None:
         return None
     content = str(row["content"] or "")

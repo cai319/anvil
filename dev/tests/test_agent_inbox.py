@@ -43,3 +43,24 @@ def test_check_commit_and_self_exclusion(conn):
     # 新消息继续可见
     tasks_service.comment(conn, "T1", "pm", "补充一条")
     assert agent_inbox.unread_count(conn, "developer", "T1") == 1
+
+
+def test_slice_scoped_inbox_does_not_leak_or_advance_other_slice(conn):
+    tasks_service.comment(conn, "T1", "pm", "A-only", slice_key="A")
+    tasks_service.comment(conn, "T1", "pm", "B-only", slice_key="B")
+    tasks_service.comment(conn, "T1", "pm", "task-wide")
+
+    a_items = agent_inbox.items(conn, "developer", "T1", slice_key="A")
+    a_texts = [i["text"] for i in a_items]
+    assert "A-only" in a_texts
+    assert "task-wide" in a_texts
+    assert "B-only" not in a_texts
+
+    b_before = agent_inbox.items(conn, "developer", "T1", slice_key="B")
+    assert "B-only" in [i["text"] for i in b_before]
+    agent_inbox.commit(conn, "developer", "T1", a_items[-1]["id"], slice_key="A")
+
+    # A 的 cursor 不影响 B；task-wide 是独立 cursor。
+    assert agent_inbox.unread_count(conn, "developer", "T1", slice_key="A") == 0
+    assert agent_inbox.unread_count(conn, "developer", "T1", slice_key="B") == 2
+    assert agent_inbox.unread_count(conn, "developer", "T1") == 1

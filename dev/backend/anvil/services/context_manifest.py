@@ -31,14 +31,16 @@ def _clean_block(block: dict) -> dict:
 def record(conn: sqlite3.Connection, *, run_id: str | None, role_slug: str,
            task_id: str | None, kind: str, budget_chars: int,
            total_chars: int, blocks: list[dict],
-           omitted: list[dict] | None = None) -> int | None:
+           omitted: list[dict] | None = None,
+           slice_key: str | None = None) -> int | None:
     if not config.CONTEXT_MANIFEST_ENABLED:
         return None
     cur = conn.execute(
         "INSERT INTO context_manifests "
-        "(run_id, role_slug, task_id, kind, budget_chars, total_chars, "
-        " blocks_json, omitted_json, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        (run_id, role_slug, task_id, kind, int(budget_chars), int(total_chars),
+        "(run_id, role_slug, task_id, slice_key, kind, budget_chars, total_chars, "
+        " blocks_json, omitted_json, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (run_id, role_slug, task_id, slice_key, kind, int(budget_chars),
+         int(total_chars),
          jdumps([_clean_block(b) for b in (blocks or [])]),
          jdumps([_clean_block(b) for b in (omitted or [])]),
          now_iso()),

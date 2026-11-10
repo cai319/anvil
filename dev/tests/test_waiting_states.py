@@ -152,10 +152,10 @@ class _Mgr:
         return {"alive": True, "status": "busy", "busy_since": self.busy_since,
                 "current_run_id": "R-M", "current_task_id": self.task_id, "queue_len": 0}
 
-    def reset_session(self, role, cic=False, task_id=None):
+    def reset_session(self, role, cic=False, task_id=None, slice_key=None, all_slices=False):
         self.reset_calls.append((role, cic))
 
-    def mark_needs_fresh_context(self, role, note="", task_id=None):
+    def mark_needs_fresh_context(self, role, note="", task_id=None, slice_key=None, all_slices=False):
         raise AssertionError("活跃进程不应被标记为 fresh context")
 
 

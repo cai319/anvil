@@ -32,6 +32,9 @@ MAIN_EPILOG = """\b
   anvil task show <id>                查看任务详情
   anvil task claim <id>               认领任务（工作流步骤不要 claim）
   anvil task comment <id> "进展"      同步进展（不唤醒）
+  anvil task mention <id> --to r "…"  同切片复核/追问（复用上下文）
+  anvil task dispatch <id> --to r "…" 无关工作 → 独立顶层任务卡
+  anvil inbox check --task <id>       拉取当前切片未读（--task-wide 看全任务）
   anvil step show <workflow-id>       查看工作流步骤
   anvil step submit <wf> <step> --summary "完成"
   anvil role list                     查看已有角色
@@ -66,7 +69,10 @@ TASK_EPILOG = """\b
   delegation-accept <id>                派发者验收委派工单
   delegation-reject <id> --feedback "…" 派发者打回委派工单
   comment <id> "正文"                   评论，不唤醒任何人
-  mention <id> --to <role> "正文"       @提及并唤醒目标角色
+  mention <id> --to <role> "正文"       @提及并唤醒；自动复用/切换切片上下文
+          [--slice S] [--context-mode auto|reuse|switch|dispatch]
+  dispatch <id> --to <role> "正文"      创建独立顶层任务卡（不做父子绑定，不阻塞）
+          [--slice S] [--context-mode dispatch] [--acceptance "a;b"]
   archive | unarchive <id>              归档/取消归档（human）
   knowledge-list <id>                   任务共享知识
   knowledge-write <id> --title --tldr --kind
@@ -82,10 +88,19 @@ TASK_EPILOG = """\b
   anvil task delegation-reject <子任务ID> --feedback "缺少命令输出"
   anvil task reviewers $ANVIL_TASK_ID --assignees auditor
   anvil task comment $ANVIL_TASK_ID "已完成接口联调"
-  anvil task mention $ANVIL_TASK_ID --to tester "请复跑回归"
+  anvil task mention $ANVIL_TASK_ID --to tester "请复跑回归"        # 同切片复核：复用上下文
+  anvil task mention $ANVIL_TASK_ID --to developer --slice A "A 模块异常，请复核"
+  anvil task dispatch $ANVIL_TASK_ID --to developer --slice A \\
+    -m "修复另一个领域的缓存问题" --acceptance "问题复现;修复完成"
 
 提示: 工作流任务先看 `anvil step show <workflow-id>`；步骤操作不要用 task claim/submit。
 任务已有 assignees 时，assign 只追加新角色，并先自动提交提案 @human；批准后重试即可。
+上下文规则:
+  · 同 task 同 slice 的复核/追问用 mention，复用当前上下文，不要 dispatch。
+  · 同 task 已知 slice 的反馈会自动切回该 slice 上下文。
+  · 与当前切片弱相关、需要新上下文/新任务卡时用 dispatch；它是顶层任务，
+    不带 --parent/--parent-step，不阻塞来源 workflow。
+  · 现有 `POST /tasks/{id}/dispatch`/“启动”仍是 human 的规划入口，不是独立派遣。
 """
 
 STEP_EPILOG = """\b
@@ -100,6 +115,10 @@ STEP_EPILOG = """\b
   · 只对 running 步骤操作；409 时先用 step show 确认状态，不要反复重试。
   · plan_slices 用 step plan；decision 用 step decide；普通步骤用 step submit。
   · 工作流步骤不要 task claim / task submit，也不要在切片里指定角色。
+  · 同 task 同 slice 的复核用 `anvil task mention` 复用当前上下文；
+    与当前切片弱相关、需要新上下文时用 `anvil task dispatch` 建独立顶层任务，
+    不要用 --parent/--parent-step 伪装成委派工单。
+  · `anvil inbox check` 默认只看当前切片；要拉全任务需显式 `--task-wide`。
 """
 
 # 未知 action 提示与 -h 的动作用同一份清单，避免新增命令后只更新一处。
@@ -159,11 +178,12 @@ SELF_EPILOG = """\b
   show | whoami                       当前身份、任务与会话
   edit-instruction --file <path>      修改自己的指令（human 审批）
   propose --field <f> --file <path>   提交角色演化提案
-  reset-context --task <id>           清空当前任务上下文
+  reset-context --task <id>           清空当前运行上下文（只清当前切片/task 级槽）
 
 规则:
   · 身份来自 ANVIL_TOKEN / ANVIL_AGENT_SLUG；不要伪造角色。
-  · 上下文接近上限或切换任务时先 reset-context，避免旧上下文污染。
+  · 切片上下文相互隔离；reset-context 不会清同 task 的其他 slice。
+  · 上下文接近上限或切换任务/切片时先 reset-context，避免旧上下文污染。
 """
 
 REMINDER_EPILOG = """\b
@@ -468,7 +488,7 @@ def whoami_cmd(json_out: bool = typer.Option(False, "--json", help="输出 JSON"
 @app.command("task",
               help="任务操作入口（动作与示例见下方）。",
               epilog=TASK_EPILOG,
-              short_help="任务：列表/创建/认领/评论/提交/知识")
+              short_help="任务：列表/创建/认领/评论/提交/派遣/知识")
 def task_cmd(
     action: str = typer.Argument("list"),
     target: str = typer.Argument(None),
@@ -529,8 +549,17 @@ def task_cmd(
                                   rich_help_panel="查询 / 创建"),
     on: str = typer.Option(None, "--on", help="block：依赖的任务 id",
                            rich_help_panel="执行 / 协作"),
-    to: str = typer.Option(None, "--to", help="mention：目标角色或 human",
+    to: str = typer.Option(None, "--to", help="mention/dispatch：目标角色或 human",
                            rich_help_panel="执行 / 协作"),
+    slice_key: str = typer.Option(
+        None, "--slice",
+        help="mention/dispatch：来源切片 key；mention 用它标注请求所属切片",
+        rich_help_panel="执行 / 协作"),
+    context_mode: str = typer.Option(
+        None, "--context-mode",
+        help="mention/dispatch：auto|reuse|switch|dispatch（默认 auto；"
+             "显式覆盖自动路由）",
+        rich_help_panel="执行 / 协作"),
     summary: str = typer.Option(
         None, "--summary",
         help="submit：摘要（涉及交付件时逐项写性质/内容简介/绝对路径）",
@@ -564,10 +593,10 @@ def task_cmd(
     json_out: bool = typer.Option(False, "--json", help="输出 JSON",
                                   rich_help_panel="输出"),
 ):
-    """anvil task <list|show|create|assign|reviewers|claim|unclaim|heartbeat|submit|comment|mention|cancel|reopen|delete|block|archive|unarchive|knowledge-list|knowledge-write|knowledge-delete> …"""
+    """anvil task <list|show|create|assign|reviewers|claim|unclaim|heartbeat|submit|comment|mention|dispatch|delegation-accept|delegation-reject|cancel|reopen|delete|block|archive|unarchive|knowledge-list|knowledge-write|knowledge-delete> …"""
     tid = target or DEFAULT_TASK
     needs_target = {"show", "claim", "unclaim", "heartbeat", "submit", "comment", "mention",
-                    "delegation-accept", "delegation-reject",
+                    "dispatch", "delegation-accept", "delegation-reject",
                     "cancel", "reopen", "delete", "block", "assign", "reviewers",
                     "archive", "unarchive", "knowledge-list", "knowledge-write",
                     "knowledge-delete"}
@@ -575,7 +604,7 @@ def task_cmd(
         _usage_error(
             f"task {action} 需要任务 id",
             "传入 <id>，或设置 ANVIL_TASK_ID；例如 `anvil task show T-0001`。")
-    if message is not None and action not in ("comment", "mention"):
+    if message is not None and action not in ("comment", "mention", "dispatch"):
         _usage_error(
             f"task {action} 不支持 --message",
             "comment/mention 用位置参数或 --message；submit 用 --summary；"
@@ -663,6 +692,38 @@ def task_cmd(
                 "例如 `anvil task delegation-reject <子任务ID> --feedback \"缺少命令输出\"`。")
         method, path, payload = (
             "POST", f"/api/v1/tasks/{tid}/delegation/reject", {"feedback": reason})
+    elif action == "dispatch":
+        if not to:
+            _usage_error(
+                "task dispatch 需要 --to <role>",
+                "例如 `anvil task dispatch $ANVIL_TASK_ID --to dev "
+                "-m \"处理另一个领域的问题\" --slice A`。")
+        if not body_text:
+            _usage_error(
+                "task dispatch 需要请求正文",
+                "用位置参数或 -m/--message 传入；它会成为独立任务卡的描述。")
+        payload = {
+            "target_role": to.strip(),
+            "message": body_text,
+            "slice_key": (slice_key or "").strip() or None,
+        }
+        if title:
+            payload["title"] = title
+        if acceptance:
+            payload["acceptance"] = [x.strip() for x in acceptance.split(";") if x.strip()]
+        if scope_paths:
+            payload["scope_paths"] = [x.strip() for x in scope_paths.split(",") if x.strip()]
+        if repo:
+            payload["repo"] = repo.strip()
+        if workspace:
+            payload["workspace_id"] = workspace.strip()
+        if base_branch:
+            payload["base_branch"] = base_branch.strip()
+        if context_mode:
+            payload["context_mode"] = context_mode.strip()
+        if force:
+            payload["force"] = True
+        method, path = "POST", f"/api/v1/tasks/{tid}/dispatches"
     elif action == "comment":
         if body_text and "@" in body_text:
             typer.echo(
@@ -681,6 +742,10 @@ def task_cmd(
                 "例如 `anvil task mention T-0001 --to tester \"请复核\"`；"
                 "@ 文本不会唤醒角色。")
         payload = {"target": to, "message": body_text}
+        if slice_key:
+            payload["slice_key"] = slice_key.strip()
+        if context_mode:
+            payload["context_mode"] = context_mode.strip()
         if expect_activity:
             payload["expect_activity_id"] = expect_activity
         if force:
@@ -738,7 +803,7 @@ def task_cmd(
         _usage_error(
             f"unknown task action: {action}",
             "可用动作: list/show/create/assign/reviewers/claim/unclaim/heartbeat/"
-            "submit/comment/mention/cancel/reopen/delete/block/archive/unarchive/"
+            "submit/comment/mention/dispatch/cancel/reopen/delete/block/archive/unarchive/"
             "knowledge-list/knowledge-write/knowledge-delete。运行 `anvil task -h` 查看示例。")
     result = _call(method, path, payload, params)
     if action == "assign" and isinstance(result, dict) \
@@ -1519,38 +1584,74 @@ def action_list(
 # ---- inbox（Agent 拉模式收件箱）-------------------------------------------
 
 
-inbox_app = typer.Typer(help="Agent 收件箱（拉模式）", context_settings=HELP_CTX)
+INBOX_EPILOG = """\b
+示例:
+  anvil inbox check --task $ANVIL_TASK_ID
+  anvil inbox commit --task $ANVIL_TASK_ID --up-to 128
+  anvil inbox check --task $ANVIL_TASK_ID --slice A
+  anvil inbox check --task $ANVIL_TASK_ID --task-wide
+
+规则:
+  · 默认按当前 run 的 slice 过滤：本切片 + task-wide 消息，不串其他切片。
+  · --slice 显式指定切片；--task-wide 显式拉取整个任务（会看到其他切片原文）。
+  · check 只读不推进 cursor；commit 只推进对应 slice/task-wide 的 cursor。
+  · slice 与 task-wide 的 cursor 相互独立。
+"""
+
+inbox_app = typer.Typer(help="Agent 收件箱（拉模式）", context_settings=HELP_CTX,
+                        epilog=INBOX_EPILOG)
 app.add_typer(inbox_app, name="inbox")
 
 
 @inbox_app.command("check")
 def inbox_check(
     task: str = typer.Option(DEFAULT_TASK, "--task", help="任务 id（默认 $ANVIL_TASK_ID）"),
+    slice_key: str = typer.Option(None, "--slice", help="只看该切片（默认取当前 run 的切片）"),
+    task_wide: bool = typer.Option(False, "--task-wide", help="显式拉取整个任务的消息"),
     limit: int = typer.Option(30, "--limit"),
     json_out: bool = typer.Option(False, "--json"),
 ):
     """拉取 cursor 之后的未读消息（不推进 cursor）。"""
-    out = _call("GET", "/api/v1/me/inbox", params={"task_id": task, "limit": limit})
+    params: dict = {"task_id": task, "limit": limit}
+    if slice_key:
+        params["slice_key"] = slice_key
+    if task_wide:
+        params["task_wide"] = "true"
+    out = _call("GET", "/api/v1/me/inbox", params=params)
     if json_out:
         _emit(out, True)
         return
-    typer.echo(f"未读 {out['unread']} 条（cursor={out['cursor']}）")
+    scope = f" · 切片 {out.get('slice_key')}" if out.get("slice_key") else " · task-wide"
+    typer.echo(f"未读 {out['unread']} 条（cursor={out['cursor']}{scope}）")
     for it in out["items"]:
         typer.echo(f"[{it['id']}] {it['role']} · {it['kind']}: {it['text'][:200]}")
     if not out["items"]:
         typer.echo("（无未读消息）")
     else:
-        typer.echo(f"处理完后：anvil inbox commit --task {task} --up-to {out['items'][-1]['id']}")
+        commit_extra = ""
+        if out.get("slice_key"):
+            commit_extra += f" --slice {out['slice_key']}"
+        elif task_wide:
+            commit_extra += " --task-wide"
+        typer.echo(f"处理完后：anvil inbox commit --task {task}{commit_extra} "
+                   f"--up-to {out['items'][-1]['id']}")
 
 
 @inbox_app.command("commit")
 def inbox_commit(
     up_to: int = typer.Option(..., "--up-to", help="已处理到的最大消息 id"),
     task: str = typer.Option(DEFAULT_TASK, "--task", help="任务 id（默认 $ANVIL_TASK_ID）"),
+    slice_key: str = typer.Option(None, "--slice", help="提交该切片的 cursor"),
+    task_wide: bool = typer.Option(False, "--task-wide", help="提交整个任务的 cursor"),
     json_out: bool = typer.Option(False, "--json"),
 ):
     """提交 cursor（只前进；崩溃未提交会重复投递，at-least-once）。"""
-    out = _call("POST", "/api/v1/me/inbox/commit", {"task_id": task, "up_to": up_to})
+    payload: dict = {"task_id": task, "up_to": up_to}
+    if slice_key:
+        payload["slice_key"] = slice_key
+    if task_wide:
+        payload["task_wide"] = True
+    out = _call("POST", "/api/v1/me/inbox/commit", payload)
     if json_out:
         _emit(out, True)
     else:

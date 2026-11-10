@@ -303,6 +303,7 @@ class NoteWriteIn(BaseModel):
     kind: str | None = None
     scope: str | None = None
     task_id: str | None = None
+    slice_key: str | None = None
     source_task: str | None = None
     tags: list[str] = Field(default_factory=list)
     repo: str | None = None

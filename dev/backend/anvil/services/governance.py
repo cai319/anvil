@@ -155,10 +155,11 @@ def tick(conn: sqlite3.Connection, force: bool = False, dispatch: bool = True,
             (now, tid),
         )
         _terminate_runs(conn, tid)  # 回收前终止仍存活的子进程（防孤儿烧钱）
-        conn.execute(
-            "UPDATE runs SET status='abandoned', ended_at=? WHERE task_id=? AND status NOT IN ('completed','failed','abandoned')",
-            (now, tid),
-        )
+        from . import runs as runs_service
+        for run in conn.execute(
+            "SELECT id FROM runs WHERE task_id=? AND status NOT IN "
+            "('completed','failed','abandoned')", (tid,)).fetchall():
+            runs_service.set_status(conn, run["id"], "abandoned", ended_at=now)
         conn.execute(
             "UPDATE task_role_claims SET status='released', lease_expires_at=NULL, updated_at=? "
             "WHERE task_id=? AND status='working'", (now, tid)
@@ -180,11 +181,12 @@ def tick(conn: sqlite3.Connection, force: bool = False, dispatch: bool = True,
             "WHERE task_id=? AND role_slug=?", (now, c["task_id"], c["role_slug"])
         )
         _terminate_runs(conn, c["task_id"], c["role_slug"])  # 角色级回收同样终止子进程
-        conn.execute(
-            "UPDATE runs SET status='abandoned', ended_at=? WHERE task_id=? AND role_slug=? "
-            "AND status NOT IN ('completed','failed','abandoned')",
-            (now, c["task_id"], c["role_slug"]),
-        )
+        from . import runs as runs_service
+        for run in conn.execute(
+            "SELECT id FROM runs WHERE task_id=? AND role_slug=? AND status NOT IN "
+            "('completed','failed','abandoned')",
+            (c["task_id"], c["role_slug"])).fetchall():
+            runs_service.set_status(conn, run["id"], "abandoned", ended_at=now)
         other = conn.execute(
             "SELECT role_slug FROM task_role_claims WHERE task_id=? AND status='working' "
             "ORDER BY claimed_at LIMIT 1", (c["task_id"],)

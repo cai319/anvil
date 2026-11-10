@@ -138,6 +138,10 @@ PAYLOAD_HINT_CHARS = int(_env("ANVIL_PAYLOAD_HINT_CHARS", "8000000"))
 # 同一 run 因上下文溢出自动换会话的最大次数；超过则交给步骤自动恢复队列
 # （指数退避重排队，不 @human）。主动水位轮换不计入此预算。
 CONTEXT_RESET_MAX_RETRIES = int(_env("ANVIL_CONTEXT_RESET_MAX_RETRIES", "3"))
+# 连续上下文轮换（主动水位/硬阈值）上限：CIC 本身超过硬阈值时防止无限
+# kill→CIC→spawn。正常轮换不计入失败预算，但连续超过该值转技术性失败。
+CONTEXT_ROTATION_MAX_CONSECUTIVE = int(
+    _env("ANVIL_CONTEXT_ROTATION_MAX_CONSECUTIVE", "5"))
 # 常驻进程已死亡但 run 仍卡在 running 的宽限期（秒）后强制转为 suspended，
 # 让步骤看门狗可以续跑/判失败，避免永久占用该角色。
 RUN_DEAD_GRACE_SECONDS = float(_env("ANVIL_RUN_DEAD_GRACE_SECONDS", "60"))
@@ -161,6 +165,14 @@ STEP_MAX_NUDGES = int(_env("ANVIL_STEP_MAX_NUDGES", "3"))
 # 人工确认点（评审/gate/审批）不受影响，仍走 HITL。
 AUTO_RECOVER_ENABLED = _env("ANVIL_AUTO_RECOVER", "1") != "0"
 AUTO_RECOVER_MAX_ATTEMPTS = int(_env("ANVIL_AUTO_RECOVER_MAX_ATTEMPTS", "10"))
+
+# 独立派遣任务：最多沿 source_task_id 链嵌套几层；mention 自动派遣默认关闭，
+# 先以显式 POST /tasks/{tid}/dispatches 观测路由质量。
+DISPATCH_MAX_DEPTH = int(_env("ANVIL_DISPATCH_MAX_DEPTH", "2"))
+DISPATCH_AUTO_FROM_MENTION = _env(
+    "ANVIL_DISPATCH_AUTO_FROM_MENTION", "0").strip().lower() in ("1", "true", "yes", "on")
+DISPATCH_RETURN_MAX_ATTEMPTS = int(
+    _env("ANVIL_DISPATCH_RETURN_MAX_ATTEMPTS", "5"))
 AUTO_RECOVER_BACKOFF_SECONDS = float(_env("ANVIL_AUTO_RECOVER_BACKOFF_SECONDS", "120"))
 AUTO_RECOVER_MAX_BACKOFF_SECONDS = float(_env("ANVIL_AUTO_RECOVER_MAX_BACKOFF_SECONDS", "1800"))
 

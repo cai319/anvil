@@ -5,7 +5,7 @@ import {
   type TimelineEvent, type Workflow,
 } from "../api/client";
 import { roleStatusFromWorkflow } from "../workflowStatus";
-import { roleLiveDot, roleLiveState, stateClassForDot } from "../roleLive";
+import { roleLiveDot, roleLiveState, stateClassForTone, type RoleLiveState } from "../roleLive";
 import { formatClock, formatShort } from "../time";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
@@ -19,14 +19,15 @@ const RUN_LABEL: Record<string, string> = {
 
 type Claim = Task["role_claims"][number];
 
-/** 角色当前会话状态：待办 / 进行中 / 待确认 / 完成 / 关闭。 */
-function roleStatus(claim?: Claim, run?: Run): { label: string; cls: string } {
-  if (claim?.status === "approved") return { label: "完成", cls: "done" };
-  if (claim?.status === "submitted") return { label: "待确认", cls: "in_review" };
-  if (claim?.status === "released") return { label: "关闭", cls: "closed" };
-  if (run?.status === "failed" || run?.status === "abandoned") return { label: "进行中（异常）", cls: "in_progress" };
-  if (claim?.status === "working") return { label: "进行中", cls: "in_progress" };
-  return { label: "待办", cls: "todo" };
+/** 角色当前会话状态：待办 / 进行中 / 待确认 / 完成 / 失败 / 关闭。 */
+function roleStatus(claim?: Claim, run?: Run): RoleLiveState {
+  if (claim?.status === "approved") return { label: "完成", cls: "done", tone: "done" };
+  if (claim?.status === "submitted") return { label: "待确认", cls: "in_review", tone: "in_review" };
+  if (claim?.status === "released") return { label: "关闭", cls: "closed", tone: "closed" };
+  if (run?.status === "failed") return { label: "失败", cls: "failed", tone: "failed" };
+  if (run?.status === "abandoned") return { label: "已放弃", cls: "abandoned", tone: "abandoned" };
+  if (claim?.status === "working") return { label: "进行中", cls: "in_progress", tone: "in_progress" };
+  return { label: "待办", cls: "todo", tone: "todo" };
 }
 
 function describeEvent(ev: TimelineEvent): string {
@@ -144,40 +145,67 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
           <p className="muted">每个角色的当前会话状态；点击行展开执行日志与历史上下文。</p>
           <div className="role-live-legend" aria-label="角色状态图例">
             <span><i className="role-live-dot green" />进行中（本任务）</span>
-            <span><i className="role-live-dot red" />繁忙（其他任务，本任务等待其空闲）</span>
-            <span><i className="role-live-dot amber" />切换上下文中</span>
+            <span><i className="role-live-dot red" />繁忙（其他任务）/ 失败</span>
+            <span><i className="role-live-dot amber" />切换上下文 / 排队 / 等待唤醒 / 等待重试</span>
             <span><i className="role-live-dot blue" />空闲 · 上下文已保留</span>
-            <span><i className="role-live-dot gray" />待办 / 冷启动</span>
+            <span><i className="role-live-dot gray" />待办 / 冷启动 / 已终止</span>
           </div>
         </>
       )}
       {visibleSlugs.map((slug) => {
         const claim = claims.get(slug);
         const stepRunId = stepRunByRole.get(slug);
-        const run = (stepRunId && runs.find((r) => r.id === stepRunId)) || latestByRole.get(slug);
         const rt = runtimes[slug];
+        // 同一 task 多切片时，优先展示角色当前切片对应的 run，而不是最后一个 step run。
+        const sliceRun = runs
+          .filter((r) => r.role_slug === slug
+            && (r.slice_key ?? null) === (rt?.context_slice_key ?? null))
+          .sort((a, b) => (b.started_at ?? "").localeCompare(a.started_at ?? ""))[0];
+        const run = sliceRun
+          || (stepRunId && runs.find((r) => r.id === stepRunId))
+          || latestByRole.get(slug);
         const busyElsewhere = Boolean(
           rt?.alive && rt.status === "busy"
           && rt.current_task_id && rt.current_task_id !== task.id,
         );
-        const queuedHere = rt?.queue_tasks?.find((q) => q.id === task.id)?.count ?? 0;
-        const ctxHere = rt?.contexts?.find((c) => c.task_id === task.id);
-        const wfState = roleStatusFromWorkflow(workflow, slug);
+        const queueInfo = rt?.queue_tasks?.find((q) => q.id === task.id);
+        const queuedHere = queueInfo?.count ?? 0;
+        const queueAhead = queueInfo?.ahead_count ?? 0;
+        const ctxList = (rt?.contexts ?? []).filter((c) => c.task_id === task.id);
+        const ctxHere = ctxList.find(
+          (c) => c.context_key && rt?.context_key && c.context_key === rt.context_key,
+        ) ?? ctxList.find(
+          (c) => (c.slice_key ?? null) === (rt?.context_slice_key ?? null),
+        ) ?? ctxList[0];
+        const wfSlice = ctxList.length
+          ? (ctxHere?.slice_key ?? rt?.context_slice_key ?? null)
+          : undefined;
+        const wfState = roleStatusFromWorkflow(workflow, slug, wfSlice);
+        const taskClosed = task.status === "closed" || workflow?.status === "terminated";
+        const retryWait = wfState?.label === "等待重试";
         const live = roleLiveState(rt, task.id, {
           hasOpenStep: wfState?.cls === "in_progress",
           allDone: wfState?.cls === "done",
           queuedHere,
+          queueAhead,
+          runStatus: run?.status ?? null,
+          retryWait,
+          taskClosed,
+          taskDone: task.status === "done",
         });
-        // 点灯表达实时运行态；徽标优先表达「进行中/繁忙/待办」。
-        // 失败等 workflow 异常状态保留原有语义。
-        let st: { label: string; cls: string } = live;
-        if (wfState?.cls === "closed") st = wfState;
-        else if (live.cls === "todo") {
-          st = wfState?.cls === "done" ? wfState : roleStatus(claim, run);
+        // 点灯表达实时运行态；徽标优先表达终止/完成/失败。
+        let st = live;
+        if (wfState?.cls === "closed" && task.status !== "done" && !taskClosed) {
+          st = { label: wfState.label, cls: "failed", tone: "failed" };
+        } else if (live.tone === "todo" && !taskClosed) {
+          st = wfState?.cls === "done"
+            ? { label: "完成", cls: "done", tone: "done" }
+            : roleStatus(claim, run);
         }
         const dot = roleLiveDot(
           rt, task.id, Boolean(ctxHere?.has_session),
           wfState?.cls === "in_progress", wfState?.cls === "closed",
+          run?.status ?? null, taskClosed, queueAhead, retryWait,
         );
         const isOpen = expanded === run?.id && !!run;
         let detail = "";
@@ -186,23 +214,32 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
         } else if (busyElsewhere) {
           detail = `繁忙 · 正在处理「${rt?.current_task?.title ?? rt?.current_task_id}」`;
           if (queuedHere) detail += `，本任务有 ${queuedHere} 条消息排队`;
-        } else if (live.cls === "in_progress") {
+        } else if (live.tone === "in_progress") {
           detail = rt?.current_step_id
             ? `正在处理本任务 · 步骤 ${rt.current_step_id}`
             : "正在处理本任务";
+          if (rt?.current_slice_key) detail += ` · 切片 ${rt.current_slice_key}`;
           if (queuedHere > 0) detail += ` · 本任务待处理 ${queuedHere} 条`;
-        } else if (live.cls === "queued") {
+        } else if (live.tone === "queued") {
           detail = live.label === "等待唤醒"
             ? `等待唤醒后处理本任务 ${queuedHere} 条消息`
-            : (queuedHere > 0
-              ? `本任务有 ${queuedHere} 条消息待处理`
-              : "等待上下文切换");
+            : live.label === "等待重试"
+              ? "等待自动恢复重试"
+              : (queuedHere > 0
+                ? `本任务有 ${queuedHere} 条消息待处理`
+                : "等待上下文切换");
+        } else if (live.tone === "failed") {
+          detail = "最近一次 run 失败，等待重试或人工处理";
+        } else if (live.tone === "closed") {
+          detail = "任务已终止";
         } else if (!rt) {
           detail = "状态加载中…";
         } else if (ctxHere?.has_session) {
-          detail = `空闲 · 上下文已保留 · ${formatShort(ctxHere.last_active_at)}`;
+          detail = `空闲 · ${ctxHere.slice_key ? `切片 ${ctxHere.slice_key} ` : ""}上下文已保留 · ${formatShort(ctxHere.last_active_at)}`;
         } else {
-          detail = "空闲 · 首次进入将新建上下文";
+          detail = ctxList.length > 1
+            ? `空闲 · 本任务有 ${ctxList.length} 个切片上下文（均无会话）`
+            : "空闲 · 首次进入将新建上下文";
         }
         return (
           <div key={slug} className="rs-row-wrap">
@@ -213,7 +250,7 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
                 aria-label={dot.title}
                 role="img"
               />
-              <span className={`status status-${stateClassForDot(dot.cls)}`}>{st.label}</span>
+              <span className={`status status-${stateClassForTone(st.tone)}`}>{st.label}</span>
               <RoleAvatar
                 slug={slug}
                 name={roleName(slug)}
@@ -238,6 +275,19 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
               <span className="rs-chevron">{isOpen ? <Icon name="chevron-down" size={14} /> : <Icon name="chevron-right" size={14} />}</span>
             </button>
             {claim?.summary && <div className="rs-summary muted">提交摘要：{claim.summary}</div>}
+            {ctxList.length > 1 && (
+              <div className="rs-summary muted">
+                切片上下文：
+                {ctxList.map((c) => (
+                  <span key={c.context_key || c.slice_key || "task"} className="chip"
+                    style={{ marginLeft: 6 }}>
+                    {c.slice_key || "task 级"}
+                    {c.has_session ? " · 已保留" : " · 无会话"}
+                    {c.context_key && c.context_key === rt?.context_key ? " · 当前" : ""}
+                  </span>
+                ))}
+              </div>
+            )}
 
             {isOpen && run && (
               <div className="rs-detail">

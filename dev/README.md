@@ -42,7 +42,7 @@ npm run dev
 
 状态机口径（SE v1.0 修正后）：任务五态 `todo/in_progress/in_review/done/closed`；
 `done` 是评审通过后的成功终态；`closed` 表示人工终止，非终态可终止，已终止可重新打开回 `todo`。
-`runs` 运行生命周期八态（`created/projecting/running/submitted/reviewing/completed/failed/abandoned`）是另一概念。
+`runs` 运行生命周期九态（`created/projecting/running/suspended/submitted/reviewing/completed/failed/abandoned`）是另一概念；`suspended` 表示等待下一条消息，不是失败。完整口径见 `../docs/superpowers/specs/2026-11-10-role-state-machine-design.md`。
 
 ## 术语：频道 / 执行工作区 / 角色工作区
 
@@ -76,4 +76,13 @@ Cindy 在规划时从已选角色中指定 reviewer，并保证 workflow 覆盖�
 ## 当前实现状态
 
 详见 `implementation-status.md`（各里程碑的已实现 / 未实现清单）。当前自动化测试：
-**643 passed + 57 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；未设置时相关用例跳过）。
+**778 passed + 58 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；未设置时相关用例跳过）。
+
+切片上下文与独立派遣任务默认已启用显式入口（`anvil task dispatch` /
+`POST /tasks/{id}/dispatches`）。`anvil task mention` 默认复用/切换当前切片上下文，
+可用 `--slice/--context-mode` 覆盖；`anvil inbox check` 默认只拉当前切片，
+`--task-wide` 才拉全任务。mention 自动转为独立任务默认关闭，先观测路由：
+`ANVIL_DISPATCH_AUTO_FROM_MENTION=1` 开启；派遣深度上限
+`ANVIL_DISPATCH_MAX_DEPTH`（默认 2），回切重试上限
+`ANVIL_DISPATCH_RETURN_MAX_ATTEMPTS`（默认 5）。设计见
+`../docs/superpowers/specs/2026-11-10-slice-context-dispatch-design.md`。

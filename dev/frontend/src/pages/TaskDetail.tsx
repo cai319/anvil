@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type Delegation, type FindingSummary, type KnowledgeKind, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Task, type TaskKnowledge, type TaskLeases, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight, type WorkspaceKnowledge } from "../api/client";
+import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type Delegation, type FindingSummary, type KnowledgeKind, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Run, type Task, type TaskDispatch, type TaskKnowledge, type TaskLeases, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight, type WorkspaceKnowledge } from "../api/client";
 import {
   AUTHORITY_LABEL,
   KNOWLEDGE_CARD_FIELDS,
@@ -13,7 +13,7 @@ import { ApplyTemplateModal } from "./ApplyTemplateModal";
 import { WorkflowGraph } from "./WorkflowGraph";
 import { roleStatusFromWorkflow } from "../workflowStatus";
 import { formatClock, formatDateTime, formatDuration } from "../time";
-import { roleLiveDot, roleLiveState, stateClassForDot } from "../roleLive";
+import { roleLiveDot, roleLiveState, stateClassForTone } from "../roleLive";
 import { useRoleRuntimes } from "../useRoleRuntimes";
 import { usePanelLayout } from "../usePanelLayout";
 import { STATUS_META, isDynamicStep, summarizeLoops, type LoopSummary } from "../workflowGroups";
@@ -50,7 +50,7 @@ const RUN_LABEL: Record<string, string> = {
   completed: "已完成",
   failed: "失败",
   abandoned: "已放弃",
-  suspended: "已挂起",
+  suspended: "等待唤醒",
 };
 
 type DelegationState = {
@@ -164,6 +164,94 @@ function DelegationCard({ d, onChanged }: { d: Delegation; onChanged: () => void
           <button className="small danger" disabled={busy} onClick={cancel}>取消</button>
         )}
       </div>
+    </div>
+  );
+}
+
+const DISPATCH_STATUS_LABEL: Record<string, string> = {
+  open: "进行中", return_ready: "待回切", returning: "回切中",
+  returned: "已回切", no_return: "不回切", cancelled: "已取消",
+};
+
+function DispatchCard({ d }: { d: TaskDispatch }) {
+  const statusCls = d.status === "returned" || d.status === "no_return"
+    ? (d.status === "returned" ? "done" : "closed")
+    : "in_progress";
+  return (
+    <div className="delegation-card">
+      <div className="delegation-head">
+        <a className="delegation-title" href={`/tasks/${d.target_task_id}`}>
+          {d.target_title || d.target_task_id}
+        </a>
+        <span className={`status status-${statusCls}`}>
+          {DISPATCH_STATUS_LABEL[d.status] || d.status}
+        </span>
+        {d.source_slice_key && <span className="chip">切片 {d.source_slice_key}</span>}
+      </div>
+      <div className="delegation-meta">
+        <span>{d.requested_by || "human"} → {d.target_role || "—"}</span>
+        {d.target_status && <span>任务状态：{d.target_status}</span>}
+        {d.return_context_key && (
+          <span className="muted mono" title="完成后回切的上下文">
+            回切：{d.return_context_key}
+          </span>
+        )}
+        {d.created_at && <span className="muted">{formatClock(d.created_at)}</span>}
+      </div>
+      <div className="delegation-actions">
+        <a href={`/tasks/${d.target_task_id}`}>打开独立任务</a>
+        {d.returned_at && <span className="muted">已回切 {formatClock(d.returned_at)}</span>}
+      </div>
+    </div>
+  );
+}
+
+function DispatchComposer({ taskId, roles, onCreated }: {
+  taskId: string;
+  roles: Role[];
+  onCreated: () => void;
+}) {
+  const [target, setTarget] = useState("");
+  const [message, setMessage] = useState("");
+  const [sliceKey, setSliceKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = async () => {
+    if (!target || !message.trim()) return;
+    setBusy(true); setError(null);
+    try {
+      await api.createDispatch(taskId, {
+        target_role: target,
+        message: message.trim(),
+        slice_key: sliceKey.trim() || null,
+      });
+      setMessage("");
+      onCreated();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="dispatch-composer">
+      <div className="dispatch-composer-row">
+        <select value={target} onChange={(e) => setTarget(e.target.value)}>
+          <option value="">选择目标角色…</option>
+          {roles.filter((r) => !isOnboardingRole(r) && r.slug !== "human").map((r) => (
+            <option key={r.slug} value={r.slug}>{r.display_name || r.slug}</option>
+          ))}
+        </select>
+        <input value={sliceKey} onChange={(e) => setSliceKey(e.target.value)}
+          placeholder="来源切片 key（可空）" />
+      </div>
+      <textarea value={message} onChange={(e) => setMessage(e.target.value)}
+        placeholder="请求内容：这是独立工作，目标角色将在新上下文完成，不阻塞当前任务。" />
+      {error && <div className="form-error">{error}</div>}
+      <button className="small primary" disabled={busy || !target || !message.trim()}
+        onClick={() => { void submit(); }}>
+        派遣独立任务
+      </button>
     </div>
   );
 }
@@ -954,7 +1042,9 @@ export function TaskDetail({ id }: { id: string }) {
   const [dossierBusy, setDossierBusy] = useState(false);
   const [reviewStep, setReviewStep] = useState<WorkflowStep | null>(null);
   const [delegations, setDelegations] = useState<Delegation[]>([]);
+  const [dispatches, setDispatches] = useState<TaskDispatch[]>([]);
   const [plannerActive, setPlannerActive] = useState(false);
+  const [runs, setRuns] = useState<Run[]>([]);
   const [wfView, setWfView] = useState<"graph" | "list">("graph");
   const [showApplyTemplate, setShowApplyTemplate] = useState(false);
   const [seedTemplates, setSeedTemplates] = useState<WorkflowTemplate[]>([]);
@@ -995,11 +1085,15 @@ export function TaskDetail({ id }: { id: string }) {
   const refreshDelegations = () =>
     api.listTaskDelegations(id).then(setDelegations).catch(() => setDelegations([]));
 
+  const refreshDispatches = () =>
+    api.listDispatches(id).then(setDispatches).catch(() => setDispatches([]));
+
   const refresh = () =>
     Promise.all([api.getTask(id), api.getTaskTimeline(id), api.listTaskRuns(id)])
       .then(([t, tl, runs]) => {
         setTask(t);
         setTimeline(tl);
+        setRuns(runs);
         const active = new Set([
           "created", "projecting", "running", "submitted", "reviewing", "suspended",
         ]);
@@ -1052,6 +1146,7 @@ export function TaskDetail({ id }: { id: string }) {
     refresh();
     refreshWorkflow();
     refreshDelegations();
+    refreshDispatches();
     api.listRoles().then(setRoles).catch(() => {});
     api.listWorkflowTemplates(undefined, "active").then((list) => {
       setSeedTemplates(list.filter((item) => item.published_version
@@ -1064,6 +1159,7 @@ export function TaskDetail({ id }: { id: string }) {
         refresh();
         refreshWorkflow();
         refreshDelegations();
+        refreshDispatches();
         refreshDrafts();
       }
     });
@@ -1193,34 +1289,67 @@ export function TaskDetail({ id }: { id: string }) {
   /** 任务信息面板统一取数：点灯、状态徽标、排队数、详情文案。 */
   const roleLiveFor = (slug: string) => {
     const rt = roleRuntimes[slug];
-    const ctxHere = rt?.contexts?.find((c) => c.task_id === task.id);
-    const wfState = roleStatusFromWorkflow(workflow, slug);
-    const queued = rt?.queue_tasks?.find((q) => q.id === task.id)?.count ?? 0;
+    const ctxList = (rt?.contexts ?? []).filter((c) => c.task_id === task.id);
+    const ctxHere = ctxList.find(
+      (c) => c.context_key && rt?.context_key && c.context_key === rt.context_key,
+    ) ?? ctxList.find(
+      (c) => (c.slice_key ?? null) === (rt?.context_slice_key ?? null),
+    ) ?? ctxList[0];
+    const wfSlice = ctxList.length
+      ? (ctxHere?.slice_key ?? rt?.context_slice_key ?? null)
+      : undefined;
+    const wfState = roleStatusFromWorkflow(workflow, slug, wfSlice);
+    const taskClosed = task.status === "closed" || workflow?.status === "terminated";
+    const latestRun = runs
+      .filter((r) => r.role_slug === slug
+        && (ctxList.length === 0
+          || (r.slice_key ?? null) === (wfSlice ?? null)))
+      .sort((a, b) => String(b.started_at ?? "").localeCompare(String(a.started_at ?? "")))[0]
+      ?? runs
+        .filter((r) => r.role_slug === slug)
+        .sort((a, b) => String(b.started_at ?? "").localeCompare(String(a.started_at ?? "")))[0];
+    const queueInfo = rt?.queue_tasks?.find((q) => q.id === task.id);
+    const queued = queueInfo?.count ?? 0;
+    const queueAhead = queueInfo?.ahead_count ?? 0;
+    const retryWait = wfState?.label === "等待重试";
     const live = roleLiveState(rt, task.id, {
       hasOpenStep: wfState?.cls === "in_progress",
       allDone: wfState?.cls === "done",
       queuedHere: queued,
+      queueAhead,
+      runStatus: latestRun?.status ?? null,
+      retryWait,
+      taskClosed,
+      taskDone: task.status === "done",
     });
-    let state: { label: string; cls: string } = live;
-    if (wfState?.cls === "closed") state = wfState;
-    else if (live.cls === "todo" && wfState?.cls === "done") state = wfState;
+    let state = live;
+    if (wfState?.cls === "closed" && task.status !== "done" && !taskClosed) {
+      state = { label: wfState.label, cls: "failed", tone: "failed" };
+    }
     const dot = roleLiveDot(
       rt, task.id, Boolean(ctxHere?.has_session),
       wfState?.cls === "in_progress", wfState?.cls === "closed",
+      latestRun?.status ?? null, taskClosed, queueAhead, retryWait,
     );
     const display = roles.find((r) => r.slug === slug)?.display_name ?? slug;
     let detail = "";
     if (rt?.switching) detail = "正在切换任务上下文…";
-    else if (live.cls === "busy") {
+    else if (live.tone === "busy") {
       detail = `正在处理「${rt?.current_task?.title ?? rt?.current_task_id}」`;
       if (queued) detail += ` · 本任务排队 ${queued} 条`;
-    } else if (live.cls === "in_progress") {
+    } else if (live.tone === "in_progress") {
       detail = rt?.current_step_id ? `当前步骤 ${rt.current_step_id}` : "正在本任务工作";
       if (queued > 0) detail += ` · 本任务待处理 ${queued} 条`;
-    } else if (live.cls === "queued") {
+    } else if (live.tone === "queued") {
       detail = live.label === "等待唤醒"
         ? `等待唤醒后处理本任务 ${queued} 条消息`
-        : (queued > 0 ? `本任务待处理 ${queued} 条` : "等待上下文切换");
+        : live.label === "等待重试"
+          ? "等待自动恢复重试"
+          : (queued > 0 ? `本任务待处理 ${queued} 条` : "等待上下文切换");
+    } else if (live.tone === "failed") {
+      detail = "最近一次 run 失败，等待重试或人工处理";
+    } else if (live.tone === "closed") {
+      detail = "任务已终止";
     } else if (!rt) {
       detail = "状态加载中…";
     } else if (ctxHere?.has_session) {
@@ -1246,7 +1375,7 @@ export function TaskDetail({ id }: { id: string }) {
         status={live.dot.cls}
       />
       <i className={`role-live-dot ${live.dot.cls}`} aria-label={live.title} />
-      <span className={`status status-${stateClassForDot(live.dot.cls)} role-live-state`}>
+      <span className={`status status-${stateClassForTone(live.state.tone)} role-live-state`}>
         {live.state.label}
       </span>
       <span className="role-live-name">{live.slug}</span>
@@ -1632,6 +1761,18 @@ export function TaskDetail({ id }: { id: string }) {
           <h1>{task.title}</h1>
           <span className={`status status-${task.status}`}>{STATUS_LABEL[task.status]}</span>
           {task.archived_at && <span className="chip">已归档</span>}
+          {task.source_task_id && (
+            <a className="chip" href={`/tasks/${task.source_task_id}`}
+              title="独立派遣任务的软关联来源（不是父子任务）">
+              来自任务 {task.source_task_id.slice(0, 8)}
+              {task.source_slice_key ? ` / 切片 ${task.source_slice_key}` : ""}
+            </a>
+          )}
+          {task.dispatch_status && task.dispatch_status !== "none" && (
+            <span className="chip">
+              {DISPATCH_STATUS_LABEL[task.dispatch_status] || task.dispatch_status}
+            </span>
+          )}
         </div>
         <div className="session-meta">
           {task.workspace ? (
@@ -1710,7 +1851,9 @@ export function TaskDetail({ id }: { id: string }) {
           </button>
         )}
         <button className={`tab ${tab === "subtasks" ? "active" : ""}`} onClick={() => selectTab("subtasks")}>
-          委派 {delegations.length > 0 && <span className="tab-count">{delegations.length}</span>}
+          委派/独立任务 {(delegations.length + dispatches.length) > 0 && (
+            <span className="tab-count">{delegations.length + dispatches.length}</span>
+          )}
         </button>
         <button className={`tab ${tab === "runtime" ? "active" : ""}`} onClick={() => selectTab("runtime")}>
           角色运行时 {(task.assignees ?? []).length > 0 && <span className="tab-count">{task.assignees.length}</span>}
@@ -2457,6 +2600,23 @@ export function TaskDetail({ id }: { id: string }) {
                 ))}
               </section>
             ))}
+            <section className="delegation-group">
+              <h3 className="delegation-group-title">
+                独立派遣任务 <span className="muted">{dispatches.length}</span>
+              </h3>
+              <DispatchComposer
+                taskId={id}
+                roles={roles}
+                onCreated={() => { void refreshDispatches(); void refresh(); }}
+              />
+              {dispatches.length === 0 && (
+                <p className="muted">
+                  没有独立派遣任务。与本切片弱相关、需要另开上下文的工作，可用
+                  「派遣独立任务」创建顶层任务卡；它不是子任务，不阻塞当前工作流。
+                </p>
+              )}
+              {dispatches.map((d) => <DispatchCard key={d.id} d={d} />)}
+            </section>
           </div>
         );
       })()}

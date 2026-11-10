@@ -451,7 +451,10 @@ def role_runtime(slug: str, conn=Depends(get_db)):
             "current_task_id": row["current_task_id"] if row else None,
             "current_run_id": row["current_run_id"] if row else None,
             "current_step_id": row["current_step_id"] if row else None,
-            "context_task_id": None, "queue_len": 0, "queue": [], "queue_tasks": [],
+            "current_slice_key": None,
+            "current_context_key": row["current_context_key"] if row else None,
+            "context_task_id": None, "context_slice_key": None, "context_key": None,
+            "queue_len": 0, "queue": [], "queue_tasks": [], "queue_contexts": [],
             "context_tokens": int(row["last_context_tokens"] or 0) if row else 0,
             "session_id": (row["session_id"] or "") if row else "",
             "model_id": row["model_id"] if row else None,
@@ -468,14 +471,47 @@ def role_runtime(slug: str, conn=Depends(get_db)):
 
     queue = st.get("queue") or []
     counts: dict[str, int] = {}
-    for item in queue:
+    first_index: dict[str, int] = {}
+    context_counts: dict[tuple[str | None, str | None], int] = {}
+    context_first: dict[tuple[str | None, str | None], int] = {}
+    queue_global_count = 0
+    for idx, item in enumerate(queue):
         tid = item.get("task_id")
         if tid:
             counts[tid] = counts.get(tid, 0) + 1
+            first_index.setdefault(tid, idx)
+            ckey = (tid, item.get("slice_key"))
+            context_counts[ckey] = context_counts.get(ckey, 0) + 1
+            context_first.setdefault(ckey, idx)
+        else:
+            queue_global_count += 1
     queue_tasks = []
     for tid, n in counts.items():
         info = task_info(tid) or {"id": tid, "title": tid, "status": None}
-        queue_tasks.append({**info, "count": n})
+        # 该 task 的第一条队列项之前还有多少条（其他 task/global）消息。
+        queue_tasks.append({**info, "count": n, "ahead_count": first_index.get(tid, 0)})
+    queue_contexts = [
+        {
+            "task_id": tid,
+            "slice_key": slice_key,
+            "count": n,
+            "ahead_count": context_first[(tid, slice_key)],
+        }
+        for (tid, slice_key), n in context_counts.items()
+    ]
+
+    current_run_status = None
+    current_run_failure_class = None
+    if st.get("current_run_id"):
+        run = conn.execute(
+            "SELECT status, failure_class FROM runs WHERE id=?",
+            (st["current_run_id"],)).fetchone()
+        if run:
+            current_run_status = run["status"]
+            current_run_failure_class = run["failure_class"]
+    busy_scope = None
+    if st.get("alive") and st.get("status") == "busy":
+        busy_scope = "task" if st.get("current_task_id") else "global"
 
     contexts = []
     for row in conn.execute(
@@ -483,10 +519,30 @@ def role_runtime(slug: str, conn=Depends(get_db)):
         "ORDER BY COALESCE(last_active_at, updated_at) DESC", (slug,)
     ).fetchall():
         key = row["task_key"]
-        info = None if key == daemon_service.GLOBAL_TASK_KEY else task_info(key)
+        stored_task_id = row["task_id"] if "task_id" in row.keys() else None
+        stored_slice_key = row["slice_key"] if "slice_key" in row.keys() else None
+        if stored_task_id:
+            ctx_task_id, ctx_slice_key = stored_task_id, stored_slice_key
+        else:
+            ctx_task_id, ctx_slice_key = daemon_service.context_parts(key)
+            if ctx_task_id == daemon_service.GLOBAL_TASK_KEY:
+                ctx_task_id = None
+        info = task_info(ctx_task_id) if ctx_task_id else None
+        slice_title = None
+        if ctx_task_id and ctx_slice_key:
+            step = conn.execute(
+                "SELECT ws.title FROM workflow_steps ws "
+                "JOIN workflows w ON w.id=ws.workflow_id "
+                "WHERE w.task_id=? AND ws.slice_key=? LIMIT 1",
+                (ctx_task_id, ctx_slice_key),
+            ).fetchone()
+            slice_title = step["title"] if step else None
         contexts.append({
-            "task_id": None if key == daemon_service.GLOBAL_TASK_KEY else key,
-            "task_title": (info or {}).get("title", key),
+            "context_key": key,
+            "task_id": ctx_task_id,
+            "slice_key": ctx_slice_key,
+            "slice_title": slice_title,
+            "task_title": (info or {}).get("title", ctx_task_id or key),
             "task_status": (info or {}).get("status"),
             "has_session": bool(row["session_id"]),
             "session_id": row["session_id"],
@@ -500,6 +556,11 @@ def role_runtime(slug: str, conn=Depends(get_db)):
         "role_slug": slug,
         "current_task": task_info(st.get("current_task_id")),
         "queue_tasks": queue_tasks,
+        "queue_contexts": queue_contexts,
+        "queue_global_count": queue_global_count,
+        "current_run_status": current_run_status,
+        "current_run_failure_class": current_run_failure_class,
+        "busy_scope": busy_scope,
         "contexts": contexts,
         **{k: v for k, v in st.items() if k != "queue"},
     }

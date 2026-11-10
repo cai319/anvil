@@ -612,6 +612,16 @@ dd { margin: 0; }
 .delegation-actions a { color: var(--cyan); }
 .wf-delegations { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; font-size: 12px; }
 .wf-delegations a { color: var(--cyan); text-decoration: none; }
+.dispatch-composer { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px;
+  margin-bottom: 10px; border: 1px dashed var(--border-strong); border-radius: 8px;
+  background: var(--bg-soft); }
+.dispatch-composer-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.dispatch-composer-row select, .dispatch-composer-row input,
+.dispatch-composer textarea { flex: 1; min-width: 160px; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--paper-3);
+  color: var(--text-on-paper); font: inherit; }
+.dispatch-composer textarea { min-height: 64px; resize: vertical; }
+.dispatch-composer .form-error { color: var(--red); font-size: 12px; }
 
 .modal input:not([type="checkbox"]), .modal textarea {
   background: var(--bg-soft);

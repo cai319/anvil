@@ -35,12 +35,16 @@ def start_run(body: dict, request: Request, conn=Depends(get_db),
         conflict = services.tasks.planning_conflict(conn, task)
         if conflict:
             raise HTTPException(status_code=409, detail=conflict)
-    # 幂等：同任务同角色已有活跃 run 时直接返回它（不二次 spawn、也不报冲突；多角色可各有一 run）
+    # 幂等：同任务/切片同角色已有活跃 run 时直接返回它（不二次 spawn；多角色可各有一 run）。
+    exact_slice = "slice_key" in body
+    slice_key = body.get("slice_key") if exact_slice else None
     if task_id and role:
-        existing = services.runs.find_active_run(conn, task_id, role)
+        existing = (services.runs.find_active_run(
+            conn, task_id, role, slice_key=slice_key)
+            if exact_slice else services.runs.find_active_run(conn, task_id, role))
         if existing:
             return existing
-    run = services.runs.create_run(conn, role, task_id)
+    run = services.runs.create_run(conn, role, task_id, slice_key=slice_key)
     orch = getattr(request.app.state, "orchestrator", None)
     if orch:
         try:
@@ -158,7 +162,7 @@ def _reset(run_id: str, mode: str, request: Request, conn) -> dict:
         try:
             services.memory.consolidate_context(
                 conn, run["role_slug"], run.get("task_id"),
-                "run-session-reset", run_id)
+                "run-session-reset", run_id, slice_key=run.get("slice_key"))
         except Exception:  # noqa: BLE001 —— 快照失败不阻断 reset
             pass
 
@@ -169,15 +173,18 @@ def _reset(run_id: str, mode: str, request: Request, conn) -> dict:
         if mode == "restart":
             mgr.restart_process(run["role_slug"])
         elif mode == "session":
-            # 只清该 run 所属任务的上下文；角色在其它任务上的会话保留。
-            mgr.reset_session(run["role_slug"], task_id=run.get("task_id"))
+            # 只清该 run 所属的 context；角色在其它任务/切片上的会话保留。
+            mgr.reset_session(
+                run["role_slug"], task_id=run.get("task_id"),
+                slice_key=run.get("slice_key"))
         else:
             mgr.reset_session(run["role_slug"])
     elif mode == "session":
-        # one-shot / daemon 未启用：只清该 run 所属任务槽。
+        # one-shot / daemon 未启用：只清该 run 所属 context。
         daemon_service.clear_session(
             conn, run["role_slug"], "session reset",
-            task_key_value=daemon_service.task_key(run.get("task_id")))
+            task_key_value=daemon_service.context_key(
+                run.get("task_id"), run.get("slice_key")))
     elif mode == "full":
         daemon_service.clear_session(conn, run["role_slug"], "full reset")
 
@@ -239,6 +246,13 @@ def release_run(rid: str, conn=Depends(get_db), auth: Auth = Depends(require_hum
     _terminate(run)
     services.runs.set_native_session(conn, rid, None)
     services.runs.set_status(conn, rid, "abandoned", ended_at=now_iso())
+    try:
+        from ..services import daemon as daemon_service
+        mgr = daemon_service.get_manager()
+        if mgr is not None:
+            mgr.clear_run(run["role_slug"], rid)
+    except Exception:  # noqa: BLE001 —— 进程清理失败不改变释放语义
+        pass
     return None
 
 

@@ -21,6 +21,7 @@ from .api.events import publish
 from .db import open_conn
 from .platform import factory
 from .services import daemon as daemon_service
+from .services import dispatch as dispatch_service
 from .services import governance, leases, runs as runs_service, tasks as tasks_service
 from .services import workflow as workflow_service
 from .util import ConflictError, now_iso
@@ -82,8 +83,13 @@ class Scheduler:
         phases = (
             ("governance", lambda: governance.tick(conn, dispatch=True, plans_only=True)),
             ("advance_workflows", lambda: self._advance_workflows(conn)),
+            ("resolve_dispatch_returns", lambda: dispatch_service.resolve_dispatch_returns(
+                conn, lambda rid, ev: self._pump(rid, ev))),
+            ("resolve_context_returns", lambda: dispatch_service.resolve_context_returns(
+                conn, lambda rid, ev: self._pump(rid, ev))),
             ("pump_created", lambda: self._pump_created(conn)),
             ("monitor", lambda: self._monitor(conn)),
+            ("clear_terminal_role_runs", lambda: self._clear_terminal_role_runs(conn)),
             ("reap_dead_runs", lambda: self._reap_dead_runs(conn)),
             ("reap_orphaned_step_runs", lambda: self._reap_orphaned_step_runs(conn)),
             ("reap_stalled_phases", lambda: self._reap_stalled_phases(conn)),
@@ -185,7 +191,8 @@ class Scheduler:
             def starter(role, task_id, prompt, step, _wid=wid):
                 return runs_service.create_run(
                     conn, role, task_id, prompt=prompt,
-                    step_id=step["step_id"], workflow_id=_wid)
+                    step_id=step["step_id"], workflow_id=_wid,
+                    slice_key=step.get("slice_key"), origin="step")
 
             workflow_service.advance(conn, wid, starter=starter)
         # run 失败/失联 → 步骤进入自动恢复队列（指数退避重试，不 @human）
@@ -202,9 +209,18 @@ class Scheduler:
         self._nudge_stalled(conn)
 
     @staticmethod
-    def _waiting_for_human(conn, task_id: str, role: str) -> bool:
+    def _in_slice_scope(entry: dict, slice_key: str | None) -> bool:
+        value = entry.get("slice_key")
+        if slice_key:
+            return value in (None, slice_key)
+        return value is None
+
+    @staticmethod
+    def _waiting_for_human(conn, task_id: str, role: str,
+                           slice_key: str | None = None) -> bool:
         """角色最后一条 @ 是 @human 且之后没有人类回复 → 合法 HITL 等待，不自动重试。"""
-        timeline = tasks_service.timeline(conn, task_id)
+        timeline = [e for e in tasks_service.timeline(conn, task_id)
+                    if Scheduler._in_slice_scope(e, slice_key)]
         own = [i for i, e in enumerate(timeline)
                if e["kind"] == "mention" and e["role"] == role]
         if not own:
@@ -216,13 +232,15 @@ class Scheduler:
         return not any(e["role"] == "human" for e in timeline[last + 1:])
 
     @staticmethod
-    def _waiting_for_busy_role(conn, task_id: str, role: str) -> bool:
+    def _waiting_for_busy_role(conn, task_id: str, role: str,
+                               slice_key: str | None = None) -> bool:
         """角色最后一条 @ 指向另一个角色，且对方仍活跃 → 合法等待，不打断。
 
         对方有活跃 run（同任务或其它任务）或进程正忙/有排队消息，说明它还在处理；
         唤醒等待方只会重复 @、浪费一次 turn。对方空闲/失联时才唤醒等待方检查。
         """
-        timeline = tasks_service.timeline(conn, task_id)
+        timeline = [e for e in tasks_service.timeline(conn, task_id)
+                    if Scheduler._in_slice_scope(e, slice_key)]
         own = [i for i, e in enumerate(timeline)
                if e["kind"] == "mention" and e["role"] == role]
         if not own:
@@ -253,12 +271,54 @@ class Scheduler:
                 return True
         return False
 
+    def _awaiting_external_work(self, conn, run_id: str | None, role: str) -> bool:
+        """该 suspended run 是否在等派遣/临时切片处理完成，而不是步骤停滞。"""
+        if not run_id:
+            return False
+        if conn.execute(
+                "SELECT 1 FROM task_dispatches WHERE return_run_id=? "
+                "AND status IN ('open','return_ready','returning') LIMIT 1",
+                (run_id,)).fetchone():
+            return True
+        if conn.execute(
+                "SELECT 1 FROM runs WHERE context_return_run_id=? "
+                "AND context_return_after_turn=1 "
+                "AND status NOT IN ('completed','failed','abandoned') LIMIT 1",
+                (run_id,)).fetchone():
+            return True
+        if conn.execute(
+                "SELECT 1 FROM runs r JOIN tasks t ON t.id=r.task_id "
+                "WHERE r.role_slug=? AND r.status NOT IN "
+                "('completed','failed','abandoned') "
+                "AND t.type='dispatched' AND t.status NOT IN ('done','closed') "
+                "LIMIT 1", (role,)).fetchone():
+            # 角色还有未完成的独立派遣任务：等它完成后的自动回切，不要提前拉回。
+            return True
+        # 角色正在别的任务/上下文执行 turn：不要用看门狗把原切片拉回来。
+        if conn.execute(
+                "SELECT 1 FROM runs WHERE role_slug=? AND id<>? "
+                "AND status IN ('created','projecting','running') LIMIT 1",
+                (role, run_id)).fetchone():
+            return True
+        mgr = daemon_service.get_manager()
+        if mgr is not None and getattr(mgr, "enabled", False):
+            try:
+                st = mgr.status(role)
+            except Exception:  # noqa: BLE001
+                st = {}
+            if st.get("switching") or (
+                    st.get("alive") and (st.get("status") == "busy"
+                                         or int(st.get("queue_len") or 0) > 0)):
+                return True
+        return False
+
     def _nudge_stalled(self, conn) -> None:
         """步骤 run 挂起且长时间无活动 → 唤醒角色续跑；超过上限交给自动恢复（退避重排队）。"""
         now = datetime.now(timezone.utc)
         rows = conn.execute(
             """SELECT s.workflow_id, s.step_id, s.role_slug, s.run_id, s.last_nudge_at,
-                      s.nudge_count, r.status AS run_status, w.task_id AS task_id,
+                      s.nudge_count, r.status AS run_status,
+                      r.slice_key AS run_slice_key, w.task_id AS task_id,
                       (SELECT MAX(a.created_at) FROM activities a WHERE a.run_id=s.run_id) AS last_act,
                       s.started_at
                  FROM workflow_steps s
@@ -270,6 +330,8 @@ class Scheduler:
         ).fetchall()
         for r in rows:
             rs = r["run_status"]
+            if self._awaiting_external_work(conn, r["run_id"], r["role_slug"]):
+                continue
             # run 丢失/已结束但步骤仍 running：重置为 pending，让 advance 重新启动
             if rs is None or rs == "completed":
                 step_row = conn.execute(
@@ -287,10 +349,12 @@ class Scheduler:
             if rs != "suspended":
                 continue  # 仍在运行/投影中
             # 等待人类决策不是“卡住”：保持挂起，human 回复后由 mention 端点唤醒。
-            if r["task_id"] and self._waiting_for_human(conn, r["task_id"], r["role_slug"]):
+            if r["task_id"] and self._waiting_for_human(
+                    conn, r["task_id"], r["role_slug"], r["run_slice_key"]):
                 continue
             # 等待另一个角色且对方仍在运行：同样不打断。
-            if r["task_id"] and self._waiting_for_busy_role(conn, r["task_id"], r["role_slug"]):
+            if r["task_id"] and self._waiting_for_busy_role(
+                    conn, r["task_id"], r["role_slug"], r["run_slice_key"]):
                 continue
             last = r["last_act"] or r["started_at"]
             if not last:
@@ -339,8 +403,8 @@ class Scheduler:
     def _monitor(self, conn) -> None:
         pm = factory.get_platform()[0]
         rows = conn.execute(
-            "SELECT id, task_id, native_session_id, started_at, timeout_seconds FROM runs "
-            "WHERE status='running' AND native_session_id IS NOT NULL"
+            "SELECT id, task_id, slice_key, native_session_id, started_at, timeout_seconds "
+            "FROM runs WHERE status='running' AND native_session_id IS NOT NULL"
         ).fetchall()
         for r in rows:
             if not r["native_session_id"]:
@@ -366,16 +430,18 @@ class Scheduler:
                         "observed_started_at": r["started_at"],
                     })
                     continue
-                # 角色正忙在别的任务上（含 __global__ 的 reminder）：这个 run 只是
-                # 排队，不能按 busy_since 判超时。
-                if st.get("current_task_id") != r["task_id"]:
+                # 只有 daemon 真正绑定的 current_run 才拥有这个进程的 busy 计时。
+                # 仅比较 task_id 不够：同一 task 可能有两个 run，global run 也没有 task_id。
+                if st.get("current_run_id") != r["id"]:
                     continue
                 if st.get("busy_since") and _elapsed_seconds(st["busy_since"]) > timeout:
                     # 超时失败也按“新上下文重试”：终止常驻进程并清当前任务槽，
                     # 避免下一次唤醒继续 --resume 卡死的上下文；其它任务上下文保留。
                     # 换新上下文，但注入 CIC（记忆/工作流决策/知识快照），
                     # 避免自动恢复后的新会话对历史一无所知。
-                    mgr.reset_session(role, cic=True, task_id=r["task_id"])  # type: ignore[union-attr]
+                    mgr.reset_session(  # type: ignore[union-attr]
+                        role, cic=True, task_id=r["task_id"],
+                        slice_key=r["slice_key"])
                     self._pump(r["id"], "process_exit", {
                         "exit_code": 1, "failure_class": "platform_timeout",
                         "observed_started_at": r["started_at"],
@@ -403,6 +469,49 @@ class Scheduler:
                     "observed_started_at": r["started_at"],
                 })
 
+    def _clear_terminal_role_runs(self, conn) -> None:
+        """角色仍指向已失败/已结束的 run 时，清掉 busy/current 状态。
+
+        兜底 process_exit 与 daemon 状态不同步：run 已经 failed/abandoned/completed，
+        但角色运行时仍显示“进行中”，会阻塞后续投递并误导 UI。
+        """
+        mgr = daemon_service.get_manager()
+        if mgr is None or not getattr(mgr, "enabled", False):
+            return
+        rows = conn.execute(
+            "SELECT role_slug, current_run_id FROM role_sessions "
+            "WHERE current_run_id IS NOT NULL"
+        ).fetchall()
+        for row in rows:
+            run = conn.execute(
+                "SELECT status FROM runs WHERE id=?", (row["current_run_id"],)
+            ).fetchone()
+            if run is None or run["status"] not in ("completed", "failed", "abandoned"):
+                continue
+            role = row["role_slug"]
+            run_id = row["current_run_id"]
+            try:
+                if mgr.clear_run(role, run_id):
+                    continue
+                # daemon 没有加载该角色，或内存已切到新 run：只清 DB 中仍指向
+                # 这个终态 run 的旧镜像，不能误伤新 current。
+                try:
+                    st = mgr.status(role)
+                except Exception:  # noqa: BLE001
+                    st = {}
+                if st.get("current_run_id") not in (None, run_id):
+                    continue
+                cur = conn.execute(
+                    "UPDATE role_sessions SET status='dead', pid=NULL, busy_since=NULL, "
+                    "current_task_id=NULL, current_run_id=NULL, current_step_id=NULL, "
+                    "current_context_key=NULL, current_slice_key=NULL, "
+                    "updated_at=? WHERE role_slug=? AND current_run_id=?",
+                    (now_iso(), role, run_id))
+                conn.commit()
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "clear terminal role run failed role=%s run=%s", role, run_id)
+
     def _reap_dead_runs(self, conn) -> None:
         """常驻进程已死但 run 仍 running → 宽限期后转 suspended。
 
@@ -415,7 +524,7 @@ class Scheduler:
         if mgr is None or not getattr(mgr, "enabled", False):
             return
         rows = conn.execute(
-            "SELECT r.id, r.role_slug, r.task_id, rs.updated_at FROM runs r "
+            "SELECT r.id, r.role_slug, r.task_id, r.slice_key, rs.updated_at FROM runs r "
             "JOIN role_sessions rs ON rs.role_slug=r.role_slug "
             "WHERE r.status='running' AND r.native_session_id LIKE 'rs:%'"
         ).fetchall()
@@ -453,11 +562,16 @@ class Scheduler:
                 try:
                     mgr.mark_needs_fresh_context(
                         row["role_slug"], "run reaped: dead role process",
-                        task_id=row["task_id"])
+                        task_id=row["task_id"], slice_key=row["slice_key"])
                 except Exception:  # noqa: BLE001
                     pass
             from .services import runs as runs_service
             runs_service.set_status(conn, row["id"], "suspended")
+            try:
+                mgr.clear_current(row["role_slug"], row["id"])
+            except Exception:  # noqa: BLE001
+                logger.exception("clear reaped role current failed role=%s run=%s",
+                                 row["role_slug"], row["id"])
             changed = True
         if changed:
             conn.commit()

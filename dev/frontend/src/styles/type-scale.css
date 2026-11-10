@@ -508,6 +508,8 @@ select { height: var(--control-h); }
 .role-avatar[data-role-status="done"] { --role-status: var(--cyan); }
 .role-avatar[data-role-status="pending"],
 .role-avatar[data-role-status="released"],
+.role-avatar[data-role-status="closed"],
+.role-avatar[data-role-status="abandoned"],
 .role-avatar[data-role-status="idle"] { --role-status: #8b8496; }
 .role-avatar[data-role-status="failed"],
 .role-avatar[data-role-status="error"],

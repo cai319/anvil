@@ -39,7 +39,7 @@ const RUN_LABEL: Record<string, string> = {
   created: "创建",
   projecting: "准备",
   running: "运行",
-  suspended: "挂起",
+  suspended: "等待唤醒",
   submitted: "提交",
   reviewing: "评审",
   completed: "完成",

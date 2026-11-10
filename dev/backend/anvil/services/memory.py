@@ -159,6 +159,7 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
                *, kind: str | None = None, scope: str | None = None,
                task_id: str | None = None, source_task: str | None = None,
                tags=None, repo: str | None = None, module: str | None = None,
+               slice_key: str | None = None,
                confidence: float = 0.5, mode: str = "append",
                source: str = "agent", updated_at: str | None = None,
                practice_task_id: str | None = None,
@@ -210,9 +211,11 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
         meta["scope"] = "unclassified"
     now = updated_at or now_iso()
     meta["updated_at"] = now
+    meta["slice_key"] = slice_key or None
     payload = json.dumps({
         "kind": meta["kind"], "scope": meta["scope"],
         "task_id": meta.get("task_id"), "source_task": meta.get("source_task"),
+        "slice_key": meta.get("slice_key"),
         "tags": meta.get("tags") or [], "repo": meta.get("repo"),
         "repo_id": meta.get("repo_id"),
         "module": meta.get("module"), "confidence": meta.get("confidence"),
@@ -239,13 +242,13 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
         meta.get("module"), meta.get("confidence"), now, source,
         meta.get("content_hash"), title, tldr, "{}", practice_task_id,
         practice_run_id, outcome, verified_at, status,
-        jdumps(source_knowledge or []),
+        jdumps(source_knowledge or []), meta.get("slice_key"),
     )
     columns = (
         "id, role_slug, path, content, created_at, kind, scope, "
         "task_id, source_task, tags_json, repo, repo_id, module, confidence, updated_at, "
         "source, content_hash, title, tldr, fields_json, practice_task_id, "
-        "practice_run_id, outcome, verified_at, status, source_knowledge_json"
+        "practice_run_id, outcome, verified_at, status, source_knowledge_json, slice_key"
     )
     placeholders = ",".join("?" for _ in values)
     if _notes_path_is_unique(conn):
@@ -262,7 +265,8 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
             "practice_task_id=excluded.practice_task_id, "
             "practice_run_id=excluded.practice_run_id, outcome=excluded.outcome, "
             "verified_at=excluded.verified_at, status=excluded.status, "
-            "source_knowledge_json=excluded.source_knowledge_json",
+            "source_knowledge_json=excluded.source_knowledge_json, "
+            "slice_key=excluded.slice_key",
             values)
     else:
         conn.execute("DELETE FROM notes WHERE role_slug=? AND path=?",
@@ -279,6 +283,7 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
         "id": row["id"] if row else nid, "role_slug": role, "path": clean_path,
         "kind": meta["kind"], "scope": meta["scope"],
         "task_id": meta.get("task_id"), "source_task": meta.get("source_task"),
+        "slice_key": meta.get("slice_key"),
         "tags": meta.get("tags") or [], "repo": meta.get("repo"),
         "repo_id": meta.get("repo_id"),
         "module": meta.get("module"), "confidence": meta.get("confidence"),
@@ -585,12 +590,16 @@ def read_memory_file(role: str, max_chars: int = 4000) -> str:
 
 
 def consolidate_context(conn: sqlite3.Connection, role: str, task_id: str | None,
-                        trigger: str, run_id: str | None = None) -> dict | None:
+                        trigger: str, run_id: str | None = None,
+                        slice_key: str | None = None) -> dict | None:
     """把任务的决策/进度快照写入 notes/knowledge/（文件 + FTS 索引）。
 
     用于上下文即将被清空（CIC/主动换会话）的场景：新会话不依赖旧对话历史，
     也能从 MEMORY.md + FTS 检索 + 最近快照恢复对历史判断的理解。
     纯 DB 生成，不调用模型，幂等成本低。
+
+    slice_key 给定时只固化本切片 + task-wide 的消息/步骤；其他切片的原始对话
+    不进入快照（蒸馏后的知识仍按 task 范围共享）。
     """
     if not task_id:
         return None
@@ -607,7 +616,10 @@ def consolidate_context(conn: sqlite3.Connection, role: str, task_id: str | None
     # 不再依赖 path LIKE（避免特殊字符/通配符误匹配）。
     safe_task = knowledge_service.task_path_segment(task_id)
     run_suffix = re.sub(r"[^A-Za-z0-9]", "", str(run_id or ""))[:8]
+    safe_slice = re.sub(r"[^A-Za-z0-9_-]", "_", str(slice_key or ""))[:64]
     path = f"knowledge/{safe_task}/{stamp}-{safe_trigger}"
+    if safe_slice:
+        path += f"-s-{safe_slice}"
     if run_suffix:
         path += f"-{run_suffix}"
     path += ".md"
@@ -619,11 +631,17 @@ def consolidate_context(conn: sqlite3.Connection, role: str, task_id: str | None
         f"- 时间：{now}",
         f"- 触发：{safe_trigger}",
     ]
+    if slice_key:
+        lines.append(f"- 切片：{slice_key}")
     # 最近结论放在工作流进度之前：快照有长度上限时，优先保住角色自己的判断。
+    act_clause, act_params = (
+        ("task_id=? AND (slice_key=? OR slice_key IS NULL)",
+         (task_id, slice_key)) if slice_key else ("task_id=?", (task_id,)))
     acts = conn.execute(
         "SELECT role_slug, kind, payload_json FROM activities "
-        "WHERE task_id=? AND kind IN ('comment','mention') ORDER BY id DESC LIMIT 30",
-        (task_id,)).fetchall()
+        f"WHERE {act_clause} AND kind IN ('comment','mention') "
+        "ORDER BY id DESC LIMIT 30",
+        act_params).fetchall()
     if acts:
         lines += ["", "## 最近结论与交接"]
         for a in reversed(acts):
@@ -638,11 +656,17 @@ def consolidate_context(conn: sqlite3.Connection, role: str, task_id: str | None
         "SELECT id FROM workflows WHERE task_id=? ORDER BY created_at DESC LIMIT 1",
         (task_id,)).fetchone()
     if wf is not None:
+        step_clause = ""
+        step_params: list = [wf["id"]]
+        if slice_key:
+            step_clause = (" AND (slice_key=? OR slice_key IS NULL "
+                           "OR slice_key='' OR kind='plan_slices')")
+            step_params.append(slice_key)
         steps = conn.execute(
             "SELECT step_id, title, role_slug, status, summary, feedback "
-            "FROM workflow_steps WHERE workflow_id=? "
-            "ORDER BY updated_at DESC, step_id DESC LIMIT 60",
-            (wf["id"],)).fetchall()
+            "FROM workflow_steps WHERE workflow_id=?" + step_clause +
+            " ORDER BY updated_at DESC, step_id DESC LIMIT 60",
+            step_params).fetchall()
         if steps:
             lines += ["", "## 工作流进度"]
             for s in reversed(steps):
@@ -659,6 +683,7 @@ def consolidate_context(conn: sqlite3.Connection, role: str, task_id: str | None
     note = write_note(
         conn, role, path, content,
         kind="task_snapshot", scope="task", task_id=task_id,
+        slice_key=slice_key,
         tags=[*task_tags, "snapshot"], repo=task["repo"],
         confidence=0.9, source="consolidate")
     conn.execute(
@@ -666,7 +691,7 @@ def consolidate_context(conn: sqlite3.Connection, role: str, task_id: str | None
         "VALUES (?,?,?,?,?)",
         (role, task_id, "session.context_digest",
          jdumps({"path": path, "trigger": safe_trigger, "run_id": run_id,
-                 "chars": len(content)}), now),
+                 "slice_key": slice_key, "chars": len(content)}), now),
     )
     conn.commit()
     return {**note, "chars": len(content), "trigger": safe_trigger}

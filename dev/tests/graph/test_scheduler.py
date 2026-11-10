@@ -176,7 +176,7 @@ def test_reap_dead_persistent_run(tmp_path, monkeypatch):
         @staticmethod
         def status(role):
             return {"alive": False}
-        def mark_needs_fresh_context(self, role, note="", task_id=None):
+        def mark_needs_fresh_context(self, role, note="", task_id=None, slice_key=None, all_slices=False):
             self.fresh.append(role)
 
     mgr = _Mgr()
@@ -213,7 +213,7 @@ def test_reap_keeps_live_persistent_run(tmp_path, monkeypatch):
         def status(role):
             return {"alive": True, "status": "busy", "current_run_id": "R-LIVE",
                     "queue_len": 0}
-        def mark_needs_fresh_context(self, role, note="", task_id=None):
+        def mark_needs_fresh_context(self, role, note="", task_id=None, slice_key=None, all_slices=False):
             self.fresh.append(role)
 
     mgr = _Mgr()
@@ -250,7 +250,7 @@ def test_reap_suspends_run_not_currently_processed(tmp_path, monkeypatch):
         def status(role):
             return {"alive": True, "status": "idle", "current_run_id": None,
                     "queue_len": 0}
-        def mark_needs_fresh_context(self, role, note="", task_id=None):
+        def mark_needs_fresh_context(self, role, note="", task_id=None, slice_key=None, all_slices=False):
             self.fresh.append(role)
 
     mgr = _Mgr()
@@ -396,3 +396,49 @@ def test_tick_isolates_phase_failures(tmp_path, monkeypatch):
     monkeypatch.setattr(sched, "_reap_dead_runs", lambda conn: called.append("reap"))
     sched.tick_once()
     assert called == ["pump", "monitor", "reap"]
+
+
+def test_awaiting_external_work_blocks_nudge(tmp_path, monkeypatch):
+    """派遣/临时切片/角色仍在别处执行时，看门狗不能把原切片拉回来。"""
+    env = make_env(tmp_path, monkeypatch)
+    conn = open_conn(env["db_path"])
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO tasks (id,title,status,scope_paths_json,acceptance_json,"
+        "created_at,updated_at) VALUES ('T-E','t','in_progress','[]','[]',?,?)",
+        (now, now))
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,started_at) "
+        "VALUES ('R-E','dev','T-E','suspended',?)", (now,))
+    conn.commit()
+    sched = Scheduler(env["db_path"], env["orch"])
+
+    assert sched._awaiting_external_work(conn, "R-E", "dev") is False
+
+    conn.execute(
+        "INSERT INTO task_dispatches "
+        "(id,source_task_id,target_task_id,target_role,return_run_id,"
+        " reason_code,reason_json,status,created_at,updated_at) "
+        "VALUES ('D-E','T-E','T-D','dev','R-E','auto','{}','return_ready',?,?)",
+        (now, now))
+    conn.commit()
+    assert sched._awaiting_external_work(conn, "R-E", "dev") is True
+    conn.execute("UPDATE task_dispatches SET status='returned' WHERE id='D-E'")
+    conn.commit()
+    assert sched._awaiting_external_work(conn, "R-E", "dev") is False
+
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,started_at,"
+        "context_return_run_id,context_return_after_turn) "
+        "VALUES ('R-A','dev','T-E','suspended',?,'R-E',1)", (now,))
+    conn.commit()
+    assert sched._awaiting_external_work(conn, "R-E", "dev") is True
+    conn.execute("UPDATE runs SET status='completed' WHERE id='R-A'")
+    conn.commit()
+
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,started_at) "
+        "VALUES ('R-OTHER','dev','T-OTHER','running',?)", (now,))
+    conn.commit()
+    assert sched._awaiting_external_work(conn, "R-E", "dev") is True
+    conn.close()

@@ -36,6 +36,8 @@ attachment_chars = int(os.environ.get("FAKE_ATTACHMENT_CHARS", "0"))
 result_text = os.environ.get("FAKE_RESULT_TEXT", "OK")
 warn_line = os.environ.get("FAKE_WARN_LINE", "")
 exit_once_file = os.environ.get("FAKE_EXIT_ONCE_FILE", "")
+exit_after = float(os.environ.get("FAKE_EXIT_AFTER", "0"))
+api_error = os.environ.get("FAKE_API_ERROR", "")
 print(json.dumps({"type": "system", "subtype": "init", "session_id": sid,
                   "model": init_model}), flush=True)
 if warn_line:
@@ -44,8 +46,16 @@ turn = 0
 for line in sys.stdin:
     turn += 1
     if exit_once_file and not os.path.exists(exit_once_file):
+        if exit_after:
+            time.sleep(exit_after)
         open(exit_once_file, "w").close()
         break
+    if api_error:
+        print(json.dumps({"type": "assistant", "isApiErrorMessage": True, "message": {
+            "model": "<synthetic>",
+            "content": [{"type": "text", "text": api_error}]}}), flush=True)
+        time.sleep(30)
+        continue
     time.sleep(turn_delay)
     model = switch_model if (switch_model and turn >= 2) else init_model
     usage = {"input_tokens": 10, "output_tokens": 2}
@@ -148,7 +158,8 @@ def _run_status(db_path, rid):
         c.close()
 
 
-def _deliver(mgr, conn, fake, log, run_id, text="hello", task_id=None, extra_env=None):
+def _deliver(mgr, conn, fake, log, run_id, text="hello", task_id=None,
+             slice_key=None, extra_env=None):
     runs_service.set_status(conn, run_id, "running")  # 等价于 resume→spawn 的状态流转
     env = {"FAKE_ARGV_LOG": str(log), **(extra_env or {})}
     args = {
@@ -161,6 +172,7 @@ def _deliver(mgr, conn, fake, log, run_id, text="hello", task_id=None, extra_env
         "prompt": text,
         "run_id": run_id,
         "task_id": task_id,
+        "slice_key": slice_key,
     }
     return mgr.ensure_and_deliver(conn, "qa-role", **args)
 
@@ -308,6 +320,40 @@ def test_api_error_adapts_context_window_downward(env):
     st = mgr.status("qa-role")
     assert st["active_context_window"] == 807_500
     assert st["hard_limit_tokens"] < 800_000
+
+
+def test_synthetic_api_error_stops_process_fast(env):
+    """网络/API synthetic 错误不能按上下文轮换后继续挂着；应快速结束进程。"""
+    conn, mgr, fake, log = env
+    overflow: list[tuple] = []
+    mgr.on_context_overflow = lambda role, run_id, reason: overflow.append(
+        (role, run_id, reason))
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "first", extra_env={
+        "FAKE_API_ERROR": "API Error: Can't reach the API server (ENOTFOUND)",
+    })
+    assert _wait(lambda: not mgr.status("qa-role")["alive"], timeout=5), (
+        "API 错误后进程不应继续挂起")
+    assert overflow == []
+    session_log = config.AGENTS_DIR / "qa-role" / "logs" / "role-session.log"
+    assert "transient API error" in session_log.read_text(encoding="utf-8")
+
+
+def test_clear_run_clears_terminal_role_state(env):
+    """run 被标失败后，必须清掉 role 的 busy/current_run，避免 UI 显示进行中。"""
+    conn, mgr, fake, log = env
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "first", extra_env={
+        "FAKE_TURN_DELAY": "5",
+    })
+    assert _wait(lambda: mgr.status("qa-role")["status"] == "busy", timeout=2)
+    assert mgr.clear_run("qa-role", run["id"]) is True
+    st = mgr.status("qa-role")
+    assert st["alive"] is False
+    assert st["status"] == "dead"
+    assert st["current_run_id"] is None
+    assert st["current_task_id"] is None
+    assert st["busy_since"] is None
 
 
 def test_context_phrases_in_normal_output_do_not_trigger_recovery(env):
@@ -872,6 +918,95 @@ def test_task_switch_uses_separate_session_per_task(env):
     assert rows[tb["id"]] == sid_b
 
 
+def test_slice_switch_uses_separate_session_per_slice(env):
+    """同一 task 的 A/B 切片各自新建会话；来回切换分别 resume 自己的 session。"""
+    conn, mgr, fake, log = env
+    task = tasks_service.create(conn, title="Task T")
+    ra = runs_service.create_run(conn, "qa-role", task["id"], slice_key="A")
+    rb = runs_service.create_run(conn, "qa-role", task["id"], slice_key="B")
+
+    _deliver(mgr, conn, fake, log, ra["id"], "A1",
+             task_id=task["id"], slice_key="A")
+    assert _wait(lambda: _run_status(mgr.db_path, ra["id"]) == "suspended")
+    st = mgr.status("qa-role")
+    assert st["context_task_id"] == task["id"]
+    assert st["context_slice_key"] == "A"
+
+    _deliver(mgr, conn, fake, log, rb["id"], "B1",
+             task_id=task["id"], slice_key="B")
+    assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended")
+    assert mgr.status("qa-role")["context_slice_key"] == "B"
+
+    lines = _argv_lines(log)
+    assert [x[0] for x in lines] == ["new", "new"]
+    sid_a, sid_b = lines[0][1], lines[1][1]
+    assert sid_a != sid_b
+
+    _deliver(mgr, conn, fake, log, ra["id"], "A2",
+             task_id=task["id"], slice_key="A")
+    assert _wait(lambda: _run_status(mgr.db_path, ra["id"]) == "suspended")
+    assert _argv_lines(log)[2] == ["resume", sid_a]
+
+    _deliver(mgr, conn, fake, log, rb["id"], "B2",
+             task_id=task["id"], slice_key="B")
+    assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended")
+    assert _argv_lines(log)[3] == ["resume", sid_b]
+
+    c = open_conn(mgr.db_path)
+    try:
+        rows = {
+            r["task_key"]: (r["task_id"], r["slice_key"], r["session_id"])
+            for r in c.execute(
+                "SELECT task_key, task_id, slice_key, session_id "
+                "FROM role_task_sessions WHERE role_slug='qa-role'").fetchall()
+        }
+    finally:
+        c.close()
+    assert rows[f"{task['id']}::slice::A"] == (task["id"], "A", sid_a)
+    assert rows[f"{task['id']}::slice::B"] == (task["id"], "B", sid_b)
+
+
+def test_reset_session_only_clears_target_slice(env):
+    """slice 级 reset 只清目标切片；当前在另一个切片时进程不受影响。"""
+    conn, mgr, fake, log = env
+    task = tasks_service.create(conn, title="Task T")
+    ra = runs_service.create_run(conn, "qa-role", task["id"], slice_key="A")
+    rb = runs_service.create_run(conn, "qa-role", task["id"], slice_key="B")
+
+    _deliver(mgr, conn, fake, log, ra["id"], "A1",
+             task_id=task["id"], slice_key="A")
+    assert _wait(lambda: _run_status(mgr.db_path, ra["id"]) == "suspended")
+    _deliver(mgr, conn, fake, log, rb["id"], "B1",
+             task_id=task["id"], slice_key="B")
+    assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended")
+    sid_a, sid_b = [x[1] for x in _argv_lines(log)[:2]]
+
+    mgr.reset_session("qa-role", task_id=task["id"], slice_key="A")
+    st = mgr.status("qa-role")
+    assert st["alive"] is True
+    assert st["context_slice_key"] == "B"
+    c = open_conn(mgr.db_path)
+    try:
+        row = c.execute(
+            "SELECT session_id FROM role_task_sessions "
+            "WHERE role_slug='qa-role' AND task_key=?",
+            (f"{task['id']}::slice::A",)).fetchone()
+    finally:
+        c.close()
+    assert row is None
+
+    # 回到 A 时必须新开会话；B 仍能 resume。
+    _deliver(mgr, conn, fake, log, ra["id"], "A2",
+             task_id=task["id"], slice_key="A")
+    assert _wait(lambda: _run_status(mgr.db_path, ra["id"]) == "suspended")
+    assert _argv_lines(log)[2][0] == "new"
+    assert _argv_lines(log)[2][1] != sid_a
+    _deliver(mgr, conn, fake, log, rb["id"], "B2",
+             task_id=task["id"], slice_key="B")
+    assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended")
+    assert _argv_lines(log)[3] == ["resume", sid_b]
+
+
 def test_busy_role_queues_other_task_until_turn_end(env):
     """角色忙 A 时 B 的消息排队；A 的 turn 结束后才切换上下文处理 B。"""
     conn, mgr, fake, log = env
@@ -1088,3 +1223,123 @@ def test_reminder_run_keeps_already_running_process(env):
     _deliver(mgr, conn, fake, log, run["id"], "daily review")
     assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "completed")
     assert mgr.status("qa-role")["alive"] is True
+
+
+def test_exit_callback_carries_only_current_run(env):
+    """进程退出只上报实际执行的 run；排队 run 不被连带判失败。"""
+    conn, mgr, fake, log = env
+    task = tasks_service.create(conn, title="Task A")
+    ra = runs_service.create_run(conn, "qa-role", task["id"])
+    rb = runs_service.create_run(conn, "qa-role", task["id"])
+    exit_once = fake.parent / "callback-exit-once.marker"
+    seen: list[tuple[str, int, str | None]] = []
+    mgr.on_exit = lambda role, code, run_id: seen.append((role, code, run_id))
+
+    _deliver(mgr, conn, fake, log, ra["id"], "A1", task_id=task["id"],
+             extra_env={"FAKE_EXIT_ONCE_FILE": str(exit_once),
+                        "FAKE_EXIT_AFTER": "0.5"})
+    _deliver(mgr, conn, fake, log, rb["id"], "A2", task_id=task["id"])
+    assert mgr.status("qa-role")["queue_len"] == 1
+
+    assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended", timeout=10)
+    assert seen == [("qa-role", 0, ra["id"])]
+    assert _run_status(mgr.db_path, rb["id"]) == "suspended"
+
+
+def test_terminal_queued_run_is_not_delivered(env):
+    """排队期间 run 已 failed/abandoned：flush 必须丢弃，不能把角色设为 busy。"""
+    conn, mgr, fake, log = env
+    task = tasks_service.create(conn, title="Task A")
+    ra = runs_service.create_run(conn, "qa-role", task["id"])
+    rb = runs_service.create_run(conn, "qa-role", task["id"])
+
+    _deliver(mgr, conn, fake, log, ra["id"], "A1", task_id=task["id"],
+             extra_env={"FAKE_TURN_DELAY": "1.0"})
+    assert _wait(lambda: mgr.status("qa-role")["status"] == "busy", timeout=2)
+    _deliver(mgr, conn, fake, log, rb["id"], "SHOULD-NOT-RUN", task_id=task["id"])
+    runs_service.set_status(conn, rb["id"], "failed", ended_at=time.strftime(
+        "%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()), failure_class="test")
+
+    assert _wait(lambda: mgr.status("qa-role")["queue_len"] == 0, timeout=8)
+    st = mgr.status("qa-role")
+    assert st["current_run_id"] is None
+    assert _run_status(mgr.db_path, rb["id"]) == "failed"
+    body = _role_log(rb["id"], conn)
+    assert "SHOULD-NOT-RUN" not in body
+    check = open_conn(mgr.db_path)
+    try:
+        dropped = check.execute(
+            "SELECT COUNT(*) FROM audit WHERE action='queue.dropped' AND task_id=?",
+            (task["id"],)).fetchone()[0]
+    finally:
+        check.close()
+    assert dropped >= 1
+
+
+def test_task_reset_preserves_other_task_queue(env):
+    """task 级 reset 只丢该 task 队列；另一个 task 的排队消息继续执行。"""
+    conn, mgr, fake, log = env
+    ta = tasks_service.create(conn, title="Task A")
+    tb = tasks_service.create(conn, title="Task B")
+    ra = runs_service.create_run(conn, "qa-role", ta["id"])
+    rb = runs_service.create_run(conn, "qa-role", tb["id"])
+
+    _deliver(mgr, conn, fake, log, ra["id"], "A1", task_id=ta["id"],
+             extra_env={"FAKE_TURN_DELAY": "1.0"})
+    assert _wait(lambda: mgr.status("qa-role")["status"] == "busy", timeout=2)
+    _deliver(mgr, conn, fake, log, rb["id"], "B1", task_id=tb["id"])
+    assert mgr.status("qa-role")["queue_len"] == 1
+
+    mgr.reset_session("qa-role", task_id=ta["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended", timeout=8)
+    assert _run_status(mgr.db_path, rb["id"]) == "suspended"
+
+
+def test_reader_exit_clears_current_fields_and_db(env):
+    """进程退出后内存和 DB 的 current_* 都不能残留。"""
+    conn, mgr, fake, log = env
+    task = tasks_service.create(conn, title="Task A")
+    run = runs_service.create_run(conn, "qa-role", task["id"])
+    exit_once = fake.parent / "clear-current.marker"
+    _deliver(mgr, conn, fake, log, run["id"], "A1", task_id=task["id"],
+             extra_env={"FAKE_EXIT_ONCE_FILE": str(exit_once)})
+    assert _wait(lambda: mgr.status("qa-role")["alive"] is False, timeout=8)
+    st = mgr.status("qa-role")
+    assert st["current_task_id"] is None
+    assert st["current_run_id"] is None
+    check = open_conn(mgr.db_path)
+    try:
+        row = check.execute(
+            "SELECT current_task_id, current_run_id, current_step_id, busy_since "
+            "FROM role_sessions WHERE role_slug='qa-role'").fetchone()
+    finally:
+        check.close()
+    assert row is not None
+    assert all(row[k] is None for k in (
+        "current_task_id", "current_run_id", "current_step_id", "busy_since"))
+
+
+def test_task_level_reset_does_not_clear_slice_slot(env):
+    """task 级 run 的 session reset 只清 task 级槽，同 task 的 slice 槽必须保留。"""
+    conn, mgr, fake, log = env
+    task = tasks_service.create(conn, title="Task T")
+    task_run = runs_service.create_run(conn, "qa-role", task["id"])
+    slice_run = runs_service.create_run(conn, "qa-role", task["id"], slice_key="A")
+
+    _deliver(mgr, conn, fake, log, task_run["id"], "task-level",
+             task_id=task["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, task_run["id"]) == "suspended")
+    _deliver(mgr, conn, fake, log, slice_run["id"], "slice-level",
+             task_id=task["id"], slice_key="A")
+    assert _wait(lambda: _run_status(mgr.db_path, slice_run["id"]) == "suspended")
+
+    mgr.reset_session("qa-role", task_id=task["id"])
+    c = open_conn(mgr.db_path)
+    try:
+        rows = {r["task_key"] for r in c.execute(
+            "SELECT task_key FROM role_task_sessions WHERE role_slug='qa-role'"
+        ).fetchall()}
+    finally:
+        c.close()
+    assert task["id"] not in rows
+    assert f"{task['id']}::slice::A" in rows

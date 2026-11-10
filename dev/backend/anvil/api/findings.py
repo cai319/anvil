@@ -65,17 +65,27 @@ def _wake_finding_reviewer(request: Request, conn, tid: str, role: str,
     if not role:
         return
     orch = getattr(request.app.state, "orchestrator", None)
-    active = services.runs.find_active_run(conn, tid, role)
+    # 问题板是 task 级工作：只能复用 task-level run，绝不 resume 某个 slice step run。
+    active = services.runs.find_active_run(conn, tid, role, slice_key=None)
     if active:
-        if orch:
-            try:
-                if active["status"] == "reviewing":
+        status = str(active.get("status") or "")
+        if status == "reviewing":
+            if orch:
+                try:
                     orch.resume_review(request.app.state.db_path, active["id"], False)
-                else:
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+        if status == "suspended":
+            if orch:
+                try:
                     orch.pump(request.app.state.db_path, active["id"], "resume", {})
-            except Exception:  # noqa: BLE001
-                pass
-        return
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+        if status in ("created", "projecting", "running"):
+            # 正在执行/排队：不能 resume 造成同一 run 重复投递；新建 findings run 排队。
+            pass
     run = services.runs.create_run(
         conn, role, tid,
         prompt=("[anvil:findings] 问题板需要复核/更新。\n"

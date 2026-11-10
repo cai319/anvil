@@ -52,6 +52,10 @@ _MODEL_VARIANT_SUFFIX = re.compile(r"\[(?:1m|200k|128k)\]$", re.IGNORECASE)
 logger = logging.getLogger("anvil.daemon")
 
 
+class _DeliveryError(RuntimeError):
+    """投递失败（spawn/stdin）；由队列循环记录并继续下一条。"""
+
+
 def _clean_env(extra: dict[str, str]) -> dict[str, str]:
     merged = {k: v for k, v in os.environ.items() if k not in _SESSION_ENV_KEYS}
     merged.update(extra)
@@ -192,23 +196,48 @@ def frame_user_message(text: str) -> str:
 
 
 GLOBAL_TASK_KEY = "__global__"
+CONTEXT_SEP = "::slice::"
 _ALL_SLOTS = object()
 
 
+def context_key(task_id: str | None, slice_key: str | None = None) -> str:
+    """上下文槽 key：task 级 / slice 级 / __global__。"""
+    if not task_id:
+        return GLOBAL_TASK_KEY
+    return (f"{task_id}{CONTEXT_SEP}{slice_key}" if slice_key else str(task_id))
+
+
+def context_parts(key: str | None) -> tuple[str | None, str | None]:
+    """Parse a context key into (task_id, slice_key)."""
+    if key in (None, GLOBAL_TASK_KEY):
+        return (None, None)
+    text = str(key)
+    if CONTEXT_SEP in text:
+        task_id, slice_key = text.split(CONTEXT_SEP, 1)
+        return (task_id or None, slice_key or None)
+    return (text, None)
+
+
 def task_key(task_id: str | None) -> str:
-    """任务上下文槽 key：角色级工作（reminder/直聊）使用 __global__。"""
-    return str(task_id) if task_id else GLOBAL_TASK_KEY
+    """兼容旧调用：task 级上下文 key。"""
+    return context_key(task_id)
 
 
 def task_id_of(key: str | None) -> str | None:
-    return None if key in (None, GLOBAL_TASK_KEY) else key
+    return context_parts(key)[0]
+
+
+def slice_key_of(key: str | None) -> str | None:
+    return context_parts(key)[1]
 
 
 def clear_session(conn, role: str, note: str = "session reset",
-                  task_key_value=_ALL_SLOTS) -> None:
+                  task_key_value=_ALL_SLOTS, all_slices: bool = False) -> None:
     """清空角色会话槽；下一次唤醒新建会话（不 --resume）。
 
-    task_key_value 默认清空该角色的**所有任务槽**；传入具体 key 时只清一个任务。
+    task_key_value 默认清空该角色的**所有任务槽**；传入具体 key 时只清对应
+    context（task 级 key 只清 task 级槽；slice key 只清该 slice）。
+    `all_slices=True` 才把 task id 展开成该 task 的全部 slice 槽（任务删除用）。
     role_sessions 是当前活跃进程的镜像，只有清到当前槽（或全部）时才清空镜像。
     """
     if task_key_value is _ALL_SLOTS:
@@ -216,23 +245,54 @@ def clear_session(conn, role: str, note: str = "session reset",
         conn.execute(
             "UPDATE role_sessions SET session_id='', status='dead', pid=NULL, "
             "last_context_tokens=NULL, current_task_id=NULL, current_run_id=NULL, "
-            "current_step_id=NULL, last_error=?, updated_at=? WHERE role_slug=?",
+            "current_step_id=NULL, current_context_key=NULL, current_slice_key=NULL, "
+            "last_error=?, updated_at=? WHERE role_slug=?",
             (note, now_iso(), role),
         )
     else:
         key = str(task_key_value)
-        conn.execute(
-            "DELETE FROM role_task_sessions WHERE role_slug=? AND task_key=?",
-            (role, key),
-        )
+        exact_slice = CONTEXT_SEP in key and key != GLOBAL_TASK_KEY
+        task_id = context_parts(key)[0]
+        if exact_slice:
+            conn.execute(
+                "DELETE FROM role_task_sessions WHERE role_slug=? AND task_key=?",
+                (role, key),
+            )
+        elif key == GLOBAL_TASK_KEY:
+            conn.execute(
+                "DELETE FROM role_task_sessions WHERE role_slug=? AND task_key=?",
+                (role, key),
+            )
+        elif all_slices:
+            # 任务删除：展开为该 task 的全部 slice 槽。
+            conn.execute(
+                "DELETE FROM role_task_sessions WHERE role_slug=? "
+                "AND (task_id=? OR task_key=?)",
+                (role, task_id, task_id),
+            )
+        else:
+            # 精确 task 级 key：只清 task 级槽，不误伤同 task 的 slice 槽。
+            conn.execute(
+                "DELETE FROM role_task_sessions WHERE role_slug=? AND task_key=?",
+                (role, key),
+            )
         row = conn.execute(
-            "SELECT current_task_id FROM role_sessions WHERE role_slug=?", (role,)
+            "SELECT current_context_key, current_task_id FROM role_sessions WHERE role_slug=?",
+            (role,),
         ).fetchone()
-        active_key = task_key(row["current_task_id"]) if row else None
-        if active_key == key:
+        active_key = row["current_context_key"] if row else None
+        if not active_key and row:
+            active_key = context_key(row["current_task_id"])
+        active_task = task_id_of(active_key)
+        if all_slices and not exact_slice and key != GLOBAL_TASK_KEY:
+            clear_active = active_task == task_id
+        else:
+            clear_active = active_key == key
+        if clear_active:
             conn.execute(
                 "UPDATE role_sessions SET session_id='', last_context_tokens=NULL, "
                 "current_task_id=NULL, current_run_id=NULL, current_step_id=NULL, "
+                "current_context_key=NULL, current_slice_key=NULL, "
                 "last_error=?, updated_at=? WHERE role_slug=?",
                 (note, now_iso(), role),
             )
@@ -261,11 +321,40 @@ class _SpawnSpec:
 
 @dataclass
 class _Queued:
-    """一条待投递消息；task_id 决定它属于哪个上下文槽。"""
+    """一条待投递消息；task_id + slice_key 决定文本属于哪个上下文槽。"""
     text: str
     run_id: str | None
     task_id: str | None
     spec: _SpawnSpec
+    slice_key: str | None = None
+    priority: int = 100
+
+
+def clear_slice_sessions(conn, role: str, task_id: str,
+                         note: str = "workflow restarted") -> None:
+    """只清该 task 的 slice 槽，保留 task 级上下文槽。
+
+    新一次 workflow execution 的 slice_key 可能复用旧 key；不清旧槽就会
+    --resume 上一次执行的对话。task 级上下文（规划/讨论）不在清理范围。
+    """
+    conn.execute(
+        "DELETE FROM role_task_sessions WHERE role_slug=? AND task_id=? "
+        "AND (slice_key IS NOT NULL OR task_key LIKE ?)",
+        (role, task_id, f"%{CONTEXT_SEP}%"),
+    )
+    row = conn.execute(
+        "SELECT current_task_id, current_context_key, current_slice_key "
+        "FROM role_sessions WHERE role_slug=?", (role,)).fetchone()
+    if row is not None and row["current_task_id"] == task_id and (
+            row["current_slice_key"]
+            or CONTEXT_SEP in str(row["current_context_key"] or "")):
+        conn.execute(
+            "UPDATE role_sessions SET session_id='', last_context_tokens=NULL, "
+            "current_task_id=NULL, current_run_id=NULL, current_step_id=NULL, "
+            "current_context_key=NULL, current_slice_key=NULL, "
+            "last_error=?, updated_at=? WHERE role_slug=?",
+            (note, now_iso(), role))
+    conn.commit()
 
 
 @dataclass
@@ -286,6 +375,7 @@ class _Role:
     current_task_id: str | None = None
     current_step_id: str | None = None
     last_task_id: str | None = None
+    last_slice_key: str | None = None
     last_step_id: str | None = None
     # 当前进程加载的上下文槽（task_key 或 __global__）；None = 尚未加载。
     context_key: str | None = None
@@ -305,6 +395,10 @@ class _Role:
     last_projected_run_id: str | None = None
     context_overflow: bool = False
     context_overflow_reason: str | None = None
+    # 触发溢出的进程；旧 reader 输掉进程竞态时不能被后来者消费。
+    context_overflow_proc: subprocess.Popen | None = None
+    # 进程世代：每次 spawn +1，用于防止旧 reader 回写新进程状态。
+    proc_generation: int = 0
     suppress_exit: bool = False
     current_log_path: str | None = None
     log_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -324,7 +418,8 @@ class DaemonManager:
             idle_release_minutes if idle_release_minutes is not None
             else config.ROLE_IDLE_RELEASE_MINUTES
         )
-        self.on_exit = None  # 回调(role, exit_code)：由 create_app 注入，泵 process_exit
+        # 回调(role, exit_code, current_run_id)：由 create_app 注入，只泵实际执行的 run。
+        self.on_exit = None
         # 回调(role, run_id, reason)：上下文溢出被主动/被动终止后，由 create_app
         # 负责清 run 的会话标记并用 CIC 新会话重投；daemon 不直接依赖编排器。
         self.on_context_overflow = None
@@ -347,6 +442,8 @@ class DaemonManager:
                            args_resume: list[str], ctx: dict, cwd: str, env: dict,
                            prompt: str, run_id: str | None = None,
                            task_id: str | None = None,
+                           slice_key: str | None = None,
+                           priority: int = 100,
                            model_pool: list[str] | None = None,
                            context_window_floor: int | None = None,
                            runtime_id: str | None = None,
@@ -368,8 +465,20 @@ class DaemonManager:
         r = self._role(role)
         with r.lock:
             self._deliver_locked(conn, r, _Queued(
-                text=prompt, run_id=run_id, task_id=task_id, spec=spec))
+                text=prompt, run_id=run_id, task_id=task_id, spec=spec,
+                slice_key=slice_key, priority=priority))
             queued = any(item.run_id == run_id for item in r.queue) if run_id else bool(r.queue)
+            run_status = None
+            delivery_error = None
+            if run_id:
+                from . import runs as runs_service
+                row = conn.execute(
+                    "SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
+                run_status = row["status"] if row else None
+                # 投递失败/被门禁丢弃时，spawn_node 不能继续把 run 标成 running。
+                if (not queued and run_status is not None
+                        and not runs_service.is_dispatchable_status(run_status)):
+                    delivery_error = f"run delivery failed (status={run_status})"
             return {
                 "session_id": r.session_id,
                 "pid": r.proc.pid if r.proc else None,
@@ -377,10 +486,13 @@ class DaemonManager:
                 "queued": queued,
                 "queue_len": len(r.queue),
                 "task_id": task_id,
+                "run_status": run_status,
+                "error": delivery_error,
             }
 
     def deliver(self, conn, role: str, prompt: str, run_id: str | None = None,
-                task_id: str | None = None) -> bool:
+                task_id: str | None = None, slice_key: str | None = None,
+                priority: int = 100) -> bool:
         """向已存在的常驻进程投递消息（无进程返回 False，由调用方走 spawn 路径）。"""
         r = self._roles.get(role)
         if r is None or r.proc is None or r.proc.poll() is not None:
@@ -389,7 +501,8 @@ class DaemonManager:
             spec = r.loaded_spec or _SpawnSpec(
                 executable="", args_new=[], args_resume=[], ctx={}, cwd="", env={})
             self._deliver_locked(conn, r, _Queued(
-                text=prompt, run_id=run_id, task_id=task_id, spec=spec))
+                text=prompt, run_id=run_id, task_id=task_id, spec=spec,
+                slice_key=slice_key, priority=priority))
             return True
 
     def status(self, role: str) -> dict:
@@ -412,7 +525,10 @@ class DaemonManager:
                 "current_task_id": None,
                 "current_run_id": None,
                 "current_step_id": None,
+                "current_slice_key": None,
                 "context_task_id": None,
+                "context_slice_key": None,
+                "context_key": None,
                 "queue_len": 0,
                 "queue": [],
                 "switching": False,
@@ -430,12 +546,15 @@ class DaemonManager:
             "current_run_id": r.current_run_id,
             "current_task_id": r.current_task_id,
             "current_step_id": r.current_step_id,
+            "current_slice_key": slice_key_of(r.context_key) if r.current_task_id else None,
             "context_task_id": task_id_of(r.context_key),
+            "context_slice_key": slice_key_of(r.context_key),
             "context_key": r.context_key,
             "switching": bool(r.switching),
             "queue_len": len(r.queue),
             "queue": [
-                {"run_id": q.run_id, "task_id": q.task_id} for q in r.queue
+                {"run_id": q.run_id, "task_id": q.task_id, "slice_key": q.slice_key}
+                for q in r.queue
             ],
             "context_tokens": tokens,
             "model_id": r.model_id,
@@ -465,7 +584,6 @@ class DaemonManager:
         - 加载/正忙其它任务：不动进程，只删该任务槽与队列项。
         返回是否终止了进程。
         """
-        key = task_key(task_id)
         r = self._roles.get(role)
         conn = open_conn(self.db_path)
         try:
@@ -473,25 +591,21 @@ class DaemonManager:
             if r is not None:
                 with r.lock:
                     r.queue = [item for item in r.queue if item.task_id != task_id]
-                    if r.context_key == key:
+                    if task_id_of(r.context_key) == task_id:
                         r.suppress_exit = True
                         self._slot_persist(r, status="idle", conn=conn)
-                        r.current_run_id = None
-                        r.current_task_id = None
-                        r.current_step_id = None
-                        r.current_log_path = None
+                        self._clear_current_locked(r)
                         self._kill_locked(r, graceful=True)
                         r.suppress_exit = False
                         self._slot_clear_memory(r)
                         r.cic_pending = False
-                        r.busy = False
-                        r.busy_since = None
                         kill = True
                         self._db_upsert(conn, r, status="idle")
                         if r.queue:
                             # 当前槽已删除；把队列里属于其它任务的消息继续处理。
                             self._flush_next_locked(conn, r)
-            clear_session(conn, role, "task deleted", task_key_value=key)
+            clear_session(conn, role, "task deleted", task_key_value=task_id,
+                          all_slices=True)
             return kill
         finally:
             conn.close()
@@ -507,6 +621,85 @@ class DaemonManager:
             self._kill_locked(r, graceful=True)
             r.suppress_exit = False
 
+    def clear_run(self, role: str, run_id: str) -> bool:
+        """run 进入终态后清掉角色上对应的 busy/current 状态。
+
+        run 可能先被 scheduler/process_exit 标为 failed，而常驻进程仍在等待；
+        此时必须主动终止该进程，否则 UI 会长期显示“进行中”，且 new run 无法投递。
+        只清当前 run 精确匹配的状态，避免误伤已切到新 run 的进程。
+        """
+        r = self._roles.get(role)
+        if r is None:
+            # daemon 未加载该角色（服务重启/仅 API 模式）：至少清掉 DB 镜像里的
+            # 幽灵 current_*，否则详情页会一直显示旧的 current_task/run。
+            conn = open_conn(self.db_path)
+            try:
+                cur = conn.execute(
+                    "UPDATE role_sessions SET status='dead', pid=NULL, busy_since=NULL, "
+                    "current_task_id=NULL, current_run_id=NULL, current_step_id=NULL, "
+                    "current_context_key=NULL, current_slice_key=NULL, "
+                    "updated_at=? WHERE role_slug=? AND current_run_id=?",
+                    (now_iso(), role, run_id))
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+        with r.lock:
+            if r.current_run_id != run_id:
+                return False
+            logger.warning(
+                "clearing terminal run from role state role=%s run=%s", role, run_id)
+            self._log(r.role, f"[anvil] clearing terminal run {run_id} from role state")
+            self._slot_persist(r)
+            r.suppress_exit = True
+            try:
+                if r.proc is not None and r.proc.poll() is None:
+                    self._kill_locked(r, graceful=True)
+            finally:
+                r.suppress_exit = False
+            self._clear_current_locked(r)
+            conn = open_conn(self.db_path)
+            try:
+                self._db_upsert(conn, r, status="idle")
+                # 失败 run 之后如果还有排队消息，继续处理下一条。
+                if r.queue:
+                    self._flush_next_locked(conn, r)
+            finally:
+                conn.close()
+            return True
+
+    def clear_current(self, role: str, run_id: str) -> bool:
+        """清掉角色上指向 run 的当前绑定，但不要求 run 已终态。
+
+        用于 reaper 把死进程的 running run 转 suspended 后，清除角色镜像里残留的
+        current_task/current_run；不杀进程、不清队列。
+        """
+        r = self._roles.get(role)
+        if r is None:
+            conn = open_conn(self.db_path)
+            try:
+                cur = conn.execute(
+                    "UPDATE role_sessions SET status='dead', busy_since=NULL, "
+                    "current_task_id=NULL, current_run_id=NULL, current_step_id=NULL, "
+                    "current_context_key=NULL, current_slice_key=NULL, "
+                    "updated_at=? WHERE role_slug=? AND current_run_id=?",
+                    (now_iso(), role, run_id))
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+        with r.lock:
+            if r.current_run_id != run_id:
+                return False
+            self._clear_current_locked(r)
+            conn = open_conn(self.db_path)
+            try:
+                status = "idle" if (r.proc is not None and r.proc.poll() is None) else "dead"
+                self._db_upsert(conn, r, status=status)
+            finally:
+                conn.close()
+            return True
+
     def restart_process(self, role: str) -> None:
         """终止常驻进程但保留所有任务上下文槽；下一次唤醒恢复对应任务。"""
         r = self._roles.get(role)
@@ -518,13 +711,8 @@ class DaemonManager:
             r.switching = True
             try:
                 self._slot_persist(r)
-                r.queue.clear()
-                r.busy = False
-                r.busy_since = None
-                r.current_run_id = None
-                r.current_task_id = None
-                r.current_step_id = None
-                r.current_log_path = None
+                # 重启只结束当前进程，不丢其它任务/后续消息的队列。
+                self._clear_current_locked(r)
                 self._kill_locked(r, graceful=True)
             finally:
                 r.suppress_exit = False
@@ -532,67 +720,134 @@ class DaemonManager:
             r.context_key = None
             r.loaded_spec = None
             r.session_id = None
+            conn = open_conn(self.db_path)
+            try:
+                self._db_upsert(conn, r, status="dead")
+                if r.queue:
+                    self._flush_next_locked(conn, r)
+            finally:
+                conn.close()
 
     def reset_session(self, role: str, cic: bool = False,
-                      task_id=_ALL_SLOTS) -> None:
+                      task_id=_ALL_SLOTS, slice_key: str | None = None,
+                      all_slices: bool = False) -> None:
         """清空上下文槽并释放进程；下一次唤醒新建上下文。
 
-        - `task_id` 省略：清空该角色的**所有任务槽**（角色级 reset）；
-        - 指定 task_id（含 None 表示 __global__）：只清该任务的槽。
-          daemon 只在被清槽正是当前加载槽时才杀进程；其它任务槽清了也不影响当前工作。
+        - `task_id` 省略：清空该角色的**所有 task/slice 槽**（角色级 reset）；
+        - 指定 task_id + slice_key：只清该 slice；
+        - 指定 task_id 且 slice_key=None：只清 task 级槽；
+        - `all_slices=True`：清该 task 的全部 slice 槽（任务级重置）。
+        daemon 只在被清槽正是当前加载槽时才杀进程；其它槽清了也不影响当前工作。
 
         cic=True 时，下一次唤醒先注入 CIC（MEMORY 头 + 最近消息/动作），适合
         角色自主决定“换新上下文，但保留必要交接”的场景。
         """
         clear_all = task_id is _ALL_SLOTS
-        key = None if clear_all else task_key(task_id)
+        key = None if clear_all else context_key(task_id, slice_key)
         r = self._roles.get(role)
         if r is not None:
             with r.lock:
-                active = clear_all or r.context_key == key
+                # task 级 reset 只移除目标 context 的排队消息；角色级 reset 才清全部。
+                if clear_all:
+                    r.queue.clear()
+                elif all_slices:
+                    r.queue = [q for q in r.queue if q.task_id != task_id]
+                else:
+                    r.queue = [
+                        q for q in r.queue
+                        if context_key(q.task_id, q.slice_key) != key]
+                active = clear_all or (
+                    task_id_of(r.context_key) == task_id if all_slices
+                    else r.context_key == key)
                 if active:
                     r.suppress_exit = True
                     # 计划内重置同样有杀人窗口；monitor 不能误判为进程死亡。
                     r.switching = True
                     try:
                         self._slot_persist(r)
-                        r.queue.clear()
                         self._kill_locked(r, graceful=True)
                     finally:
                         r.suppress_exit = False
                         r.switching = False
-                    r.context_key = None
-                    r.loaded_spec = None
+                    self._slot_clear_memory(r)
                     r.session_id = None
                     r.context_tokens = 0
                     r.slot_seen_activity = 0
                     r.payload_chars = 0
                     r.cic_pending = cic
-                    r.busy = False
-                    r.busy_since = None
-                    r.current_run_id = None
-                    r.current_task_id = None
-                    r.current_step_id = None
-                    r.current_log_path = None
+                    self._clear_current_locked(r)
+                    conn = open_conn(self.db_path)
+                    try:
+                        self._db_upsert(conn, r, status="dead")
+                        if r.queue:
+                            self._flush_next_locked(conn, r)
+                    finally:
+                        conn.close()
         conn = open_conn(self.db_path)
         try:
             clear_session(
                 conn, role, "session reset",
-                task_key_value=_ALL_SLOTS if clear_all else key)
+                task_key_value=_ALL_SLOTS if clear_all else key,
+                all_slices=all_slices)
+        finally:
+            conn.close()
+
+    def reset_task_slices(self, role: str, task_id: str,
+                          note: str = "workflow restarted") -> None:
+        """清掉某 task 的全部 slice 槽，保留 task 级槽；新 execution 从新会话开始。"""
+        r = self._roles.get(role)
+        if r is not None:
+            with r.lock:
+                r.queue = [
+                    q for q in r.queue
+                    if not (q.task_id == task_id and q.slice_key)]
+                active = (
+                    task_id_of(r.context_key) == task_id
+                    and slice_key_of(r.context_key) is not None)
+                if active:
+                    r.suppress_exit = True
+                    r.switching = True
+                    try:
+                        self._kill_locked(r, graceful=True)
+                    finally:
+                        r.suppress_exit = False
+                        r.switching = False
+                    self._slot_clear_memory(r)
+                    self._clear_current_locked(r)
+                    conn = open_conn(self.db_path)
+                    try:
+                        self._db_upsert(conn, r, status="dead")
+                        if r.queue:
+                            self._flush_next_locked(conn, r)
+                    finally:
+                        conn.close()
+        conn = open_conn(self.db_path)
+        try:
+            clear_slice_sessions(conn, role, task_id, note)
         finally:
             conn.close()
 
     def mark_needs_fresh_context(self, role: str, note: str = "fresh context required",
-                                 task_id=_ALL_SLOTS) -> None:
-        """标记某个任务槽下次唤醒使用全新 CIC 会话（不杀进程、不清排队消息）。
+                                 task_id=_ALL_SLOTS,
+                                 slice_key: str | None = None,
+                                 all_slices: bool = False) -> None:
+        """标记上下文槽下次唤醒使用全新 CIC 会话（不杀进程、不清排队消息）。
 
-        `task_id` 省略时作用于当前加载槽；进程已死/会话损坏的健康检查应传入
-        具体 run 的任务，避免误清其它任务的上下文。
+        task_id 省略时作用于当前加载槽；指定 task_id + slice 时只作用于该 slice；
+        指定 task_id 且 slice=None 时只作用于 task 级槽；`all_slices=True`
+        才作用于该 task 的所有 slice。
         """
         r = self._role(role)
         with r.lock:
-            key = r.context_key if task_id is _ALL_SLOTS else task_key(task_id)
-            active = key is not None and r.context_key == key
+            if task_id is _ALL_SLOTS:
+                key = r.context_key
+                active = key is not None and r.context_key == key
+            elif all_slices:
+                key = None
+                active = task_id_of(r.context_key) == task_id
+            else:
+                key = context_key(task_id, slice_key)
+                active = r.context_key == key
             if active:
                 r.session_id = None
                 r.cic_pending = True
@@ -607,9 +862,15 @@ class DaemonManager:
                     "UPDATE role_task_sessions SET session_id='', context_tokens=NULL, "
                     "last_error=?, updated_at=? WHERE role_slug=? AND task_key=?",
                     (note, now_iso(), role, str(key)))
-            if key is None or active:
+            elif task_id is not _ALL_SLOTS:
+                conn.execute(
+                    "UPDATE role_task_sessions SET session_id='', context_tokens=NULL, "
+                    "last_error=?, updated_at=? WHERE role_slug=? AND task_id=?",
+                    (note, now_iso(), role, task_id))
+            if active:
                 conn.execute(
                     "UPDATE role_sessions SET session_id='', last_context_tokens=NULL, "
+                    "current_context_key=NULL, current_slice_key=NULL, "
                     "last_error=?, updated_at=? WHERE role_slug=?",
                     (note, now_iso(), role))
             conn.commit()
@@ -657,13 +918,16 @@ class DaemonManager:
         last_active = (
             datetime.fromtimestamp(r.last_active, tz=timezone.utc).isoformat()
             if r.last_active else now)
+        task_id, slice_key = context_parts(key)
         conn.execute(
             """INSERT INTO role_task_sessions
-                   (role_slug, task_key, session_id, runtime_id, cwd, workspace_path,
-                    model_id, status, context_tokens, last_seen_activity_id,
-                    last_active_at, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   (role_slug, task_key, task_id, slice_key, session_id, runtime_id,
+                    cwd, workspace_path, model_id, status, context_tokens,
+                    last_seen_activity_id, last_active_at, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(role_slug, task_key) DO UPDATE SET
+                   task_id=excluded.task_id,
+                   slice_key=excluded.slice_key,
                    session_id=excluded.session_id,
                    runtime_id=COALESCE(excluded.runtime_id, role_task_sessions.runtime_id),
                    cwd=COALESCE(excluded.cwd, role_task_sessions.cwd),
@@ -678,18 +942,28 @@ class DaemonManager:
                        ELSE role_task_sessions.last_seen_activity_id END,
                    last_active_at=excluded.last_active_at,
                    updated_at=excluded.updated_at""",
-            (r.role, key, r.session_id or "", spec.runtime_id if spec else None,
+            (r.role, key, task_id, slice_key, r.session_id or "",
+             spec.runtime_id if spec else None,
              spec.cwd if spec else None, spec.workspace_path if spec else None,
              r.model_id, slot_status, int(r.context_tokens or 0),
              int(r.slot_seen_activity or 0), last_active, now, now),
         )
         # 同步角色级镜像：当前加载槽的 session / 水位。
+        # idle/dead 槽不能把 current_* 写回角色镜像；只有 starting/busy 才代表执行绑定。
+        if status in ("busy", "starting"):
+            current_task, current_run, current_step = (
+                r.current_task_id, r.current_run_id, r.current_step_id)
+        else:
+            current_task = current_run = current_step = None
         conn.execute(
             "UPDATE role_sessions SET session_id=?, model_id=COALESCE(?, model_id), "
             "last_context_tokens=?, current_task_id=?, current_run_id=?, "
-            "current_step_id=?, updated_at=? WHERE role_slug=?",
+            "current_step_id=?, current_context_key=?, current_slice_key=?, "
+            "updated_at=? WHERE role_slug=?",
             (r.session_id or "", r.model_id, int(r.context_tokens or 0),
-             r.current_task_id, r.current_run_id, r.current_step_id, now, r.role),
+             current_task, current_run, current_step,
+             r.context_key if current_task else None,
+             slice_key if current_task else None, now, r.role),
         )
 
     def _slot_load(self, conn, role: str, key: str):
@@ -698,26 +972,38 @@ class DaemonManager:
             (role, key),
         ).fetchone()
 
-    def _slot_seen_activity(self, conn, role: str, task_key_value: str) -> int:
-        """任务当前最大活动 id；__global__ 槽不跟踪任务时间线。"""
-        if task_key_value == GLOBAL_TASK_KEY:
+    def _slot_seen_activity(self, conn, role: str, task_id: str | None,
+                            slice_key: str | None = None) -> int:
+        """当前上下文已见的最大活动 id；__global__ 槽不跟踪任务时间线。"""
+        if not task_id:
             return 0
+        clause, params = self._activity_scope(task_id, slice_key)
         row = conn.execute(
-            "SELECT COALESCE(MAX(id),0) AS m FROM activities WHERE task_id=?",
-            (task_key_value,),
+            f"SELECT COALESCE(MAX(id),0) AS m FROM activities WHERE {clause}",
+            params,
         ).fetchone()
         return int(row["m"]) if row else 0
 
-    def _slot_handoff(self, conn, role: str, key: str, since_id: int) -> str:
+    @staticmethod
+    def _activity_scope(task_id: str, slice_key: str | None) -> tuple[str, tuple]:
+        """Task-wide comments are visible to every slice; other slices are not."""
+        if slice_key:
+            return ("task_id=? AND (slice_key=? OR slice_key IS NULL)",
+                    (task_id, slice_key))
+        return ("task_id=? AND slice_key IS NULL", (task_id,))
+
+    def _slot_handoff(self, conn, role: str, task_id: str | None,
+                      slice_key: str | None, since_id: int) -> str:
         """恢复会话时注入「离开期间的新进展」，避免角色用过时状态继续工作。"""
-        if key == GLOBAL_TASK_KEY:
+        if not task_id:
             return ""
+        clause, params = self._activity_scope(task_id, slice_key)
         rows = conn.execute(
-            """SELECT id, role_slug, kind, payload_json, created_at
+            f"""SELECT id, role_slug, kind, payload_json, created_at
                  FROM activities
-                WHERE task_id=? AND id>? AND (role_slug IS NULL OR role_slug<>?)
+                WHERE {clause} AND id>? AND (role_slug IS NULL OR role_slug<>?)
                 ORDER BY id LIMIT 40""",
-            (key, int(since_id or 0), role),
+            (*params, int(since_id or 0), role),
         ).fetchall()
         if not rows:
             return ""
@@ -742,10 +1028,12 @@ class DaemonManager:
         if not lines:
             return ""
         return ("## 你离开任务期间的新进展\n" + "\n".join(lines[-25:])
-                + f"\n（完整内容用 `anvil inbox check {key}` 拉取）\n\n")
+                + f"\n（完整内容用 `anvil inbox check {task_id}` 拉取）\n\n")
 
     def _slot_clear_memory(self, r: _Role) -> None:
         r.context_key = None
+        r.last_task_id = None
+        r.last_slice_key = None
         r.loaded_spec = None
         r.session_id = None
         r.context_tokens = 0
@@ -788,6 +1076,11 @@ class DaemonManager:
         except TypeError:  # Windows 不支持 start_new_session
             proc = subprocess.Popen([spec.executable, *args], **kwargs)
         r.proc = proc
+        r.proc_generation += 1
+        # 新进程不继承上一代的溢出标记。
+        r.context_overflow = False
+        r.context_overflow_reason = None
+        r.context_overflow_proc = None
         self._log(r.role,
                   f"[anvil] spawn {spec.executable} {' '.join(str(a) for a in args)}")
         r.session_id = sid
@@ -882,13 +1175,16 @@ class DaemonManager:
         """单轮内主动换会话的硬阈值。"""
         return _hard_limit_for(self._context_window(r))
 
-    def _context_hint(self, r: _Role, task_id: str | None) -> str:
-        """给角色的会话决策提示：只在切换任务或上下文占用较高时出现。"""
+    def _context_hint(self, r: _Role, task_id: str | None,
+                      slice_key: str | None = None) -> str:
+        """给角色的会话决策提示：只在切换任务/切片或上下文占用较高时出现。"""
         tokens = int(r.context_tokens or 0)
         active_window = self._active_context_window(r)
         window = self._context_window(r)
         threshold = self._cic_threshold(r)
-        changed = bool(r.last_task_id and task_id and r.last_task_id != task_id)
+        last_context = context_key(r.last_task_id, r.last_slice_key)
+        current_context = context_key(task_id, slice_key)
+        changed = bool(r.last_task_id and task_id and last_context != current_context)
         high = tokens >= self._hint_threshold(r)
         payload = int(r.payload_chars or 0)
         payload_hint = int(config.PAYLOAD_HINT_CHARS)
@@ -919,8 +1215,10 @@ class DaemonManager:
             lines.append(f"- 上一次处理：{last}")
         if task_id:
             lines.append(f"- 当前任务：{task_id}")
+            if slice_key:
+                lines.append(f"- 当前切片：{slice_key}")
         if changed:
-            lines.append("- 任务已切换；若与本任务不相关，建议先重置会话。")
+            lines.append("- 任务已切换；若与本切片不相关，建议先重置会话。")
         if high:
             lines.append("- 上下文占用较高；若新任务与旧上下文关系不大，建议先重置会话。")
             lines.append(
@@ -941,36 +1239,112 @@ class DaemonManager:
         return "\n".join(lines) + "\n\n"
 
     def _deliver_locked(self, conn, r: _Role, item: _Queued) -> None:
+        # 同一 run 只保留一条队列项：scheduler/mention/回切可能并发 pump 同一个
+        # suspended run；重复投递会造成同一 turn 执行两次。新文本可能包含刚追加的
+        # wake_note，用最新 text/spec 覆盖旧项。
+        if item.run_id:
+            for queued in r.queue:
+                if queued.run_id == item.run_id:
+                    queued.text = item.text
+                    queued.spec = item.spec
+                    queued.slice_key = item.slice_key
+                    queued.task_id = item.task_id
+                    queued.priority = min(int(queued.priority), int(item.priority))
+                    r.queue.sort(key=lambda q: int(q.priority))
+                    if not r.busy:
+                        self._flush_next_locked(conn, r)
+                    return
         r.queue.append(item)
+        # 稳定排序：同 priority 内保持 FIFO；return/step 可以插到普通 mention 前。
+        r.queue.sort(key=lambda q: int(q.priority))
         if not r.busy:
             self._flush_next_locked(conn, r)
 
-    def _mark_idle_locked(self, conn, r: _Role) -> None:
+    @staticmethod
+    def _clear_current_locked(r: _Role) -> None:
+        """清掉角色当前执行绑定；调用方必须持有 r.lock。"""
         r.busy = False
         r.busy_since = None
         r.current_run_id = None
         r.current_task_id = None
         r.current_step_id = None
         r.current_log_path = None
+
+    def _mark_idle_locked(self, conn, r: _Role) -> None:
+        self._clear_current_locked(r)
         if r.context_key:
             self._slot_persist(r, status="idle", conn=conn)
         self._db_upsert(conn, r, status="idle")
 
-    def _flush_next_locked(self, conn, r: _Role) -> None:
-        if not r.queue:
-            self._mark_idle_locked(conn, r)
-            return
-        item = r.queue.pop(0)
-        target_key = task_key(item.task_id)
-        same_context = (
-            r.proc is not None
-            and r.proc.poll() is None
-            and r.context_key == target_key
+    def _run_dispatchable(self, conn, run_id: str | None) -> bool:
+        """队列项对应的 run 是否仍可投递。无 run_id 的角色级消息始终可投递。"""
+        if not run_id:
+            return True
+        row = conn.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
+        from . import runs as runs_service
+        return bool(row and runs_service.is_dispatchable_status(row["status"]))
+
+    def _queue_drop(self, conn, r: _Role, item: _Queued, reason: str) -> None:
+        self._log(
+            r.role,
+            f"[anvil] dropping queued message run={item.run_id} task={item.task_id}: {reason}",
         )
-        if same_context:
-            self._send_locked(conn, r, item)
-        else:
-            self._switch_context_locked(conn, r, item)
+        self._audit_session(
+            conn, r.role, item.task_id, "queue.dropped",
+            {"run_id": item.run_id, "reason": reason},
+        )
+
+    def _delivery_failed(self, conn, r: _Role, item: _Queued, error: Exception) -> None:
+        from . import runs as runs_service
+        self._log(
+            r.role,
+            f"[anvil] delivery failed run={item.run_id} task={item.task_id}: {error}",
+        )
+        self._clear_current_locked(r)
+        if item.run_id:
+            runs_service.set_status(
+                conn, item.run_id, "failed", ended_at=now_iso(),
+                failure_class="delivery_error",
+                from_statuses=runs_service.ACTIVE_RUN_STATUSES,
+            )
+        self._audit_session(
+            conn, r.role, item.task_id, "queue.delivery_failed",
+            {"run_id": item.run_id, "error": str(error)[:500]},
+        )
+        if r.proc is not None and r.proc.poll() is None:
+            r.suppress_exit = True
+            try:
+                self._kill_locked(r, graceful=True)
+            finally:
+                r.suppress_exit = False
+        self._db_upsert(conn, r, status="dead", error=str(error)[:500])
+
+    def _flush_next_locked(self, conn, r: _Role) -> None:
+        """FIFO 处理队列；跳过已终态/不可投递 run，单条投递失败不阻塞后续消息。"""
+        while r.queue:
+            item = r.queue.pop(0)
+            if not self._run_dispatchable(conn, item.run_id):
+                self._queue_drop(conn, r, item, "run is terminal or not dispatchable")
+                continue
+            target_key = context_key(item.task_id, item.slice_key)
+            same_context = (
+                r.proc is not None
+                and r.proc.poll() is None
+                and r.context_key == target_key
+            )
+            try:
+                if same_context:
+                    delivered = self._send_locked(conn, r, item)
+                else:
+                    delivered = self._switch_context_locked(conn, r, item)
+            except Exception as exc:  # noqa: BLE001 —— 单条消息失败不能阻塞队列
+                self._delivery_failed(conn, r, item, exc)
+                continue
+            if delivered:
+                return
+            # run 在投递前变成不可投递（并发失败/取消）：继续下一条。
+            self._queue_drop(conn, r, item, "run became non-dispatchable")
+        self._mark_idle_locked(conn, r)
 
     def _project_before_delivery(self, conn, r: _Role, item: _Queued) -> None:
         """实际投递前投影当前任务；失败不阻断投递（spawn 仍可用旧投影）。"""
@@ -992,9 +1366,9 @@ class DaemonManager:
             except Exception:  # noqa: BLE001
                 pass
 
-    def _switch_context_locked(self, conn, r: _Role, item: _Queued) -> None:
+    def _switch_context_locked(self, conn, r: _Role, item: _Queued) -> bool:
         """在 turn 边界切换任务上下文：保存当前槽 → 重开进程 → 恢复目标槽。"""
-        target_key = task_key(item.task_id)
+        target_key = context_key(item.task_id, item.slice_key)
         # 1) 保存当前上下文
         if r.context_key:
             self._slot_persist(r, status="idle", conn=conn)
@@ -1002,16 +1376,17 @@ class DaemonManager:
         #    switching=True 让调度器在「杀旧进程 → 拉新进程」窗口内不要把它当死进程回收。
         r.switching = True
         try:
-            self._switch_context_inner(conn, r, item, target_key)
+            return self._switch_context_inner(conn, r, item, target_key)
         finally:
             r.switching = False
 
     def _switch_context_inner(self, conn, r: _Role, item: _Queued,
-                              target_key: str) -> None:
+                              target_key: str) -> bool:
         if r.proc is not None and r.proc.poll() is None:
             r.suppress_exit = True
             self._kill_locked(r, graceful=True)
             r.suppress_exit = False
+            self._clear_current_locked(r)
             # 旧槽只是释放进程，session 仍可恢复：槽状态回到 idle。
             if r.context_key:
                 self._slot_persist(r, status="idle", conn=conn)
@@ -1041,18 +1416,24 @@ class DaemonManager:
                 rotate_reason = "context-high-on-resume"
                 resume = False
         if rotate_reason:
-            # 换新上下文前先固化该任务的决策/进度，CIC 才能接得上。
+            # 换新上下文前先固化该切片的决策/进度，CIC 才能接得上。
             try:
                 from . import memory as memory_service
                 memory_service.consolidate_context(
-                    conn, r.role, item.task_id, rotate_reason, None)
+                    conn, r.role, item.task_id, rotate_reason, None,
+                    slice_key=context_parts(target_key)[1])
             except Exception:  # noqa: BLE001 —— 快照失败不阻断恢复
                 self._log(r.role, f"[anvil] knowledge snapshot failed ({rotate_reason})")
         r.session_id = row["session_id"] if resume else None
         r.cic_pending = not resume
+        if not resume:
+            # 新会话/CIC 的上下文从 0 重新计量；不能沿用旧槽的 context_tokens，
+            # 否则首个无 usage 的 synthetic/API 事件会再次触发硬阈值轮换，形成死循环。
+            r.context_tokens = 0
         if resume:
+            target_task_id, target_slice_key = context_parts(target_key)
             r.handoff_pending = self._slot_handoff(
-                conn, r.role, target_key, r.slot_seen_activity)
+                conn, r.role, target_task_id, target_slice_key, r.slot_seen_activity)
         self._log(
             r.role,
             f"[anvil] context switch → {target_key} "
@@ -1060,9 +1441,16 @@ class DaemonManager:
         # 4) 拉起目标槽并投递（投递前投影当前任务，避免排队任务互相覆盖 CLAUDE.md）
         self._project_before_delivery(conn, r, item)
         self._spawn(conn, r, item.spec)
-        self._send_locked(conn, r, item)
+        return self._send_locked(conn, r, item)
 
-    def _send_locked(self, conn, r: _Role, item: _Queued) -> None:
+    def _send_locked(self, conn, r: _Role, item: _Queued) -> bool:
+        # 状态门禁：队列项可能在排队期间被 scheduler/治理置为终态或 HITL 态。
+        from . import runs as runs_service
+        if item.run_id:
+            row = conn.execute(
+                "SELECT status FROM runs WHERE id=?", (item.run_id,)).fetchone()
+            if row is None or not runs_service.is_dispatchable_status(row["status"]):
+                return False
         self._project_before_delivery(conn, r, item)
         spec = item.spec
         r.loaded_spec = spec
@@ -1072,20 +1460,44 @@ class DaemonManager:
             r.context_window_floor = spec.context_window_floor
         # 上下文已按任务切换；_context_hint 不应再提示“任务已切换，建议重置”。
         r.last_task_id = item.task_id
+        r.last_slice_key = item.slice_key
         task_prefix = (
             f"当前任务 ID：{item.task_id}\n"
             "（环境变量 ANVIL_TASK_ID 可能已过期，请以此为准）\n\n"
             if item.task_id else "")
+        if item.slice_key:
+            task_prefix += (f"当前切片：{item.slice_key}\n"
+                            "（本切片的会话上下文与其他切片隔离）\n\n")
         if r.cic_pending:
             prefix = self._build_cic(
-                conn, r.role, item.task_id, run_id=item.run_id) + "\n\n" + task_prefix
+                conn, r.role, item.task_id, run_id=item.run_id,
+                slice_key=item.slice_key) + "\n\n" + task_prefix
             r.cic_pending = False
         else:
             prefix = (r.handoff_pending
-                      + self._context_hint(r, item.task_id)
+                      + self._context_hint(r, item.task_id, item.slice_key)
                       + task_prefix)
         r.handoff_pending = ""
         text = prefix + item.text
+
+        # 排队期间被标记 suspended/created 的 run，真正投递时恢复 running。
+        # 已 running 的排队 run 不重复写；状态迁移必须走 set_status 以写 ledger。
+        # 必须在设置 r.busy/current_* 之前完成 CAS，失败时不要留下幽灵 busy。
+        if item.run_id:
+            current = conn.execute(
+                "SELECT status FROM runs WHERE id=?", (item.run_id,)).fetchone()
+            if current is not None and current["status"] != "running":
+                if not runs_service.set_status(
+                        conn, item.run_id, "running",
+                        from_statuses=("created", "projecting", "suspended")):
+                    again = conn.execute(
+                        "SELECT status FROM runs WHERE id=?", (item.run_id,)).fetchone()
+                    if again is None or again["status"] != "running":
+                        return False
+            conn.execute(
+                "UPDATE runs SET started_at=COALESCE(started_at, ?), ended_at=NULL "
+                "WHERE id=?", (now_iso(), item.run_id))
+            conn.commit()
 
         r.busy = True
         r.busy_since = time.time()
@@ -1099,32 +1511,34 @@ class DaemonManager:
         # 投递成功后才推进「已看到」游标；失败时保留旧游标，下次恢复能补上未送达事件。
         seen = max(
             int(r.slot_seen_activity or 0),
-            self._slot_seen_activity(conn, r.role, task_key(item.task_id)))
+            self._slot_seen_activity(conn, r.role, item.task_id, item.slice_key))
         self._slot_persist(r, status="busy", conn=conn)
         self._append_run_log(r, f"\n===== USER（上下文/提示词） @ {now_iso()} =====\n{text}\n")
         self._db_upsert(conn, r, status="busy")
-        # 排队期间被标记 suspended 的 run，真正投递时恢复 running。
-        if item.run_id:
-            conn.execute(
-                "UPDATE runs SET status='running', "
-                "started_at=COALESCE(started_at, ?) "
-                "WHERE id=? AND status IN ('created','projecting','suspended')",
-                (now_iso(), item.run_id),
-            )
-            conn.commit()
         try:
             if r.proc and r.proc.stdin:
                 r.proc.stdin.write(frame_user_message(text).encode("utf-8"))
                 r.proc.stdin.flush()
                 r.slot_seen_activity = seen
                 self._slot_persist(r, status="busy", conn=conn)
-        except (BrokenPipeError, OSError) as exc:
+                if item.run_id:
+                    # wake_note 是“投递即消费”的一次性 continuation；排队/重启
+                    # 期间必须保留，只有真正写入 stdin 后才清。
+                    conn.execute(
+                        "UPDATE runs SET wake_note=NULL WHERE id=? AND wake_note IS NOT NULL",
+                        (item.run_id,))
+                    conn.commit()
+            else:
+                raise _DeliveryError("role process is not writable")
+        except (BrokenPipeError, OSError, _DeliveryError) as exc:
             self._log(r.role, f"[anvil] stdin write failed: {exc}")
             r.last_active = time.time()
             r.suppress_exit = True
             self._kill_locked(r, graceful=True)
             r.suppress_exit = False
-            self._db_upsert(conn, r, status="dead", error=str(exc))
+            self._clear_current_locked(r)
+            raise _DeliveryError(str(exc)) from exc
+        return True
 
     def _audit_session(self, conn, role: str, task_id: str | None, action: str,
                        payload: dict) -> None:
@@ -1152,11 +1566,11 @@ class DaemonManager:
                     self._log(r.role, line)  # claude 的警告行（如 unrecognized_model）
                     if _is_payload_overflow(line):
                         if r.proc is proc:
-                            self._begin_context_overflow(r, "payload")
+                            self._begin_context_overflow(r, "payload", proc)
                         break
                     if _is_context_overflow(line):
                         if r.proc is proc:
-                            self._begin_context_overflow(r, "api_error")
+                            self._begin_context_overflow(r, "api_error", proc)
                         break
                     continue
                 try:
@@ -1180,7 +1594,7 @@ class DaemonManager:
                             r.current_run_id and config.PAYLOAD_HARD_RESET_CHARS > 0
                             and r.payload_chars >= config.PAYLOAD_HARD_RESET_CHARS)
                     if payload_hit:
-                        self._begin_context_overflow(r, "payload")
+                        self._begin_context_overflow(r, "payload", proc)
                         break
                 etype = ev.get("type")
                 if etype == "system" and ev.get("session_id"):
@@ -1205,11 +1619,11 @@ class DaemonManager:
                     result_text = str(ev.get("result") or ev.get("error") or "")
                     if ev.get("is_error") and _is_payload_overflow(result_text):
                         if r.proc is proc:
-                            self._begin_context_overflow(r, "payload")
+                            self._begin_context_overflow(r, "payload", proc)
                         break
                     if ev.get("is_error") and _is_context_overflow(result_text):
                         if r.proc is proc:
-                            self._begin_context_overflow(r, "api_error")
+                            self._begin_context_overflow(r, "api_error", proc)
                         break
                     if r.proc is not proc:
                         return
@@ -1221,6 +1635,8 @@ class DaemonManager:
                     usage: dict = {}
                     switched = False
                     hard = False
+                    is_api_error = bool(
+                        ev.get("isApiErrorMessage") or model == "<synthetic>")
                     with r.lock:
                         if r.proc is not proc:
                             return
@@ -1253,7 +1669,8 @@ class DaemonManager:
                         switched = bool(
                             old_model and r.model_id and r.model_id != old_model)
                         hard = bool(
-                            r.current_run_id
+                            not is_api_error
+                            and r.current_run_id
                             and int(r.context_tokens or 0) >= self._hard_threshold(r))
                     self._log(r.role, self._assistant_text(ev))
                     if switched:
@@ -1261,22 +1678,36 @@ class DaemonManager:
                     # 结构化 API 错误（synthetic assistant 消息）也要识别，避免只依赖
                     # 原始文本；同时检查单轮硬阈值——一次唤醒可能连续跑几百次工具调用，
                     # CLI 的自动压缩来不及介入。
-                    if ev.get("isApiErrorMessage") or msg.get("model") == "<synthetic>":
+                    if is_api_error:
                         blocks = msg.get("content") or []
                         err_text = "".join(
                             b.get("text", "") for b in blocks if isinstance(b, dict))
                         if _is_payload_overflow(err_text):
                             if r.proc is proc:
-                                self._begin_context_overflow(r, "payload")
+                                self._begin_context_overflow(r, "payload", proc)
                             break
                         if _is_context_overflow(err_text):
                             if r.proc is proc:
-                                self._begin_context_overflow(r, "api_error")
+                                self._begin_context_overflow(r, "api_error", proc)
                             break
+                        # 网络/API 不可达等 synthetic 错误不能按上下文水位轮换；
+                        # CLI 常在错误后继续等待/重试，表现为角色一直“进行中”。
+                        # 快速结束本轮，让 process_exit → 自动恢复/失败处理接管。
+                        self._log(
+                            r.role,
+                            "[anvil] transient API error; stopping role process: "
+                            + (err_text[:300] or "<no message>"),
+                        )
+                        try:
+                            if r.proc is proc:
+                                proc.terminate()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        break
                     if hard:
                         if r.proc is not proc:
                             return
-                        self._begin_context_overflow(r, "threshold")
+                        self._begin_context_overflow(r, "threshold", proc)
                         break
         except Exception:  # noqa: BLE001 —— 解码/管道异常不能静默杀死 reader
             self._log(r.role, "[anvil] reader crashed:\n" + traceback.format_exc())
@@ -1292,10 +1723,22 @@ class DaemonManager:
                 code = proc.wait(timeout=5)
             except Exception:  # noqa: BLE001
                 code = None
+        # reader 已结束但进程仍不退出（例如 API 错误后 CLI 卡住）：强制回收，
+        # 避免留下不受 daemon 管理的孤儿进程。
+        if code is None and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                code = proc.wait(timeout=2)
+            except Exception:  # noqa: BLE001
+                code = None
         # 失败后默认丢弃上下文：非零退出时下一次唤醒新建 session，
         # 避免坏 context 被 --resume 反复复现（可用 ANVIL_RESET_SESSION_ON_FAILURE=0 关闭）。
         overflow_run_id: str | None = None
         overflow_reason: str | None = None
+        exit_run_id: str | None = None
         was_current = False
         suppress = False
         reset_key: str | None = None
@@ -1311,10 +1754,9 @@ class DaemonManager:
                 and not self._shutting_down
                 and config.RESET_SESSION_ON_FAILURE
             )
+            exit_run_id = r.current_run_id
             r.proc = None
-            r.busy = False
-            r.busy_since = None
-            r.current_step_id = None
+            self._clear_current_locked(r)
             if auto_reset:
                 reset_key = r.context_key
                 r.session_id = None
@@ -1322,17 +1764,26 @@ class DaemonManager:
                 # 崩溃后的重试用 CIC：保留 MEMORY/工作流决策/知识快照，
                 # 不从一张白纸重新开始。
                 r.cic_pending = True
-            if r.context_overflow:
-                overflow_run_id = r.current_run_id
+            # 只消费属于本进程的溢出标记；旧 reader 不能偷走新进程的标记。
+            if (r.context_overflow
+                    and r.context_overflow_proc in (None, proc)):
+                overflow_run_id = exit_run_id
                 overflow_reason = r.context_overflow_reason or "threshold"
                 reset_key = r.context_key
                 r.context_overflow = False
                 r.context_overflow_reason = None
+                r.context_overflow_proc = None
+            elif (r.context_overflow and r.context_overflow_proc is not None
+                  and r.context_overflow_proc.poll() is not None):
+                # 标记属于已经死掉的旧进程：清掉，避免永久抑制后续溢出检测。
+                r.context_overflow = False
+                r.context_overflow_reason = None
+                r.context_overflow_proc = None
         conn = open_conn(self.db_path)
         try:
             note = f"auto reset after exit code {code}" if auto_reset else None
             if overflow_run_id:
-                note = f"context overflow ({overflow_reason})"
+                note = f"context overflow ({overflow_reason}) run={overflow_run_id}"
             self._db_upsert(conn, r, status="dead", pid=None, error=note)
             if reset_key:
                 # 只清当前任务的槽；其它任务的上下文不受影响。
@@ -1350,7 +1801,8 @@ class DaemonManager:
                 daemon=True, name=f"anvil-overflow-{r.role}").start()
         elif self.on_exit and not self._shutting_down and not suppress:
             try:
-                self.on_exit(r.role, 0 if code is None else code)
+                # 只把实际执行的 run 交给编排器；排队 run 由 queue recovery 处理。
+                self.on_exit(r.role, 0 if code is None else code, exit_run_id)
             except Exception:  # noqa: BLE001
                 pass
         # 进程退出时如果还有排队消息（例如运行时每个 turn 后自行退出），
@@ -1499,75 +1951,83 @@ class DaemonManager:
         except Exception:  # noqa: BLE001
             pass
 
-    def _begin_context_overflow(self, r: _Role, reason: str) -> None:
+    def _begin_context_overflow(self, r: _Role, reason: str,
+                                proc: subprocess.Popen | None = None) -> None:
         """上下文超限（主动阈值或 API 报错）：终止本会话，交给回调换 CIC 新会话。
 
         幂等：同一轮内只处理一次。等待 reader 线程走正常退出路径，由它调用
         `on_context_overflow(role, run_id, reason)`，避免在 reader 线程里重入编排器。
+        `proc` 是发现溢出的进程；旧 reader 不得杀掉已经切换后的新进程。
         """
-        if r.context_overflow:
-            return
-        r.context_overflow = True
-        r.context_overflow_reason = reason
-        if reason == "api_error":
-            # API 已明确拒绝：说明真实窗口可能小于模型名推断值。按“最后一次成功
-            # 请求的 95%”收紧，后续会话在更低水位轮换，避免反复撞同一堵墙。
-            measured = int(r.context_tokens or 0)
-            if measured > 0:
-                cap = max(64_000, int(measured * 0.95))
-                r.adaptive_window = min(int(r.adaptive_window or cap), cap)
-                self._log(
-                    r.role,
-                    f"[anvil] adaptive context window → {r.adaptive_window} "
-                    f"(last accepted context {measured})")
-        # 先把任务决策/进度固化成 notes 快照，再丢掉对话上下文。
-        if r.current_task_id:
-            conn = open_conn(self.db_path)
-            try:
-                self._consolidate_context(conn, r, reason)
-            finally:
-                conn.close()
-        r.cic_pending = True
-        r.suppress_exit = True
-        # 强制下一次 _spawn 新建会话：payload 溢出时 token 可能不高，
-        # 不能依赖 token 阈值决定是否 --resume（否则旧附件会被原样带回）。
-        r.session_id = None
-        try:
-            r.context_tokens = max(int(r.context_tokens or 0),
-                                   self._hard_threshold(r) + 1)
-        except Exception:  # noqa: BLE001
-            pass
-        proc = r.proc
-        if proc is not None:
-            try:
-                if proc.stdin:
-                    proc.stdin.close()
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                proc.terminate()
-            except Exception:  # noqa: BLE001
-                pass
-            # terminate 被忽略时兜底 kill，避免残留进程变成同一角色的第二个实例。
-            try:
-                proc.wait(timeout=2)
-            except Exception:  # noqa: BLE001
+        with r.lock:
+            if proc is not None and r.proc is not proc:
+                return
+            if r.context_overflow:
+                return
+            owner = proc or r.proc
+            r.context_overflow = True
+            r.context_overflow_reason = reason
+            r.context_overflow_proc = owner
+            if reason == "api_error":
+                # API 已明确拒绝：说明真实窗口可能小于模型名推断值。按“最后一次成功
+                # 请求的 95%”收紧，后续会话在更低水位轮换，避免反复撞同一堵墙。
+                measured = int(r.context_tokens or 0)
+                if measured > 0:
+                    cap = max(64_000, int(measured * 0.95))
+                    r.adaptive_window = min(int(r.adaptive_window or cap), cap)
+                    self._log(
+                        r.role,
+                        f"[anvil] adaptive context window → {r.adaptive_window} "
+                        f"(last accepted context {measured})")
+            # 先把任务决策/进度固化成 notes 快照，再丢掉对话上下文。
+            if r.current_task_id:
+                conn = open_conn(self.db_path)
                 try:
-                    proc.kill()
+                    self._consolidate_context(conn, r, reason)
+                finally:
+                    conn.close()
+            r.cic_pending = True
+            r.suppress_exit = True
+            # 强制下一次 _spawn 新建会话：payload 溢出时 token 可能不高，
+            # 不能依赖 token 阈值决定是否 --resume（否则旧附件会被原样带回）。
+            r.session_id = None
+            try:
+                r.context_tokens = max(int(r.context_tokens or 0),
+                                       self._hard_threshold(r) + 1)
+            except Exception:  # noqa: BLE001
+                pass
+            active_proc = r.proc
+            if active_proc is not None and (proc is None or active_proc is proc):
+                try:
+                    if active_proc.stdin:
+                        active_proc.stdin.close()
                 except Exception:  # noqa: BLE001
                     pass
-        self._log(
-            r.role,
-            f"[anvil] context/payload overflow ({reason}; "
-            f"context≈{r.context_tokens}, payload≈{r.payload_chars} chars) "
-            "→ 将用 CIC 新会话重投当前 run")
+                try:
+                    active_proc.terminate()
+                except Exception:  # noqa: BLE001
+                    pass
+                # terminate 被忽略时兜底 kill，避免残留进程变成同一角色的第二个实例。
+                try:
+                    active_proc.wait(timeout=2)
+                except Exception:  # noqa: BLE001
+                    try:
+                        active_proc.kill()
+                    except Exception:  # noqa: BLE001
+                        pass
+            self._log(
+                r.role,
+                f"[anvil] context/payload overflow ({reason}; "
+                f"context≈{r.context_tokens}, payload≈{r.payload_chars} chars) "
+                "→ 将用 CIC 新会话重投当前 run")
 
     def _consolidate_context(self, conn, r: _Role, trigger: str) -> None:
         """上下文清理前固化任务知识；失败只记日志，不阻断换会话。"""
         try:
             from . import memory as memory_service
             snap = memory_service.consolidate_context(
-                conn, r.role, r.current_task_id, trigger, r.current_run_id)
+                conn, r.role, r.current_task_id, trigger, r.current_run_id,
+                slice_key=slice_key_of(r.context_key))
             if snap:
                 self._log(r.role,
                           f"[anvil] knowledge snapshot saved: {snap.get('path')}")
@@ -1602,15 +2062,16 @@ class DaemonManager:
                     "SELECT was_alive FROM reminder_wakes WHERE run_id=?",
                     (run_id,),
                 ).fetchone()
-                row = conn.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
-                if row and row["status"] == "running":
-                    from . import runs as runs_service
-                    if reminder_row is not None:
-                        # 知识管理/定时提醒是一次性工作：本轮结束即完成，不再作为
-                        # suspended 活跃会话等待下一条消息。
-                        runs_service.set_status(conn, run_id, "completed", ended_at=now_iso())
-                    else:
-                        runs_service.set_status(conn, run_id, "suspended")
+                from . import runs as runs_service
+                if reminder_row is not None:
+                    # 知识管理/定时提醒是一次性工作：本轮结束即完成，不再作为
+                    # suspended 活跃会话等待下一条消息。CAS 防止覆盖并发 failed。
+                    runs_service.set_status(
+                        conn, run_id, "completed", ended_at=now_iso(),
+                        from_statuses=("running",))
+                else:
+                    runs_service.set_status(
+                        conn, run_id, "suspended", from_statuses=("running",))
             with r.lock:
                 if proc is not None and r.proc is not proc:
                     return
@@ -1625,6 +2086,15 @@ class DaemonManager:
                 if (not r.queue and r.proc is not None
                         and (int(r.context_tokens or 0) >= self._cic_threshold(r)
                              or payload_high)):
+                    if run_id:
+                        rotation = runs_service.note_context_rotation(
+                            conn, run_id,
+                            max_rotations=config.CONTEXT_ROTATION_MAX_CONSECUTIVE)
+                        if rotation == "failed":
+                            self._log(
+                                r.role,
+                                "[anvil] consecutive context rotations exhausted; "
+                                "run marked failed")
                     self._consolidate_context(
                         conn, r, "payload-high" if payload_high else "context-high")
                     r.cic_pending = True
@@ -1649,6 +2119,13 @@ class DaemonManager:
                     r.current_log_path = None
                     self._db_upsert(conn, r, status="idle")
                 else:
+                    # 正常结束且未触发轮换：连续计数归零。
+                    if run_id:
+                        conn.execute(
+                            "UPDATE runs SET context_rotation_count=0 WHERE id=? "
+                            "AND status NOT IN ('completed','failed','abandoned')",
+                            (run_id,))
+                        conn.commit()
                     self._flush_next_locked(conn, r)
                 self._release_reminder_process(conn, r, run_id, reminder_row)
         finally:
@@ -1716,6 +2193,10 @@ class DaemonManager:
         # 先与进程失联：旧 reader 仍可能有缓冲事件，必须立即停止回写共享状态，
         # 否则上下文切换后旧 turn 的 result 会修改新任务的 current_run/tokens。
         r.proc = None
+        if r.context_overflow_proc is proc:
+            r.context_overflow = False
+            r.context_overflow_reason = None
+            r.context_overflow_proc = None
         r.busy = False
         r.busy_since = None
         try:
@@ -1738,11 +2219,14 @@ class DaemonManager:
             conn.close()
 
     def _build_cic(self, conn, role: str, task_id: str | None,
-                   run_id: str | None = None) -> str:
+                   run_id: str | None = None,
+                   slice_key: str | None = None) -> str:
         """Constructed Initial Context：任务知识 + 可复用知识 + 最近消息/动作。
 
         三条负规则：不宣布重置、不列未决问题清单、超过 2 小时的内容只给指针。
         task-scoped 内容只允许当前 task_id；role-scoped 可复用知识可跨任务。
+        slice 上下文只注入本切片（及 task-wide）的原始消息；其他切片只允许
+        以蒸馏后的知识/决策进入。
         """
         from . import knowledge as knowledge_service  # 惰性导入避免循环
         from . import knowledge_binding as knowledge_binding_service
@@ -1783,11 +2267,51 @@ class DaemonManager:
                 header += f"\n- 仓库：{task['repo']}"
             if repos:
                 header += "\n- 知识仓库：" + "、".join(repos)
+            if slice_key:
+                slice_row = conn.execute(
+                    "SELECT ws.title FROM workflow_steps ws "
+                    "JOIN workflows w ON w.id=ws.workflow_id "
+                    "WHERE w.task_id=? AND ws.slice_key=? LIMIT 1",
+                    (task_id, slice_key)).fetchone()
+                header += "\n- 当前切片：" + slice_key
+                if slice_row and slice_row["title"]:
+                    header += f"（{slice_row['title']}）"
+                header += "\n- 本切片的对话上下文与其他切片隔离；不要引用其他切片的原始对话。"
             blocks.append({
                 "priority": 5, "order": 5, "cap": 500, "min": 120, "text": header,
                 "name": "current_task", "layer": "L1", "kind": "task_header",
                 "scope": "task", "source_ids": [task_id] if task_id else [],
             })
+
+            # 本切片出发的独立派遣任务：回切后让角色知道出去做过什么。
+            try:
+                dclause = "d.source_task_id=?"
+                dparams: list = [task_id]
+                if slice_key:
+                    dclause += " AND (d.source_slice_key=? OR d.source_slice_key IS NULL)"
+                    dparams.append(slice_key)
+                drows = conn.execute(
+                    "SELECT d.target_task_id, d.target_role, d.status, d.returned_at, "
+                    "t.title, t.status AS target_status FROM task_dispatches d "
+                    "LEFT JOIN tasks t ON t.id=d.target_task_id "
+                    f"WHERE {dclause} ORDER BY d.created_at DESC LIMIT 5",
+                    dparams).fetchall()
+                if drows:
+                    lines = []
+                    for d in drows:
+                        line = (f"- {d['target_task_id']}「{d['title'] or '已删除任务'}」"
+                                f"→ {d['target_role'] or '—'}；{d['status']}")
+                        if d["target_status"]:
+                            line += f"（任务 {d['target_status']}）"
+                        lines.append(line)
+                    blocks.append({
+                        "priority": 48, "order": 55, "cap": 1200, "min": 150,
+                        "text": "## 本切片出发的独立派遣任务\n" + "\n".join(lines),
+                        "name": "dispatches", "layer": "L1", "kind": "dispatch",
+                        "scope": "task", "source_ids": [d["target_task_id"] for d in drows],
+                    })
+            except Exception:  # noqa: BLE001 —— 派遣信息失败不阻断 CIC
+                pass
 
             channel_knowledge = workspace_knowledge_service.render_for_task(
                 conn, dict(task), budget_chars=config.CHANNEL_KNOWLEDGE_CIC_CHARS)
@@ -1827,7 +2351,8 @@ class DaemonManager:
             except Exception:  # noqa: BLE001 —— 主题知识失败不阻断 CIC
                 pass
 
-            snap = knowledge_service.latest_task_snapshot(conn, role, task_id)
+            snap = knowledge_service.latest_task_snapshot(
+                conn, role, task_id, slice_key=slice_key)
             if snap:
                 blocks.append({
                     "priority": 20, "order": 30, "cap": 4000, "min": 600,
@@ -1863,10 +2388,18 @@ class DaemonManager:
                 counts = conn.execute(
                     "SELECT status, COUNT(*) AS n FROM workflow_steps "
                     "WHERE workflow_id=? GROUP BY status", (wf["id"],)).fetchall()
+                step_clause = ""
+                step_params: list = [wf["id"]]
+                if slice_key:
+                    # 只展示 task 级步骤与本切片；其他切片的执行细节不得串入。
+                    step_clause = (" AND (slice_key=? OR slice_key IS NULL "
+                                   "OR slice_key='' OR kind='plan_slices')")
+                    step_params.append(slice_key)
                 steps = conn.execute(
                     "SELECT step_id, title, role_slug, status, summary, feedback "
-                    "FROM workflow_steps WHERE workflow_id=? "
-                    "ORDER BY updated_at DESC, step_id DESC LIMIT 30", (wf["id"],)).fetchall()
+                    "FROM workflow_steps WHERE workflow_id=?" + step_clause +
+                    " ORDER BY updated_at DESC, step_id DESC LIMIT 30",
+                    step_params).fetchall()
                 if steps:
                     lines = []
                     if counts:
@@ -1929,10 +2462,11 @@ class DaemonManager:
             })
 
         if task is not None:
+            clause, params = self._activity_scope(task_id, slice_key)
             rows = conn.execute(
                 "SELECT id, role_slug, kind, payload_json FROM activities "
-                "WHERE task_id=? AND kind IN ('comment','mention','step') "
-                "ORDER BY id DESC LIMIT 25", (task_id,)).fetchall()
+                f"WHERE {clause} AND kind IN ('comment','mention','step') "
+                "ORDER BY id DESC LIMIT 25", params).fetchall()
             lines = []
             for r in rows:
                 p = jloads(r["payload_json"], {})
@@ -1959,7 +2493,8 @@ class DaemonManager:
                     "name": "recent_messages", "layer": "L1", "kind": "messages",
                     "scope": "task", "source_ids": [r["id"] for r in rows],
                 })
-            acts = conn.execute(
+            # audit 没有 slice 维度；切片上下文不注入，避免把其他切片的动作带进来。
+            acts = [] if slice_key else conn.execute(
                 "SELECT role_slug, action FROM audit WHERE task_id=? ORDER BY id DESC LIMIT 12",
                 (task_id,)).fetchall()
             if acts:
@@ -2007,6 +2542,7 @@ class DaemonManager:
             from . import context_manifest as manifest_service
             manifest_service.record(
                 conn, run_id=run_id, role_slug=role, task_id=task_id,
+                slice_key=slice_key,
                 kind="cic", budget_chars=32000, total_chars=len(text),
                 blocks=manifest)
             conn.commit()
@@ -2018,11 +2554,19 @@ class DaemonManager:
                    error: str | None = None) -> None:
         if pid == -1:
             pid = r.proc.pid if r.proc else None
+        # dead/idle 不得携带 current_*；即使调用方忘了先清内存，DB 也不能留下幽灵绑定。
+        current_task = r.current_task_id if status not in ("dead", "idle") else None
+        current_run = r.current_run_id if status not in ("dead", "idle") else None
+        current_step = r.current_step_id if status not in ("dead", "idle") else None
+        current_context = r.context_key if status not in ("dead", "idle") else None
+        current_slice = slice_key_of(current_context) if current_context else None
+        busy_since = (r.busy_since if status not in ("dead", "idle") else None)
         conn.execute(
             "INSERT INTO role_sessions (role_slug, session_id, token, model_id, pid, status, "
             "busy_since, last_active_at, last_context_tokens, last_error, "
-            "current_task_id, current_run_id, current_step_id, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "current_task_id, current_run_id, current_step_id, current_context_key, "
+            "current_slice_key, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(role_slug) DO UPDATE SET session_id=excluded.session_id, token=excluded.token, "
             "model_id=COALESCE(excluded.model_id, role_sessions.model_id), "
             "pid=excluded.pid, status=excluded.status, busy_since=excluded.busy_since, "
@@ -2030,12 +2574,14 @@ class DaemonManager:
             "last_context_tokens=COALESCE(excluded.last_context_tokens, role_sessions.last_context_tokens), "
             "last_error=excluded.last_error, current_task_id=excluded.current_task_id, "
             "current_run_id=excluded.current_run_id, current_step_id=excluded.current_step_id, "
-            "updated_at=excluded.updated_at",
+            "current_context_key=excluded.current_context_key, "
+            "current_slice_key=excluded.current_slice_key, updated_at=excluded.updated_at",
             (r.role, r.session_id or "", r.token, r.model_id, pid, status,
-             datetime.fromtimestamp(r.busy_since, tz=timezone.utc).isoformat() if r.busy_since else None,
+             datetime.fromtimestamp(busy_since, tz=timezone.utc).isoformat() if busy_since else None,
              datetime.fromtimestamp(r.last_active, tz=timezone.utc).isoformat() if r.last_active else None,
              r.context_tokens or None, error,
-             r.current_task_id, r.current_run_id, r.current_step_id, now_iso()),
+             current_task, current_run, current_step, current_context, current_slice,
+             now_iso()),
         )
         conn.commit()
         # 当前任务上下文槽同步（session/水位/状态）；没有加载槽时跳过。
@@ -2068,8 +2614,11 @@ class DaemonManager:
                                   f"[anvil] 启动自愈：终止上一实例遗留进程 pid={pid}")
                 except Exception:  # noqa: BLE001
                     pass
-            conn.execute("UPDATE role_sessions SET status='dead', pid=NULL, updated_at=? "
-                         "WHERE status IN ('starting','idle','busy')", (now_iso(),))
+            conn.execute(
+                "UPDATE role_sessions SET status='dead', pid=NULL, busy_since=NULL, "
+                "current_task_id=NULL, current_run_id=NULL, current_step_id=NULL, "
+                "current_context_key=NULL, current_slice_key=NULL, "
+                "updated_at=? WHERE status IN ('starting','idle','busy')", (now_iso(),))
             conn.execute("UPDATE role_task_sessions SET status='dead', updated_at=? "
                          "WHERE status IN ('idle','busy')", (now_iso(),))
             conn.commit()

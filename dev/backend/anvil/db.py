@@ -318,7 +318,7 @@ CREATE TABLE IF NOT EXISTS runs (
     role_slug         TEXT NOT NULL,
     task_id           TEXT,
     status            TEXT NOT NULL DEFAULT 'created',
-    -- 8-state lifecycle: created|projecting|running|submitted|reviewing|completed|failed|abandoned
+    -- 9-state lifecycle: created|projecting|running|suspended|submitted|reviewing|completed|failed|abandoned
     profile_snapshot  TEXT,
     worktree_path     TEXT,
     native_session_id TEXT,
@@ -641,13 +641,15 @@ CREATE TABLE IF NOT EXISTS action_cards (
     decided_at  TEXT
 );
 
--- Agent Inbox 拉模式 cursor（role × task；两阶段：check 读、commit 提交）
+-- Agent Inbox 拉模式 cursor（role × task × slice；两阶段：check 读、commit 提交）
+-- slice_key='' 表示 task-wide；切片上下文用实际 slice key，避免 A/B 游标互相推进。
 CREATE TABLE IF NOT EXISTS role_inbox_cursors (
     role_slug        TEXT NOT NULL,
     task_id          TEXT NOT NULL,
+    slice_key        TEXT NOT NULL DEFAULT '',
     last_activity_id INTEGER NOT NULL DEFAULT 0,
     updated_at       TEXT NOT NULL,
-    PRIMARY KEY (role_slug, task_id)
+    PRIMARY KEY (role_slug, task_id, slice_key)
 );
 
 -- Agent 会话令牌（design §10 末段：X-Anvil-Session 校验该会话能否操作目标任务）
@@ -1199,7 +1201,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
             pass
     # 迁移：P0 可靠性——run 级超时 / 失败分类；P1-0——任务规划字段 / 草案关联任务
     for col in ("timeout_seconds INTEGER", "failure_class TEXT",
-                "context_reset_count INTEGER NOT NULL DEFAULT 0"):
+                "context_reset_count INTEGER NOT NULL DEFAULT 0",
+                "context_rotation_count INTEGER NOT NULL DEFAULT 0"):
         try:
             conn.execute(f"ALTER TABLE runs ADD COLUMN {col}")
         except sqlite3.OperationalError:
@@ -1305,6 +1308,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_finding_external_submit_v1(conn)
     _migrate_knowledge_hits_v1(conn)
     _migrate_task_workspace_v1(conn)
+    _migrate_slice_context_v1(conn)
+    _migrate_slice_context_v2(conn)
     _migrate_knowledge_repos_v1(conn)
     _migrate_notes_repo_ids_v2(conn)
     _migrate_knowledge_quality_v1(conn)
@@ -1599,6 +1604,201 @@ def _migrate_task_workspace_v1(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
     _set_setting(conn, "schema.task_workspace_v1", "1")
+    conn.commit()
+
+
+def _migrate_slice_context_v1(conn: sqlite3.Connection) -> None:
+    """Slice-scoped role contexts + independent dispatched tasks.
+
+    `role_task_sessions.task_key` becomes an opaque context key; explicit
+    task_id/slice_key columns keep task-scoped cleanup from parsing it.
+    """
+    if _setting(conn, "schema.slice_context_v1"):
+        return
+
+    for table, specs in (
+        ("runs", (
+            "slice_key TEXT",
+            "wake_note TEXT",
+            "dispatch_id TEXT",
+            "origin TEXT",
+            "context_return_context_key TEXT",
+            "context_return_run_id TEXT",
+            "context_return_after_turn INTEGER NOT NULL DEFAULT 0",
+            "context_returned_at TEXT",
+        )),
+        ("tasks", (
+            "source_task_id TEXT",
+            "source_slice_key TEXT",
+            "source_step_id TEXT",
+            "source_workflow_id TEXT",
+            "requested_by TEXT",
+            "dispatch_status TEXT NOT NULL DEFAULT 'none'",
+            "dispatch_reason TEXT",
+            "dispatch_reason_json TEXT",
+        )),
+        ("role_sessions", (
+            "current_context_key TEXT",
+            "current_slice_key TEXT",
+        )),
+        ("role_task_sessions", (
+            "task_id TEXT",
+            "slice_key TEXT",
+        )),
+        ("notes", (
+            "slice_key TEXT",
+        )),
+    ):
+        for spec in specs:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {spec}")
+            except sqlite3.OperationalError:
+                pass
+
+    for row in conn.execute(
+            "SELECT role_slug, task_key FROM role_task_sessions "
+            "WHERE task_id IS NULL").fetchall():
+        key = str(row["task_key"] or "")
+        if key == "__global__":
+            task_id, slice_key = None, None
+        elif "::slice::" in key:
+            task_id, slice_key = key.split("::slice::", 1)
+        else:
+            task_id, slice_key = key, None
+        conn.execute(
+            "UPDATE role_task_sessions SET task_id=?, "
+            "slice_key=COALESCE(slice_key, ?) WHERE role_slug=? AND task_key=?",
+            (task_id, slice_key, row["role_slug"], key))
+    conn.execute(
+        "UPDATE role_sessions SET current_context_key = current_task_id "
+        "WHERE current_context_key IS NULL AND current_task_id IS NOT NULL")
+    conn.execute(
+        "UPDATE runs SET slice_key = ("
+        " SELECT ws.slice_key FROM workflow_steps ws "
+        " WHERE ws.workflow_id=runs.workflow_id AND ws.step_id=runs.step_id) "
+        "WHERE slice_key IS NULL AND workflow_id IS NOT NULL AND step_id IS NOT NULL")
+    # Legacy static slices: infer `<slice>.<phase>` only when the suffix is a
+    # known loop phase. Arbitrary dotted step ids stay task-level.
+    phases = {"scope", "execute", "verify", "fix", "verify2", "decide"}
+    rows = conn.execute(
+        "SELECT workflow_id, step_id FROM workflow_steps "
+        "WHERE (slice_key IS NULL OR slice_key='') "
+        "AND (source_step_id IS NULL OR source_step_id='')").fetchall()
+    for row in rows:
+        base, sep, phase = str(row["step_id"]).rpartition(".")
+        if (sep and (phase in phases or re.fullmatch(r"execute\d+", phase)) and base
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", base)
+                and "::slice::" not in base):
+            conn.execute(
+                "UPDATE workflow_steps SET slice_key=? WHERE workflow_id=? AND step_id=?",
+                (base, row["workflow_id"], row["step_id"]))
+
+    # Static slice inference runs after the first backfill; fill those runs too.
+    conn.execute(
+        "UPDATE runs SET slice_key = ("
+        " SELECT ws.slice_key FROM workflow_steps ws "
+        " WHERE ws.workflow_id=runs.workflow_id AND ws.step_id=runs.step_id) "
+        "WHERE slice_key IS NULL AND workflow_id IS NOT NULL AND step_id IS NOT NULL")
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS task_dispatches (
+            id TEXT PRIMARY KEY,
+            source_task_id TEXT NOT NULL,
+            source_workflow_id TEXT,
+            source_step_id TEXT,
+            source_slice_key TEXT,
+            requester_run_id TEXT,
+            requested_by TEXT,
+            target_task_id TEXT NOT NULL,
+            target_role TEXT,
+            request_hash TEXT,
+            return_context_key TEXT,
+            return_run_id TEXT,
+            return_step_id TEXT,
+            reason_code TEXT NOT NULL,
+            reason_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            returned_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """)
+    for stmt in (
+        "CREATE INDEX IF NOT EXISTS idx_runs_task_role_slice_status "
+        "ON runs(task_id, role_slug, slice_key, status)",
+        "CREATE INDEX IF NOT EXISTS idx_role_task_sessions_task "
+        "ON role_task_sessions(role_slug, task_id)",
+        "CREATE INDEX IF NOT EXISTS idx_notes_task_slice "
+        "ON notes(role_slug, task_id, slice_key)",
+        "CREATE INDEX IF NOT EXISTS idx_tasks_source_slice "
+        "ON tasks(source_task_id, source_slice_key)",
+        "CREATE INDEX IF NOT EXISTS idx_tasks_dispatch_status "
+        "ON tasks(dispatch_status)",
+        "CREATE INDEX IF NOT EXISTS idx_task_dispatches_source "
+        "ON task_dispatches(source_task_id, source_slice_key)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_task_dispatches_active_target "
+        "ON task_dispatches(target_task_id) "
+        "WHERE status IN ('open','return_ready','returning')",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_task_dispatches_active_request "
+        "ON task_dispatches(source_task_id, source_slice_key, target_role, request_hash) "
+        "WHERE status IN ('open','return_ready','returning')",
+    ):
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+
+    _set_setting(conn, "schema.slice_context_v1", "1")
+    conn.commit()
+
+
+def _migrate_slice_context_v2(conn: sqlite3.Connection) -> None:
+    """补齐 v1 之后新增的切片列，并迁移 inbox cursor 到 (role, task, slice)。
+
+    不能把新列塞回已发布的 v1：已有库的 `schema.slice_context_v1` 已经置 1，
+    early-return 会让新列永远缺失。
+    """
+    if _setting(conn, "schema.slice_context_v2"):
+        return
+    for table, spec in (
+        ("notes", "slice_key TEXT"),
+        ("context_manifests", "slice_key TEXT"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {spec}")
+        except sqlite3.OperationalError:
+            pass
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(role_inbox_cursors)")}
+    if "slice_key" not in cols:
+        conn.execute("ALTER TABLE role_inbox_cursors RENAME TO role_inbox_cursors_v1")
+        conn.execute(
+            "CREATE TABLE role_inbox_cursors ("
+            " role_slug TEXT NOT NULL, task_id TEXT NOT NULL,"
+            " slice_key TEXT NOT NULL DEFAULT '',"
+            " last_activity_id INTEGER NOT NULL DEFAULT 0,"
+            " updated_at TEXT NOT NULL,"
+            " PRIMARY KEY (role_slug, task_id, slice_key))")
+        conn.execute(
+            "INSERT INTO role_inbox_cursors "
+            "(role_slug, task_id, slice_key, last_activity_id, updated_at) "
+            "SELECT role_slug, task_id, '', last_activity_id, updated_at "
+            "FROM role_inbox_cursors_v1")
+        conn.execute("DROP TABLE role_inbox_cursors_v1")
+
+    for stmt in (
+        "CREATE INDEX IF NOT EXISTS idx_role_inbox_cursors_task "
+        "ON role_inbox_cursors(role_slug, task_id)",
+        "CREATE INDEX IF NOT EXISTS idx_notes_task_slice "
+        "ON notes(role_slug, task_id, slice_key)",
+    ):
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+    _set_setting(conn, "schema.slice_context_v2", "1")
     conn.commit()
 
 

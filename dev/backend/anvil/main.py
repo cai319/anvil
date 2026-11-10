@@ -59,15 +59,46 @@ def _graph_db_path(db_path: str) -> str:
     return str(p.with_name(p.stem + "-graph.db"))
 
 
+def _pump_role_exit(db_path: str, orchestrator, role: str, code: int,
+                    run_id: str | None) -> None:
+    """常驻进程退出：只把实际执行的 run 泵进 process_exit。
+
+    排队中的 run 仍是 running，但并未被这个进程执行；它们由 daemon 的队列恢复
+    继续投递，不能在这里被连带判失败。
+    """
+    if not run_id:
+        return
+    c = open_conn(db_path)
+    try:
+        row = c.execute(
+            "SELECT id, started_at FROM runs WHERE id=? AND role_slug=? "
+            "AND status IN ('created','projecting','running')",
+            (run_id, role),
+        ).fetchone()
+    finally:
+        c.close()
+    if row is None:
+        return
+    try:
+        orchestrator.pump(db_path, row["id"], "process_exit", {
+            "exit_code": code,
+            "observed_started_at": row["started_at"],
+        })
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _handle_context_overflow(db_path: str, orchestrator, run_id: str, reason: str,
                              max_retries: int) -> str:
     """上下文溢出后的恢复：retry 时清会话并重新 wake 当前 run；超限则判失败。"""
     conn = open_conn(db_path)
     try:
         if reason == "threshold":
-            # 主动水位轮换：正常上下文管理，不计入失败/溢出重试预算。
+            # 主动水位轮换：正常上下文管理，不计入失败/溢出重试预算；
+            # 但连续轮换超过上限要失败，防止 CIC 本身超阈值时无限循环。
             outcome = runs_service.reset_run_for_redelivery(
-                conn, run_id, reason=reason)
+                conn, run_id, reason=reason,
+                max_rotations=config.CONTEXT_ROTATION_MAX_CONSECUTIVE)
         else:
             outcome = runs_service.register_context_overflow(
                 conn, run_id, max_retries=max_retries, reason=reason)
@@ -112,8 +143,8 @@ def _cleanup_orphans(conn) -> None:
         "DELETE FROM role_inbox_cursors WHERE task_id IS NOT NULL "
         "AND task_id NOT IN (SELECT id FROM tasks)")
     conn.execute(
-        "DELETE FROM role_task_sessions WHERE task_key<>'__global__' "
-        "AND task_key NOT IN (SELECT id FROM tasks)")
+        "DELETE FROM role_task_sessions WHERE task_id IS NOT NULL "
+        "AND task_id NOT IN (SELECT id FROM tasks)")
     conn.execute(
         "DELETE FROM reminders WHERE role_slug IS NOT NULL "
         "AND role_slug NOT IN (SELECT slug FROM roles)")
@@ -196,25 +227,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         config.PERSISTENT_RUNTIME == "auto" and scheduler_enabled)
     role_daemon = daemon_service.init_manager(path, persistent_enabled)
     if persistent_enabled:
-        def _on_role_exit(role: str, code: int) -> None:
-            """常驻进程意外退出：把该角色所有活跃 run 泵进 process_exit。"""
-            c = open_conn(path)
-            try:
-                rows = c.execute(
-                    "SELECT id, started_at FROM runs WHERE role_slug=? "
-                    "AND status IN ('created','projecting','running')",
-                    (role,),
-                ).fetchall()
-            finally:
-                c.close()
-            for r in rows:
-                try:
-                    orchestrator.pump(path, r["id"], "process_exit", {
-                        "exit_code": code,
-                        "observed_started_at": r["started_at"],
-                    })
-                except Exception:  # noqa: BLE001
-                    pass
+        def _on_role_exit(role: str, code: int, run_id: str | None = None) -> None:
+            _pump_role_exit(path, orchestrator, role, code, run_id)
         role_daemon.on_exit = _on_role_exit
 
         def _on_role_context_overflow(role: str, run_id: str, reason: str) -> None:
@@ -222,8 +236,13 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
             daemon 只负责发现并终止会话；run 的恢复动作放在这里，避免反向依赖编排器。
             """
-            _handle_context_overflow(path, orchestrator, run_id, reason,
-                                     config.CONTEXT_RESET_MAX_RETRIES)
+            outcome = _handle_context_overflow(path, orchestrator, run_id, reason,
+                                               config.CONTEXT_RESET_MAX_RETRIES)
+            if outcome == "failed":
+                try:
+                    role_daemon.clear_run(role, run_id)
+                except Exception:  # noqa: BLE001 —— 清理失败不改变 run 失败语义
+                    pass
         role_daemon.on_context_overflow = _on_role_context_overflow
 
         def _on_project(role: str, run_id: str, task_id: str | None,

@@ -84,15 +84,18 @@ def reset_my_session(body: dict, request: Request, conn=Depends(get_db),
     if auth.task_id and auth.task_id != task_id:
         raise HTTPException(status_code=403, detail="session is bound to another task")
 
-    run = services.runs.find_active_run(conn, task_id, role)
-    if run is None:
-        raise HTTPException(status_code=409, detail="no active run for this role/task")
     mgr = services.daemon.get_manager()
     if mgr is None or not mgr.enabled:
         raise HTTPException(status_code=409, detail="persistent runtime is not enabled")
     st = mgr.status(role)
     if not st.get("alive"):
         raise HTTPException(status_code=409, detail="role process is not alive")
+    # 以进程真实 current_run 为准：同 task 可能有多个 slice 的 suspended run，
+    # 不能再用 find_active_run 猜“最新一个”。
+    run = services.runs.get_run(conn, st.get("current_run_id") or "")
+    if run is None or run.get("task_id") != task_id or run.get("role_slug") != role:
+        raise HTTPException(
+            status_code=409, detail="role is not currently processing this task")
     if st.get("current_run_id") != run["id"]:
         raise HTTPException(status_code=409, detail="role is not currently processing this run")
     if st.get("current_task_id") not in (None, task_id):
@@ -107,10 +110,12 @@ def reset_my_session(body: dict, request: Request, conn=Depends(get_db),
     # 主动换会话前也固化任务知识，避免只有 daemon 触发的轮换才有快照。
     try:
         services.memory.consolidate_context(
-            conn, role, task_id, "self-reset", run["id"])
+            conn, role, task_id, "self-reset", run["id"],
+            slice_key=run.get("slice_key"))
     except Exception:  # noqa: BLE001 —— 快照失败不阻断 reset
         pass
-    mgr.reset_session(role, cic=True, task_id=task_id)
+    mgr.reset_session(
+        role, cic=True, task_id=task_id, slice_key=run.get("slice_key"))
     services.runs.set_native_session(conn, run["id"], None)
     services.runs.set_status(conn, run["id"], "created")
     conn.execute(
@@ -207,6 +212,12 @@ def write_note(body: NoteWriteIn, conn=Depends(get_db), auth: Auth = Depends(get
         raise HTTPException(status_code=422, detail=f"invalid note kind: {body.kind}")
     if scope not in services.knowledge.NOTE_SCOPES:
         raise HTTPException(status_code=422, detail=f"invalid note scope: {scope}")
+    slice_key = body.slice_key
+    if slice_key is None and scope == "task" and auth.run_id:
+        run = conn.execute(
+            "SELECT task_id, slice_key FROM runs WHERE id=?", (auth.run_id,)).fetchone()
+        if run is not None and run["task_id"] == task_id:
+            slice_key = run["slice_key"]
     is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
     status = services.memory.resolve_practice_status(
         conn,
@@ -218,7 +229,7 @@ def write_note(body: NoteWriteIn, conn=Depends(get_db), auth: Auth = Depends(get
     try:
         return services.memory.write_note(
             conn, role, body.path, body.content,
-            kind=body.kind, scope=scope, task_id=task_id,
+            kind=body.kind, scope=scope, task_id=task_id, slice_key=slice_key,
             source_task=body.source_task, tags=body.tags, repo=body.repo,
             module=body.module, confidence=body.confidence, mode=body.mode,
             practice_task_id=body.practice_task_id or auth.task_id,

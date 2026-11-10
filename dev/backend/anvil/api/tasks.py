@@ -12,7 +12,7 @@ from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import ClaimIn, CommentIn, DepIn, ReviewIn, SubmitIn, TaskIn, TaskOut, TaskPatch
 from ..services import knowledge_quality, repo_catalog
 from ..services.tasks import ConflictError
-from ..util import now_iso
+from ..util import jdumps, now_iso
 from . import access, events
 
 router = APIRouter()
@@ -28,7 +28,7 @@ def _pump_after_submit(request: Request, conn, tid: str) -> None:
     orch = getattr(request.app.state, "orchestrator", None)
     if orch is None:
         return
-    active = services.runs.find_active_run(conn, tid)
+    active = services.runs.find_active_run(conn, tid, slice_key=None)
     if active and active["status"] == "running":
         try:
             orch.pump(request.app.state.db_path, active["id"], "submit", {})
@@ -41,7 +41,7 @@ def _resume_after_review(request: Request, conn, tid: str, approve: bool) -> Non
     orch = getattr(request.app.state, "orchestrator", None)
     if orch is None:
         return
-    active = services.runs.find_active_run(conn, tid)
+    active = services.runs.find_active_run(conn, tid, slice_key=None)
     if active and active["status"] == "reviewing":
         try:
             orch.resume_review(request.app.state.db_path, active["id"], approve)
@@ -792,6 +792,24 @@ def reject_delegation(tid: str, body: dict, conn=Depends(get_db),
     return result
 
 
+def _auth_run_context(conn, auth: Auth, tid: str) -> dict:
+    """当前运行级会话的 run/slice/step；人类/测试旁路/跨任务会话返回空。"""
+    empty = {"run_id": None, "slice_key": None, "step_id": None}
+    if auth.test_bypass or not auth.run_id:
+        return empty
+    row = conn.execute(
+        "SELECT task_id, slice_key, step_id FROM runs WHERE id=?",
+        (auth.run_id,)).fetchone()
+    if row is None or row["task_id"] != tid:
+        return empty
+    return {"run_id": auth.run_id, "slice_key": row["slice_key"],
+            "step_id": row["step_id"]}
+
+
+def _auth_slice_key(conn, auth: Auth, tid: str) -> str | None:
+    return _auth_run_context(conn, auth, tid)["slice_key"]
+
+
 @router.post("/{tid}/comment", response_model=TaskOut)
 def comment_task(tid: str, body: CommentIn, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     _assert_session_task(conn, auth, tid)
@@ -799,7 +817,9 @@ def comment_task(tid: str, body: CommentIn, conn=Depends(get_db), auth: Auth = D
     if held is not None:
         return held
     try:
-        result = services.tasks.comment(conn, tid, auth.role or "human", body.body)
+        result = services.tasks.comment(
+            conn, tid, auth.role or "human", body.body,
+            slice_key=_auth_slice_key(conn, auth, tid))
     except LookupError:
         raise HTTPException(status_code=404, detail="task not found")
     events.publish("task", {"id": tid, "kind": "comment"})
@@ -807,40 +827,154 @@ def comment_task(tid: str, body: CommentIn, conn=Depends(get_db), auth: Auth = D
 
 
 def _wake_mentioned_role(conn, request: Request, task: dict, target: str,
-                         message: str, sender: str, wf: dict | None) -> None:
-    """唤醒被 @ 的角色：有活跃 run 则 resume；否则起 reply/normal run。
+                         message: str, sender: str, wf: dict | None,
+                         *, source_slice_key: str | None = None,
+                         source_run_id: str | None = None,
+                         source_step_id: str | None = None,
+                         explicit_mode: str | None = None) -> None:
+    """按上下文路由唤醒被 @ 的角色：复用当前 / 切换切片 / 新建独立任务。
 
-    - 工作流任务：起 `[anvil:reply]` run（只讨论，不改 workflow 结构）；
-    - 普通任务/子任务：起普通 run，让被 @ 的角色可以直接 claim 执行。
+    - 同 task 同 slice：复用现有上下文；
+    - 同 task 已知 slice：切回该 slice 槽；
+    - 无关/无归属：创建独立派遣任务（需启用自动派遣），否则退化为本任务新回复 run。
     """
     orch = getattr(request.app.state, "orchestrator", None)
-    active = services.runs.find_active_run(conn, task["id"], target)
+    findings_mode = (
+        bool(task.get("issue_board_enabled"))
+        and target in services.findings.reviewer_roles(conn, task["id"])
+        and services.findings.board_status(conn, task["id"]) == "in_progress")
+    if findings_mode:
+        from ..services import daemon as daemon_service
+        decision = {
+            "mode": "switch",
+            "target_task_id": task["id"],
+            "target_slice_key": None,
+            "context_key": daemon_service.context_key(task["id"]),
+            "current_context_key": None,
+            "current_run_id": None,
+            "reasons": ["findings_task_level"],
+            "score": None,
+            "confidence": "hard",
+        }
+    else:
+        decision = services.context_router.route(
+            conn, target_role=target, source_task_id=task["id"],
+            source_slice_key=source_slice_key,
+            source_step_id=source_step_id, source_run_id=source_run_id,
+            action_kind="mention", message=message,
+            explicit_mode=explicit_mode)
+    try:
+        conn.execute(
+            "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
+            "VALUES (?,?,?,?,?)",
+            (sender, task["id"], "context.routing",
+             jdumps({
+                 "target": target, "message": message[:200],
+                 "source_slice_key": source_slice_key,
+                 "source_run_id": source_run_id,
+                 **decision,
+             }), now_iso()),
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001 —— 审计失败不阻断唤醒
+        pass
+
+    mode = decision.get("mode")
+    if mode == "dispatch" and config.DISPATCH_AUTO_FROM_MENTION:
+        try:
+            result = services.dispatch.create_dispatch(
+                conn, source_task_id=task["id"], target_role=target,
+                message=message, requester=sender,
+                source_slice_key=source_slice_key,
+                source_step_id=source_step_id,
+                source_run_id=source_run_id,
+                reason_code="auto_route",
+                reason_json={"score": decision.get("score"),
+                             "reasons": decision.get("reasons")},
+            )
+            run = result.get("run")
+            if orch and run and not result.get("reused"):
+                try:
+                    orch.pump(request.app.state.db_path, run["id"], "wake", {})
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+        except services.dispatch.DispatchError:
+            # 派遣失败（深度/权限/并发去重冲突）退化为本任务内的回复 run。
+            mode = "new_slice"
+    if mode == "dispatch":
+        mode = "new_slice"
+
+    target_task_id = decision.get("target_task_id") or task["id"]
+    target_slice = decision.get("target_slice_key")
+    active = services.runs.find_active_run(
+        conn, target_task_id, target, slice_key=target_slice)
     if active:
-        if orch:
-            try:
-                orch.pump(request.app.state.db_path, active["id"], "resume", {})
-            except Exception:  # noqa: BLE001
-                pass
-        return
-    if (task.get("issue_board_enabled")
-            and target in services.findings.reviewer_roles(conn, task["id"])
-            and services.findings.board_status(conn, task["id"]) == "in_progress"):
-        # 问题板复评：不能被 workflow 的 REPLY_PROTOCOL 拦住（reviewer 需要写 finding）。
+        status = str(active.get("status") or "")
+        if status == "suspended":
+            # 挂起等待下一条消息：resume 现有 run，复用该上下文。
+            hidden = (
+                target_task_id != task["id"]
+                or (source_slice_key is not None
+                    and source_slice_key != target_slice))
+            if hidden:
+                # 跨 task/跨切片的 mention 不在目标 run 的 transcript 里；
+                # 用一次性 wake_note 把请求本身带过去。
+                try:
+                    services.dispatch.append_wake_note(
+                        conn, active["id"],
+                        f"来源任务 {task['id']} 的 {sender} @你：\n{message}\n\n"
+                        "请在本上下文处理该请求；处理完按系统回切提示返回原上下文。")
+                except Exception:  # noqa: BLE001
+                    pass
+            if mode == "switch":
+                try:
+                    services.dispatch.record_context_return(
+                        conn, switched_run_id=active["id"],
+                        return_context_key=decision.get("current_context_key"),
+                        return_run_id=decision.get("current_run_id"))
+                except Exception:  # noqa: BLE001
+                    pass
+            if orch:
+                try:
+                    orch.pump(request.app.state.db_path, active["id"], "resume", {})
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+        if status in ("submitted", "reviewing"):
+            # HITL 评审中的 run 不能被 mention 拉回执行。
+            return
+        # created/projecting/running：不能 resume（会重复投递）；新建排队 run。
+
+    source_note = (
+        f"来源任务：{task['id']}"
+        + (f" / 切片 {source_slice_key}" if source_slice_key else "")
+        + f"\n路由：{mode}（{', '.join(decision.get('reasons') or [])}）\n\n")
+    if findings_mode:
         run = services.runs.create_run(
-            conn, target, task["id"],
+            conn, target, target_task_id,
             prompt=("[anvil:findings]你在任务会话中被 "
                     f"{sender} @：\n{message}\n\n"
                     "请复核/更新问题板 findings；完成后执行 "
                     "`anvil finding complete --task $ANVIL_TASK_ID --summary \"...\"`。"))
     elif wf is not None or target == services.roles.ONBOARDING_SLUG:
-        # 工作流任务或 Cindy：起回复 run（只讨论，不 claim/改 workflow）。
         run = services.runs.create_run(
-            conn, target, task["id"],
+            conn, target, target_task_id,
             prompt=("[anvil:reply]你在任务会话中被 "
-                    f"{sender} @：\n{message}\n\n"
-                    "请评估该反馈并回复你的判断与依据。"))
+                    f"{sender} @：\n{source_note}{message}\n\n"
+                    "请评估该反馈并回复你的判断与依据。"),
+            slice_key=target_slice, origin="mention")
     else:
-        run = services.runs.create_run(conn, target, task["id"])
+        run = services.runs.create_run(
+            conn, target, target_task_id, slice_key=target_slice, origin="mention")
+    if mode == "switch":
+        try:
+            services.dispatch.record_context_return(
+                conn, switched_run_id=run["id"],
+                return_context_key=decision.get("current_context_key"),
+                return_run_id=decision.get("current_run_id"))
+        except Exception:  # noqa: BLE001
+            pass
     if orch:
         try:
             orch.pump(request.app.state.db_path, run["id"], "wake", {})
@@ -860,7 +994,13 @@ def mention_task(tid: str, body: dict, request: Request, conn=Depends(get_db), a
         return held
     target = str(body.get("target") or "human")
     message = _strip_leading_mention(conn, str(body.get("message") or ""), target)
-    result = services.tasks.mention(conn, tid, auth.role or "human", target, message)
+    source_ctx = _auth_run_context(conn, auth, tid)
+    explicit_slice = str(body.get("slice_key") or "").strip() or None
+    if explicit_slice:
+        source_ctx = {**source_ctx, "slice_key": explicit_slice}
+    result = services.tasks.mention(
+        conn, tid, auth.role or "human", target, message,
+        slice_key=source_ctx["slice_key"])
     # workflow/system 是系统伪发送者，不是真实角色；即使历史数据里有同名 role 行，
     # 也不允许通过 @ 唤醒它。
     pseudo_targets = {"workflow", "system"}
@@ -915,8 +1055,13 @@ def mention_task(tid: str, body: dict, request: Request, conn=Depends(get_db), a
             except Exception:  # noqa: BLE001 —— 规划失败不阻断已记录的 mention
                 pass
         else:
-            _wake_mentioned_role(conn, request, task, target, message,
-                                 auth.role or "human", wf)
+            _wake_mentioned_role(
+                conn, request, task, target, message,
+                auth.role or "human", wf,
+                source_slice_key=source_ctx["slice_key"],
+                source_run_id=source_ctx["run_id"],
+                source_step_id=source_ctx["step_id"],
+                explicit_mode=body.get("context_mode"))
     events.publish("task", {"id": tid, "kind": "mention", "target": target})
     return result
 
@@ -1112,7 +1257,7 @@ def dispatch_task(tid: str, request: Request, conn=Depends(get_db),
     runs = []
     orch = getattr(request.app.state, "orchestrator", None)
     for role in assignees:
-        existing = services.runs.find_active_run(conn, tid, role)
+        existing = services.runs.find_active_run(conn, tid, role, slice_key=None)
         run = existing or services.runs.create_run(conn, role, tid)
         if not existing and orch:
             try:
@@ -1130,3 +1275,65 @@ def add_deps(tid: str, body: DepIn, conn=Depends(get_db),
     if t is None:
         raise HTTPException(status_code=404, detail="task not found")
     return t
+
+
+@router.post("/{tid}/dispatches", status_code=201)
+def create_dispatch(tid: str, body: dict, request: Request, conn=Depends(get_db),
+                    auth: Auth = Depends(get_auth)):
+    """创建一张**独立顶层任务卡**（不是 delegation 子任务）。
+
+    与现有 `POST /{tid}/dispatch`（启动/规划）区分：这里的目标角色在全新上下文
+    工作，来源 task 只保留软关联，不阻塞、不共享对话。
+    """
+    _assert_session_task(conn, auth, tid)
+    target_role = str(body.get("target_role") or "").strip()
+    message = str(body.get("message") or "").strip()
+    if not target_role or not message:
+        raise HTTPException(status_code=422, detail="target_role and message are required")
+    source_run_id = body.get("source_run_id") or auth.run_id
+    source_slice_key = str(body.get("slice_key") or "").strip() or None
+    source_step_id = str(body.get("source_step_id") or "").strip() or None
+    if source_run_id:
+        run = conn.execute(
+            "SELECT task_id, slice_key, step_id FROM runs WHERE id=?",
+            (source_run_id,)).fetchone()
+        if run is None or run["task_id"] != tid:
+            source_run_id = None
+        else:
+            source_slice_key = source_slice_key or run["slice_key"]
+            source_step_id = source_step_id or run["step_id"]
+    requester = ("human" if auth.role in (None, "human") or auth.test_bypass
+                 else auth.role)
+    try:
+        result = services.dispatch.create_dispatch(
+            conn, source_task_id=tid, target_role=target_role, message=message,
+            requester=requester,
+            title=body.get("title"),
+            acceptance=[str(x) for x in (body.get("acceptance") or [])],
+            scope_paths=[str(x) for x in (body.get("scope_paths") or [])],
+            source_slice_key=source_slice_key,
+            source_step_id=source_step_id,
+            source_run_id=source_run_id,
+            repo=body.get("repo"), workspace_id=body.get("workspace_id"),
+            base_branch=body.get("base_branch"),
+            force=bool(body.get("force")),
+            reason_code="explicit_mention" if source_run_id else "explicit",
+            reason_json={"explicit_mode": body.get("context_mode") or "dispatch"},
+        )
+    except services.dispatch.DispatchError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    run = result.get("run")
+    orch = getattr(request.app.state, "orchestrator", None)
+    if orch and run and not result.get("reused"):
+        try:
+            orch.pump(request.app.state.db_path, run["id"], "wake", {})
+        except Exception:  # noqa: BLE001
+            pass
+    events.publish("task", {"id": tid, "kind": "dispatch"})
+    return result
+
+
+@router.get("/{tid}/dispatches")
+def list_dispatches(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    _assert_session_task(conn, auth, tid)
+    return services.dispatch.list_dispatches(conn, tid)

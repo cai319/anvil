@@ -111,6 +111,10 @@ anvil task delegation-accept <id>
 anvil task delegation-reject <id> --feedback "打回原因"
 anvil task comment <id> "正文"                 # 也可 --message
 anvil task mention <id> --to <role|human> "正文"  # 也可 --message
+  [--slice <slice-key>] [--context-mode auto|reuse|switch|dispatch]
+anvil task dispatch <id> --to <role> "正文" [--slice <slice-key>] \
+  [--acceptance "验收1;验收2"] [--scope-paths src/a,src/b] \
+  [--title "..."] [--context-mode auto|reuse|switch|dispatch] [--force]
 anvil task block <id> --on <task-id>
 anvil task cancel <id>
 anvil task reopen <id>
@@ -127,6 +131,10 @@ anvil task knowledge-delete <id> --id <knowledge-id>   # human
 
 - 位置参数 `action` 默认 `list`；`target` 通常省略，默认取 `ANVIL_TASK_ID`。
 - `comment` 只写时间线，不唤醒；`mention` 才唤醒目标角色。
+- `mention` 默认按来源/当前切片自动路由：同 task 同 slice 复用；同 task 已知
+  slice 切回该槽；`--context-mode` 可显式覆盖（`reuse/switch/dispatch`）。
+- `--slice` 标记来源切片；跨 task/跨切片的请求会通过一次性 wake_note 带入目标
+  上下文，避免只 resume 旧 prompt 而看不到新消息。
 - **工作流步骤不要调用 `task claim` / `task submit`**；用 `anvil step`。
 - 规划期间（`plan_first`、planner run 活跃或存在待审草案）不接受 human
   `task assign` 或手动 `POST /runs`；先等草案批准/驳回，或改走 `task dispatch`。
@@ -137,6 +145,10 @@ anvil task knowledge-delete <id> --id <knowledge-id>   # human
   `--description`（目标/输入/输出）、`--acceptance`、`--scope-paths`、owner、TTL；
   TTL 用 `--due-at <ISO8601>` 记录（当前只展示/告警，超时处理在后续版本）；
   目标角色忙时排队，父 step 提交前必须等委派完成。创建者不要 claim 委派给别人的工单。
+- **独立派遣任务不是子任务/侧任务**：与本切片弱相关、需要新上下文的工作用
+  `task dispatch` 创建顶层任务卡；不带 `--parent/--parent-step`，不阻塞当前 workflow，
+  目标角色完成后原切片仍 running 时自动回切。同 task 同 slice 的复核不要派遣，
+  用 `mention` 复用当前上下文。
 - 委派完成后由派发者验收：`anvil task delegation-accept <id>` 或
   `anvil task delegation-reject <id> --feedback "原因"`（对应
   `POST /tasks/{id}/delegation/accept|reject`）；负责人不能验收自己的产出；
@@ -402,8 +414,8 @@ anvil reminder list
 anvil reminder remove <id>
 anvil reminder fire-now <id>
 
-anvil inbox check [--task <id>] [--limit 30]
-anvil inbox commit --up-to <max-message-id> [--task <id>]
+anvil inbox check [--task <id>] [--slice <slice-key> | --task-wide] [--limit 30]
+anvil inbox commit --up-to <max-message-id> [--task <id>] [--slice <slice-key> | --task-wide]
 
 anvil lease list <task-id>
 anvil lease reserve <path>... [--task <id>] [--ttl 600]
@@ -415,6 +427,14 @@ anvil board drafts [--task <id>]
 anvil action prepare --kind task.cancel --task <id> --reason "..."
 anvil action list
 ```
+
+规则：
+
+- `self reset-context` 只清当前 run 所属的 `(task, slice)` 上下文；同 task 其他切片
+  的会话保留。角色级全量重置由 human 的 runtime reset 负责。
+- `inbox check/commit` 默认取当前 run 的 slice，只返回本切片 + task-wide 消息；
+  显式 `--slice` 指定切片，`--task-wide` 才拉整个任务。slice 与 task-wide 的
+  cursor 相互独立。
 
 ## 11. 常见错误与处理
 

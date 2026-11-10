@@ -149,3 +149,85 @@ async def test_role_runtime_reports_busy_task_queue_and_contexts(client, app):
     assert data["current_task"]["id"] == task_id
     assert data["current_task"]["title"] == "任务 A"
     assert data["queue_tasks"] == []
+
+
+async def test_role_runtime_reports_slice_contexts(client, app):
+    """同一 task 的多个 slice 槽分别暴露 context_key/slice_key，供任务详情分组。"""
+    from anvil.db import open_conn
+    from anvil.util import now_iso
+
+    await _seed_runtime(client)
+    await _post_role(client)
+    t = await client.post(f"{API}/tasks", json={"title": "切片任务"}, headers=auth_headers())
+    assert t.status_code == 201, t.text
+    task_id = t.json()["id"]
+
+    conn = open_conn(app.state.db_path)
+    try:
+        now = now_iso()
+        for slice_key in ("A", "B"):
+            conn.execute(
+                "INSERT INTO role_task_sessions "
+                "(role_slug, task_key, task_id, slice_key, session_id, status, "
+                " context_tokens, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                ("qa-role", f"{task_id}::slice::{slice_key}", task_id, slice_key,
+                 f"sid-{slice_key}", "idle", 10, now, now),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = await client.get(f"{API}/roles/qa-role/runtime")
+    assert r.status_code == 200, r.text
+    contexts = {c["slice_key"]: c for c in r.json()["contexts"]}
+    assert set(contexts) == {"A", "B"}
+    assert contexts["A"]["task_id"] == task_id
+    assert contexts["A"]["context_key"] == f"{task_id}::slice::A"
+    assert contexts["B"]["context_key"] == f"{task_id}::slice::B"
+
+
+async def test_role_runtime_queue_ahead_count_and_current_run_status(client, app, monkeypatch):
+    """UI 只能靠 ahead_count 区分“排队中”和“下一条就是本任务”。"""
+    from anvil.db import open_conn
+    from anvil.services import daemon as daemon_service
+    from anvil.util import now_iso
+
+    await _seed_runtime(client)
+    await _post_role(client)
+    t = await client.post(f"{API}/tasks", json={"title": "任务 A"}, headers=auth_headers())
+    task_id = t.json()["id"]
+    now = now_iso()
+    conn = open_conn(app.state.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO runs (id, role_slug, task_id, status, started_at) "
+            "VALUES ('run-current','qa-role',?, 'running', ?)", (task_id, now))
+        conn.commit()
+    finally:
+        conn.close()
+
+    class _Mgr:
+        enabled = True
+        def status(self, slug):
+            return {
+                "alive": True, "status": "busy", "pid": 1,
+                "current_task_id": task_id, "current_run_id": "run-current",
+                "current_step_id": None, "context_task_id": task_id,
+                "queue_len": 2, "switching": False,
+                "queue": [
+                    {"run_id": "r-other", "task_id": "other-task"},
+                    {"run_id": "r-here", "task_id": task_id},
+                ],
+            }
+
+    monkeypatch.setattr(daemon_service, "get_manager", lambda: _Mgr())
+    r = await client.get(f"{API}/roles/qa-role/runtime")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["current_run_status"] == "running"
+    assert data["busy_scope"] == "task"
+    assert data["queue_global_count"] == 0
+    here = next(q for q in data["queue_tasks"] if q["id"] == task_id)
+    assert here["count"] == 1
+    assert here["ahead_count"] == 1

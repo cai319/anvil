@@ -123,8 +123,8 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
            knowledge_repos_source: str = "human",
            issue_board_enabled: bool = False) -> dict:
     tid = id or new_id()
-    if str(tid).startswith("__"):
-        # `__global__` 是角色上下文槽的保留 key，不能与真实任务 id 冲突。
+    if str(tid).startswith("__") or "::slice::" in str(tid):
+        # `__global__` 是角色上下文槽保留 key；`::slice::` 是 context key 分隔符。
         raise ConflictError(f"task id {tid!r} is reserved")
     now = now_iso()
     tags = knowledge.normalize_tags(tags or [])
@@ -715,6 +715,12 @@ def review(conn: sqlite3.Connection, tid: str, approve: bool, role: str | None =
             )
     _audit(conn, role, tid, "review", {"approve": approve})
     conn.commit()
+    if approve:
+        try:
+            from . import dispatch as dispatch_service
+            dispatch_service.on_task_done(conn, tid)
+        except Exception:  # noqa: BLE001 —— 回切状态失败不阻断评审
+            pass
     try:
         from . import experience_capture
         if approve:
@@ -795,6 +801,28 @@ def cancel(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
         "UPDATE task_role_claims SET status='released', lease_expires_at=NULL, updated_at=? "
         "WHERE task_id=? AND status IN ('pending','working')", (now_iso(), tid)
     )
+    # closed 是失败/终止，不是成功完成：派遣任务不再自动回切。
+    now = now_iso()
+    target_dispatch = conn.execute(
+        "SELECT id FROM task_dispatches WHERE target_task_id=? "
+        "AND status IN ('open','return_ready','returning')", (tid,)).fetchall()
+    for row in target_dispatch:
+        conn.execute(
+            "UPDATE task_dispatches SET status='no_return', updated_at=? WHERE id=?",
+            (now, row["id"]))
+    if target_dispatch:
+        conn.execute(
+            "UPDATE tasks SET dispatch_status='no_return', updated_at=? WHERE id=?",
+            (now, tid))
+    for row in conn.execute(
+            "SELECT id, target_task_id FROM task_dispatches WHERE source_task_id=? "
+            "AND status IN ('open','return_ready','returning')", (tid,)).fetchall():
+        conn.execute(
+            "UPDATE task_dispatches SET status='cancelled', updated_at=? WHERE id=?",
+            (now, row["id"]))
+        conn.execute(
+            "UPDATE tasks SET dispatch_status='cancelled' WHERE id=?",
+            (row["target_task_id"],))
     _audit(conn, role, tid, "cancel")
     conn.commit()
     return get(conn, tid)  # type: ignore[return-value]
@@ -959,6 +987,24 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
     if children and not force:
         raise ConflictError(f"task {tid} has child tasks; delete them first or use force")
 
+    # 独立派遣任务不随来源删除：来源删除后只标记软关联失效/不再回切。
+    now = now_iso()
+    for row in conn.execute(
+            "SELECT id, target_task_id FROM task_dispatches WHERE source_task_id=? "
+            "AND status IN ('open','return_ready','returning')", (tid,)).fetchall():
+        conn.execute(
+            "UPDATE task_dispatches SET status='cancelled', updated_at=? WHERE id=?",
+            (now, row["id"]))
+        conn.execute(
+            "UPDATE tasks SET dispatch_status='cancelled' WHERE id=?",
+            (row["target_task_id"],))
+    for row in conn.execute(
+            "SELECT id FROM task_dispatches WHERE target_task_id=? "
+            "AND status IN ('open','return_ready','returning')", (tid,)).fetchall():
+        conn.execute(
+            "UPDATE task_dispatches SET status='no_return', updated_at=? WHERE id=?",
+            (now, row["id"]))
+
     # 删除前先让每个参与角色固化本任务知识快照，再终止/清理其运行时资源。
     # 快照写入 notes/knowledge/<task>/<time>-task-deleted.md（文件 + FTS），
     # 删除 activities/runs 后仍然保留，不会随任务物理删除而丢失。
@@ -972,7 +1018,8 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
             latest_run[role] = (stamp, r["id"])
     latest_run_id = {role: rid for role, (_stamp, rid) in latest_run.items()}
     slot_roles = {row["role_slug"] for row in conn.execute(
-        "SELECT role_slug FROM role_task_sessions WHERE task_key=?", (tid,)).fetchall()}
+        "SELECT role_slug FROM role_task_sessions "
+        "WHERE task_id=? OR task_key=?", (tid, tid)).fetchall()}
     task_roles = set(latest_run_id) | slot_roles
     consolidated: list[str] = []
     consolidation_errors: list[str] = []
@@ -1012,7 +1059,8 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
             try:
                 daemon_service.clear_session(
                     conn, role_slug, "task deleted",
-                    task_key_value=daemon_service.task_key(tid))
+                    task_key_value=daemon_service.task_key(tid),
+                    all_slices=True)
             except Exception:  # noqa: BLE001
                 pass
     if active:
@@ -1052,7 +1100,8 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
     conn.execute("DELETE FROM sessions WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM role_inbox_cursors WHERE task_id=?", (tid,))
     # 任务上下文槽（daemon 未启用/角色已停机时也要清，避免孤儿槽被下次同名任务复用）
-    conn.execute("DELETE FROM role_task_sessions WHERE task_key=?", (tid,))
+    conn.execute(
+        "DELETE FROM role_task_sessions WHERE task_id=? OR task_key=?", (tid, tid))
     # 任务数据目录保留到保留期结束（可审计/可恢复）；标记 deleted，由定期清理删除。
     task_workspace.mark_deleted(conn, tid, commit=False)
     conn.execute("DELETE FROM audit WHERE task_id=?", (tid,))
@@ -1091,9 +1140,10 @@ def add_dep(conn: sqlite3.Connection, tid: str, depends_on: list[str]) -> dict:
     return get(conn, tid)  # type: ignore[return-value]
 
 
-def comment(conn: sqlite3.Connection, tid: str, role: str, body: str) -> dict:
+def comment(conn: sqlite3.Connection, tid: str, role: str, body: str,
+            slice_key: str | None = None) -> dict:
     ledger.emit(
-        conn, "message.comment", task_id=tid,
+        conn, "message.comment", task_id=tid, slice_key=slice_key,
         actor_type="human" if role == "human" else "role", actor=role,
         payload={"body": body}, mirror_activity=True, activity_kind="comment",
         activity_role=role,
@@ -1102,10 +1152,11 @@ def comment(conn: sqlite3.Connection, tid: str, role: str, body: str) -> dict:
     return get(conn, tid)  # type: ignore[return-value]
 
 
-def mention(conn: sqlite3.Connection, tid: str, role: str, target: str, message: str) -> dict:
+def mention(conn: sqlite3.Connection, tid: str, role: str, target: str,
+            message: str, slice_key: str | None = None) -> dict:
     """向目标（如 `human`）发起 @提及，用于人工确认点（HITL）的通知。"""
     ledger.emit(
-        conn, "message.mention", task_id=tid,
+        conn, "message.mention", task_id=tid, slice_key=slice_key,
         actor_type="human" if role == "human" else "role", actor=role,
         payload={"target": target, "message": message},
         mirror_activity=True, activity_kind="mention", activity_role=role,

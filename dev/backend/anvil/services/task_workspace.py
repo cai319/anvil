@@ -219,8 +219,9 @@ def cleanup_stale(conn: sqlite3.Connection, *,
             skipped.append(task_id)
             continue
         busy = conn.execute(
-            "SELECT 1 FROM role_task_sessions WHERE task_key=? AND status='busy' LIMIT 1",
-            (task_id,),
+            "SELECT 1 FROM role_task_sessions "
+            "WHERE (task_id=? OR task_key=?) AND status='busy' LIMIT 1",
+            (task_id, task_id),
         ).fetchone()
         if busy:
             skipped.append(task_id)

@@ -45,6 +45,7 @@ def _expand_slices(definition: dict) -> dict:
     seen: set[str] = set()
     previous_decide: str | None = None
     slice_decide: dict[str, str] = {}
+    current_slice: str | None = None
 
     def add(step: dict) -> str:
         sid = str(step.get("id") or "").strip()
@@ -53,6 +54,9 @@ def _expand_slices(definition: dict) -> dict:
         if sid in seen:
             raise ConflictError(f"duplicate workflow step id: {sid}")
         seen.add(sid)
+        if current_slice is not None:
+            # 静态切片同样按 slice 隔离上下文；source_step_id 只属于运行期动态切片。
+            step.setdefault("slice_key", current_slice)
         steps.append(step)
         return sid
 
@@ -60,6 +64,10 @@ def _expand_slices(definition: dict) -> dict:
         if not isinstance(raw_slice, dict):
             raise ConflictError(f"workflow slice #{index + 1} must be an object")
         base = str(raw_slice.get("id") or f"S{index + 1}").strip()
+        if not SLICE_ID_RE.match(base):
+            raise ConflictError(
+                f"invalid slice id {base!r}: use letters/digits/_/-, max 64 chars")
+        current_slice = base
         title = str(raw_slice.get("title") or base).strip()
         execute_role = str(raw_slice.get("execute_role") or raw_slice.get("role") or "").strip()
         verify_role = str(
@@ -1117,6 +1125,26 @@ def _terminate_running_workflow(conn: sqlite3.Connection, wid: str, reason: str,
         dossier.persist(conn, wid, commit=False)
 
 
+def _clear_restarted_slice_contexts(conn: sqlite3.Connection, task_id: str) -> None:
+    """新 execution 不复用上一次执行的 slice 会话；task 级上下文保留。"""
+    roles = [r["role_slug"] for r in conn.execute(
+        "SELECT DISTINCT role_slug FROM role_task_sessions WHERE task_id=? "
+        "AND (slice_key IS NOT NULL OR task_key LIKE '%::slice::%')",
+        (task_id,)).fetchall()]
+    if not roles:
+        return
+    from . import daemon as daemon_service
+    mgr = daemon_service.get_manager()
+    for role in roles:
+        try:
+            if mgr is not None and getattr(mgr, "enabled", False):
+                mgr.reset_task_slices(role, task_id)
+            else:
+                daemon_service.clear_slice_sessions(conn, role, task_id)
+        except Exception:  # noqa: BLE001 —— 上下文清理失败不阻断新执行落板
+            pass
+
+
 def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
                     created_by: str = "agent:cindy",
                     *, enforce_role_coverage: bool = True,
@@ -1212,8 +1240,8 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
             "depends_on_json, acceptance_json, gate, reviewer, contract, kind, on_reject_json, "
             "max_rework, rework_count, decision_authority, risk_level, reversible, escalate_json, "
             "decision_question, decision_options_json, evidence_required, scope_paths_json, "
-            "status, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "slice_key, source_step_id, status, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (wid, sid, str(s.get("title") or sid), role,
              str(s.get("instructions") or s.get("description") or ""),
              jdumps(s.get("depends_on") or []), jdumps(s.get("acceptance") or []),
@@ -1223,7 +1251,8 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
              jdumps(meta["escalate"]), meta["decision_question"],
              jdumps(meta["decision_options"]),
              1 if (meta["evidence_required"] or (weight == "strict" and kind == "task")) else 0,
-             jdumps(meta["scope_paths"]), "pending", now),
+             jdumps(meta["scope_paths"]), s.get("slice_key"),
+             s.get("source_step_id"), "pending", now),
         )
     conn.execute(
         "UPDATE tasks SET status='in_progress', assignee=NULL, lease_expires_at=NULL, "
@@ -1252,6 +1281,8 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
             }), now),
         )
     conn.commit()
+    if previous_workflow_id:
+        _clear_restarted_slice_contexts(conn, task_id)
     return get_workflow(conn, wid)  # type: ignore[return-value]
 
 

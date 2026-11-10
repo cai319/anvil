@@ -54,6 +54,18 @@ DELEGATION_PROTOCOL = (
     "· 反模式：共享写状态/同一文件并行写、强耦合、频繁往返、仅因“任务复杂”而拆。\n"
 )
 
+# 与当前切片/步骤弱相关的独立工作：新建顶层任务卡，不用 parent 父子关系。
+DISPATCH_PROTOCOL = (
+    "## 无关工作 = 独立派遣任务（不是子任务）\n"
+    "· 如果对方请求与当前切片/步骤弱相关、需要另开上下文，执行 "
+    "`anvil task dispatch $ANVIL_TASK_ID --to <角色> --slice <当前切片> \"请求\"`；"
+    "它会新建一张顶层任务卡，不阻塞当前 workflow。\n"
+    "· 派遣任务不要带 `--parent/--parent-step`，也不要用 `anvil task create` 伪装成子任务；"
+    "不要把来源任务的原始对话复制给对方。\n"
+    "· 同 task 同切片的复核/追问不要派遣，直接用 `anvil task mention` 在当前上下文处理。\n"
+    "· 目标角色完成后，系统会在原切片仍 running 时尝试自动回切；不要重复创建同一个派遣任务。\n"
+)
+
 # 回复 run 只讨论，不创建规划级任务；确需委派时用短版规则。
 REPLY_DELEGATION_PROTOCOL = (
     "## 委派（回复 run 限制）\n"
@@ -82,7 +94,8 @@ PROTOCOL = (
     "再 @对方认领。\n"
     "只有需要人类决策（评审）时，系统会 @human 通知自然人；其余事务由角色间 @提及自行协商。\n"
     "只修改 scope 范围内的文件，越界的提交会被拒绝。"
-) + "\n\n" + DELEGATION_PROTOCOL + "\n\n" + DELIVERABLE_MANIFEST + "\n\n" + ATTACHMENT_BUDGET
+) + ("\n\n" + DELEGATION_PROTOCOL + "\n\n" + DISPATCH_PROTOCOL + "\n\n"
+     + DELIVERABLE_MANIFEST + "\n\n" + ATTACHMENT_BUDGET)
 
 # 角色被 @ 且当前没有工作流步骤时的回复协议：只讨论，不 claim/submit 任务。
 REPLY_PROTOCOL = (
@@ -102,7 +115,7 @@ REPLY_PROTOCOL = (
     "`anvil task mention $ANVIL_TASK_ID --to <对方角色slug> \"结论\"` 回复（这会自动唤醒对方）；"
     "只有在纯旁注、不需要对方行动时才用 `anvil task comment`。\n"
     "回复后结束进程；如果需要对方处理后给你回执，你会在被 @ 时再次唤醒。"
-) + "\n\n" + REPLY_DELEGATION_PROTOCOL
+) + "\n\n" + REPLY_DELEGATION_PROTOCOL + "\n\n" + DISPATCH_PROTOCOL
 
 # 工作流步骤协议：角色执行一个 workflow step（不是整个 task）。
 STEP_PROTOCOL = (
@@ -174,7 +187,8 @@ STEP_PROTOCOL = (
     "文件证据只能使用 repo 或 agent home 内的相对路径。"
     "不要调用 `anvil task submit` 或 `anvil task claim`。\n"
     "只修改本步骤范围内的文件；越界提交会被拒绝。"
-) + "\n\n" + DELEGATION_PROTOCOL + "\n\n" + DELIVERABLE_MANIFEST + "\n\n" + ATTACHMENT_BUDGET
+) + ("\n\n" + DELEGATION_PROTOCOL + "\n\n" + DISPATCH_PROTOCOL + "\n\n"
+     + DELIVERABLE_MANIFEST + "\n\n" + ATTACHMENT_BUDGET)
 
 # 问题板（Issue Board）：reviewer 在任务内填写结构化安全 findings。
 # 写入规则由“步骤 run”和“问题板收口 run”共用；complete 只在收口 run 中允许。

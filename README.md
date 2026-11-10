@@ -634,6 +634,7 @@ anvil init --with-roles
 - [docs/v1.41.3-release.md](docs/v1.41.3-release.md)：v1.41.3 日志级别按业务收敛
 - [docs/v1.41.4-release.md](docs/v1.41.4-release.md)：v1.41.4 Tracker 字段 LLM 精简与可配置上限
 - [docs/v1.41.5-release.md](docs/v1.41.5-release.md)：v1.41.5 Finding 详情标题与分条展示修复
+- [docs/v1.42.0-release.md](docs/v1.42.0-release.md)：v1.42.0 切片上下文隔离、独立派遣任务与自动回切
 - [docs/workflow-revision.md](docs/workflow-revision.md)：运行中 workflow 的增量修订（安全变更不重启任务）
 - [docs/operations.md](docs/operations.md)：打包、备份/迁移/重置、卸载
 - [docs/troubleshooting.md](docs/troubleshooting.md)：详细排查

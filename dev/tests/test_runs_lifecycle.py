@@ -168,3 +168,80 @@ def test_heal_stale_runs_suspends_orphans(conn, monkeypatch):
     assert out["healed"] == 2
     assert runs_service.get_run(conn, "R1")["status"] == "suspended"
     assert runs_service.get_run(conn, "R2")["status"] == "suspended"
+
+
+def test_set_status_cas_rejects_terminal_revival(conn):
+    """failed 不能被并发 turn-result 覆盖回 suspended。"""
+    _mk_run(conn, rid="R1", status="failed")
+    ok = runs_service.set_status(
+        conn, "R1", "suspended", from_statuses=("running",))
+    assert ok is False
+    assert runs_service.get_run(conn, "R1")["status"] == "failed"
+
+
+def test_reset_for_redelivery_updates_started_at(conn):
+    """redelivery 必须刷新 started_at，旧 monitor 的 process_exit 才会让路。"""
+    _mk_run(conn, rid="R1", status="running", sid="rs:qa-role",
+            started="2026-01-01T00:00:00+00:00")
+    assert runs_service.reset_run_for_redelivery(conn, "R1") == "retry"
+    r = runs_service.get_run(conn, "R1")
+    assert r["status"] == "created"
+    assert r["started_at"] > "2026-01-01"
+    assert r["ended_at"] is None
+
+
+def test_pump_role_exit_only_pumps_current_run(tmp_path):
+    """进程退出回调只接受 daemon 传入的 current_run_id，不扫描同角色其它 run。"""
+    from anvil.main import _pump_role_exit
+
+    db_path = str(tmp_path / "exit.db")
+    conn = connect(db_path)
+    _mk_run(conn, rid="R1", status="running")
+    _mk_run(conn, rid="R2", status="running")
+    conn.close()
+
+    class _Orch:
+        def __init__(self):
+            self.pumped = []
+
+        def pump(self, db_path, run_id, event, payload):
+            self.pumped.append((run_id, event, payload))
+
+    orch = _Orch()
+    _pump_role_exit(db_path, orch, "qa-role", 1, "R1")
+    assert [x[0] for x in orch.pumped] == ["R1"]
+    _pump_role_exit(db_path, orch, "qa-role", 1, None)
+    assert len(orch.pumped) == 1
+
+
+def test_threshold_rotation_breaker_fails_after_limit(tmp_path):
+    """连续 threshold 轮换超过上限 → failed，不再无限 wake。"""
+    from anvil.main import _handle_context_overflow
+
+    db_path = str(tmp_path / "loop.db")
+    conn = connect(db_path)
+    _mk_run(conn, rid="R1", status="running", sid="rs:qa-role")
+    conn.close()
+
+    class _Orch:
+        def __init__(self):
+            self.pumped = []
+
+        def pump(self, db_path, run_id, event, payload):
+            self.pumped.append((run_id, event))
+
+    orch = _Orch()
+    outcomes = [
+        _handle_context_overflow(db_path, orch, "R1", "threshold", 3)
+        for _ in range(6)
+    ]
+    assert outcomes[:5] == ["retry"] * 5
+    assert outcomes[5] == "failed"
+    assert len(orch.pumped) == 5
+    check = connect(db_path)
+    try:
+        r = runs_service.get_run(check, "R1")
+        assert r["status"] == "failed"
+        assert r["failure_class"] == "context_rotation_loop"
+    finally:
+        check.close()

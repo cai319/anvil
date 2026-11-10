@@ -13,7 +13,7 @@ const RUN_LABEL: Record<string, string> = {
   completed: "已完成",
   failed: "失败",
   abandoned: "已放弃",
-  suspended: "已挂起",
+  suspended: "等待唤醒",
 };
 
 function fmtDuration(start: string | null, end: string | null, now = Date.now()): string {

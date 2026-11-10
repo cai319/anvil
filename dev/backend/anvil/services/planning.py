@@ -267,7 +267,7 @@ def start_planner_run(conn: sqlite3.Connection, db_path: str, orchestrator,
         ).fetchall():
             runs_service.set_status(conn, row["id"], "abandoned", ended_at=now_iso())
     else:
-        existing = runs_service.find_active_run(conn, task_id, planner)
+        existing = runs_service.find_active_run(conn, task_id, planner, slice_key=None)
         if existing:
             return existing
 

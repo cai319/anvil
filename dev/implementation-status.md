@@ -561,3 +561,32 @@ cd frontend && npm run build         # tsc + vite build
 
 > 注意：`dev/.venv` 若未安装 `langgraph`，`tests/conftest.py` 的 `importorskip` 会把全部测试
 > 静默 skip。请使用装有 `backend/requirements.txt` 的环境运行测试。
+
+## 切片上下文与独立派遣任务（2026-11-10）
+
+- 上下文单元从 `(role, task)` 扩展为 `(role, task, slice)`：
+  `task_id::slice::<slice_key>`；静态与运行期切片都写 `slice_key`，静态切片不写
+  `source_step_id`。
+- `role_task_sessions` 增加显式 `task_id/slice_key`；`role_sessions` 增加
+  `current_context_key/current_slice_key`；`runs` 增加
+  `slice_key/wake_note/dispatch_id/origin/context_return_*`；`notes` 增加
+  `slice_key`。
+- daemon 队列按完整 context key 切换；`clear_session/reset_session/cancel_task/
+  mark_needs_fresh_context` 支持 task 级与 slice 级清理；workspace/cwd 仍按 task
+  复用；workflow 重启清旧 slice 槽。
+- CIC 只注入当前 slice + task-wide 的原始消息；知识快照可按 slice 生成。
+- 新增 `services/context_router.py`：身份硬规则优先，歧义时用轻量词法相关度；
+  返回 reuse/switch/new_slice/dispatch。
+- 新增独立派遣任务：`POST /tasks/{id}/dispatches`、`GET .../dispatches`、
+  `anvil task dispatch`；顶层 task、无 parent、软关联来源、新 run/上下文；请求哈希
+  去重、深度限制（`ANVIL_DISPATCH_MAX_DEPTH`）。
+- 新增 `task_dispatches` 状态机与 `runs.wake_note`；派遣任务 `done` 后由
+  scheduler `resolve_dispatch_returns` 自动回切一次；跨切片临时处理由
+  `context_return_*` + `resolve_context_returns` 回切。
+- 任务详情「委派/独立任务」页签、来源任务 chip、派遣表单；大厅显示独立任务卡；
+  角色运行时按 slice 展示上下文。
+- 文档：`docs/superpowers/specs/2026-11-10-slice-context-dispatch-design.md`；
+  `design.md` §6.1、角色上下文/状态机 spec、CLI reference 同步。
+- 测试：`tests/test_slice_context.py`、`tests/test_context_router.py`、
+  `tests/test_dispatch_task.py`、`tests/test_auto_return.py`、
+  `tests/api/test_dispatch_api.py`，全量 778 passed / 58 skipped；前端构建通过。
