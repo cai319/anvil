@@ -980,6 +980,7 @@ export function TaskDetail({ id }: { id: string }) {
   const [drafts, setDrafts] = useState<BoardDraft[]>([]);
   const [dispatchNote, setDispatchNote] = useState<string | null>(null);
   const [tab, setTab] = useState<TaskTab>(initialRoute.tab);
+  const [runtimeFocus, setRuntimeFocus] = useState<{ role: string; sliceKey: string | null } | null>(null);
   const [findingSummary, setFindingSummary] = useState<FindingSummary | null>(null);
   const [tlKind, setTlKind] = useState<"all" | "dialog" | "mention" | "step" | "decision" | "run" | "review">("all");
   const [tlLimit, setTlLimit] = useState(40);
@@ -2523,6 +2524,10 @@ export function TaskDetail({ id }: { id: string }) {
                   onRetry={(step) => act(async () => {
                     setWorkflow(await api.retryWorkflowStep(workflow!.id, step.step_id));
                   })}
+                  onOpenRoleContext={(role, sliceKey) => {
+                    setRuntimeFocus({ role, sliceKey });
+                    selectTab("runtime");
+                  }}
                 />
               ) : (
                 (() => {
@@ -2609,7 +2614,7 @@ export function TaskDetail({ id }: { id: string }) {
         );
       })()}
 
-      {tab === "runtime" && <RoleSessions task={task} roles={roles} workflow={workflow} dispatches={dispatches} />}
+      {tab === "runtime" && <RoleSessions task={task} roles={roles} workflow={workflow} dispatches={dispatches} focus={runtimeFocus} />}
       </div>
       {reviewStep && workflow && (
         <GateReviewDrawer

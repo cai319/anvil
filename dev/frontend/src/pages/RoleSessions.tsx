@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   api, subscribeEvents,
   type ContextManifest, type Role, type RoleRuntimeStatus, type Run, type Task,
@@ -47,11 +47,12 @@ function describeEvent(ev: TimelineEvent): string {
   }
 }
 
-export function RoleSessions({ task, roles, workflow, dispatches = [] }: {
+export function RoleSessions({ task, roles, workflow, dispatches = [], focus = null }: {
   task: Task;
   roles: Role[];
   workflow?: Workflow | null;
   dispatches?: TaskDispatch[];
+  focus?: { role: string; sliceKey: string | null } | null;
 }) {
   const [runs, setRuns] = useState<Run[]>([]);
   const [runsLoaded, setRunsLoaded] = useState(false);
@@ -69,6 +70,7 @@ export function RoleSessions({ task, roles, workflow, dispatches = [] }: {
       ? task.assignees
       : (task.role_claims ?? []).map((c) => c.role_slug)),
     ...(task.planner ? [task.planner] : []),
+    ...((workflow?.steps ?? []).map((s) => s.role_slug)),
   ])).filter(Boolean);
   const slugKey = slugs.join(",");
 
@@ -118,14 +120,7 @@ export function RoleSessions({ task, roles, workflow, dispatches = [] }: {
   const roleName = (slug: string) => roles.find((r) => r.slug === slug)?.display_name ?? slug;
   const roleFor = (slug: string) => roles.find((r) => r.slug === slug);
 
-  const open = (run: Run | undefined, slug: string) => {
-    if (!run) {
-      setExpanded(null);
-      setExpandedCtx((cur) => (cur === slug ? null : slug));
-      return;
-    }
-    setExpandedCtx(null);
-    setExpanded((cur) => (cur === run.id ? null : run.id));
+  const loadRunContext = (run: Run) => {
     setSubTab("log");
     if (!(run.id in logs)) {
       api.getRunLog(run.id)
@@ -143,6 +138,35 @@ export function RoleSessions({ task, roles, workflow, dispatches = [] }: {
         .catch(() => setManifests((prev) => ({ ...prev, [run.id]: [] })));
     }
   };
+
+  const open = (run: Run | undefined, slug: string) => {
+    if (!run) {
+      setExpanded(null);
+      setExpandedCtx((cur) => (cur === slug ? null : slug));
+      return;
+    }
+    setExpandedCtx(null);
+    setExpanded((cur) => (cur === run.id ? null : run.id));
+    loadRunContext(run);
+  };
+
+  const focusAppliedRef = useRef<{ role: string; sliceKey: string | null } | null>(null);
+  useEffect(() => {
+    if (!focus || focusAppliedRef.current === focus || !runsLoaded) return;
+    const candidate = runs
+      .filter((r) => r.role_slug === focus.role
+        && (r.slice_key ?? null) === (focus.sliceKey ?? null))
+      .sort((a, b) => String(b.started_at ?? "").localeCompare(String(a.started_at ?? "")))[0];
+    if (candidate) {
+      setExpanded(candidate.id);
+      setExpandedCtx(null);
+      loadRunContext(candidate);
+    } else {
+      setExpanded(null);
+      setExpandedCtx(focus.role);
+    }
+    focusAppliedRef.current = focus;
+  }, [focus, runsLoaded, runs]);
 
   // 本任务出现过的所有角色（含被 @ 拉入、但不在 assignees 里的角色）。
   const visibleSlugs = Array.from(new Set([
@@ -188,7 +212,10 @@ export function RoleSessions({ task, roles, workflow, dispatches = [] }: {
         );
         const queueInfo = rt?.queue_tasks?.find((q) => q.id === task.id);
         const ctxList = (rt?.contexts ?? []).filter((c) => c.task_id === task.id);
-        const ctxHere = ctxList.find(
+        const focusCtx = focus?.role === slug
+          ? ctxList.find((c) => (c.slice_key ?? null) === (focus.sliceKey ?? null))
+          : undefined;
+        const ctxHere = focusCtx ?? ctxList.find(
           (c) => c.context_key && rt?.context_key && c.context_key === rt.context_key,
         ) ?? ctxList.find(
           (c) => (c.slice_key ?? null) === (rt?.context_slice_key ?? null),
@@ -292,7 +319,7 @@ export function RoleSessions({ task, roles, workflow, dispatches = [] }: {
             : "空闲 · 首次进入将新建上下文";
         }
         return (
-          <div key={slug} className="rs-row-wrap">
+          <div key={slug} className={`rs-row-wrap ${focus?.role === slug ? "is-focused" : ""}`}>
             <button className="rs-row" onClick={() => open(run, slug)}>
               <span
                 className={`role-live-dot ${dot.cls}`}

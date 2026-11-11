@@ -91,13 +91,14 @@ function computeLayers(nodes: VisualNode[]): Map<string, number> {
   return layers;
 }
 
-export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenReview, onRetry }: {
+export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenReview, onRetry, onOpenRoleContext }: {
   workflow: Workflow;
   roles: Role[];
   busy: boolean;
   readOnly?: boolean;
   onOpenReview: (step: WorkflowStep) => void;
   onRetry: (step: WorkflowStep) => void;
+  onOpenRoleContext?: (role: string, sliceKey: string | null, runId?: string | null) => void;
 }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [selectedSliceKey, setSelectedSliceKey] = useState<string | null>(null);
@@ -440,6 +441,14 @@ export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenR
               {" "}· {roleName(activeGroup.current.role_slug)}
             </div>
           ) : null}
+          {onOpenRoleContext && (activeStep?.role_slug || activeGroup.roleSlug) && (
+            <button className="small"
+              onClick={() => onOpenRoleContext(
+                activeStep?.role_slug || activeGroup.roleSlug,
+                activeGroup.sliceKey,
+                activeStep?.run_id ?? activeGroup.current?.run_id ?? null,
+              )}>查看角色上下文</button>
+          )}
           {!readOnly && activeStep
             && (activeStep.status === "failed" || activeStep.status === "rejected") && (
             <button className="small" disabled={busy}
@@ -472,17 +481,33 @@ export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenR
             <summary>切换切片（{selectedLoop.totalSlices}）</summary>
             <div className="wf-slice-list">
               {selectedLoop.groups.map((g, idx) => (
-                <button
+                <div
                   key={g.key}
-                  type="button"
-                  className={`wf-slice-row wf-slice-row-btn ${g.key === activeGroup.key ? "active" : ""}`}
-                  onClick={() => setSelectedSliceKey(g.key)}
+                  className={`wf-slice-row ${g.key === activeGroup.key ? "active" : ""}`}
                 >
-                  <i className="wf-slice-dot" style={{ background: STATUS_META[g.status].color }} />
-                  <span className="wf-slice-name" title={g.title}>{idx + 1}. {g.title}</span>
-                  <span className="muted">{g.done}/{g.total}</span>
-                  <span className="muted">{g.phase}</span>
-                </button>
+                  <button
+                    type="button"
+                    className="wf-slice-row-btn"
+                    onClick={() => setSelectedSliceKey(g.key)}
+                  >
+                    <i className="wf-slice-dot" style={{ background: STATUS_META[g.status].color }} />
+                    <span className="wf-slice-name" title={g.title}>{idx + 1}. {g.title}</span>
+                    <span className="muted">{g.done}/{g.total}</span>
+                    <span className="muted">{g.phase}</span>
+                  </button>
+                  {onOpenRoleContext && (g.current?.role_slug || g.roleSlug) && (
+                    <button
+                      type="button"
+                      className="small wf-slice-context"
+                      title="查看该切片对应角色执行上下文"
+                      onClick={() => onOpenRoleContext(
+                        g.current?.role_slug || g.roleSlug,
+                        g.sliceKey,
+                        g.current?.run_id ?? g.active?.run_id ?? null,
+                      )}
+                    >上下文</button>
+                  )}
+                </div>
               ))}
             </div>
           </details>
@@ -551,6 +576,12 @@ export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenR
           )}
           {selectedStep.summary && <div className="muted">提交摘要：{selectedStep.summary}</div>}
           <div className="wf-actions">
+            {onOpenRoleContext && (
+              <button className="small"
+                onClick={() => onOpenRoleContext(
+                  selectedStep.role_slug, selectedStep.slice_key ?? null,
+                  selectedStep.run_id ?? null)}>查看角色上下文</button>
+            )}
             {selectedStep.run_id && <a href={`/runs/${selectedStep.run_id}`}>查看会话</a>}
             {!readOnly && (selectedStep.gate && selectedStep.status === "submitted"
               || selectedStep.kind === "decision"

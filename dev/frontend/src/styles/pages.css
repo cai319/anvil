@@ -519,6 +519,7 @@ dd { margin: 0; }
 /* ---- 子任务（角色会话）-------------------------------------------------- */
 .role-sessions { font-size: 13px; }
 .rs-row-wrap { border: 1px solid var(--border, #e5e2dc); border-radius: 10px; margin-bottom: 10px; overflow: hidden; }
+.rs-row-wrap.is-focused { border-color: var(--ink-900); box-shadow: 3px 3px 0 var(--yellow); }
 .rs-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px;
   background: var(--surface, #fff); border: none; cursor: pointer; text-align: left; color: inherit; }
 .rs-row:disabled { cursor: default; }
@@ -681,10 +682,12 @@ dd { margin: 0; }
 .wf-slice-step-title { flex: 1; min-width: 0; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 .wf-slice-step-role { flex: none; }
-.wf-slice-row-btn { width: 100%; border: 0; background: transparent; color: var(--text);
+.wf-slice-row-btn { width: auto; flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text);
+  display: flex; align-items: center; gap: 8px;
   text-align: left; cursor: pointer; font: inherit; }
 .wf-slice-row-btn:hover { background: rgba(127, 127, 127, .08); }
-.wf-slice-row-btn.active { background: rgba(96, 165, 250, .12); }
+.wf-slice-row.active .wf-slice-row-btn { background: rgba(96, 165, 250, .12); }
+.wf-slice-context { flex: none; padding: 2px 6px; font-size: 10px; min-height: 0; }
 .wf-slice-details { margin-top: 8px; }
 .wf-slice-details summary { cursor: pointer; font-weight: 600; color: var(--muted); font-size: 12px; }
 .wf-slice-list { max-height: 240px; overflow-y: auto; margin-top: 6px;

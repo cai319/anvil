@@ -1,0 +1,720 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Anvil · Workflow 与委派/派遣 · 演示</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --ink-900:#14131a; --ink-800:#1b1a23; --ink-700:#241f2e; --ink-600:#2d2738;
+    --line:rgba(247,239,227,.16); --line-2:rgba(247,239,227,.28);
+    --paper:#f7efe3; --paper-2:#efe4d2; --paper-3:#fffaf1;
+    --ink-text:#14131a; --ink-muted:#a8a0b4; --ink-faint:#6f6878;
+    --paper-soft:#4b4652; --paper-muted:#6b6375;
+    --yellow:#facc15; --orange:#fb923c; --red:#f87171; --green:#4ade80; --cyan:#22d3ee; --blue:#60a5fa;
+    --font: "Inter", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --radius:10px; --radius-sm:6px; --radius-lg:14px;
+    --shadow:3px 3px 0 rgba(20,19,26,.35);
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; min-height:100%; background:var(--ink-900); color:var(--paper); font-family:var(--font); }
+  button { font:inherit; cursor:pointer; }
+  a { color:inherit; }
+  .mono { font-family:var(--mono); }
+  .muted { color:var(--ink-muted); }
+  .faint { color:var(--ink-faint); }
+  .status { display:inline-flex; align-items:center; gap:5px; padding:2px 8px; border:1.5px solid var(--ink-900); border-radius:999px; font-size:11px; font-weight:800; white-space:nowrap; color:var(--ink-900); background:var(--paper-2); }
+  .status.green { background:var(--green); }
+  .status.orange { background:var(--orange); }
+  .status.yellow { background:var(--yellow); }
+  .status.red { background:var(--red); }
+  .status.gray { background:#8b8496; color:var(--paper); }
+  .chip { display:inline-flex; align-items:center; gap:5px; padding:2px 7px; border:1px solid var(--line-2); border-radius:999px; color:var(--ink-muted); font-size:10.5px; white-space:nowrap; }
+  .chip.on-paper { border-color:rgba(20,19,26,.2); color:var(--paper-soft); background:rgba(20,19,26,.04); }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--ink-muted); flex:none; }
+  .dot.green { background:var(--green); box-shadow:0 0 0 3px rgba(74,222,128,.16); }
+  .dot.orange { background:var(--orange); box-shadow:0 0 0 3px rgba(251,146,60,.16); }
+  .dot.yellow { background:var(--yellow); box-shadow:0 0 0 3px rgba(250,204,21,.15); }
+  .dot.red { background:var(--red); box-shadow:0 0 0 3px rgba(248,113,113,.16); }
+  .dot.gray { background:#8b8496; }
+  .avatar { width:28px; height:28px; border-radius:50%; display:grid; place-items:center; flex:none; font-weight:900; font-size:11px; border:2px solid var(--ink-900); background:var(--paper-2); color:var(--ink-900); box-shadow:2px 2px 0 var(--ink-900); }
+  .avatar.cy { background:var(--cyan); } .avatar.ye { background:var(--yellow); }
+  .avatar.or { background:var(--orange); } .avatar.gr { background:var(--green); } .avatar.re { background:var(--red); }
+  .avatar.lg { width:38px; height:38px; font-size:14px; }
+  .shell { min-height:100vh; display:flex; flex-direction:column; }
+  .topbar { display:flex; align-items:center; gap:18px; padding:14px 26px; border-bottom:2px solid var(--paper); background:var(--ink-800); }
+  .brand { display:flex; align-items:center; gap:9px; font-weight:900; letter-spacing:-.02em; }
+  .brand .mark { width:27px; height:27px; display:grid; place-items:center; border:2px solid var(--ink-900); background:var(--yellow); color:var(--ink-900); box-shadow:2px 2px 0 var(--red); font-size:14px; }
+  .crumb { color:var(--ink-muted); font-size:12px; }
+  .crumb b { color:var(--paper); }
+  .top-actions { margin-left:auto; display:flex; align-items:center; gap:8px; }
+  .btn { border:2px solid var(--line-2); background:transparent; color:var(--paper); border-radius:var(--radius-sm); padding:7px 12px; font-weight:700; font-size:12px; }
+  .btn:hover { background:rgba(247,239,227,.08); border-color:var(--paper); }
+  .btn.primary { background:var(--yellow); color:var(--ink-900); border-color:var(--ink-900); box-shadow:2px 2px 0 var(--red); }
+  .btn.ghost { border-color:transparent; color:var(--ink-muted); }
+  .tabs { display:flex; gap:8px; padding:12px 26px 0; background:var(--ink-800); border-bottom:1px solid var(--line); }
+  .tab { border:2px solid transparent; border-bottom:none; background:transparent; color:var(--ink-muted); padding:9px 16px; font-size:12px; font-weight:800; border-radius:8px 8px 0 0; }
+  .tab.active { background:var(--ink-900); color:var(--paper); border-color:var(--line-2); box-shadow:inset 0 3px 0 var(--yellow); }
+  .page { flex:1; min-height:0; overflow:auto; padding:22px 26px 40px; }
+  .hidden { display:none !important; }
+  .page-title { display:flex; align-items:flex-end; gap:14px; flex-wrap:wrap; margin-bottom:14px; }
+  .page-title h1 { margin:0; font-size:24px; letter-spacing:-.03em; }
+  .page-title p { margin:0 0 2px; color:var(--ink-muted); font-size:12px; }
+  .page-title .spacer { flex:1; }
+  .summary { display:grid; grid-template-columns:1.5fr repeat(4,minmax(90px,.55fr)); gap:10px; margin-bottom:14px; }
+  .summary-card { background:var(--ink-800); border:1px solid var(--line); border-radius:var(--radius); padding:10px 12px; min-width:0; }
+  .summary-card .k { font-size:10px; color:var(--ink-faint); letter-spacing:.08em; text-transform:uppercase; font-weight:800; }
+  .summary-card .v { margin-top:5px; font-size:17px; font-weight:900; }
+  .summary-card .s { color:var(--ink-muted); font-size:11px; margin-top:3px; }
+  .summary-card.main { border-color:var(--line-2); background:linear-gradient(135deg,var(--ink-700),var(--ink-800)); }
+  .bars { height:8px; background:rgba(247,239,227,.09); border:1px solid var(--line); border-radius:999px; overflow:hidden; margin-top:10px; }
+  .bars i { display:block; height:100%; width:58%; background:linear-gradient(90deg,var(--green),var(--yellow)); }
+  .metric-line { display:flex; gap:12px; flex-wrap:wrap; margin-top:8px; color:var(--ink-muted); font-size:11px; }
+  .metric-line b { color:var(--paper); }
+  .wf-layout { display:grid; grid-template-columns:minmax(0,1fr) 330px; gap:14px; align-items:start; }
+  .panel { background:var(--ink-800); border:1px solid var(--line); border-radius:var(--radius-lg); overflow:hidden; }
+  .panel-head { display:flex; align-items:center; gap:10px; padding:11px 13px; border-bottom:1px solid var(--line); }
+  .panel-head h2 { margin:0; font-size:13px; letter-spacing:.01em; }
+  .panel-head .right { margin-left:auto; display:flex; gap:6px; align-items:center; }
+  .panel-body { padding:14px; }
+  .graph-wrap { overflow:auto; padding:18px 18px 12px; min-height:445px; }
+  .pipeline { display:flex; align-items:flex-start; gap:0; min-width:920px; }
+  .stage { position:relative; flex:none; }
+  .stage + .arrow { flex:none; width:42px; display:flex; align-items:center; justify-content:center; color:var(--ink-faint); font-size:22px; padding-top:44px; }
+  .stage.parallel { display:flex; flex-direction:column; gap:10px; }
+  .node { width:214px; background:var(--paper); color:var(--ink-text); border:2px solid var(--ink-900); border-radius:var(--radius); box-shadow:var(--shadow); overflow:hidden; }
+  .node .stripe { height:5px; background:#8b8496; }
+  .node.done .stripe { background:var(--green); } .node.running .stripe { background:var(--orange); }
+  .node.hitl .stripe { background:var(--yellow); } .node.pending .stripe { background:#8b8496; }
+  .node.active { outline:3px solid var(--orange); outline-offset:2px; }
+  .node-main { padding:10px 11px 9px; }
+  .node-kicker { display:flex; align-items:center; gap:6px; color:var(--paper-muted); font-size:10px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; }
+  .node-kicker .spacer { flex:1; }
+  .node h3 { margin:6px 0 5px; font-size:13px; line-height:1.35; }
+  .node-role { display:flex; align-items:center; gap:7px; color:var(--paper-soft); font-size:11px; }
+  .node-role .avatar { width:22px; height:22px; font-size:9px; box-shadow:1px 1px 0 var(--ink-900); }
+  .node-foot { display:flex; align-items:center; gap:5px; flex-wrap:wrap; padding:8px 11px 10px; border-top:1px dashed rgba(20,19,26,.18); }
+  .node-foot .chip { font-size:9.5px; padding:1px 6px; color:var(--paper-soft); }
+  .slices { display:flex; gap:4px; flex-wrap:wrap; padding:0 11px 10px; }
+  .slice { border:1px solid rgba(20,19,26,.22); border-radius:999px; padding:2px 6px; font-size:9px; color:var(--paper-soft); background:rgba(20,19,26,.03); }
+  button.slice { cursor:pointer; font:inherit; }
+  button.slice:hover { border-color:var(--ink-900); background:var(--paper-hover, #fff3c4); }
+  .slice.done { background:rgba(74,222,128,.22); border-color:rgba(21,128,61,.35); color:#166534; }
+  .slice.current { background:var(--orange); border-color:var(--ink-900); color:var(--ink-900); font-weight:800; }
+  button.slice.active { background:var(--ink-900); color:var(--paper); border-color:var(--ink-900); font-weight:800; }
+  .satellites { display:flex; flex-direction:column; gap:5px; margin-top:9px; }
+  .sat { display:flex; align-items:center; gap:7px; width:100%; text-align:left; padding:7px 8px; border-radius:7px; border:1.5px solid var(--ink-900); background:var(--paper-3); color:var(--ink-text); box-shadow:2px 2px 0 rgba(20,19,26,.2); }
+  .sat .line { width:3px; align-self:stretch; border-radius:2px; background:var(--red); }
+  .sat.dispatch .line { background:var(--cyan); }
+  .sat .copy { min-width:0; }
+  .sat strong { display:block; font-size:10.5px; line-height:1.25; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sat small { display:block; font-size:9px; color:var(--paper-muted); margin-top:2px; }
+  .sat .tag { margin-left:auto; font-size:9px; font-weight:900; color:var(--paper-soft); white-space:nowrap; }
+  .sat.delegation { border-left:0; }
+  .gantt { padding:0 18px 18px; }
+  .gantt-label { display:flex; align-items:center; gap:8px; font-size:10px; color:var(--ink-faint); margin-bottom:7px; text-transform:uppercase; letter-spacing:.08em; font-weight:800; }
+  .gantt-line { display:flex; align-items:center; gap:10px; font-size:10px; margin:5px 0; }
+  .gantt-line span:first-child { width:64px; color:var(--ink-muted); }
+  .gantt-track { flex:1; height:8px; border-radius:99px; background:rgba(247,239,227,.07); border:1px solid var(--line); overflow:hidden; }
+  .gantt-track i { display:block; height:100%; background:var(--orange); width:58%; }
+  .gantt-track.green i { background:var(--green); width:100%; }
+  .side-rail { display:flex; flex-direction:column; gap:12px; }
+  .rail-panel { background:var(--ink-800); border:1px solid var(--line); border-radius:var(--radius-lg); overflow:hidden; }
+  .rail-head { display:flex; align-items:center; gap:7px; padding:10px 12px; border-bottom:1px solid var(--line); font-size:12px; font-weight:900; }
+  .rail-head .count { margin-left:auto; color:var(--ink-muted); font-size:10px; font-weight:800; }
+  .rail-body { padding:10px 12px; display:flex; flex-direction:column; gap:8px; }
+  .mini { display:flex; align-items:center; gap:8px; padding:7px 8px; border:1px solid var(--line); border-radius:8px; background:rgba(247,239,227,.025); }
+  .mini .copy { min-width:0; }
+  .mini strong { display:block; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .mini small { display:block; color:var(--ink-faint); font-size:9.5px; margin-top:2px; }
+  .mini .status { margin-left:auto; font-size:9px; padding:1px 6px; }
+  .role-row { display:flex; align-items:center; gap:8px; padding:7px 0; border-bottom:1px dashed var(--line); }
+  .role-row:last-child { border-bottom:0; }
+  .role-row .copy { min-width:0; }
+  .role-row strong { display:block; font-size:11px; }
+  .role-row small { display:block; color:var(--ink-faint); font-size:9.5px; margin-top:2px; }
+  .role-row .dot { margin-left:auto; }
+  .inspector { margin-top:12px; background:var(--ink-800); border:1px solid var(--line); border-radius:var(--radius-lg); padding:13px 15px; }
+  .inspector-head { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+  .inspector-head h2 { margin:0; font-size:14px; }
+  .inspector-head .right { margin-left:auto; display:flex; gap:6px; }
+  .inspector-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:12px; }
+  .fact { border:1px solid var(--line); border-radius:8px; padding:8px 9px; background:rgba(247,239,227,.025); }
+  .fact .k { font-size:9px; color:var(--ink-faint); letter-spacing:.07em; text-transform:uppercase; font-weight:800; }
+  .fact .v { font-size:12px; margin-top:4px; }
+  .ctx-list { margin-top:12px; display:grid; gap:6px; }
+  .ctx-row { display:flex; align-items:flex-start; gap:8px; padding:7px 9px; border:1px solid var(--line); border-radius:7px; background:rgba(247,239,227,.025); font-size:10.5px; color:var(--ink-muted); }
+  .ctx-row b { color:var(--paper); }
+  .ctx-row .layer { flex:none; width:28px; color:var(--ink-faint); font-family:var(--mono); font-size:9px; }
+  .ctx-row .bar { margin-left:auto; width:62px; height:5px; border-radius:99px; background:rgba(247,239,227,.1); overflow:hidden; }
+  .ctx-row .bar i { display:block; height:100%; background:var(--cyan); }
+  .ctx-actions { display:flex; gap:7px; flex-wrap:wrap; margin-top:11px; }
+  .inspector p { color:var(--ink-muted); font-size:12px; line-height:1.6; margin:10px 0 0; }
+  .legend { display:flex; gap:12px; flex-wrap:wrap; color:var(--ink-faint); font-size:10px; }
+  .legend span { display:inline-flex; align-items:center; gap:5px; }
+  .legend .swatch { width:12px; height:4px; border-radius:2px; }
+  /* Collaboration page */
+  .collab-summary { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px; }
+  .collab-summary .summary-card { padding:12px 14px; }
+  .collab-summary .big { font-size:22px; }
+  .collab-summary .sub { display:flex; gap:12px; flex-wrap:wrap; color:var(--ink-muted); font-size:11px; margin-top:7px; }
+  .filter-row { display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin:0 0 12px; }
+  .filter { border:1px solid var(--line); background:transparent; color:var(--ink-muted); padding:5px 10px; border-radius:999px; font-size:10.5px; font-weight:700; }
+  .filter.active { background:var(--paper); color:var(--ink-900); border-color:var(--ink-900); box-shadow:2px 2px 0 var(--yellow); }
+  .collab-layout { display:grid; grid-template-columns:minmax(0,1fr) 360px; gap:14px; align-items:start; }
+  .collab-list { display:flex; flex-direction:column; gap:16px; }
+  .section-title { display:flex; align-items:center; gap:9px; margin:0 0 8px; font-size:13px; }
+  .section-title .rule { height:2px; flex:1; background:var(--line); }
+  .section-title .hint { color:var(--ink-faint); font-size:10px; font-weight:500; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(310px,1fr)); gap:9px; }
+  .card { position:relative; background:var(--paper); color:var(--ink-text); border:2px solid var(--ink-900); border-radius:var(--radius); box-shadow:var(--shadow); padding:11px 12px 10px 15px; text-align:left; overflow:hidden; }
+  .card::before { content:""; position:absolute; inset:0 auto 0 0; width:5px; background:var(--red); }
+  .card.dispatch::before { background:var(--cyan); }
+  .card.selected { outline:3px solid var(--yellow); outline-offset:2px; }
+  .card-top { display:flex; align-items:center; gap:7px; }
+  .card-type { font-size:9px; font-weight:900; letter-spacing:.06em; text-transform:uppercase; color:var(--paper-muted); }
+  .card-top .status { margin-left:auto; font-size:9px; padding:1px 6px; }
+  .card h3 { margin:6px 0 5px; font-size:12px; line-height:1.35; }
+  .card-meta { display:flex; align-items:center; gap:6px; flex-wrap:wrap; color:var(--paper-muted); font-size:10px; }
+  .card-meta .chip { color:var(--paper-soft); border-color:rgba(20,19,26,.18); }
+  .card-foot { display:flex; align-items:center; gap:6px; margin-top:8px; padding-top:7px; border-top:1px dashed rgba(20,19,26,.18); color:var(--paper-muted); font-size:9.5px; }
+  .card-foot .avatar { width:20px; height:20px; font-size:8px; box-shadow:1px 1px 0 var(--ink-900); }
+  .block-banner { display:flex; align-items:center; gap:6px; margin-top:7px; padding:5px 7px; border-radius:6px; background:rgba(248,113,113,.16); color:#991b1b; font-size:9.5px; font-weight:700; }
+  .dispatch-banner { display:flex; align-items:center; gap:6px; margin-top:7px; padding:5px 7px; border-radius:6px; background:rgba(34,211,238,.13); color:#0e7490; font-size:9.5px; font-weight:700; }
+  .drawer { position:sticky; top:0; background:var(--ink-800); border:1px solid var(--line); border-radius:var(--radius-lg); overflow:hidden; }
+  .drawer-head { padding:12px 14px; border-bottom:1px solid var(--line); }
+  .drawer-head .kicker { font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint); font-weight:800; }
+  .drawer-head h2 { margin:6px 0 7px; font-size:15px; line-height:1.4; }
+  .drawer-head .meta { display:flex; align-items:center; gap:7px; flex-wrap:wrap; color:var(--ink-muted); font-size:10.5px; }
+  .drawer-body { padding:12px 14px 15px; }
+  .drawer-section { margin-bottom:13px; }
+  .drawer-section .k { font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint); font-weight:800; margin-bottom:5px; }
+  .drawer-section p { margin:0; color:var(--ink-muted); font-size:11.5px; line-height:1.55; }
+  .kv { display:grid; grid-template-columns:88px minmax(0,1fr); gap:5px 8px; font-size:11px; color:var(--ink-muted); }
+  .kv b { color:var(--paper); font-weight:700; }
+  .timeline { display:flex; flex-direction:column; gap:8px; }
+  .timeline-item { display:flex; gap:8px; font-size:10.5px; color:var(--ink-muted); }
+  .timeline-item .dot { margin-top:4px; }
+  .timeline-item b { color:var(--paper); }
+  .empty { color:var(--ink-faint); font-size:11px; padding:10px 0; }
+  @media (max-width: 1180px) {
+    .wf-layout { grid-template-columns:minmax(0,1fr); }
+    .side-rail { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .collab-layout { grid-template-columns:minmax(0,1fr); }
+    .drawer { position:static; }
+  }
+  @media (max-width: 760px) {
+    .topbar { padding:12px 14px; flex-wrap:wrap; }
+    .crumb { display:none; }
+    .page { padding:16px 14px 30px; }
+    .summary { grid-template-columns:1fr 1fr; }
+    .summary-card.main { grid-column:1 / -1; }
+    .side-rail { grid-template-columns:1fr; }
+    .collab-summary { grid-template-columns:1fr; }
+    .inspector-grid { grid-template-columns:1fr 1fr; }
+    .cards { grid-template-columns:1fr; }
+    .tabs { padding-left:14px; padding-right:14px; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="topbar">
+    <div class="brand"><span class="mark">⚒</span><span>Anvil</span></div>
+    <div class="crumb">任务 / <b>支付网关安全审计</b> / T-2048</div>
+    <div class="top-actions">
+      <button class="btn ghost">回放</button>
+      <button class="btn">任务详情</button>
+      <button class="btn primary">人工介入</button>
+      <div style="display:flex;gap:-4px;margin-left:6px">
+        <span class="avatar ye" title="Cindy · planner">C</span>
+        <span class="avatar cy" title="审计员 · auditor">审</span>
+        <span class="avatar gr" title="渗透测试 · sec-tester">渗</span>
+        <span class="avatar or" title="开发 · developer">开</span>
+      </div>
+    </div>
+  </header>
+
+  <nav class="tabs" aria-label="演示视图">
+    <button class="tab active" data-view="workflow">工作流总览</button>
+    <button class="tab" data-view="collab">委派 / 派遣</button>
+  </nav>
+
+  <main class="page">
+    <!-- ================= WORKFLOW ================= -->
+    <section id="view-workflow">
+      <div class="page-title">
+        <div>
+          <h1>支付网关安全审计</h1>
+          <p>工作流总览 · 当前执行到“代码审计 / 切片 B”，另有 2 个委派、3 个派遣在进行。</p>
+        </div>
+        <div class="spacer"></div>
+        <span class="chip"><span class="dot orange"></span>推进中</span>
+        <span class="chip">严格模式</span>
+        <span class="chip">权重：高风险 · 可逆</span>
+      </div>
+
+      <div class="summary">
+        <div class="summary-card main">
+          <div class="k">Workflow pulse</div>
+          <div class="v">58% <span class="muted" style="font-size:11px;font-weight:600">7 / 12 步</span></div>
+          <div class="s">当前：S2 代码审计 · 切片 B / execute</div>
+          <div class="bars"><i></i></div>
+          <div class="metric-line">
+            <span>有效 <b>42m</b></span><span>人工等待 <b>8m</b></span>
+            <span>审核门 <b>1 待</b></span><span>返工 <b>1</b></span>
+          </div>
+        </div>
+        <div class="summary-card"><div class="k">委派 · 阻塞</div><div class="v">2</div><div class="s">1 个等待验收</div></div>
+        <div class="summary-card"><div class="k">派遣 · 非阻塞</div><div class="v">3</div><div class="s">1 个待回切</div></div>
+        <div class="summary-card"><div class="k">子代理</div><div class="v">1</div><div class="s">运行时原生</div></div>
+        <div class="summary-card"><div class="k">下一步</div><div class="v" style="font-size:13px">渗透验证</div><div class="s">等待审计结论</div></div>
+      </div>
+
+      <div class="wf-layout">
+        <div>
+          <div class="panel">
+            <div class="panel-head">
+              <h2>执行图谱</h2>
+              <span class="chip">DAG</span>
+              <span class="chip">切片已折叠</span>
+              <div class="right">
+                <span class="chip">图谱</span>
+                <span class="chip">列表</span>
+              </div>
+            </div>
+            <div class="graph-wrap">
+              <div class="pipeline">
+                <div class="stage">
+                  <div class="node done" data-node="s1">
+                    <div class="stripe"></div>
+                    <div class="node-main">
+                      <div class="node-kicker"><span>STEP 01</span><span class="spacer"></span><span class="status green">完成</span></div>
+                      <h3>范围确认与资产盘点</h3>
+                      <div class="node-role"><span class="avatar ye">C</span><span>Cindy · planner</span></div>
+                    </div>
+                    <div class="node-foot"><span class="chip">2 个交付件</span><span class="chip">已归档</span></div>
+                  </div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="stage">
+                  <div class="node running active" data-node="s2">
+                    <div class="stripe"></div>
+                    <div class="node-main">
+                      <div class="node-kicker"><span>STEP 02 · 切片循环</span><span class="spacer"></span><span class="status orange">进行中</span></div>
+                      <h3>代码审计：支付回调 / 签名 / 重放</h3>
+                      <div class="node-role"><span class="avatar cy">审</span><span>审计员 · auditor</span></div>
+                    </div>
+                    <div class="slices">
+                      <button class="slice done" data-slice="A">A 回调</button>
+                      <button class="slice current" data-slice="B">B 签名 · execute</button>
+                      <button class="slice" data-slice="C">C 重放</button>
+                    </div>
+                    <div class="node-foot"><span class="chip">2/5 相</span><span class="chip">委派 1</span><span class="chip">派遣 2</span></div>
+                  </div>
+                  <div class="satellites">
+                    <button class="sat" data-select="d1">
+                      <span class="line"></span>
+                      <span class="copy"><strong>复现 REF-203 越权链</strong><small>委派 · 父 step 等待验收</small></span>
+                      <span class="tag">阻塞</span>
+                    </button>
+                    <button class="sat dispatch" data-select="p1">
+                      <span class="line"></span>
+                      <span class="copy"><strong>修复 Redis 缓存击穿</strong><small>派遣 · 来源切片 A · 待回切</small></span>
+                      <span class="tag">非阻塞</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="stage parallel">
+                  <div class="node pending" data-node="s3a">
+                    <div class="stripe"></div>
+                    <div class="node-main">
+                      <div class="node-kicker"><span>STEP 03a</span><span class="spacer"></span><span class="status gray">待开始</span></div>
+                      <h3>渗透验证</h3>
+                      <div class="node-role"><span class="avatar gr">渗</span><span>sec-tester</span></div>
+                    </div>
+                    <div class="node-foot"><span class="chip">依赖 S2</span></div>
+                  </div>
+                  <div class="node pending" data-node="s3b">
+                    <div class="stripe"></div>
+                    <div class="node-main">
+                      <div class="node-kicker"><span>STEP 03b</span><span class="spacer"></span><span class="status gray">待开始</span></div>
+                      <h3>证据归档</h3>
+                      <div class="node-role"><span class="avatar ye">C</span><span>Cindy</span></div>
+                    </div>
+                    <div class="node-foot"><span class="chip">并行分支</span></div>
+                  </div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="stage">
+                  <div class="node hitl" data-node="s4">
+                    <div class="stripe"></div>
+                    <div class="node-main">
+                      <div class="node-kicker"><span>STEP 04 · HUMAN GATE</span><span class="spacer"></span><span class="status yellow">待人工</span></div>
+                      <h3>风险决策与放行</h3>
+                      <div class="node-role"><span class="avatar re">评</span><span>评审人 · human</span></div>
+                    </div>
+                    <div class="node-foot"><span class="chip">人工决策</span><span class="chip">证据必填</span></div>
+                  </div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="stage">
+                  <div class="node pending" data-node="s5">
+                    <div class="stripe"></div>
+                    <div class="node-main">
+                      <div class="node-kicker"><span>STEP 05</span><span class="spacer"></span><span class="status gray">待开始</span></div>
+                      <h3>修复复核与回归</h3>
+                      <div class="node-role"><span class="avatar or">开</span><span>developer</span></div>
+                    </div>
+                    <div class="node-foot"><span class="chip">回归</span><span class="chip">验收</span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="gantt">
+              <div class="gantt-label"><span>切片进度</span><span class="muted">当前切片 B</span></div>
+              <div class="gantt-line" data-slice="A" style="cursor:pointer"><span>A 回调</span><div class="gantt-track green"><i></i></div><span>完成</span></div>
+              <div class="gantt-line" data-slice="B" style="cursor:pointer"><span>B 签名</span><div class="gantt-track"><i style="width:58%"></i></div><span>2/5</span></div>
+              <div class="gantt-line" data-slice="C" style="cursor:pointer"><span>C 重放</span><div class="gantt-track"><i style="width:0"></i></div><span>待开始</span></div>
+            </div>
+          </div>
+
+          <div class="inspector" id="node-inspector">
+            <div class="inspector-head">
+              <span class="status orange">进行中</span>
+              <h2>S2 · 代码审计 / 切片 B</h2>
+              <div class="right"><span class="chip">审计员</span><span class="chip">72% 上下文</span></div>
+            </div>
+            <div class="inspector-grid">
+              <div class="fact"><div class="k">当前 phase</div><div class="v">execute · 2/5</div></div>
+              <div class="fact"><div class="k">来源 run</div><div class="v mono">run-7a42…</div></div>
+              <div class="fact"><div class="k">关联委派</div><div class="v">1 · 阻塞父 step</div></div>
+              <div class="fact"><div class="k">关联派遣</div><div class="v">2 · 非阻塞</div></div>
+            </div>
+            <p>当前切片已产出 2 个证据文件；委派 REF-203 等待验收，父步骤需等待它完成。派遣“Redis 缓存击穿”已完成目标工作，等待回切原切片。</p>
+          </div>
+        </div>
+
+        <aside class="side-rail">
+          <div class="rail-panel">
+            <div class="rail-head">协同任务 <span class="count">5 项</span></div>
+            <div class="rail-body">
+              <button class="mini" data-select="d1">
+                <span class="dot red"></span>
+                <span class="copy"><strong>复现 REF-203 越权链</strong><small>委派 · 父 step 等待中</small></span>
+                <span class="status yellow">待验收</span>
+              </button>
+              <button class="mini" data-select="d2">
+                <span class="dot red"></span>
+                <span class="copy"><strong>补充第三方签名证据</strong><small>委派 · 父 step 等待中</small></span>
+                <span class="status orange">进行中</span>
+              </button>
+              <button class="mini" data-select="p1">
+                <span class="dot orange"></span>
+                <span class="copy"><strong>修复 Redis 缓存击穿</strong><small>派遣 · 待回切</small></span>
+                <span class="status orange">待回切</span>
+              </button>
+              <button class="mini" data-select="p2">
+                <span class="dot green"></span>
+                <span class="copy"><strong>补充安全提示文案</strong><small>派遣 · 已回切</small></span>
+                <span class="status green">完成</span>
+              </button>
+            </div>
+          </div>
+          <div class="rail-panel">
+            <div class="rail-head">运行脉搏 <span class="count">4 角色</span></div>
+            <div class="rail-body">
+              <div class="role-row"><span class="avatar cy">审</span><span class="copy"><strong>审计员</strong><small>本任务 · 切片 B · 处理中</small></span><span class="dot orange"></span></div>
+              <div class="role-row"><span class="avatar gr">渗</span><span class="copy"><strong>渗透测试</strong><small>空闲 · 已保留上下文</small></span><span class="dot green"></span></div>
+              <div class="role-row"><span class="avatar or">开</span><span class="copy"><strong>开发</strong><small>派遣任务 · 待回切</small></span><span class="dot orange"></span></div>
+              <div class="role-row"><span class="avatar ye">C</span><span class="copy"><strong>Cindy</strong><small>空闲 · 可安排任务</small></span><span class="dot green"></span></div>
+            </div>
+          </div>
+          <div class="rail-panel">
+            <div class="rail-head">需要你 <span class="count">1 项</span></div>
+            <div class="rail-body">
+              <div class="mini"><span class="dot yellow"></span><span class="copy"><strong>风险决策 · S4</strong><small>证据已齐，等待人工放行</small></span><span class="status yellow">HITL</span></div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ================= COLLAB ================= -->
+    <section id="view-collab" class="hidden">
+      <div class="page-title">
+        <div>
+          <h1>委派 / 派遣</h1>
+          <p>委派是当前 step 内的阻塞式拆工；派遣是来源 task 下的非阻塞小切片。两者在这里统一追踪。</p>
+        </div>
+        <div class="spacer"></div>
+        <span class="chip"><span class="dot red"></span>阻塞 2</span>
+        <span class="chip"><span class="dot cyan" style="background:var(--cyan)"></span>非阻塞 3</span>
+        <span class="chip">平均等待 6m</span>
+      </div>
+
+      <div class="collab-summary">
+        <div class="summary-card">
+          <div class="k">委派 · delegation</div>
+          <div class="v big">2 <span class="muted" style="font-size:11px;font-weight:600">项</span></div>
+          <div class="sub"><span>阻塞父 step 1</span><span>待验收 1</span><span>进行中 1</span></div>
+        </div>
+        <div class="summary-card">
+          <div class="k">派遣 · dispatch</div>
+          <div class="v big">3 <span class="muted" style="font-size:11px;font-weight:600">项</span></div>
+          <div class="sub"><span>进行中 1</span><span>待回切 1</span><span>已回切 1</span></div>
+        </div>
+      </div>
+
+      <div class="filter-row">
+        <button class="filter active" data-filter="all">全部</button>
+        <button class="filter" data-filter="active">进行中</button>
+        <button class="filter" data-filter="wait">待验收 / 待回切</button>
+        <button class="filter" data-filter="done">已完成</button>
+        <button class="filter" data-filter="block">只看阻塞</button>
+        <span class="muted" style="font-size:10.5px;margin-left:4px">筛选只影响演示列表</span>
+      </div>
+
+      <div class="collab-layout">
+        <div class="collab-list">
+          <section>
+            <h2 class="section-title">
+              <span class="dot red"></span>委派 <span class="hint">阻塞式 · 父 step 等待验收</span>
+              <span class="rule"></span><span class="muted" style="font-size:10px">2</span>
+            </h2>
+            <div class="cards">
+              <button class="card" data-card="d1" data-state="wait block">
+                <div class="card-top"><span class="card-type">DELEGATION · 阻塞</span><span class="status yellow">待验收</span></div>
+                <h3>复现 REF-203 越权链</h3>
+                <div class="card-meta"><span class="chip">S2 代码审计</span><span class="chip">验收：审计员</span></div>
+                <div class="block-banner">⛔ 父步骤正等待此委派完成</div>
+                <div class="card-foot"><span class="avatar gr">渗</span><span>vuln-verifier</span><span style="margin-left:auto">提交于 12:44</span></div>
+              </button>
+              <button class="card" data-card="d2" data-state="active block">
+                <div class="card-top"><span class="card-type">DELEGATION · 阻塞</span><span class="status orange">进行中</span></div>
+                <h3>补充第三方签名证据</h3>
+                <div class="card-meta"><span class="chip">S2 代码审计</span><span class="chip">验收：审计员</span></div>
+                <div class="block-banner">⛔ 父步骤正等待此委派完成</div>
+                <div class="card-foot"><span class="avatar cy">审</span><span>compliance</span><span style="margin-left:auto">已运行 8m</span></div>
+              </button>
+            </div>
+          </section>
+
+          <section>
+            <h2 class="section-title">
+              <span class="dot orange"></span>派遣 <span class="hint">非阻塞 · 独立上下文 · 完成即 done</span>
+              <span class="rule"></span><span class="muted" style="font-size:10px">3</span>
+            </h2>
+            <div class="cards">
+              <button class="card dispatch" data-card="p1" data-state="wait">
+                <div class="card-top"><span class="card-type">DISPATCH · 非阻塞</span><span class="status orange">待回切</span></div>
+                <h3>修复 Redis 缓存击穿</h3>
+                <div class="card-meta"><span class="chip">来源：切片 A</span><span class="chip">同 workspace</span></div>
+                <div class="dispatch-banner">↩ 原切片 B 仍 suspended，回切已就绪</div>
+                <div class="card-foot"><span class="avatar or">开</span><span>developer</span><span style="margin-left:auto">结果已回流</span></div>
+              </button>
+              <button class="card dispatch" data-card="p2" data-state="done">
+                <div class="card-top"><span class="card-type">DISPATCH · 非阻塞</span><span class="status green">已回切</span></div>
+                <h3>补充安全提示文案</h3>
+                <div class="card-meta"><span class="chip">来源：切片 B</span><span class="chip">独立上下文</span></div>
+                <div class="dispatch-banner">✓ 已返回原切片，上下文已恢复</div>
+                <div class="card-foot"><span class="avatar or">设</span><span>designer</span><span style="margin-left:auto">完成于 11:20</span></div>
+              </button>
+              <button class="card dispatch" data-card="p3" data-state="active">
+                <div class="card-top"><span class="card-type">DISPATCH · 非阻塞</span><span class="status orange">进行中</span></div>
+                <h3>检查 WAF 规则命中情况</h3>
+                <div class="card-meta"><span class="chip">来源：切片 A</span><span class="chip">来源 task 参与者</span></div>
+                <div class="dispatch-banner">↗ 目标角色空闲后执行，不阻塞当前 workflow</div>
+                <div class="card-foot"><span class="avatar gr">渗</span><span>sec-tester</span><span style="margin-left:auto">已运行 3m</span></div>
+              </button>
+            </div>
+          </section>
+        </div>
+
+        <aside class="drawer" id="collab-drawer">
+          <div class="drawer-head">
+            <div class="kicker" id="drawer-kicker">DISPATCH · 非阻塞</div>
+            <h2 id="drawer-title">修复 Redis 缓存击穿</h2>
+            <div class="meta" id="drawer-meta">
+              <span class="status orange">待回切</span><span class="chip">developer</span><span class="chip">来源：切片 A</span>
+            </div>
+          </div>
+          <div class="drawer-body" id="drawer-body">
+            <div class="drawer-section">
+              <div class="k">关系</div>
+              <div class="kv">
+                <span>来源任务</span><b>支付网关安全审计 · T-2048</b>
+                <span>来源步骤</span><b>S2 代码审计 / 切片 A</b>
+                <span>上下文</span><b>独立 · task B 子任务上下文</b>
+                <span>回切目标</span><b>切片 B · run-7a42…</b>
+              </div>
+            </div>
+            <div class="drawer-section">
+              <div class="k">结果摘要</div>
+              <p>已定位 Redis 键未设置互斥锁导致缓存击穿；补充 singleflight 与随机 TTL，回归用例通过。等待原切片 resume 后合并结论。</p>
+            </div>
+            <div class="drawer-section">
+              <div class="k">时间线</div>
+              <div class="timeline">
+                <div class="timeline-item"><span class="dot green"></span><span><b>12:31</b> 角色空闲，切换进派遣上下文</span></div>
+                <div class="timeline-item"><span class="dot orange"></span><span><b>12:58</b> 提交结果，子任务直接 done</span></div>
+                <div class="timeline-item"><span class="dot yellow"></span><span><b>13:01</b> 回切就绪，等待原 run resume</span></div>
+              </div>
+            </div>
+            <div class="drawer-section">
+              <div class="k">操作</div>
+              <p class="muted">演示页不执行操作。实际页面提供“打开来源任务 / 打开派遣子任务 / 查看 run”。</p>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+  const views = {
+    workflow: document.getElementById('view-workflow'),
+    collab: document.getElementById('view-collab'),
+  };
+  document.querySelectorAll('.tab').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
+      tab.classList.add('active');
+      Object.entries(views).forEach(([key, el]) => el.classList.toggle('hidden', key !== tab.dataset.view));
+      if (tab.dataset.view === 'collab') {
+        location.hash = 'collab';
+      } else {
+        location.hash = 'workflow';
+      }
+    });
+  });
+  if (location.hash === '#collab') {
+    document.querySelector('[data-view="collab"]').click();
+  }
+
+  const nodes = {
+    s1: ['完成', 'S1 · 范围确认与资产盘点', 'green', '范围确认已完成；资产清单与数据流图已归档。'],
+    s2: ['进行中', 'S2 · 代码审计 / 切片 B', 'orange', '当前切片 B 正在执行 execute 阶段；委派 REF-203 阻塞父步骤，派遣 Redis 任务已完成并等待回切。'],
+    s3a: ['待开始', 'S3a · 渗透验证', 'gray', '依赖 S2 审计结论；审计员完成后自动进入。'],
+    s3b: ['待开始', 'S3b · 证据归档', 'gray', '并行分支，等待 S2 产出。'],
+    s4: ['待人工', 'S4 · 风险决策与放行', 'yellow', '人工审核门：需要确认风险等级、证据完整性与放行条件。'],
+    s5: ['待开始', 'S5 · 修复复核与回归', 'gray', '修复完成后由开发提交回归证据，最终复核。'],
+  };
+  document.querySelectorAll('[data-node]').forEach((node) => {
+    node.addEventListener('click', () => {
+      document.querySelectorAll('.node').forEach((n) => n.classList.remove('active'));
+      node.classList.add('active');
+      const [status, title, tone, text] = nodes[node.dataset.node];
+      const box = document.getElementById('node-inspector');
+      box.querySelector('.inspector-head').innerHTML =
+        `<span class="status ${tone}">${status}</span><h2>${title}</h2>` +
+        `<div class="right"><span class="chip">演示详情</span><span class="chip">点击节点切换</span></div>`;
+      box.querySelector('.inspector-grid').innerHTML =
+        `<div class="fact"><div class="k">状态</div><div class="v">${status}</div></div>` +
+        `<div class="fact"><div class="k">关系</div><div class="v">workflow 步骤</div></div>` +
+        `<div class="fact"><div class="k">上下文</div><div class="v">按 step/slice 隔离</div></div>` +
+        `<div class="fact"><div class="k">关联任务</div><div class="v">见协同任务栏</div></div>`;
+      box.querySelector('p').textContent = text;
+      const oldCtx = box.querySelector('.ctx-list');
+      if (oldCtx) oldCtx.remove();
+    });
+  });
+
+  const slices = {
+    A: { status:['已完成','green'], role:'审计员 · auditor', run:'run-3f91…', key:'T-2048::slice::A', session:'sid_a91…', tokens:64, phase:'decide · 已通过', note:'切片 A 上下文已完成并保留；点击可回到该切片的执行记录与上下文来源。', blocks:[['L0','角色身份 + 审计协议','100%'],['L1','任务：支付网关安全审计','100%'],['L2','切片 A 指令 + 验收标准','100%'],['L2','回调路径审计知识','72%'],['L3','最近 12 条切片活动','58%']] },
+    B: { status:['执行中','orange'], role:'审计员 · auditor', run:'run-7a42…', key:'T-2048::slice::B', session:'sid_b72…', tokens:72, phase:'execute · 2/5', note:'当前切片 B 的独立上下文；任务级知识可带入，切片 A 的原始对话不会进入。', blocks:[['L0','角色身份 + 审计协议','100%'],['L1','任务：支付网关安全审计','100%'],['L2','切片 B 签名校验指令','100%'],['L2','签名/证书链知识','88%'],['L3','最近 8 条切片活动','63%']] },
+    C: { status:['未开始','gray'], role:'审计员 · auditor', run:'—', key:'T-2048::slice::C（待创建）', session:'—', tokens:0, phase:'pending', note:'切片 C 尚未开始；首次进入时会新建独立上下文，不复用 A/B 的原始对话。', blocks:[['L0','角色身份 + 审计协议','待注入'],['L1','任务：支付网关安全审计','待注入'],['L2','切片 C 重放保护指令','待注入']] },
+  };
+  function showSlice(key) {
+    const d = slices[key];
+    if (!d) return;
+    document.querySelectorAll('button.slice').forEach((b) => b.classList.toggle('active', b.dataset.slice === key));
+    const box = document.getElementById('node-inspector');
+    box.querySelector('.inspector-head').innerHTML =
+      `<span class="status ${d.status[1]}">${d.status[0]}</span><h2>切片 ${key} · 角色执行上下文</h2>` +
+      `<div class="right"><span class="chip">${d.role}</span><span class="chip">上下文 ${d.tokens}%</span></div>`;
+    box.querySelector('.inspector-grid').innerHTML =
+      `<div class="fact"><div class="k">context key</div><div class="v mono">${d.key}</div></div>` +
+      `<div class="fact"><div class="k">session</div><div class="v mono">${d.session}</div></div>` +
+      `<div class="fact"><div class="k">run</div><div class="v mono">${d.run}</div></div>` +
+      `<div class="fact"><div class="k">phase</div><div class="v">${d.phase}</div></div>`;
+    box.querySelector('p').textContent = d.note;
+    const old = box.querySelector('.ctx-list');
+    if (old) old.remove();
+    const list = document.createElement('div');
+    list.className = 'ctx-list';
+    list.innerHTML = d.blocks.map(([layer, name, pct]) =>
+      `<div class="ctx-row"><span class="layer">${layer}</span><span><b>${name}</b></span><span class="bar"><i style="width:${String(pct).replace('%','')}%"></i></span></div>`).join('') +
+      `<div class="ctx-actions"><span class="chip">打开完整交互</span><span class="chip">历史上下文</span><span class="chip">上下文来源</span></div>`;
+    box.appendChild(list);
+  }
+  document.querySelectorAll('[data-slice]').forEach((el) => {
+    el.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      showSlice(el.dataset.slice);
+    });
+  });
+
+  const details = {
+    d1: { kicker:'DELEGATION · 阻塞', title:'复现 REF-203 越权链', status:['待验收','yellow'], meta:['vuln-verifier','S2 代码审计','阻塞父 step'], body:`
+      <div class="drawer-section"><div class="k">关系</div><div class="kv"><span>父任务</span><b>支付网关安全审计 · T-2048</b><span>父步骤</span><b>S2 代码审计 / 切片 B</b><span>验收人</span><b>审计员</b><span>阻塞</span><b>是 · 父 step 不能 submit</b></div></div>
+      <div class="drawer-section"><div class="k">验收标准</div><p>PoC 可复现；修复前后对比；影响范围与证据文件齐全。</p></div>
+      <div class="drawer-section"><div class="k">时间线</div><div class="timeline"><div class="timeline-item"><span class="dot orange"></span><span><b>12:20</b> 审计员创建委派</span></div><div class="timeline-item"><span class="dot yellow"></span><span><b>12:44</b> 负责人提交，等待验收</span></div><div class="timeline-item"><span class="dot red"></span><span><b>现在</b> 父 step 仍被阻塞</span></div></div></div>` },
+    d2: { kicker:'DELEGATION · 阻塞', title:'补充第三方签名证据', status:['进行中','orange'], meta:['compliance','S2 代码审计','阻塞父 step'], body:`
+      <div class="drawer-section"><div class="k">关系</div><div class="kv"><span>父任务</span><b>支付网关安全审计 · T-2048</b><span>父步骤</span><b>S2 代码审计 / 切片 B</b><span>验收人</span><b>审计员</b><span>阻塞</span><b>是 · 父 step 不能 submit</b></div></div>
+      <div class="drawer-section"><div class="k">当前状态</div><p>负责人正在收集第三方签名和证书链证据；已运行 8 分钟。</p></div>
+      <div class="drawer-section"><div class="k">为什么用委派</div><p>需要另一个 Anvil 角色的权限/知识，且父 step 必须等待结果才能收口。</p></div>` },
+    p1: { kicker:'DISPATCH · 非阻塞', title:'修复 Redis 缓存击穿', status:['待回切','orange'], meta:['developer','来源：切片 A','submit 即 done'], body:`
+      <div class="drawer-section"><div class="k">关系</div><div class="kv"><span>来源任务</span><b>支付网关安全审计 · T-2048</b><span>来源步骤</span><b>S2 代码审计 / 切片 A</b><span>上下文</span><b>独立 · 新 task 子上下文</b><span>回切目标</span><b>切片 B · run-7a42…</b></div></div>
+      <div class="drawer-section"><div class="k">结果摘要</div><p>已定位 Redis 键未设置互斥锁导致缓存击穿；补充 singleflight 与随机 TTL，回归用例通过。</p></div>
+      <div class="drawer-section"><div class="k">时间线</div><div class="timeline"><div class="timeline-item"><span class="dot green"></span><span><b>12:31</b> 角色空闲，进入派遣上下文</span></div><div class="timeline-item"><span class="dot orange"></span><span><b>12:58</b> submit，子任务直接 done</span></div><div class="timeline-item"><span class="dot yellow"></span><span><b>13:01</b> 回切就绪，等待 resume</span></div></div></div>` },
+    p2: { kicker:'DISPATCH · 非阻塞', title:'补充安全提示文案', status:['已回切','green'], meta:['designer','来源：切片 B','已恢复上下文'], body:`
+      <div class="drawer-section"><div class="k">关系</div><div class="kv"><span>来源任务</span><b>支付网关安全审计 · T-2048</b><span>来源步骤</span><b>S2 代码审计 / 切片 B</b><span>上下文</span><b>独立 · designer 上下文</b><span>回切目标</span><b>切片 B · 已恢复</b></div></div>
+      <div class="drawer-section"><div class="k">结果摘要</div><p>已补充支付失败页的安全提示文案与截图；派遣结束后返回原切片，原 session 已 resume。</p></div>
+      <div class="drawer-section"><div class="k">回切结果</div><p>原 run 仍 suspended，回切成功；结果以 mention 回流来源任务。</p></div>` },
+    p3: { kicker:'DISPATCH · 非阻塞', title:'检查 WAF 规则命中情况', status:['进行中','orange'], meta:['sec-tester','来源：切片 A','独立上下文'], body:`
+      <div class="drawer-section"><div class="k">关系</div><div class="kv"><span>来源任务</span><b>支付网关安全审计 · T-2048</b><span>来源步骤</span><b>S2 代码审计 / 切片 A</b><span>上下文</span><b>独立 · 新上下文</b><span>阻塞</span><b>否 · 不阻塞 workflow</b></div></div>
+      <div class="drawer-section"><div class="k">当前状态</div><p>sec-tester 空闲后进入派遣上下文，正在比对 WAF 规则与审计发现。</p></div>
+      <div class="drawer-section"><div class="k">说明</div><p>派遣子任务共享来源 workspace，但使用独立对话上下文；完成后 submit 即 done。</p></div>` },
+  };
+  const drawer = document.getElementById('collab-drawer');
+  function selectCard(id) {
+    document.querySelectorAll('.card').forEach((c) => c.classList.toggle('selected', c.dataset.card === id));
+    const d = details[id];
+    if (!d) return;
+    drawer.querySelector('#drawer-kicker').textContent = d.kicker;
+    drawer.querySelector('#drawer-title').textContent = d.title;
+    drawer.querySelector('#drawer-meta').innerHTML =
+      `<span class="status ${d.status[1]}">${d.status[0]}</span>` +
+      d.meta.map((m) => `<span class="chip">${m}</span>`).join('');
+    drawer.querySelector('#drawer-body').innerHTML = d.body;
+  }
+  document.querySelectorAll('.card').forEach((card) => {
+    card.addEventListener('click', () => selectCard(card.dataset.card));
+  });
+  document.querySelectorAll('[data-select]').forEach((el) => {
+    el.addEventListener('click', () => {
+      document.querySelector('[data-view="collab"]').click();
+      selectCard(el.dataset.select);
+      drawer.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+  document.querySelectorAll('.filter').forEach((f) => {
+    f.addEventListener('click', () => {
+      document.querySelectorAll('.filter').forEach((x) => x.classList.remove('active'));
+      f.classList.add('active');
+      const mode = f.dataset.filter;
+      document.querySelectorAll('.card').forEach((card) => {
+        const states = (card.dataset.state || '').split(' ');
+        const ok = mode === 'all' || states.includes(mode);
+        card.style.display = ok ? '' : 'none';
+      });
+    });
+  });
+</script>
+</body>
+</html>

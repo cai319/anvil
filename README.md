@@ -640,6 +640,7 @@ anvil init --with-roles
 - [docs/v1.42.3-release.md](docs/v1.42.3-release.md)：v1.42.3 当前运行会话选择与空白 run 日志说明
 - [docs/v1.42.4-release.md](docs/v1.42.4-release.md)：v1.42.4 侧栏分组标题排版与开发方署名
 - [docs/v1.42.5-release.md](docs/v1.42.5-release.md)：v1.42.5 派遣子任务模型修正、回切状态机与 runtime subagent
+- [docs/v1.42.6-release.md](docs/v1.42.6-release.md)：v1.42.6 切片关联角色执行上下文
 - [docs/workflow-revision.md](docs/workflow-revision.md)：运行中 workflow 的增量修订（安全变更不重启任务）
 - [docs/operations.md](docs/operations.md)：打包、备份/迁移/重置、卸载
 - [docs/troubleshooting.md](docs/troubleshooting.md)：详细排查
