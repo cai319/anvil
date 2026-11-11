@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import {
   api, subscribeEvents,
   type ContextManifest, type Role, type RoleRuntimeStatus, type Run, type Task,
-  type TimelineEvent, type Workflow,
+  type TaskDispatch, type TimelineEvent, type Workflow,
 } from "../api/client";
 import { roleStatusFromWorkflow } from "../workflowStatus";
 import { roleLiveDot, roleLiveState, stateClassForTone, type RoleLiveState } from "../roleLive";
@@ -47,10 +47,17 @@ function describeEvent(ev: TimelineEvent): string {
   }
 }
 
-export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Role[]; workflow?: Workflow | null }) {
+export function RoleSessions({ task, roles, workflow, dispatches = [] }: {
+  task: Task;
+  roles: Role[];
+  workflow?: Workflow | null;
+  dispatches?: TaskDispatch[];
+}) {
   const [runs, setRuns] = useState<Run[]>([]);
   const [runsLoaded, setRunsLoaded] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
+  // 没有本任务 run 时仍允许展开运行时上下文（角色可能正在别的 task/slice 工作）。
+  const [expandedCtx, setExpandedCtx] = useState<string | null>(null);
   const [subTab, setSubTab] = useState<"log" | "timeline" | "manifest">("log");
   const [logs, setLogs] = useState<Record<string, string>>({});
   const [timelines, setTimelines] = useState<Record<string, TimelineEvent[]>>({});
@@ -111,8 +118,13 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
   const roleName = (slug: string) => roles.find((r) => r.slug === slug)?.display_name ?? slug;
   const roleFor = (slug: string) => roles.find((r) => r.slug === slug);
 
-  const open = (run: Run | undefined) => {
-    if (!run) return;
+  const open = (run: Run | undefined, slug: string) => {
+    if (!run) {
+      setExpanded(null);
+      setExpandedCtx((cur) => (cur === slug ? null : slug));
+      return;
+    }
+    setExpandedCtx(null);
     setExpanded((cur) => (cur === run.id ? null : run.id));
     setSubTab("log");
     if (!(run.id in logs)) {
@@ -175,8 +187,6 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
           && rt.current_task_id && rt.current_task_id !== task.id,
         );
         const queueInfo = rt?.queue_tasks?.find((q) => q.id === task.id);
-        const queuedHere = queueInfo?.count ?? 0;
-        const queueAhead = queueInfo?.ahead_count ?? 0;
         const ctxList = (rt?.contexts ?? []).filter((c) => c.task_id === task.id);
         const ctxHere = ctxList.find(
           (c) => c.context_key && rt?.context_key && c.context_key === rt.context_key,
@@ -186,6 +196,13 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
         const wfSlice = ctxList.length
           ? (ctxHere?.slice_key ?? rt?.context_slice_key ?? null)
           : undefined;
+        const queueCtx = rt?.queue_contexts?.find(
+          (q) => q.task_id === task.id && (q.slice_key ?? null) === (wfSlice ?? null));
+        const queuedHere = queueCtx?.count ?? queueInfo?.count ?? 0;
+        const queueAhead = queueCtx?.ahead_count ?? queueInfo?.ahead_count ?? 0;
+        const returnPending = dispatches.some(
+          (d) => d.target_role === slug
+            && (d.status === "return_ready" || d.status === "returning"));
         const wfState = roleStatusFromWorkflow(workflow, slug, wfSlice);
         const taskClosed = task.status === "closed" || workflow?.status === "terminated";
         const retryWait = wfState?.label === "等待重试";
@@ -203,6 +220,7 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
           taskInReview: task.status === "in_review",
           hasReviewStep: wfState?.cls === "in_review",
           hasContext: Boolean(ctxHere?.has_session),
+          returnPending,
         });
         // 点灯表达实时运行态；徽标优先表达终止/完成/失败。
         let st = live;
@@ -224,13 +242,19 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
           taskInReview: task.status === "in_review",
           hasReviewStep: wfState?.cls === "in_review",
           queuedHere,
+          returnPending,
         });
-        const isOpen = expanded === run?.id && !!run;
+        const subagents = rt?.active_subagents ?? [];
+        const runOpen = expanded === run?.id && !!run;
+        const ctxOpen = expandedCtx === slug;
+        const isOpen = runOpen || ctxOpen;
         let detail = "";
         if (rt?.switching) {
           detail = "正在切换任务上下文…";
         } else if (live.tone === "in_review") {
           detail = "等待人工评审/确认";
+        } else if (live.tone === "in_progress" && returnPending) {
+          detail = "等待派遣任务回切原切片";
         } else if (live.tone === "idle") {
           detail = ctxHere?.has_session
             ? "空闲 · 本任务上下文已保留"
@@ -269,7 +293,7 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
         }
         return (
           <div key={slug} className="rs-row-wrap">
-            <button className="rs-row" onClick={() => open(run)} disabled={!run}>
+            <button className="rs-row" onClick={() => open(run, slug)}>
               <span
                 className={`role-live-dot ${dot.cls}`}
                 title={dot.title}
@@ -277,6 +301,11 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
                 role="img"
               />
               <span className={`status status-${stateClassForTone(st.tone)}`}>{st.label}</span>
+              {subagents.length > 0 && (
+                <span className="chip" title="运行时原生子代理，不是 Anvil 任务">
+                  子代理 {subagents.length}
+                </span>
+              )}
               <RoleAvatar
                 slug={slug}
                 name={roleName(slug)}
@@ -315,7 +344,42 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
               </div>
             )}
 
-            {isOpen && run && (
+            {ctxOpen && (
+              <div className="rs-detail">
+                <div className="rs-detail-meta">
+                  <strong>运行时上下文</strong>
+                  <span className="muted">本任务暂无可用 run；角色可能正在其他 task/slice 工作</span>
+                  {rt?.current_run_id && (
+                    <a href={`/runs/${rt.current_run_id}`}>打开当前 run <Icon name="chevron-right" size={12} /></a>
+                  )}
+                </div>
+                {ctxList.length === 0 ? (
+                  <p className="muted">本任务还没有上下文槽；首次进入时会新建。</p>
+                ) : (
+                  <ul className="rs-timeline">
+                    {ctxList.map((c) => (
+                      <li key={c.context_key || c.slice_key || "task"}>
+                        <span className="mono">{c.slice_key || "task 级"}</span>
+                        <span className="muted">
+                          {" · "}{c.has_session ? "已保留会话" : "无 session"}
+                          {c.cwd ? ` · ${c.cwd}` : ""}
+                        </span>
+                        {c.context_key && c.context_key === rt?.context_key && (
+                          <span className="chip" style={{ marginLeft: 6 }}>当前</span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <p className="muted">
+                  队列：{queuedHere} 条；最近活跃：{ctxHere?.last_active_at ? formatShort(ctxHere.last_active_at) : "—"}
+                </p>
+                {subagents.length > 0 && (
+                  <p className="muted">运行时子代理：{subagents.length} 个运行中</p>
+                )}
+              </div>
+            )}
+            {runOpen && run && (
               <div className="rs-detail">
                 <div className="rs-detail-meta">
                   <span className="mono">run {run.id.slice(0, 8)}</span>
@@ -323,6 +387,26 @@ export function RoleSessions({ task, roles, workflow }: { task: Task; roles: Rol
                   {run.failure_class && <span className="badge badge-in_progress">{run.failure_class}</span>}
                   <a href={`/runs/${run.id}`}>打开完整会话页 <Icon name="chevron-right" size={12} /></a>
                 </div>
+                {subagents.length > 0 && (
+                  <div className="rs-subagents">
+                    <strong>运行时子代理</strong>
+                    <ul>
+                      {subagents.map((sub) => (
+                        <li key={sub.tool_use_id}>
+                          <span className="mono">{sub.subagent_type || sub.tool_name || "subagent"}</span>
+                          {sub.description ? ` · ${sub.description}` : ""}
+                          <span className="muted"> · {sub.status || "running"}</span>
+                          {sub.result_summary ? (
+                            <div className="muted">{sub.result_summary}</div>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="muted">
+                      子代理由运行时管理；Anvil 只展示可观测到的状态和结果，不保证完整子上下文。
+                    </p>
+                  </div>
+                )}
                 <div className="rs-tabs">
                   <button className={`small ${subTab === "log" ? "primary" : ""}`} onClick={() => setSubTab("log")}>完整交互（上下文 / 模型 / 工具）</button>
                   <button className={`small ${subTab === "timeline" ? "primary" : ""}`} onClick={() => setSubTab("timeline")}>历史上下文（时间线）</button>

@@ -832,11 +832,11 @@ def _wake_mentioned_role(conn, request: Request, task: dict, target: str,
                          source_run_id: str | None = None,
                          source_step_id: str | None = None,
                          explicit_mode: str | None = None) -> None:
-    """按上下文路由唤醒被 @ 的角色：复用当前 / 切换切片 / 新建独立任务。
+    """按上下文路由唤醒被 @ 的角色：复用当前 / 切换切片 / 新建派遣子任务。
 
     - 同 task 同 slice：复用现有上下文；
     - 同 task 已知 slice：切回该 slice 槽；
-    - 无关/无归属：创建独立派遣任务（需启用自动派遣），否则退化为本任务新回复 run。
+    - 无关/无归属：创建派遣子任务（人类/显式模式始终允许；Agent 自动路由受开关控制），否则退化为本任务新回复 run。
     """
     orch = getattr(request.app.state, "orchestrator", None)
     findings_mode = (
@@ -880,7 +880,14 @@ def _wake_mentioned_role(conn, request: Request, task: dict, target: str,
         pass
 
     mode = decision.get("mode")
-    if mode == "dispatch" and config.DISPATCH_AUTO_FROM_MENTION:
+    # 人类/显式 dispatch 是明确意图，不受 Agent 自动路由开关限制；
+    # 开关只控制 Agent 之间的自动升级。
+    allow_dispatch = (
+        config.DISPATCH_AUTO_FROM_MENTION
+        or sender in (None, "human")
+        or explicit_mode == "dispatch"
+    )
+    if mode == "dispatch" and allow_dispatch:
         try:
             result = services.dispatch.create_dispatch(
                 conn, source_task_id=task["id"], target_role=target,
@@ -1280,7 +1287,7 @@ def add_deps(tid: str, body: DepIn, conn=Depends(get_db),
 @router.post("/{tid}/dispatches", status_code=201)
 def create_dispatch(tid: str, body: dict, request: Request, conn=Depends(get_db),
                     auth: Auth = Depends(get_auth)):
-    """创建一张**独立顶层任务卡**（不是 delegation 子任务）。
+    """创建一张来源 task 下的**派遣子任务**（不是 delegation，也不是顶层任务）。
 
     与现有 `POST /{tid}/dispatch`（启动/规划）区分：这里的目标角色在全新上下文
     工作，来源 task 只保留软关联，不阻塞、不共享对话。

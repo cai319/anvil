@@ -349,10 +349,10 @@ export function Lobby() {
                   >
                     <a className="card-link" href={`/tasks/${t.id}`} draggable={false}>
                       <strong className="card-title" title={t.title}>{t.title}</strong>
-                      {t.source_task_id && (
-                        <div className="card-tags" title="独立派遣任务：软关联来源，不是父子任务">
+                      {t.parent_id && (
+                        <div className="card-tags" title="派遣子任务：挂在来源 task 下，不进入顶层大厅">
                           <span className="card-tag">
-                            独立任务 · 来自 {t.source_task_id.slice(0, 8)}
+                            派遣任务 · 来自 {t.parent_id.slice(0, 8)}
                             {t.source_slice_key ? ` / ${t.source_slice_key}` : ""}
                           </span>
                         </div>

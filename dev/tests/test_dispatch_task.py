@@ -1,4 +1,4 @@
-"""独立派遣任务：顶层任务、软关联、新 run、幂等与深度保护。"""
+"""派遣子任务：来源 task 下的非阻塞 child、共享 workspace、幂等与深度保护。"""
 from __future__ import annotations
 
 import pytest
@@ -31,10 +31,11 @@ def env(tmp_path, monkeypatch):
     conn.close()
 
 
-def test_dispatch_creates_independent_top_level_task(env):
+def test_dispatch_creates_non_blocking_child_task(env):
     conn = env
     source = tasks_service.create(
-        conn, title="来源任务", assignee="qa", repo="original-repo")
+        conn, title="来源任务", assignee="qa", assignees=["qa", "dev"],
+        repo="original-repo")
     now = now_iso()
     conn.execute(
         "INSERT INTO role_sessions "
@@ -52,19 +53,20 @@ def test_dispatch_creates_independent_top_level_task(env):
     record = result["dispatch"]
 
     assert task["id"] != source["id"]
-    assert task["parent_id"] is None
+    assert task["parent_id"] == source["id"]
     assert task["parent_step_id"] is None
-    assert task["type"] == "dispatched"
+    assert task["type"] == "dispatch"
     assert task["assignee"] == "dev"
     assert task["source_task_id"] == source["id"]
     assert task["source_slice_key"] == "A"
     assert task["requested_by"] == "qa"
     assert task["dispatch_status"] == "open"
-    # 不继承来源任务的 repo/workspace。
-    assert task["repo"] is None
+    # 继承来源任务的 repo/workspace；但对话上下文独立。
+    assert task["repo"] == "original-repo"
     assert task["depends_on"] == []
     assert run["task_id"] == task["id"]
     assert run["slice_key"] is None
+    assert not (run.get("worktree_path") and __import__("pathlib").Path(run["worktree_path"]).exists())
     assert run["origin"] == "dispatch"
     assert run["dispatch_id"] == record["id"]
     assert record["status"] == "open"
@@ -81,7 +83,8 @@ def test_dispatch_creates_independent_top_level_task(env):
 
 def test_dispatch_is_idempotent_for_same_request(env):
     conn = env
-    source = tasks_service.create(conn, title="来源任务", assignee="qa")
+    source = tasks_service.create(
+        conn, title="来源任务", assignee="qa", assignees=["qa", "dev"])
     first = dispatch.create_dispatch(
         conn, source_task_id=source["id"], target_role="dev",
         message="同一个请求", requester="qa")
@@ -116,7 +119,8 @@ def test_dispatch_rejects_terminal_source_and_non_participant(env):
 def test_dispatch_depth_limit(env, monkeypatch):
     conn = env
     monkeypatch.setattr(config, "DISPATCH_MAX_DEPTH", 1)
-    source = tasks_service.create(conn, title="来源", assignee="qa")
+    source = tasks_service.create(
+        conn, title="来源", assignee="qa", assignees=["qa", "dev"])
     first = dispatch.create_dispatch(
         conn, source_task_id=source["id"], target_role="dev",
         message="第一层", requester="qa")
@@ -131,7 +135,8 @@ def test_dispatch_captures_return_point_after_idle_release(env):
     from anvil.services import runs as runs_service
 
     conn = env
-    source = tasks_service.create(conn, title="来源", assignee="qa")
+    source = tasks_service.create(
+        conn, title="来源", assignee="qa", assignees=["qa", "dev"])
     now = now_iso()
     conn.execute("UPDATE tasks SET status='in_progress' WHERE id=?", (source["id"],))
     conn.execute(
@@ -152,3 +157,107 @@ def test_dispatch_captures_return_point_after_idle_release(env):
     assert record["return_context_key"] == f"{source['id']}::slice::A"
     assert record["return_run_id"] == "R-return"
     assert record["return_step_id"] == "A.scope"
+
+
+def test_dispatch_workspace_is_shared_with_source(env):
+    from anvil.services import task_workspace
+
+    conn = env
+    source = tasks_service.create(
+        conn, title="共享 workspace", assignee="qa", assignees=["qa", "dev"])
+    result = dispatch.create_dispatch(
+        conn, source_task_id=source["id"], target_role="dev",
+        message="共享空间的小切片", requester="qa")
+    target = result["task"]
+    src_ws = task_workspace.resolve_for_task(conn, source["id"], create=True)
+    child_ws = task_workspace.resolve_for_task(conn, target["id"], create=True)
+    assert src_ws and child_ws == src_ws
+    assert result["run"]["worktree_path"] and not __import__("pathlib").Path(
+        result["run"]["worktree_path"]).exists()
+
+
+def test_dispatch_submit_marks_done_without_review(env):
+    conn = env
+    source = tasks_service.create(
+        conn, title="来源", assignee="qa", assignees=["qa", "dev"])
+    result = dispatch.create_dispatch(
+        conn, source_task_id=source["id"], target_role="dev",
+        message="完成后直接 done", requester="qa")
+    target = result["task"]
+    tasks_service.claim(conn, target["id"], "dev")
+    submitted = tasks_service.submit(
+        conn, target["id"], summary="派遣结果", role="dev")
+    assert submitted["status"] == "done"
+    assert submitted["assignee"] == "dev"
+
+
+def test_parent_submit_is_not_blocked_by_dispatch_child(env):
+    conn = env
+    source = tasks_service.create(conn, title="父任务", assignee="qa")
+    now = now_iso()
+    # dev 作为参与者但不参与父任务团队提交。
+    conn.execute(
+        "INSERT INTO task_role_claims (task_id, role_slug, status, updated_at) "
+        "VALUES (?, 'dev', 'pending', ?)", (source["id"], now))
+    conn.commit()
+    dispatch.create_dispatch(
+        conn, source_task_id=source["id"], target_role="dev",
+        message="不阻塞父任务", requester="qa")
+    tasks_service.claim(conn, source["id"], "qa")
+    submitted = tasks_service.submit(
+        conn, source["id"], summary="父任务按自己的节奏提交", role="qa")
+    assert submitted["status"] == "in_review"
+
+
+def test_dispatch_creation_rolls_back_on_run_failure(env, monkeypatch):
+    from anvil.services import runs as runs_service
+
+    conn = env
+    source = tasks_service.create(
+        conn, title="来源", assignee="qa", assignees=["qa", "dev"])
+    monkeypatch.setattr(runs_service, "create_run",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError):
+        dispatch.create_dispatch(
+            conn, source_task_id=source["id"], target_role="dev",
+            message="失败不应留下 task", requester="qa")
+    conn.rollback()
+    child = conn.execute(
+        "SELECT COUNT(*) AS n FROM tasks WHERE parent_id=? AND type='dispatch'",
+        (source["id"],)).fetchone()["n"]
+    assert child == 0
+
+
+def test_dispatch_target_must_be_source_participant(env):
+    conn = env
+    source = tasks_service.create(conn, title="来源", assignee="qa")
+    with pytest.raises(dispatch.DispatchError) as exc:
+        dispatch.create_dispatch(
+            conn, source_task_id=source["id"], target_role="dev",
+            message="非参与者不能进入共享 workspace", requester="qa")
+    assert "participant" in str(exc.value)
+
+
+def test_migration_reparents_legacy_top_level_dispatch(env):
+    from anvil import db as db_module
+
+    conn = env
+    source = tasks_service.create(conn, title="来源", assignee="qa")
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO tasks (id,title,type,status,source_task_id,created_at,updated_at) "
+        "VALUES ('T-OLD','旧派遣','dispatched','in_progress',?,?,?)",
+        (source["id"], now, now))
+    conn.execute(
+        "INSERT INTO task_dispatches "
+        "(id,source_task_id,target_task_id,target_role,request_hash,reason_code,"
+        " reason_json,status,created_at,updated_at) "
+        "VALUES ('D-OLD',?,'T-OLD','dev','old','legacy','{}','open',?,?)",
+        (source["id"], now, now))
+    conn.execute("DELETE FROM settings WHERE key='schema.dispatch_child_v1'")
+    conn.commit()
+    db_module._migrate_dispatch_child_v1(conn)  # noqa: SLF001
+    row = conn.execute(
+        "SELECT parent_id, type FROM tasks WHERE id='T-OLD'").fetchone()
+    assert row["parent_id"] == source["id"]
+    assert row["type"] == "dispatch"

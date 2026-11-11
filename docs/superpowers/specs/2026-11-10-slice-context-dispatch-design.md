@@ -1,4 +1,11 @@
-# 切片上下文隔离与独立派遣任务 · 设计
+> **2026-11-11 模型修订**
+> dispatch 不是顶层任务。顶层任务仅 human 手动创建；所有 dispatch 都是来源 task 下的
+> 派遣子任务（`parent_id=来源 task`、`parent_step_id=NULL`、`type=dispatch`），共享来源
+> task 的 workspace/cwd，不进入 Lobby，不阻塞父任务；角色 submit 即 `done`，无人工评审。
+> 同角色当前 step 内的并行工作优先使用运行时 subagent；delegation 仅保留跨角色/跨 turn/
+> 阻塞式拆工。本文下方涉及“独立顶层任务/派遣子任务卡”的历史描述以本修订为准。
+
+# 切片上下文隔离与派遣子任务 · 设计
 
 - 日期：2026-11-10
 - 状态：已实现（Phase 1–4），UI/文档持续补齐
@@ -10,9 +17,9 @@
 
 1. workflow 的每个切片（`slice_key`）拥有独立角色上下文；同一角色在切片 A/B
    的工作对话互不污染。
-2. 角色被 @ 或收到与当前切片弱相关的请求时，可以新建一张**独立顶层任务卡**，
+2. 角色被 @ 或收到与当前切片弱相关的请求时，可以新建一张来源 task 下的**派遣子任务卡**，
    在全新上下文中工作；原切片上下文保留。
-3. 独立任务完成后，若原切片仍在执行且原 run 仍挂起，自动回到原切片上下文。
+3. 派遣子任务完成后，若原切片仍在执行且原 run 仍挂起，自动回到原切片上下文。
 4. 路由可解释、可测试：身份硬规则优先，歧义时才用轻量词法相关度。
 5. 与历史“委派子任务”语义明确区分，不改变其阻塞/验收规则。
 
@@ -21,7 +28,7 @@
 - 不把 slice 建成任务卡；slice 是上下文/执行单位，task 是工作空间/记账单位。
 - 不引入 embedding 或每次请求调用 LLM 做路由。
 - 不做跨机器分布式上下文；仍是一角色一进程、单 turn。
-- 不把派遣任务变成原任务的父子任务；没有 `parent_id`/`parent_step_id` 阻塞。
+- 不把 dispatch 变成 delegation；dispatch 是来源 task 下的 child，但 `parent_step_id=NULL`，不阻塞父 step/task。
 
 ## 2. 术语与关系
 
@@ -31,13 +38,13 @@
 | slice | workflow 内一片工作（scope/execute/verify/fix/verify2/decide） | 不是任务；同一 slice 各 phase 共享上下文 |
 | context key | `task_id` / `task_id::slice::<slice_key>` / `__global__` | daemon 会话槽的主键 |
 | 委派子任务（delegation） | `parent_id + parent_step_id`，当前 step 内强依赖拆工 | **阻塞**父 step；派发者验收；负责人不能自验收 |
-| 独立派遣任务（dispatch） | 顶层 `tasks` 行，`type=dispatched`，软关联来源 | **不阻塞**来源 workflow；走普通任务评审 |
-| 侧任务 | 已废弃术语 | 不再使用；统一叫“独立派遣任务” |
+| 派遣子任务（dispatch） | 来源 task 下的 child，`parent_id=来源 task`、`parent_step_id=NULL`，`type=dispatch` | **不阻塞**来源 workflow；角色 submit 即 done，无人工评审 |
+| 侧任务 | 已废弃术语 | 不再使用；统一叫“派遣子任务” |
 
 关键区别：
 
 - 委派子任务解决“同一父步骤内需要拆工/并行/不同权限/独立验收”；
-- 独立派遣任务解决“与当前切片弱相关、需要新上下文/新任务卡/不阻塞当前工作”；
+- 派遣子任务解决“与当前切片弱相关、需要新上下文/新任务卡/不阻塞当前工作”；
 - 同 task 同 slice 的复核/追问不是派遣，必须复用当前上下文。
 
 ## 3. 上下文模型
@@ -121,7 +128,7 @@ action_kind, message, explicit_mode, target_task_id, target_slice_key, scope_pat
 
 判定顺序：
 
-1. `explicit_mode=dispatch` → 新独立任务。
+1. `explicit_mode=dispatch` → 新派遣子任务。
 2. `explicit_mode=reuse` → 当前上下文。
 3. `explicit_mode=switch` → 指定 task/slice 槽。
 4. 目标 context key == 当前 context key → `reuse`（硬规则，同切片复核不得派遣）。
@@ -145,10 +152,10 @@ reasons/score/current context。人工/Agent 可用 `context_mode` 覆盖。
 |---|---|
 | 当前在 slice B，同切片反馈 B 的问题 | `reuse`，不新建任务 |
 | 当前在 B，A 是上一轮已有切片的异常反馈 | `switch` 到 A 槽；无槽但有 A 职责则 `new_slice` |
-| 当前 debug 任务 D，另一个任务请求无关领域修复 | 低相关/无归属 → `dispatch` 独立任务 |
+| 当前 debug 任务 D，另一个任务请求无关领域修复 | 低相关/无归属 → `dispatch` 派遣子任务 |
 | 来源 task 参与者，但请求不属于其 slice/职责且低相关 | `dispatch`（允许） |
 
-## 5. 独立派遣任务流程
+## 5. 派遣子任务流程
 
 ### 5.1 创建
 
@@ -170,16 +177,16 @@ API：`POST /api/v1/tasks/{tid}/dispatches`
 服务：`services.dispatch.create_dispatch`。
 
 1. 校验来源 task 非终态、目标角色存在且非 onboarding、请求者是来源 task 参与者
-   （human 例外）。
+   （human 例外）；目标角色也必须是来源 task 参与者（共享 workspace 的权限边界）。
 2. 沿 `tasks.source_task_id` 检查派遣深度，超过 `ANVIL_DISPATCH_MAX_DEPTH`
    拒绝。
 3. `request_hash` 去重；同活跃请求直接返回已有任务（`force` 可绕过）。
-4. 创建普通顶层 task：`type=dispatched`、`assignee=target`、
-   `parent_id/parent_step_id=NULL`、无 `depends_on`；不继承来源 workspace/repo/
-   base_branch，除非显式传入。
+4. 创建来源 task 下的 child：`type=dispatch`、`parent_id=来源 task`、
+   `parent_step_id=NULL`、`assignee=target`、无 `depends_on`；继承来源
+   workspace/repo/base_branch，并复用同一个 workspace 路径/cwd。
 5. 写软关联字段与 `task_dispatches`；记录目标角色当前上下文/run/step 作为返回点。
 6. 为目标任务创建 `origin=dispatch` 的新 run，prompt 只包含请求、验收和来源标识，
-   不注入来源切片原始对话。
+   不注入来源切片原始对话；run 使用来源 task 的 cwd，避免回切时 resume 轮换。
 7. 来源任务时间线写 `kind=dispatch` 活动；来源 workflow 不阻塞。
 8. `pump(run,'wake')`；目标角色忙时进入其队列。
 
@@ -266,7 +273,7 @@ human/测试旁路写 task-wide。`anvil inbox check` 默认按当前 slice 过�
 - `GET /tasks/{id}`：软关联字段和 `dispatch_status`。
 - `POST /tasks/{id}/dispatches`、`GET /tasks/{id}/dispatches`。
 - 现有 `POST /tasks/{id}/dispatch` 仍是 human 的“启动/规划”，语义不变；文档/UI
-  改称“启动/发起”，不要与独立派遣混淆。
+  改称“启动/发起”，不要与派遣子任务混淆。
 
 ### CLI
 
@@ -279,11 +286,13 @@ anvil task mention $ANVIL_TASK_ID --to dev "同切片复核" --context-mode auto
 ### UI
 
 - TaskDetail：任务头显示“来自任务 X / 切片 A”软关联 chip 和 dispatch 状态；
-  “委派/独立任务”页签同时列出 delegation 与独立派遣任务；提供派遣表单。
-- Lobby：独立派遣任务作为顶层任务卡展示，带“独立任务 · 来自 X”chip。
+  “委派/派遣任务”页签同时列出 delegation 与派遣子任务，只展示/追踪已创建任务，
+  不提供人工派遣表单；人工派遣在任务会话中 `@目标角色` 完成，Agent/CLI 仍可调用
+  `POST /tasks/{id}/dispatches`。
+- Lobby：派遣子任务不显示；来源 task 的“委派/派遣任务”页签展示。
 - RoleSessions：同一 task 多 slice 时列出每个 slice 的上下文（当前/已保留/无会话），
   优先展示当前 slice 的 run。
-- 图例文案：复用当前上下文 / 切换到切片上下文 / 新建切片上下文 / 已派遣独立任务。
+- 图例文案：复用当前上下文 / 切换到切片上下文 / 新建切片上下文 / 已派遣派遣子任务。
 
 ## 9. 实施状态
 
@@ -295,7 +304,7 @@ anvil task mention $ANVIL_TASK_ID --to dev "同切片复核" --context-mode auto
 | Phase 4 | task_dispatches、wake_note、自动回切、跨切片回切、scheduler 对账 | 完成 |
 | Phase 5 | UI/文档/验收 | 进行中 |
 
-自动 mention 派遣由 `ANVIL_DISPATCH_AUTO_FROM_MENTION=1` 开启；未开启时路由
+Agent 之间的自动 mention 派遣由 `ANVIL_DISPATCH_AUTO_FROM_MENTION=1` 开启；人类 @ 和显式 `context_mode=dispatch` 始终创建派遣子任务；未开启时 Agent 路由
 仍会选择 reuse/switch/new_slice，dispatch 降级为本任务内回复 run，并写 audit。
 
 ## 10. 测试
@@ -305,7 +314,7 @@ anvil task mention $ANVIL_TASK_ID --to dev "同切片复核" --context-mode auto
 - `tests/test_daemon.py`：A/B slice 各独立 session、slice reset、workspace 复用。
 - `tests/test_context_router.py`：同切片 reuse、已知切片 switch、无归属 dispatch、
   参与者低相关 dispatch、显式覆盖。
-- `tests/test_dispatch_task.py`：顶层任务/软关联/新 run/幂等/深度/权限。
+- `tests/test_dispatch_task.py`：child 模型/软关联/新 run/共享 workspace/幂等/深度/权限/自动 done。
 - `tests/test_auto_return.py`：done 回切、已提交不回切、重复不重复 resume、
   跨切片临时回切一次。
 - `tests/api/test_dispatch_api.py`：端点、软关联、幂等、参与者校验。
@@ -330,7 +339,7 @@ anvil task mention $ANVIL_TASK_ID --to dev "同切片复核" --context-mode auto
 - [x] task reset/delete 清全部 slice 槽；slice reset 只清当前 slice。
 - [x] 同 task 同 slice 复核 → reuse，不新建任务。
 - [x] 同 task 已知 A slice、当前 B → 切到 A 上下文。
-- [x] 跨领域/低相关 → 独立顶层任务卡，原任务不阻塞。
+- [x] 跨领域/低相关 → 派遣子任务卡，原任务不阻塞。
 - [x] 派遣完成且原切片 running/run suspended → 自动回切一次；已提交不回切。
 - [x] 委派子任务阻塞/验收语义不变。
 - [x] 新 slice CIC 不含其他 slice 原始消息。
@@ -344,7 +353,7 @@ anvil task mention $ANVIL_TASK_ID --to dev "同切片复核" --context-mode auto
    - `task_dispatches.return_run_id` 指向它且 dispatch 处于
      `open/return_ready/returning`；
    - 它被其他 run 的 `context_return_run_id` 指向且 `context_return_after_turn=1`；
-   - 同角色还有非终态的独立派遣任务；
+   - 同角色还有非终态的派遣子任务；
    - 同角色正在其他 task 执行 turn，或 daemon 正忙/有队列。
 2. **reset 作用域必须精确**：崩溃、超时、run session reset、self reset-context
    只清当前 `(task, slice)`；task id 不再隐式代表“全部 slice”。任务删除才用

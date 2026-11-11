@@ -306,6 +306,18 @@ export interface RoleRuntimeStatus {
   busy_scope?: "task" | "global" | null;
   contexts: RoleTaskContext[];
   switching?: boolean;
+  active_subagents?: {
+    tool_use_id: string;
+    tool_name?: string | null;
+    subagent_type?: string | null;
+    description?: string | null;
+    prompt_summary?: string | null;
+    status?: string | null;
+    started_at?: string | null;
+    ended_at?: string | null;
+    result_summary?: string | null;
+    context_available?: number;
+  }[];
   context_tokens: number;
   model_id: string | null;
 }

@@ -21,6 +21,11 @@ const FLAG_GROUPS: { key: string; title: string; hint: string }[] = [
     title: "任务隔离",
     hint: "控制每个任务的工作空间与磁盘清理。",
   },
+  {
+    key: "collaboration",
+    title: "协作与派遣",
+    hint: "控制 Agent 之间的 @ 路由是否自动创建派遣子任务。",
+  },
 ];
 
 /** 功能开关的详细说明气泡：悬停或键盘聚焦时显示。 */

@@ -415,6 +415,18 @@ def test_awaiting_external_work_blocks_nudge(tmp_path, monkeypatch):
 
     assert sched._awaiting_external_work(conn, "R-E", "dev") is False
 
+    # 无关的派遣子任务（open）不能角色级抑制来源 watchdog。
+    conn.execute(
+        "INSERT INTO tasks (id,title,type,status,parent_id,scope_paths_json,"
+        "acceptance_json,created_at,updated_at) "
+        "VALUES ('T-D','dispatch','dispatch','in_progress','T-E','[]','[]',?,?)",
+        (now, now))
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,started_at) "
+        "VALUES ('R-DISP','dev','T-D','suspended',?)", (now,))
+    conn.commit()
+    assert sched._awaiting_external_work(conn, "R-E", "dev") is False
+
     conn.execute(
         "INSERT INTO task_dispatches "
         "(id,source_task_id,target_task_id,target_role,return_run_id,"
@@ -433,6 +445,9 @@ def test_awaiting_external_work_blocks_nudge(tmp_path, monkeypatch):
         "VALUES ('R-A','dev','T-E','suspended',?,'R-E',1)", (now,))
     conn.commit()
     assert sched._awaiting_external_work(conn, "R-E", "dev") is True
+    conn.execute("UPDATE runs SET status='submitted' WHERE id='R-A'")
+    conn.commit()
+    assert sched._awaiting_external_work(conn, "R-E", "dev") is False
     conn.execute("UPDATE runs SET status='completed' WHERE id='R-A'")
     conn.commit()
 

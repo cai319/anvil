@@ -145,10 +145,10 @@ anvil task knowledge-delete <id> --id <knowledge-id>   # human
   `--description`（目标/输入/输出）、`--acceptance`、`--scope-paths`、owner、TTL；
   TTL 用 `--due-at <ISO8601>` 记录（当前只展示/告警，超时处理在后续版本）；
   目标角色忙时排队，父 step 提交前必须等委派完成。创建者不要 claim 委派给别人的工单。
-- **独立派遣任务不是子任务/侧任务**：与本切片弱相关、需要新上下文的工作用
-  `task dispatch` 创建顶层任务卡；不带 `--parent/--parent-step`，不阻塞当前 workflow，
-  目标角色完成后原切片仍 running 时自动回切。同 task 同 slice 的复核不要派遣，
-  用 `mention` 复用当前上下文。
+- **派遣子任务是来源 task 下的 child**：与本切片弱相关、需要新上下文的工作用
+  `task dispatch` 创建 `parent_id=来源 task`、`parent_step_id=NULL` 的非阻塞子任务；
+  共享来源 workspace，不进入 Lobby，角色 `task submit` 即 done，无人工评审；
+  原切片仍 running 时自动回切。同 task 同 slice 的复核不要派遣，用 `mention`。
 - 委派完成后由派发者验收：`anvil task delegation-accept <id>` 或
   `anvil task delegation-reject <id> --feedback "原因"`（对应
   `POST /tasks/{id}/delegation/accept|reject`）；负责人不能验收自己的产出；

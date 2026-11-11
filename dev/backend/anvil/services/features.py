@@ -135,6 +135,19 @@ FLAGS: tuple[FeatureFlag, ...] = (
         ),
         category="workspace",
     ),
+    FeatureFlag(
+        key="dispatch_auto_from_mention",
+        attr="DISPATCH_AUTO_FROM_MENTION",
+        title="Agent 间 @ 自动派遣",
+        summary="Agent 之间 @ 且路由判定为独立工作时，自动创建派遣子任务。",
+        description=(
+            "人类 @ 始终按上下文路由执行；显式 context_mode=dispatch 始终可用。"
+            "此开关只控制 Agent 之间的自动路由。开启后，Agent 的无关 @ 会在来源 task "
+            "下创建非阻塞的派遣子任务；关闭后，退化为当前 task 的新切片/回复 run，"
+            "不创建子任务。"
+        ),
+        category="collaboration",
+    ),
 )
 
 _BY_KEY = {flag.key: flag for flag in FLAGS}

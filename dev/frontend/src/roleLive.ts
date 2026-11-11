@@ -41,6 +41,7 @@ export function roleLiveState(
     taskInReview?: boolean;
     hasReviewStep?: boolean;
     hasContext?: boolean;
+    returnPending?: boolean;
   } = {},
 ): RoleLiveState {
   // 终止/完成/失败优先于实时忙碌；否则完成后的历史 failed run 会把角色染红。
@@ -75,6 +76,7 @@ export function roleLiveState(
     return state("进行中", "in_progress");
   }
   if (options.allDone) return state("完成", "done");
+  if (options.returnPending) return state("等待回切", "in_progress");
   // 进程活着或上下文仍保留：空闲（绿），不是待办。
   if (rt.alive || options.hasContext) return state("空闲", "idle");
   return state("待办", "todo");
@@ -118,6 +120,7 @@ export function roleLiveDot(
     taskInReview?: boolean;
     hasReviewStep?: boolean;
     queuedHere?: number;
+    returnPending?: boolean;
   } = {},
 ): RoleLiveDot {
   const hasContext = Boolean(options.hasContext);
@@ -157,18 +160,21 @@ export function roleLiveDot(
         : "正在本任务工作",
     };
   }
+  if (busy && !rt.current_task_id) {
+    return { cls: "orange", title: "正在处理系统任务" };
+  }
   // turn 之间但子任务尚未提交：上下文仍绑在本任务，视为仍在执行该子任务。
   if (options.hasOpenStep && rt.alive && rt.context_task_id === taskId) {
     return { cls: "orange", title: "本任务子任务进行中（等待下一轮）" };
   }
   const queueAhead = options.queueAhead ?? 0;
-  if (queueAhead > 0) {
-    return { cls: "red", title: "本任务消息排在其它任务之后" };
-  }
-  if ((options.queuedHere ?? 0) > 0 && rt.alive) {
+  if ((options.queuedHere ?? 0) > 0) {
+    if (!rt.alive) return { cls: "red", title: "等待唤醒后处理本任务消息" };
+    if (queueAhead > 0) return { cls: "red", title: "本任务消息排在其它任务之后" };
     return { cls: "orange", title: "下一轮将处理本任务" };
   }
   if (options.allDone) return { cls: "green", title: "本任务步骤已完成" };
+  if (options.returnPending) return { cls: "orange", title: "等待派遣任务回切原切片" };
   if (rt.alive || hasContext) {
     return { cls: "green", title: hasContext
       ? "空闲 · 本任务上下文已保留"

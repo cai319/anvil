@@ -33,13 +33,12 @@ DELIVERABLE_MANIFEST = (
     "· 证据文件仍按 CLI 的相对路径规则提交；交付件清单只用于 human 直接打开，不替代证据。\n"
 )
 
-# 子任务 = 委派工单：默认不建；只有能换取稀缺资源时才拆。
+# 子任务 = 委派工单：默认不建；只有跨角色/跨 turn 的强依赖才拆。
 DELEGATION_PROTOCOL = (
     "## 子任务 = 委派工单（默认不建）\n"
+    "· 同角色、当前 step 内的并行探索/实现优先使用运行时 subagent，不要建委派子任务。\n"
+    "· 只有需要另一个 Anvil 角色、独立验收、跨 turn 持久化、或必须阻塞父 step 时才建。\n"
     "· 能用当前 step 或 `anvil task mention` 解决的，不建子任务。\n"
-    "· 只有能换取以下之一时才建：独立上下文（大量日志/搜索结果/文件）；"
-    "多个独立只读分支并行；不同角色的权限/工具/验收；执行失败后确有必要的动态分解；"
-    "跨会话持久责任。\n"
     "· 规划级分解（新增阶段/角色/顺序）只能由 Cindy 定义；执行角色只执行 "
     "`anvil task mention $ANVIL_TASK_ID --to cindy \"具体诉求\"` 提议。\n"
     "· 建子任务必须写清：目标、输入、输出、验收、scope、owner、TTL、父步骤。"
@@ -47,23 +46,31 @@ DELEGATION_PROTOCOL = (
     "`anvil task create --title \"...\" --description \"...\" --parent $ANVIL_TASK_ID "
     "--parent-step S3 --assignee <角色> --acceptance \"...\" --scope-paths poc/`。\n"
     "· 目标角色忙时子任务会排队；父 step 提交前必须等委派完成。"
-    "同角色委派只能串行；需要真并行请优先用运行时自带的 subagent（只读）。\n"
-    "· 负责人完成后执行 `anvil task submit <子任务ID> \"...\"`；派发者收到通知后执行 "
+    "负责人完成后执行 `anvil task submit <子任务ID> \"...\"`；派发者收到通知后执行 "
     "`anvil task delegation-accept <子任务ID>` 或 "
     "`anvil task delegation-reject <子任务ID> --feedback \"...\"`。负责人不能验收自己的产出。\n"
-    "· 反模式：共享写状态/同一文件并行写、强耦合、频繁往返、仅因“任务复杂”而拆。\n"
+    "· 反模式：同角色拆工、共享写状态/同一文件并行写、强耦合、频繁往返、仅因“任务复杂”而拆。\n"
 )
 
-# 与当前切片/步骤弱相关的独立工作：新建顶层任务卡，不用 parent 父子关系。
+# 仅有运行时 subagent 能力时注入。
+SUBAGENT_PROTOCOL = (
+    "## 运行时 subagent\n"
+    "· 同角色、当前 step 内的并行探索、代码搜索、局部实现、验证，优先使用运行时"
+    "自带的 subagent/Task 机制，不要为此创建委派子任务。\n"
+    "· 父角色只接收子代理的压缩结果/摘要，不要求复制子代理原始上下文；"
+    "不要把子代理结果当成已经验收的最终产物。\n"
+    "· 子代理继承父角色的 workspace/权限；跨角色权限、跨 turn 持久责任仍用委派子任务。\n"
+)
+
+# 派遣是来源 task 下的非阻塞子任务，不是顶层任务。
 DISPATCH_PROTOCOL = (
-    "## 无关工作 = 独立派遣任务（不是子任务）\n"
+    "## 无关工作 = 派遣子任务（不是顶层任务）\n"
     "· 如果对方请求与当前切片/步骤弱相关、需要另开上下文，执行 "
     "`anvil task dispatch $ANVIL_TASK_ID --to <角色> --slice <当前切片> \"请求\"`；"
-    "它会新建一张顶层任务卡，不阻塞当前 workflow。\n"
-    "· 派遣任务不要带 `--parent/--parent-step`，也不要用 `anvil task create` 伪装成子任务；"
-    "不要把来源任务的原始对话复制给对方。\n"
+    "它会在来源 task 下创建非阻塞派遣子任务，不推进 workflow。\n"
+    "· 派遣任务共享来源 task 的 workspace，但不是委派：不阻塞父 step，提交即 done。\n"
+    "· 不要把来源任务的原始对话复制给对方；完成后系统会在原切片仍 running 时尝试回切。\n"
     "· 同 task 同切片的复核/追问不要派遣，直接用 `anvil task mention` 在当前上下文处理。\n"
-    "· 目标角色完成后，系统会在原切片仍 running 时尝试自动回切；不要重复创建同一个派遣任务。\n"
 )
 
 # 回复 run 只讨论，不创建规划级任务；确需委派时用短版规则。

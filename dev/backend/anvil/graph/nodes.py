@@ -81,6 +81,18 @@ def _runtime_id(effective: dict) -> str | None:
     return rt or None
 
 
+def _supports_subagents(conn: sqlite3.Connection, run: dict,
+                        effective: dict) -> bool:
+    """运行时是否声明支持原生 subagent；能力来自 runtime YAML capabilities。"""
+    try:
+        runtime_id = _runtime_id(effective) or config.DEFAULT_RUNTIME
+        row = runtime_service.get(conn, runtime_id) or {}
+        caps = row.get("capabilities") or {}
+        return bool(caps.get("supports_subagents"))
+    except Exception:  # noqa: BLE001 —— 能力查询失败按不支持处理
+        return False
+
+
 def _persistent_session(conn: sqlite3.Connection, effective: dict) -> dict | None:
     """该角色运行时是否走常驻会话模式（claude-code stream-json 等）。"""
     from ..services import daemon as daemon_service
@@ -152,11 +164,18 @@ def _task_workspace_path(conn: sqlite3.Connection, run: dict) -> str:
     if not task_id:
         return ""
     from ..services import task_workspace as task_workspace_service
-    return task_workspace_service.resolve(conn, task_id, create=True)
+    # 派遣子任务与来源 task 共享 workspace/cwd，保证回切时 --resume 不因 cwd 变化轮换。
+    return task_workspace_service.resolve_for_task(conn, task_id, create=True)
 
 
 def _workspace_path(run: dict, role: dict, conn: sqlite3.Connection | None = None) -> str:
     """执行目录优先级：run worktree → task workspace → 角色 home。"""
+    if conn is not None and run.get("task_id"):
+        task = tasks_service.get(conn, run["task_id"])
+        if task and task.get("type") in ("dispatch", "dispatched") and task.get("parent_id"):
+            shared = _task_workspace_path(conn, run)
+            if shared:
+                return shared
     wt = run.get("worktree_path")
     if wt and Path(wt).exists():
         return wt
@@ -180,6 +199,13 @@ def _run_workspace_path(conn: sqlite3.Connection, run: dict, role: dict,
     旧槽指向角色 home 时会被忽略，首次唤醒触发一次 CIC 轮换。
     """
     role_home = str(role.get("home_path") or "")
+    task_id = run.get("task_id")
+    task = tasks_service.get(conn, task_id) if task_id else None
+    if task and task.get("type") in ("dispatch", "dispatched") and task.get("parent_id"):
+        # 派遣子任务必须与来源 task 使用同一 cwd；不能被旧槽/旧 worktree 覆盖。
+        shared = _task_workspace_path(conn, run)
+        if shared:
+            return shared
     if _persistent_session(conn, effective) and run.get("task_id"):
         from ..services import daemon as daemon_service
         # 同一 task 的 workspace 在 slice 间共享；优先精确槽，再回退同 task 任意槽。
@@ -601,8 +627,10 @@ def _project_run(conn: sqlite3.Connection, run: dict, *,
         task_knowledge=ctx.get("task_knowledge", ""),
         topic_knowledge=ctx.get("topic_knowledge", ""),
         knowledge_repos=ctx.get("knowledge_repos"),
-        prompt=((str(run.get("wake_note") or "").strip() + "\n\n")
-                if run.get("wake_note") else "") + (run.get("prompt") or ""),
+        prompt=(((str(run.get("wake_note") or "").strip() + "\n\n")
+                 if run.get("wake_note") else "") + (run.get("prompt") or "")
+                + ("\n\n" + render.SUBAGENT_PROTOCOL
+                   if _supports_subagents(conn, run, effective) else "")),
         protocol=_protocol_for_run(conn, run),
     )
     _project_catalog(conn, effective, workspace_path, run["role_slug"])
@@ -724,6 +752,8 @@ def spawn_node(state: dict, config) -> dict:
                  window_floor, runtime_id, ws_path) = _render_persistent(
                     conn, run, task, effective, role, workspace_path)
                 prompt = _prompt_for_run(conn, run, task)
+                if _supports_subagents(conn, run, effective):
+                    prompt = prompt + "\n\n" + render.SUBAGENT_PROTOCOL
                 delivery = daemon_service.get_manager().ensure_and_deliver(
                     conn, run["role_slug"], executable=exe, args_new=args_new,
                     args_resume=args_resume, ctx=pctx, cwd=cwd, env=env, prompt=prompt,

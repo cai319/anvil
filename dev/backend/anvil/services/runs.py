@@ -24,7 +24,8 @@ def create_run(conn: sqlite3.Connection, role_slug: str, task_id: str | None = N
                prompt: str | None = None, step_id: str | None = None,
                workflow_id: str | None = None, slice_key: str | None = None,
                dispatch_id: str | None = None,
-               origin: str | None = None) -> dict:
+               origin: str | None = None,
+               commit: bool = True) -> dict:
     """冻结快照 + 插入 run（status='created'）+ best-effort worktree + 建日志文件。不拉起子进程。
 
     `prompt` 用于无任务的 run（reminder / 直接消息），有任务时由任务内容组装提示。
@@ -52,9 +53,15 @@ def create_run(conn: sqlite3.Connection, role_slug: str, task_id: str | None = N
         (rid, role_slug, task_id, "created", digest, str(worktree), str(log_path), prompt,
          step_id, workflow_id, slice_key, dispatch_id, origin, now_iso()),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
-    _create_worktree(conn, rid, role_slug, task_id, worktree)
+    # 派遣子任务共享来源 task 的 workspace/cwd，不使用 per-run worktree。
+    task = tasks_service.get(conn, task_id) if task_id else None
+    dispatch_child = bool(
+        task and task.get("type") in ("dispatch", "dispatched") and task.get("parent_id"))
+    if not dispatch_child:
+        _create_worktree(conn, rid, role_slug, task_id, worktree)
     return get_run(conn, rid)  # type: ignore[return-value]
 
 

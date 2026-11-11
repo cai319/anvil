@@ -78,11 +78,11 @@ Cindy 在规划时从已选角色中指定 reviewer，并保证 workflow 覆盖�
 详见 `implementation-status.md`（各里程碑的已实现 / 未实现清单）。当前自动化测试：
 **781 passed + 58 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；未设置时相关用例跳过）。
 
-切片上下文与独立派遣任务默认已启用显式入口（`anvil task dispatch` /
+切片上下文与派遣子任务默认已启用显式入口（`anvil task dispatch` /
 `POST /tasks/{id}/dispatches`）。`anvil task mention` 默认复用/切换当前切片上下文，
 可用 `--slice/--context-mode` 覆盖；`anvil inbox check` 默认只拉当前切片，
-`--task-wide` 才拉全任务。mention 自动转为独立任务默认关闭，先观测路由：
-`ANVIL_DISPATCH_AUTO_FROM_MENTION=1` 开启；派遣深度上限
+`--task-wide` 才拉全任务。Agent 之间 mention 自动转为派遣子任务默认关闭；人类 @ 与显式 context_mode 不受此开关限制：
+Agent 之间的自动 mention 派遣由 `ANVIL_DISPATCH_AUTO_FROM_MENTION=1` 开启；人类 @ 与显式 `context_mode=dispatch` 不受开关限制；派遣深度上限
 `ANVIL_DISPATCH_MAX_DEPTH`（默认 2），回切重试上限
 `ANVIL_DISPATCH_RETURN_MAX_ATTEMPTS`（默认 5）。设计见
 `../docs/superpowers/specs/2026-11-10-slice-context-dispatch-design.md`。

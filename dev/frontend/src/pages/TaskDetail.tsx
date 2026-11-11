@@ -172,6 +172,10 @@ const DISPATCH_STATUS_LABEL: Record<string, string> = {
   open: "进行中", return_ready: "待回切", returning: "回切中",
   returned: "已回切", no_return: "不回切", cancelled: "已取消",
 };
+const TASK_STATUS_LABEL: Record<string, string> = {
+  todo: "待办", in_progress: "进行中", in_review: "待评审",
+  done: "完成", closed: "已终止",
+};
 
 function DispatchCard({ d }: { d: TaskDispatch }) {
   const statusCls = d.status === "returned"
@@ -190,7 +194,9 @@ function DispatchCard({ d }: { d: TaskDispatch }) {
       </div>
       <div className="delegation-meta">
         <span>{d.requested_by || "human"} → {d.target_role || "—"}</span>
-        {d.target_status && <span>任务状态：{d.target_status}</span>}
+        {d.target_status && (
+          <span>任务状态：{TASK_STATUS_LABEL[d.target_status] ?? d.target_status}</span>
+        )}
         {d.return_context_key && (
           <span className="muted mono" title="完成后回切的上下文">
             回切：{d.return_context_key}
@@ -199,59 +205,9 @@ function DispatchCard({ d }: { d: TaskDispatch }) {
         {d.created_at && <span className="muted">{formatClock(d.created_at)}</span>}
       </div>
       <div className="delegation-actions">
-        <a href={`/tasks/${d.target_task_id}`}>打开独立任务</a>
+        <a href={`/tasks/${d.target_task_id}`}>打开派遣任务</a>
         {d.returned_at && <span className="muted">已回切 {formatClock(d.returned_at)}</span>}
       </div>
-    </div>
-  );
-}
-
-function DispatchComposer({ taskId, roles, onCreated }: {
-  taskId: string;
-  roles: Role[];
-  onCreated: () => void;
-}) {
-  const [target, setTarget] = useState("");
-  const [message, setMessage] = useState("");
-  const [sliceKey, setSliceKey] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const submit = async () => {
-    if (!target || !message.trim()) return;
-    setBusy(true); setError(null);
-    try {
-      await api.createDispatch(taskId, {
-        target_role: target,
-        message: message.trim(),
-        slice_key: sliceKey.trim() || null,
-      });
-      setMessage("");
-      onCreated();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <div className="dispatch-composer">
-      <div className="dispatch-composer-row">
-        <select value={target} onChange={(e) => setTarget(e.target.value)}>
-          <option value="">选择目标角色…</option>
-          {roles.filter((r) => !isOnboardingRole(r) && r.slug !== "human").map((r) => (
-            <option key={r.slug} value={r.slug}>{r.display_name || r.slug}</option>
-          ))}
-        </select>
-        <input value={sliceKey} onChange={(e) => setSliceKey(e.target.value)}
-          placeholder="来源切片 key（可空）" />
-      </div>
-      <textarea value={message} onChange={(e) => setMessage(e.target.value)}
-        placeholder="请求内容：这是独立工作，目标角色将在新上下文完成，不阻塞当前任务。" />
-      {error && <div className="form-error">{error}</div>}
-      <button className="small primary" disabled={busy || !target || !message.trim()}
-        onClick={() => { void submit(); }}>
-        派遣独立任务
-      </button>
     </div>
   );
 }
@@ -1314,8 +1270,13 @@ export function TaskDetail({ id }: { id: string }) {
         .filter((r) => r.role_slug === slug)
         .sort((a, b) => String(b.started_at ?? "").localeCompare(String(a.started_at ?? "")))[0];
     const queueInfo = rt?.queue_tasks?.find((q) => q.id === task.id);
-    const queued = queueInfo?.count ?? 0;
-    const queueAhead = queueInfo?.ahead_count ?? 0;
+    const queueCtx = rt?.queue_contexts?.find(
+      (q) => q.task_id === task.id && (q.slice_key ?? null) === (wfSlice ?? null));
+    const queued = queueCtx?.count ?? queueInfo?.count ?? 0;
+    const queueAhead = queueCtx?.ahead_count ?? queueInfo?.ahead_count ?? 0;
+    const returnPending = dispatches.some(
+      (d) => d.target_role === slug
+        && (d.status === "return_ready" || d.status === "returning"));
     const retryWait = wfState?.label === "等待重试";
     const stepFailed = wfState?.cls === "failed";
     const live = roleLiveState(rt, task.id, {
@@ -1331,6 +1292,7 @@ export function TaskDetail({ id }: { id: string }) {
       taskInReview: task.status === "in_review",
       hasReviewStep: wfState?.cls === "in_review",
       hasContext: Boolean(ctxHere?.has_session),
+      returnPending,
     });
     let state = live;
     if (stepFailed && task.status !== "done" && !taskClosed) {
@@ -1347,11 +1309,15 @@ export function TaskDetail({ id }: { id: string }) {
       taskInReview: task.status === "in_review",
       hasReviewStep: wfState?.cls === "in_review",
       queuedHere: queued,
+      returnPending,
     });
     const display = roles.find((r) => r.slug === slug)?.display_name ?? slug;
     let detail = "";
     if (rt?.switching) detail = "正在切换任务上下文…";
     else if (live.tone === "in_review") detail = "等待人工评审/确认";
+    else if (live.tone === "in_progress" && returnPending) {
+      detail = "等待派遣任务回切原切片";
+    }
     else if (live.tone === "idle") detail = ctxHere?.has_session
       ? "空闲 · 本任务上下文已保留" : "空闲 · 可安排任务";
     else if (live.tone === "busy") {
@@ -1400,6 +1366,11 @@ export function TaskDetail({ id }: { id: string }) {
       <span className={`status status-${stateClassForTone(live.state.tone)} role-live-state`}>
         {live.state.label}
       </span>
+      {(live.rt?.active_subagents?.length ?? 0) > 0 && (
+        <span className="chip" title="运行时原生子代理，不是 Anvil 任务">
+          子代理 {live.rt?.active_subagents?.length}
+        </span>
+      )}
       <span className="role-live-name">{live.slug}</span>
       {live.queued > 0 && (
         <span className="role-live-queue" title={`本任务有 ${live.queued} 条消息待处理`}>
@@ -1784,7 +1755,7 @@ export function TaskDetail({ id }: { id: string }) {
           {task.archived_at && <span className="chip">已归档</span>}
           {task.source_task_id && (
             <a className="chip" href={`/tasks/${task.source_task_id}`}
-              title="独立派遣任务的软关联来源（不是父子任务）">
+              title="派遣子任务的来源任务（parent_id 指向来源 task）">
               来自任务 {task.source_task_id.slice(0, 8)}
               {task.source_slice_key ? ` / 切片 ${task.source_slice_key}` : ""}
             </a>
@@ -1872,7 +1843,7 @@ export function TaskDetail({ id }: { id: string }) {
           </button>
         )}
         <button className={`tab ${tab === "subtasks" ? "active" : ""}`} onClick={() => selectTab("subtasks")}>
-          委派/独立任务 {(delegations.length + dispatches.length) > 0 && (
+          委派/派遣任务 {(delegations.length + dispatches.length) > 0 && (
             <span className="tab-count">{delegations.length + dispatches.length}</span>
           )}
         </button>
@@ -2623,18 +2594,14 @@ export function TaskDetail({ id }: { id: string }) {
             ))}
             <section className="delegation-group">
               <h3 className="delegation-group-title">
-                独立派遣任务 <span className="muted">{dispatches.length}</span>
+                派遣任务 <span className="muted">{dispatches.length}</span>
               </h3>
-              <DispatchComposer
-                taskId={id}
-                roles={roles}
-                onCreated={() => { void refreshDispatches(); void refresh(); }}
-              />
+              <p className="muted">
+                人工派遣请在会话中 @目标角色（路由判定为独立工作时）；这里只展示和追踪已创建的派遣任务
+                （含来源切片、目标角色与回切状态）。
+              </p>
               {dispatches.length === 0 && (
-                <p className="muted">
-                  没有独立派遣任务。与本切片弱相关、需要另开上下文的工作，可用
-                  「派遣独立任务」创建顶层任务卡；它不是子任务，不阻塞当前工作流。
-                </p>
+                <p className="muted">还没有派遣任务。</p>
               )}
               {dispatches.map((d) => <DispatchCard key={d.id} d={d} />)}
             </section>
@@ -2642,7 +2609,7 @@ export function TaskDetail({ id }: { id: string }) {
         );
       })()}
 
-      {tab === "runtime" && <RoleSessions task={task} roles={roles} workflow={workflow} />}
+      {tab === "runtime" && <RoleSessions task={task} roles={roles} workflow={workflow} dispatches={dispatches} />}
       </div>
       {reviewStep && workflow && (
         <GateReviewDrawer

@@ -1311,6 +1311,10 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_slice_context_v1(conn)
     _migrate_slice_context_v2(conn)
     _migrate_run_recovery_v1(conn)
+    _migrate_dispatch_child_v1(conn)
+    _migrate_dispatch_notify_v1(conn)
+    _migrate_context_return_v1(conn)
+    _migrate_subagents_v1(conn)
     _migrate_knowledge_repos_v1(conn)
     _migrate_notes_repo_ids_v2(conn)
     _migrate_knowledge_quality_v1(conn)
@@ -1722,6 +1726,7 @@ def _migrate_slice_context_v1(conn: sqlite3.Connection) -> None:
             status TEXT NOT NULL DEFAULT 'open',
             attempts INTEGER NOT NULL DEFAULT 0,
             returned_at TEXT,
+            result_notified_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -1800,6 +1805,134 @@ def _migrate_slice_context_v2(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
     _set_setting(conn, "schema.slice_context_v2", "1")
+    conn.commit()
+
+
+def _migrate_subagents_v1(conn: sqlite3.Connection) -> None:
+    """运行时原生 subagent 的观测记录（不是 Anvil 任务）。"""
+    if _setting(conn, "schema.subagents_v1"):
+        return
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS run_subagents (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            role_slug TEXT NOT NULL,
+            task_id TEXT,
+            tool_use_id TEXT NOT NULL,
+            tool_name TEXT,
+            description TEXT,
+            prompt_summary TEXT,
+            status TEXT NOT NULL DEFAULT 'running',
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            result_summary TEXT,
+            context_available INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )
+        """)
+    for stmt in (
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_run_subagents_tool "
+        "ON run_subagents(run_id, tool_use_id)",
+        "CREATE INDEX IF NOT EXISTS idx_run_subagents_run "
+        "ON run_subagents(run_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_run_subagents_role "
+        "ON run_subagents(role_slug, status)",
+    ):
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+    _set_setting(conn, "schema.subagents_v1", "1")
+    conn.commit()
+
+
+def _migrate_dispatch_notify_v1(conn: sqlite3.Connection) -> None:
+    """派遣结果回流幂等标记。"""
+    if _setting(conn, "schema.dispatch_notify_v1"):
+        return
+    try:
+        conn.execute("ALTER TABLE task_dispatches ADD COLUMN result_notified_at TEXT")
+    except sqlite3.OperationalError:
+        pass
+    _set_setting(conn, "schema.dispatch_notify_v1", "1")
+    conn.commit()
+
+
+def _migrate_context_return_v1(conn: sqlite3.Connection) -> None:
+    """跨切片临时回切的尝试次数/退避元数据。"""
+    if _setting(conn, "schema.context_return_v1"):
+        return
+    for spec in (
+        "context_return_attempts INTEGER NOT NULL DEFAULT 0",
+        "context_return_last_attempt_at TEXT",
+    ):
+        try:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {spec}")
+        except sqlite3.OperationalError:
+            pass
+    _set_setting(conn, "schema.context_return_v1", "1")
+    conn.commit()
+
+
+def _migrate_dispatch_child_v1(conn: sqlite3.Connection) -> None:
+    """把旧的顶层 dispatched task 收敛为来源任务下的派遣子任务，并修复 NULL 去重。"""
+    if _setting(conn, "schema.dispatch_child_v1"):
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    rows = conn.execute(
+        "SELECT id, source_task_id FROM tasks "
+        "WHERE COALESCE(type,'')='dispatched' AND parent_id IS NULL"
+    ).fetchall()
+    for row in rows:
+        tid = row["id"]
+        source_id = row["source_task_id"]
+        source = conn.execute(
+            "SELECT id FROM tasks WHERE id=? AND id<>?", (source_id, tid)
+        ).fetchone() if source_id else None
+        if source is not None:
+            conn.execute(
+                "UPDATE tasks SET parent_id=?, type='dispatch', updated_at=? WHERE id=?",
+                (source_id, now, tid))
+        else:
+            # 找不到来源：不再作为顶层任务存在，保留审计但关闭。
+            conn.execute(
+                "UPDATE tasks SET status='closed', archived_at=?, "
+                "dispatch_status='cancelled', updated_at=? WHERE id=?",
+                (now, now, tid))
+            conn.execute(
+                "UPDATE task_dispatches SET status='cancelled', updated_at=? "
+                "WHERE target_task_id=?", (now, tid))
+
+    # 同一个请求在 source_slice_key 为 NULL 时曾被唯一索引放过；保留最早一条。
+    active = conn.execute(
+        "SELECT id, source_task_id, source_slice_key, target_role, request_hash, "
+        "target_task_id FROM task_dispatches "
+        "WHERE status IN ('open','return_ready','returning') "
+        "ORDER BY created_at, rowid"
+    ).fetchall()
+    seen: set[tuple] = set()
+    for row in active:
+        key = (row["source_task_id"], row["source_slice_key"] or "",
+               row["target_role"], row["request_hash"])
+        if key in seen:
+            conn.execute(
+                "UPDATE task_dispatches SET status='cancelled', updated_at=? WHERE id=?",
+                (now, row["id"]))
+            conn.execute(
+                "UPDATE tasks SET dispatch_status='cancelled', updated_at=? WHERE id=?",
+                (now, row["target_task_id"]))
+        else:
+            seen.add(key)
+
+    conn.execute("DROP INDEX IF EXISTS uq_task_dispatches_active_request")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_task_dispatches_active_request "
+        "ON task_dispatches(source_task_id, COALESCE(source_slice_key,''), "
+        "target_role, request_hash) "
+        "WHERE status IN ('open','return_ready','returning')"
+    )
+    _set_setting(conn, "schema.dispatch_child_v1", "1")
     conn.commit()
 
 

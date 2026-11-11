@@ -85,7 +85,7 @@ def test_dispatch_done_prepares_return_and_resolves_once(env):
         "SELECT * FROM task_dispatches WHERE target_task_id=?", (target_id,)).fetchone()
     assert d["status"] == "return_ready"
     run = conn.execute("SELECT wake_note FROM runs WHERE id='R-original'").fetchone()
-    assert "独立任务" in (run["wake_note"] or "")
+    assert "派遣任务" in (run["wake_note"] or "")
     target = tasks_service.get(conn, target_id)
     assert target["dispatch_status"] == "return_ready"
 
@@ -220,3 +220,154 @@ def test_context_return_resumes_when_temporary_run_failed(env):
     a = conn.execute(
         "SELECT context_return_after_turn FROM runs WHERE id='R-a'").fetchone()
     assert a["context_return_after_turn"] == 0
+
+
+def test_context_return_submitted_temporary_run_clears_without_wait(env):
+    conn = env
+    task = tasks_service.create(conn, title="B 片", assignee="qa")
+    _running_step(conn, task["id"], "B.execute", "R-b", "B")
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,step_id,slice_key,started_at,"
+        "context_return_context_key,context_return_run_id,context_return_after_turn) "
+        "VALUES ('R-a','dev',?,'submitted','A.execute','A',?,?,?,1)",
+        (task["id"], now, f"{task['id']}::slice::B", "R-b"))
+    conn.commit()
+    calls: list[str] = []
+    assert dispatch.resolve_context_returns(conn, lambda rid, ev: calls.append(rid) or True) == 0
+    assert calls == []
+    a = conn.execute(
+        "SELECT context_return_after_turn, context_returned_at FROM runs WHERE id='R-a'"
+    ).fetchone()
+    assert a["context_return_after_turn"] == 0
+    assert a["context_returned_at"]
+
+
+def test_multiple_context_returns_merge_into_one_pump(env):
+    conn = env
+    task = tasks_service.create(conn, title="B 片", assignee="qa")
+    _running_step(conn, task["id"], "B.execute", "R-b", "B")
+    now = now_iso()
+    for rid in ("R-a1", "R-a2"):
+        conn.execute(
+            "INSERT INTO runs (id,role_slug,task_id,status,step_id,slice_key,started_at,"
+            "context_return_context_key,context_return_run_id,context_return_after_turn) "
+            "VALUES (?,'dev',?,'suspended','A.execute','A',?,?,?,1)",
+            (rid, task["id"], now, f"{task['id']}::slice::B", "R-b"))
+    conn.commit()
+    calls: list[str] = []
+    assert dispatch.resolve_context_returns(
+        conn, lambda rid, ev: calls.append(rid) or True) == 1
+    assert calls == ["R-b"]
+    note = conn.execute("SELECT wake_note FROM runs WHERE id='R-b'").fetchone()["wake_note"]
+    assert "R-a1" in note and "R-a2" in note
+    rows = conn.execute(
+        "SELECT context_return_after_turn FROM runs WHERE id IN ('R-a1','R-a2')"
+    ).fetchall()
+    assert [r["context_return_after_turn"] for r in rows] == [0, 0]
+
+
+def test_context_return_pump_failure_does_not_duplicate_note(env, monkeypatch):
+    from anvil import config
+
+    conn = env
+    monkeypatch.setattr(config, "CONTEXT_RETURN_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(config, "CONTEXT_RETURN_MAX_ATTEMPTS", 2)
+    task = tasks_service.create(conn, title="B 片", assignee="qa")
+    _running_step(conn, task["id"], "B.execute", "R-b", "B")
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,step_id,slice_key,started_at,"
+        "context_return_context_key,context_return_run_id,context_return_after_turn) "
+        "VALUES ('R-a','dev',?,'suspended','A.execute','A',?,?,?,1)",
+        (task["id"], now, f"{task['id']}::slice::B", "R-b"))
+    conn.commit()
+    assert dispatch.resolve_context_returns(conn, lambda rid, ev: False) == 0
+    assert dispatch.resolve_context_returns(conn, lambda rid, ev: False) == 0
+    note = conn.execute("SELECT wake_note FROM runs WHERE id='R-b'").fetchone()["wake_note"]
+    assert note.count("run R-a") == 1
+    attempt = conn.execute(
+        "SELECT context_return_attempts FROM runs WHERE id='R-a'").fetchone()[0]
+    assert attempt >= 2
+
+
+def test_context_return_missing_slot_does_not_pump(env):
+    conn = env
+    task = tasks_service.create(conn, title="B 片", assignee="qa")
+    _running_step(conn, task["id"], "B.execute", "R-b", "B")
+    conn.execute(
+        "DELETE FROM role_task_sessions WHERE role_slug='dev' AND task_id=?", (task["id"],))
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,step_id,slice_key,started_at,"
+        "context_return_context_key,context_return_run_id,context_return_after_turn) "
+        "VALUES ('R-a','dev',?,'suspended','A.execute','A',?,?,?,1)",
+        (task["id"], now, f"{task['id']}::slice::B", "R-b"))
+    conn.commit()
+    calls: list[str] = []
+    assert dispatch.resolve_context_returns(conn, lambda rid, ev: calls.append(rid) or True) == 0
+    assert calls == []
+
+
+def test_dispatch_return_does_not_resume_human_wait(env):
+    conn = env
+    source = tasks_service.create(conn, title="来源任务", assignee="qa")
+    _running_step(conn, source["id"], "A.scope", "R-original", "A")
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
+        "VALUES (?, 'dev', 'mention', ?, ?)",
+        (source["id"], '{"target":"human","message":"请确认"}', now))
+    conn.commit()
+    result = dispatch.create_dispatch(
+        conn, source_task_id=source["id"], target_role="dev",
+        message="独立工作", requester="qa", source_slice_key="A")
+    target_id = result["task"]["id"]
+    conn.execute("UPDATE tasks SET status='in_review' WHERE id=?", (target_id,))
+    conn.commit()
+    tasks_service.review(conn, target_id, True, "human")
+    row = conn.execute(
+        "SELECT status FROM task_dispatches WHERE target_task_id=?", (target_id,)).fetchone()
+    assert row["status"] == "no_return"
+    note = conn.execute("SELECT wake_note FROM runs WHERE id='R-original'").fetchone()[0]
+    assert not note
+
+
+def test_record_context_return_recovers_idle_release_run(env):
+    conn = env
+    task = tasks_service.create(conn, title="B 片", assignee="qa")
+    _running_step(conn, task["id"], "B.execute", "R-b", "B")
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,started_at) "
+        "VALUES ('R-a','dev',?, 'running', ?)", (task["id"], now))
+    conn.commit()
+    dispatch.record_context_return(
+        conn, switched_run_id="R-a",
+        return_context_key=f"{task['id']}::slice::B", return_run_id=None)
+    row = conn.execute(
+        "SELECT context_return_run_id FROM runs WHERE id='R-a'").fetchone()
+    assert row[0] == "R-b"
+
+
+def test_dispatch_completion_notification_is_idempotent(env):
+    conn = env
+    source = tasks_service.create(conn, title="来源任务", assignee="qa")
+    _running_step(conn, source["id"], "A.scope", "R-original", "A")
+    result = dispatch.create_dispatch(
+        conn, source_task_id=source["id"], target_role="dev",
+        message="独立工作", requester="qa", source_slice_key="A")
+    target_id = result["task"]["id"]
+    tasks_service.claim(conn, target_id, "dev")
+    tasks_service.submit(conn, target_id, summary="完成", role="dev")
+    conn.execute("UPDATE task_dispatches SET status='return_ready' WHERE target_task_id=?",
+                 (target_id,))
+    conn.commit()
+    count = conn.execute(
+        "SELECT COUNT(*) AS n FROM activities WHERE task_id=? AND kind='mention'",
+        (source["id"],)).fetchone()["n"]
+    dispatch.on_task_done(conn, target_id)
+    count2 = conn.execute(
+        "SELECT COUNT(*) AS n FROM activities WHERE task_id=? AND kind='mention'",
+        (source["id"],)).fetchone()["n"]
+    assert count2 == count

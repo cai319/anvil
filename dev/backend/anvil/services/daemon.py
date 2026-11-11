@@ -401,6 +401,8 @@ class _Role:
     proc_generation: int = 0
     suppress_exit: bool = False
     current_log_path: str | None = None
+    # 当前 run 中运行时原生 subagent（Task/Agent）的观测状态；不是 Anvil 任务。
+    active_subagents: dict[str, dict] = field(default_factory=dict)
     log_lock: threading.Lock = field(default_factory=threading.Lock)
     lock: threading.Lock = field(default_factory=threading.Lock)
     reader: threading.Thread | None = None
@@ -532,6 +534,7 @@ class DaemonManager:
                 "queue_len": 0,
                 "queue": [],
                 "switching": False,
+                "active_subagents": [],
             }
         alive = r.proc is not None and r.proc.poll() is None
         tokens = int(r.context_tokens or 0)
@@ -555,6 +558,10 @@ class DaemonManager:
             "queue": [
                 {"run_id": q.run_id, "task_id": q.task_id, "slice_key": q.slice_key}
                 for q in r.queue
+            ],
+            "active_subagents": [
+                dict(info) for info in r.active_subagents.values()
+                if info.get("status") == "running"
             ],
             "context_tokens": tokens,
             "model_id": r.model_id,
@@ -1269,6 +1276,7 @@ class DaemonManager:
         r.current_task_id = None
         r.current_step_id = None
         r.current_log_path = None
+        r.active_subagents.clear()
 
     def _mark_idle_locked(self, conn, r: _Role) -> None:
         self._clear_current_locked(r)
@@ -1580,6 +1588,7 @@ class DaemonManager:
                     continue
                 if r.proc is not proc:
                     return
+                self._track_subagent(r, ev)
                 self._append_run_log(r, self._format_event(ev))
                 # 图片/附件不计 token，但会计入请求体；累计到阈值时主动换新会话，
                 # 避免撞上 “request too large (max 32mb)”。
@@ -1859,6 +1868,104 @@ class DaemonManager:
         except OSError:
             pass
 
+    def _track_subagent(self, r: _Role, ev: dict) -> None:
+        """观测运行时 Task/Agent tool_use；Anvil 不主动创建子代理。"""
+        msg = ev.get("message") or {}
+        blocks = msg.get("content")
+        if not isinstance(blocks, list):
+            return
+        with r.lock:
+            run_id = r.current_run_id
+            task_id = r.current_task_id
+        if not run_id:
+            return
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                name = str(block.get("name") or "")
+                inp = block.get("input") or {}
+                if name not in ("Task", "Agent") and "subagent_type" not in inp:
+                    continue
+                tool_id = str(block.get("id") or "")
+                if not tool_id:
+                    continue
+                info = {
+                    "tool_use_id": tool_id,
+                    "tool_name": name or "subagent",
+                    "subagent_type": str(inp.get("subagent_type") or name or "subagent"),
+                    "description": str(inp.get("description") or "")[:300],
+                    "prompt_summary": str(inp.get("prompt") or "")[:800],
+                    "status": "running",
+                    "started_at": now_iso(),
+                    "ended_at": None,
+                    "result_summary": None,
+                    "context_available": int(bool(ev.get("parent_tool_use_id"))),
+                }
+                with r.lock:
+                    r.active_subagents[tool_id] = info
+                self._persist_subagent(r, run_id, task_id, info)
+            elif block.get("type") == "tool_result":
+                tool_id = str(block.get("tool_use_id") or "")
+                with r.lock:
+                    info = r.active_subagents.get(tool_id)
+                if info is None:
+                    continue
+                content = block.get("content")
+                if isinstance(content, list):
+                    content = "\n".join(
+                        str(x.get("text") or "") for x in content if isinstance(x, dict))
+                info = {**info, "status": "completed", "ended_at": now_iso(),
+                        "result_summary": str(content or "")[:1200],
+                        "context_available": int(bool(ev.get("parent_tool_use_id"))
+                                                 or info.get("context_available"))}
+                with r.lock:
+                    r.active_subagents.pop(tool_id, None)
+                self._persist_subagent(r, run_id, task_id, info)
+
+    def _finish_subagents(self, conn, r: _Role, run_id: str | None,
+                          status: str = "completed") -> None:
+        if not run_id:
+            return
+        try:
+            conn.execute(
+                "UPDATE run_subagents SET status=?, ended_at=COALESCE(ended_at, ?), "
+                "updated_at=? WHERE run_id=? AND status='running'",
+                (status, now_iso(), now_iso(), run_id))
+            conn.commit()
+        except Exception:  # noqa: BLE001
+            pass
+        with r.lock:
+            r.active_subagents.clear()
+
+    def _persist_subagent(self, r: _Role, run_id: str, task_id: str | None,
+                          info: dict) -> None:
+        try:
+            conn = open_conn(self.db_path)
+            try:
+                now = now_iso()
+                conn.execute(
+                    "INSERT INTO run_subagents "
+                    "(id, run_id, role_slug, task_id, tool_use_id, tool_name, "
+                    " description, prompt_summary, status, started_at, ended_at, "
+                    " result_summary, context_available, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(run_id, tool_use_id) DO UPDATE SET "
+                    "status=excluded.status, ended_at=excluded.ended_at, "
+                    "result_summary=excluded.result_summary, "
+                    "context_available=excluded.context_available, updated_at=excluded.updated_at",
+                    (uuid.uuid4().hex, run_id, r.role, task_id,
+                     info["tool_use_id"], info.get("tool_name"),
+                     info.get("description"), info.get("prompt_summary"),
+                     info.get("status") or "running", info.get("started_at") or now,
+                     info.get("ended_at"), info.get("result_summary"),
+                     int(info.get("context_available") or 0), now))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 —— 观测失败不影响角色执行
+            pass
+
     @staticmethod
     def _format_event(ev: dict) -> str | None:
         """把 stream-json 事件格式化为可读的「上下文/模型/工具」记录。"""
@@ -2058,6 +2165,7 @@ class DaemonManager:
             # 一轮结束仍未 submit → run 进入 suspended（等待下一条消息）
             reminder_row = None
             if run_id:
+                self._finish_subagents(conn, r, run_id)
                 reminder_row = conn.execute(
                     "SELECT was_alive FROM reminder_wakes WHERE run_id=?",
                     (run_id,),
@@ -2283,7 +2391,7 @@ class DaemonManager:
                 "scope": "task", "source_ids": [task_id] if task_id else [],
             })
 
-            # 本切片出发的独立派遣任务：回切后让角色知道出去做过什么。
+            # 本切片出发的派遣子任务：回切后让角色知道出去做过什么。
             try:
                 dclause = "d.source_task_id=?"
                 dparams: list = [task_id]
@@ -2306,7 +2414,7 @@ class DaemonManager:
                         lines.append(line)
                     blocks.append({
                         "priority": 48, "order": 55, "cap": 1200, "min": 150,
-                        "text": "## 本切片出发的独立派遣任务\n" + "\n".join(lines),
+                        "text": "## 本切片出发的派遣子任务\n" + "\n".join(lines),
                         "name": "dispatches", "layer": "L1", "kind": "dispatch",
                         "scope": "task", "source_ids": [d["target_task_id"] for d in drows],
                     })

@@ -562,7 +562,7 @@ cd frontend && npm run build         # tsc + vite build
 > 注意：`dev/.venv` 若未安装 `langgraph`，`tests/conftest.py` 的 `importorskip` 会把全部测试
 > 静默 skip。请使用装有 `backend/requirements.txt` 的环境运行测试。
 
-## 切片上下文与独立派遣任务（2026-11-10）
+## 切片上下文与派遣子任务（2026-11-10，2026-11-11 修正）
 
 - 上下文单元从 `(role, task)` 扩展为 `(role, task, slice)`：
   `task_id::slice::<slice_key>`；静态与运行期切片都写 `slice_key`，静态切片不写
@@ -577,14 +577,19 @@ cd frontend && npm run build         # tsc + vite build
 - CIC 只注入当前 slice + task-wide 的原始消息；知识快照可按 slice 生成。
 - 新增 `services/context_router.py`：身份硬规则优先，歧义时用轻量词法相关度；
   返回 reuse/switch/new_slice/dispatch。
-- 新增独立派遣任务：`POST /tasks/{id}/dispatches`、`GET .../dispatches`、
-  `anvil task dispatch`；顶层 task、无 parent、软关联来源、新 run/上下文；请求哈希
-  去重、深度限制（`ANVIL_DISPATCH_MAX_DEPTH`）。
-- 新增 `task_dispatches` 状态机与 `runs.wake_note`；派遣任务 `done` 后由
+- 新增派遣子任务：`POST /tasks/{id}/dispatches`、`GET .../dispatches`、
+  `anvil task dispatch`；**来源 task 下的 child**（`parent_id`、`parent_step_id=NULL`、
+  `type=dispatch`），共享来源 workspace/cwd，不进入 Lobby，不阻塞父任务；请求哈希
+  去重、深度限制（`ANVIL_DISPATCH_MAX_DEPTH`）。顶层任务仍只由 human 创建。
+- 派遣子任务 `submit` 即 `done`，无人工评审；任务详情「委派/派遣任务」页签展示和
+  追踪；Agent 自动 @ 派遣受 Tooling `dispatch_auto_from_mention` 控制，人类 @ 与
+  显式 `context_mode=dispatch` 不受开关限制。
+- 新增 `task_dispatches` 状态机与 `runs.wake_note`；派遣子任务 `done` 后由
   scheduler `resolve_dispatch_returns` 自动回切一次；跨切片临时处理由
   `context_return_*` + `resolve_context_returns` 回切。
-- 任务详情「委派/独立任务」页签、来源任务 chip、派遣表单；大厅显示独立任务卡；
-  角色运行时按 slice 展示上下文。
+- 同角色当前 step 内的并行工作优先使用运行时 subagent；delegation 仅保留跨角色/
+  跨 turn/阻塞式拆工。角色运行时按 slice 展示上下文，并在有原生 subagent 时展示
+  子代理状态。
 - 文档：`docs/superpowers/specs/2026-11-10-slice-context-dispatch-design.md`；
   `design.md` §6.1、角色上下文/状态机 spec、CLI reference 同步。
 - 测试：`tests/test_slice_context.py`、`tests/test_context_router.py`、

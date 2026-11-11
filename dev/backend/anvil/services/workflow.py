@@ -825,6 +825,7 @@ def _assert_delegations_done(conn: sqlite3.Connection, wf: dict, step_id: str) -
     """委派工单未完成前，父 step 不能收口。"""
     pending = conn.execute(
         "SELECT id FROM tasks WHERE parent_id=? AND parent_step_id=? "
+        "AND COALESCE(type,'') NOT IN ('dispatch','dispatched') "
         "AND status != 'done' LIMIT 1",
         (wf["task_id"], step_id)).fetchone()
     if pending is not None:

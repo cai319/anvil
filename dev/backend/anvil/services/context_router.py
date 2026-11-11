@@ -1,4 +1,4 @@
-"""上下文路由：复用当前上下文、切换切片上下文，还是派遣独立任务。
+"""上下文路由：复用当前上下文、切换切片上下文，还是创建派遣子任务。
 
 身份规则优先（同一 task/slice、已有槽、参与者关系），只有身份不足以判定时
 才用轻量词法相关度。不调用模型、不做 embedding；每次决策都可解释、可审计。
@@ -267,7 +267,16 @@ def route(conn: sqlite3.Connection, *, target_role: str,
         target_text = _scope_text(conn, target_task, target_slice)
         request_text = " ".join([message, *(scope_paths or [])])
         participant_score = _score(request_text, target_text)
-        same_task = bool(target_task and target_task == current.get("task_id"))
+        # 角色空闲且请求就在来源 task：这是“开始/继续本任务”，即使词法分数低
+        # 也不升级为派遣。角色正在别的 task、或请求跨 task 时才进入 dispatch 判定。
+        same_task = bool(
+            target_task and (
+                target_task == current.get("task_id")
+                or (
+                    target_task == source_task_id
+                    and not current.get("task_id")
+                )
+            ))
         slice_role = bool(target_slice) and _has_slice_role(
             conn, target_task, target_role, target_slice)
         if target_slice:
@@ -277,7 +286,7 @@ def route(conn: sqlite3.Connection, *, target_role: str,
                     task_id=target_task, slice_key=target_slice,
                     reasons=["participant_new_slice"])
             if participant_score < SWITCH_SCORE:
-                # 参与者但请求不属于其切片/职责且相关度低：允许转为独立任务。
+                # 参与者但请求不属于其切片/职责且相关度低：允许转为派遣子任务。
                 return decision(
                     "dispatch", task_id=target_task, slice_key=target_slice,
                     reasons=["participant_low_relevance"], score=participant_score,

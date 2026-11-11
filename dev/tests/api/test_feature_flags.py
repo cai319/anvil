@@ -10,6 +10,10 @@ from tests.conftest import API, auth_headers, human_headers
 async def test_feature_flags_default_toggle_and_reset(client):
     data = (await client.get(f"{API}/features", headers=auth_headers())).json()
     flags = {item["key"]: item for item in data["flags"]}
+    dispatch = flags["dispatch_auto_from_mention"]
+    assert dispatch["default"] is False
+    assert dispatch["category"] == "collaboration"
+    assert dispatch["value"] is False
     capture = flags["experience_capture"]
     assert capture["value"] is True
     assert capture["default"] is True

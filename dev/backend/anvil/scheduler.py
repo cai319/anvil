@@ -220,17 +220,7 @@ class Scheduler:
     def _waiting_for_human(conn, task_id: str, role: str,
                            slice_key: str | None = None) -> bool:
         """角色最后一条 @ 是 @human 且之后没有人类回复 → 合法 HITL 等待，不自动重试。"""
-        timeline = [e for e in tasks_service.timeline(conn, task_id)
-                    if Scheduler._in_slice_scope(e, slice_key)]
-        own = [i for i, e in enumerate(timeline)
-               if e["kind"] == "mention" and e["role"] == role]
-        if not own:
-            return False
-        last = own[-1]
-        payload = timeline[last].get("payload") or {}
-        if payload.get("target") != "human":
-            return False
-        return not any(e["role"] == "human" for e in timeline[last + 1:])
+        return tasks_service.waiting_for_human(conn, task_id, role, slice_key)
 
     @staticmethod
     def _waiting_for_busy_role(conn, task_id: str, role: str,
@@ -276,25 +266,25 @@ class Scheduler:
         """该 suspended run 是否在等派遣/临时切片处理完成，而不是步骤停滞。"""
         if not run_id:
             return False
+        # 只有“回切已经就绪/正在投递”才短暂等待；open 派遣不阻塞来源 watchdog。
+        cutoff = (datetime.now(timezone.utc) - timedelta(
+            seconds=max(1, int(config.DISPATCH_RETURN_WAIT_SECONDS)))).isoformat()
         if conn.execute(
                 "SELECT 1 FROM task_dispatches WHERE return_run_id=? "
-                "AND status IN ('open','return_ready','returning') LIMIT 1",
-                (run_id,)).fetchone():
+                "AND status IN ('return_ready','returning') "
+                "AND COALESCE(updated_at, created_at) >= ? LIMIT 1",
+                (run_id, cutoff)).fetchone():
             return True
+        # 临时切片只有在 resolver 能处理的状态下才等待；submitted/reviewing 按非阻塞
+        # 规则不等待（否则会永久抑制来源 step）。
         if conn.execute(
                 "SELECT 1 FROM runs WHERE context_return_run_id=? "
                 "AND context_return_after_turn=1 "
-                "AND status NOT IN ('completed','failed','abandoned') LIMIT 1",
+                "AND status IN ('suspended','completed','failed','abandoned') LIMIT 1",
                 (run_id,)).fetchone():
             return True
-        if conn.execute(
-                "SELECT 1 FROM runs r JOIN tasks t ON t.id=r.task_id "
-                "WHERE r.role_slug=? AND r.status NOT IN "
-                "('completed','failed','abandoned') "
-                "AND t.type='dispatched' AND t.status NOT IN ('done','closed') "
-                "LIMIT 1", (role,)).fetchone():
-            # 角色还有未完成的独立派遣任务：等它完成后的自动回切，不要提前拉回。
-            return True
+        # 不再使用“角色有任意未完成 dispatched 任务”的角色级兜底；那会让无关派遣
+        # 永久阻塞来源 step。角色真正忙碌由下面的 active run / daemon 检查处理。
         # 角色正在别的任务/上下文执行 turn：不要用看门狗把原切片拉回来。
         if conn.execute(
                 "SELECT 1 FROM runs WHERE role_slug=? AND id<>? "

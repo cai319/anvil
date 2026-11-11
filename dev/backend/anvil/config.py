@@ -166,13 +166,19 @@ STEP_MAX_NUDGES = int(_env("ANVIL_STEP_MAX_NUDGES", "3"))
 AUTO_RECOVER_ENABLED = _env("ANVIL_AUTO_RECOVER", "1") != "0"
 AUTO_RECOVER_MAX_ATTEMPTS = int(_env("ANVIL_AUTO_RECOVER_MAX_ATTEMPTS", "10"))
 
-# 独立派遣任务：最多沿 source_task_id 链嵌套几层；mention 自动派遣默认关闭，
-# 先以显式 POST /tasks/{tid}/dispatches 观测路由质量。
+# 派遣子任务：最多沿 source_task_id 链嵌套几层；Agent 之间 mention 自动派遣默认关闭。
+# 人类 @ 与显式 context_mode=dispatch 不受此开关限制。
 DISPATCH_MAX_DEPTH = int(_env("ANVIL_DISPATCH_MAX_DEPTH", "2"))
 DISPATCH_AUTO_FROM_MENTION = _env(
     "ANVIL_DISPATCH_AUTO_FROM_MENTION", "0").strip().lower() in ("1", "true", "yes", "on")
 DISPATCH_RETURN_MAX_ATTEMPTS = int(
     _env("ANVIL_DISPATCH_RETURN_MAX_ATTEMPTS", "5"))
+DISPATCH_RETURN_WAIT_SECONDS = float(
+    _env("ANVIL_DISPATCH_RETURN_WAIT_SECONDS", "900"))
+CONTEXT_RETURN_MAX_ATTEMPTS = int(
+    _env("ANVIL_CONTEXT_RETURN_MAX_ATTEMPTS", "5"))
+CONTEXT_RETURN_BACKOFF_SECONDS = float(
+    _env("ANVIL_CONTEXT_RETURN_BACKOFF_SECONDS", "30"))
 AUTO_RECOVER_BACKOFF_SECONDS = float(_env("ANVIL_AUTO_RECOVER_BACKOFF_SECONDS", "120"))
 AUTO_RECOVER_MAX_BACKOFF_SECONDS = float(_env("ANVIL_AUTO_RECOVER_MAX_BACKOFF_SECONDS", "1800"))
 

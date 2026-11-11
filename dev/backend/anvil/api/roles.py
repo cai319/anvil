@@ -459,6 +459,7 @@ def role_runtime(slug: str, conn=Depends(get_db)):
             "session_id": (row["session_id"] or "") if row else "",
             "model_id": row["model_id"] if row else None,
             "busy_since": row["busy_since"] if row else None,
+            "active_subagents": [],
         }
 
     def task_info(task_id):

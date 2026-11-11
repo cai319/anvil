@@ -24,6 +24,37 @@ from . import knowledge
 
 
 GLOBAL_TASK_KEY = "__global__"
+DISPATCH_TASK_TYPES = ("dispatch", "dispatched")
+
+
+def _workspace_owner(conn: sqlite3.Connection, task_id: str) -> str:
+    """派遣子任务共享来源 task 的 workspace；其它任务使用自己的 task_id。"""
+    key = str(task_id or GLOBAL_TASK_KEY)
+    row = conn.execute(
+        "SELECT type, parent_id FROM tasks WHERE id=?", (key,)
+    ).fetchone()
+    if row is not None and row["type"] in DISPATCH_TASK_TYPES and row["parent_id"]:
+        return str(row["parent_id"])
+    return key
+
+
+def owner_task_id(conn: sqlite3.Connection, task_id: str) -> str:
+    """共享 workspace 的 owner task；派遣链会一路回溯到根来源 task。"""
+    key = str(task_id or GLOBAL_TASK_KEY)
+    seen: set[str] = set()
+    while key not in seen:
+        seen.add(key)
+        owner = _workspace_owner(conn, key)
+        if owner == key:
+            return key
+        key = owner
+    return key
+
+
+def resolve_for_task(conn: sqlite3.Connection, task_id: str, *,
+                     create: bool = True) -> str:
+    """任务执行目录：派遣子任务回退到来源 task 的共享 workspace。"""
+    return resolve(conn, _workspace_owner(conn, task_id), create=create)
 
 
 def _root() -> Path:
@@ -145,8 +176,14 @@ def ensure(conn: sqlite3.Connection, task_id: str, *,
 
 def resolve(conn: sqlite3.Connection, task_id: str, *,
             create: bool = True) -> str:
-    """返回任务工作空间路径；不存在时按需创建。`TASK_WORKSPACE=0` 返回空串。"""
+    """返回任务工作空间路径；不存在时按需创建。`TASK_WORKSPACE=0` 返回空串。
+
+    派遣子任务不创建自己的目录，直接返回来源 task 的 workspace。
+    """
     key = str(task_id or GLOBAL_TASK_KEY)
+    owner = _workspace_owner(conn, key)
+    if owner != key:
+        return resolve(conn, owner, create=create)
     row = get(conn, key)
     if row and row.get("status") in ("deleted",):
         return ""
@@ -224,6 +261,16 @@ def cleanup_stale(conn: sqlite3.Connection, *,
             (task_id, task_id),
         ).fetchone()
         if busy:
+            skipped.append(task_id)
+            continue
+        # 父 workspace 可能被活跃的派遣子任务共享；不能只按父 task 的 slot 判断。
+        active_dispatch = conn.execute(
+            "SELECT 1 FROM tasks WHERE parent_id=? "
+            "AND COALESCE(type,'') IN ('dispatch','dispatched') "
+            "AND status NOT IN ('done','closed') LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if active_dispatch:
             skipped.append(task_id)
             continue
         path = Path(str(row["path"] or ""))

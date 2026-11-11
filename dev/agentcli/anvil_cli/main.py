@@ -33,7 +33,7 @@ MAIN_EPILOG = """\b
   anvil task claim <id>               认领任务（工作流步骤不要 claim）
   anvil task comment <id> "进展"      同步进展（不唤醒）
   anvil task mention <id> --to r "…"  同切片复核/追问（复用上下文）
-  anvil task dispatch <id> --to r "…" 无关工作 → 独立顶层任务卡
+  anvil task dispatch <id> --to r "…" 无关工作 → 来源 task 下的派遣子任务
   anvil inbox check --task <id>       拉取当前切片未读（--task-wide 看全任务）
   anvil step show <workflow-id>       查看工作流步骤
   anvil step submit <wf> <step> --summary "完成"
@@ -71,7 +71,7 @@ TASK_EPILOG = """\b
   comment <id> "正文"                   评论，不唤醒任何人
   mention <id> --to <role> "正文"       @提及并唤醒；自动复用/切换切片上下文
           [--slice S] [--context-mode auto|reuse|switch|dispatch]
-  dispatch <id> --to <role> "正文"      创建独立顶层任务卡（不做父子绑定，不阻塞）
+  dispatch <id> --to <role> "正文"      创建来源 task 下的派遣子任务（不阻塞，submit 即 done）
           [--slice S] [--context-mode dispatch] [--acceptance "a;b"]
   archive | unarchive <id>              归档/取消归档（human）
   knowledge-list <id>                   任务共享知识
@@ -98,9 +98,9 @@ TASK_EPILOG = """\b
 上下文规则:
   · 同 task 同 slice 的复核/追问用 mention，复用当前上下文，不要 dispatch。
   · 同 task 已知 slice 的反馈会自动切回该 slice 上下文。
-  · 与当前切片弱相关、需要新上下文/新任务卡时用 dispatch；它是顶层任务，
-    不带 --parent/--parent-step，不阻塞来源 workflow。
-  · 现有 `POST /tasks/{id}/dispatch`/“启动”仍是 human 的规划入口，不是独立派遣。
+  · 与当前切片弱相关、需要新上下文时用 dispatch；它是来源 task 下的派遣子任务，
+    共享 workspace、不阻塞 workflow，submit 即 done。
+  · 现有 `POST /tasks/{id}/dispatch`/“启动”仍是 human 的规划入口，不是派遣。
 """
 
 STEP_EPILOG = """\b
@@ -116,7 +116,7 @@ STEP_EPILOG = """\b
   · plan_slices 用 step plan；decision 用 step decide；普通步骤用 step submit。
   · 工作流步骤不要 task claim / task submit，也不要在切片里指定角色。
   · 同 task 同 slice 的复核用 `anvil task mention` 复用当前上下文；
-    与当前切片弱相关、需要新上下文时用 `anvil task dispatch` 建独立顶层任务，
+    与当前切片弱相关、需要新上下文时用 `anvil task dispatch` 建派遣子任务，
     不要用 --parent/--parent-step 伪装成委派工单。
   · `anvil inbox check` 默认只看当前切片；要拉全任务需显式 `--task-wide`。
 """
@@ -701,7 +701,7 @@ def task_cmd(
         if not body_text:
             _usage_error(
                 "task dispatch 需要请求正文",
-                "用位置参数或 -m/--message 传入；它会成为独立任务卡的描述。")
+                "用位置参数或 -m/--message 传入；它会成为派遣子任务的描述。")
         payload = {
             "target_role": to.strip(),
             "message": body_text,

@@ -1,4 +1,4 @@
-"""独立派遣任务：顶层任务卡 + 新上下文 + 软关联来源 task/slice。
+"""派遣子任务：来源 task 下的非阻塞 child + 新上下文 + 共享 workspace。
 
 与 delegation 子任务的区别：
 - 不设置 parent_id / parent_step_id，不阻塞来源 workflow；
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 from .. import config
 from ..util import jdumps, new_id, now_iso
@@ -33,7 +34,7 @@ def _title_from_message(message: str, target_role: str) -> str:
     if text.startswith("@"):
         text = text.split(maxsplit=1)[1] if " " in text else ""
     first = text.splitlines()[0].strip() if text else ""
-    return (first[:120] or f"{target_role} · 独立派遣任务")
+    return (first[:120] or f"{target_role} · 派遣任务")
 
 
 def _dispatch_depth(conn: sqlite3.Connection, task_id: str) -> int:
@@ -98,7 +99,7 @@ def create_dispatch(conn: sqlite3.Connection, *, source_task_id: str,
                     force: bool = False,
                     reason_code: str = "explicit",
                     reason_json: dict | None = None) -> dict:
-    """原子创建独立任务 + 目标 run + task_dispatches 记录（不 pump）。"""
+    """原子创建派遣子任务 + 目标 run + task_dispatches 记录（不 pump）。"""
     target_role = str(target_role or "").strip()
     if not target_role:
         raise DispatchError("target_role is required")
@@ -116,6 +117,11 @@ def create_dispatch(conn: sqlite3.Connection, *, source_task_id: str,
     if requester != "human" and not context_router.is_participant(
             conn, source_task_id, requester):
         raise DispatchError("requester is not a participant of the source task")
+    # 派遣子任务复用来源 task 的 workspace，目标角色必须是来源 task 的参与者。
+    if not context_router.is_participant(conn, source_task_id, target_role):
+        raise DispatchError(
+            f"target role {target_role} is not a participant of the source task; "
+            "add it to the source task before dispatching")
     if _dispatch_depth(conn, source_task_id) >= max(0, int(config.DISPATCH_MAX_DEPTH)):
         raise DispatchError(
             f"dispatch depth limit reached ({config.DISPATCH_MAX_DEPTH})")
@@ -150,14 +156,17 @@ def create_dispatch(conn: sqlite3.Connection, *, source_task_id: str,
     task = tasks_service.create(
         conn,
         title=(title or "").strip() or _title_from_message(message, target_role),
-        type="dispatched",
-        # 不继承来源 task 的 workspace/repo/base_branch；只有显式给出才写入。
-        repo=repo, workspace_id=workspace_id, base_branch=base_branch,
+        # 派遣是来源 task 下的非阻塞子任务，不是顶层任务；不参与 step 委派阻塞。
+        type="dispatch",
+        parent_id=source_task_id,
+        parent_step_id=None,
+        # workspace/repo/base_branch 由 tasks.create 从 parent 继承，禁止覆盖。
         scope_paths=scope_paths or [],
         description=message,
         acceptance=acceptance or [],
         assignee=target_role,
         created_by=created_by,
+        commit=False,
     )
     tid = task["id"]
     conn.execute(
@@ -167,30 +176,43 @@ def create_dispatch(conn: sqlite3.Connection, *, source_task_id: str,
         (source_task_id, source_slice_key, source_step_id, source_workflow_id,
          requester, reason_code, jdumps(reason_json or {}), now, tid),
     )
-    conn.execute(
-        "INSERT INTO task_dispatches "
-        "(id, source_task_id, source_workflow_id, source_step_id, source_slice_key, "
-        " requester_run_id, requested_by, target_task_id, target_role, request_hash, "
-        " return_context_key, return_run_id, return_step_id, reason_code, reason_json, "
-        " status, attempts, created_at, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',0,?,?)",
-        (dispatch_id, source_task_id, source_workflow_id,
-         source_step_id, source_slice_key, source_run_id, requester, tid, target_role,
-         request_hash, return_context_key, return_run_id, return_step_id,
-         reason_code, jdumps(reason_json or {}), now, now),
-    )
+    try:
+        conn.execute(
+            "INSERT INTO task_dispatches "
+            "(id, source_task_id, source_workflow_id, source_step_id, source_slice_key, "
+            " requester_run_id, requested_by, target_task_id, target_role, request_hash, "
+            " return_context_key, return_run_id, return_step_id, reason_code, reason_json, "
+            " status, attempts, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',0,?,?)",
+            (dispatch_id, source_task_id, source_workflow_id,
+             source_step_id, source_slice_key, source_run_id, requester, tid, target_role,
+             request_hash, return_context_key, return_run_id, return_step_id,
+             reason_code, jdumps(reason_json or {}), now, now),
+        )
+    except sqlite3.IntegrityError as exc:
+        # 并发重复请求：回滚本次未提交的 task/run，复用已存在的活跃 dispatch。
+        conn.rollback()
+        existing = _active_dispatch(
+            conn, request_hash, source_task_id, source_slice_key, target_role)
+        if existing is not None:
+            task = tasks_service.get(conn, existing["target_task_id"])
+            run = runs_service.find_active_run(
+                conn, existing["target_task_id"], target_role, slice_key=None)
+            return {"task": task, "run": run, "dispatch": existing, "reused": True}
+        raise DispatchError(f"duplicate dispatch request: {exc}") from exc
     prompt = (
-        "[anvil:dispatch] 你收到一个独立派遣任务。它与来源任务/切片不做父子绑定，"
-        "请使用本任务自己的上下文独立完成。\n\n"
+        "[anvil:dispatch] 你收到一个派遣子任务（来源 workflow 期间临时加入的小切片）。"
+        "它挂在来源任务下，不推进 workflow、不阻塞父任务；请使用本任务自己的上下文独立完成。\n\n"
         f"来源任务：{source_task_id}"
         + (f" / 切片 {source_slice_key}" if source_slice_key else "")
         + f"\n请求者：{requester}\n\n请求：\n{message}\n")
     if acceptance:
         prompt += "\n验收标准：\n" + "\n".join(f"- {x}" for x in acceptance)
-    prompt += ("\n\n完成后提交本任务结果；不要把来源任务的原始对话当作本任务上下文。")
+    prompt += ("\n\n完成后用 `anvil task submit` 提交结果；派遣子任务提交即 done，"
+               "不进入人工评审。不要把来源任务的原始对话当作本任务上下文。")
     run = runs_service.create_run(
         conn, target_role, tid, prompt=prompt,
-        dispatch_id=dispatch_id, origin="dispatch")
+        dispatch_id=dispatch_id, origin="dispatch", commit=False)
     ledger.emit(
         conn, "dispatch.created", task_id=source_task_id,
         slice_key=source_slice_key, step_id=source_step_id, run_id=source_run_id,
@@ -213,8 +235,12 @@ def create_dispatch(conn: sqlite3.Connection, *, source_task_id: str,
     }
 
 
-def append_wake_note(conn: sqlite3.Connection, run_id: str | None, note: str) -> None:
-    """追加一次性 continuation；多个派遣结果不会被 COALESCE 吞掉。"""
+def append_wake_note(conn: sqlite3.Connection, run_id: str | None, note: str,
+                     *, once_marker: str | None = None) -> None:
+    """追加一次性 continuation；多个派遣结果不会被 COALESCE 吞掉。
+
+    once_marker 用于 scheduler 重试：同一 marker 已存在时不再重复追加。
+    """
     if not run_id or not note.strip():
         return
     row = conn.execute(
@@ -222,6 +248,8 @@ def append_wake_note(conn: sqlite3.Connection, run_id: str | None, note: str) ->
     if row is None:
         return
     existing = str(row["wake_note"] or "").strip()
+    if once_marker and once_marker in existing:
+        return
     merged = (existing + "\n\n" + note.strip()) if existing else note.strip()
     conn.execute("UPDATE runs SET wake_note=? WHERE id=?", (merged, run_id))
 
@@ -249,6 +277,38 @@ def _result_summary(conn: sqlite3.Connection, task_id: str, limit: int = 1500) -
     return text[:limit]
 
 
+def _notify_dispatch_completed(conn: sqlite3.Connection, d: dict,
+                               target_task_id: str, summary: str,
+                               status: str, reason: str | None) -> None:
+    """结果回流幂等：mention + dispatch.completed ledger 只发一次。"""
+    if d.get("result_notified_at"):
+        return
+    requester = str(d.get("requested_by") or "")
+    if requester and requester != str(d.get("target_role") or ""):
+        try:
+            tasks_service.mention(
+                conn, d["source_task_id"], "system",
+                requester if requester != "human" else "human",
+                f"派遣任务 {target_task_id}「{_task_title(conn, target_task_id)}」"
+                f"已完成，结果：{summary}",
+                slice_key=d.get("source_slice_key"))
+        except Exception:  # noqa: BLE001 —— 通知失败不阻断回切状态
+            pass
+    ledger.emit(
+        conn, "dispatch.completed", task_id=d["source_task_id"],
+        slice_key=d.get("source_slice_key"), step_id=d.get("source_step_id"),
+        run_id=d.get("requester_run_id"),
+        actor_type="system", actor="dispatch",
+        payload={"dispatch_id": d["id"], "target_task_id": target_task_id,
+                 "target_role": d.get("target_role"), "summary": summary,
+                 "return_status": status, "return_reason": reason},
+        mirror_activity=True, activity_kind="dispatch_result", activity_role="system",
+    )
+    conn.execute(
+        "UPDATE task_dispatches SET result_notified_at=? WHERE id=?",
+        (now_iso(), d["id"]))
+
+
 def _return_state(conn: sqlite3.Connection, row: dict) -> tuple[bool | None, str | None]:
     """True=可回切；None=稍后再试；False=放弃并标记 no_return。"""
     run_id = row.get("return_run_id")
@@ -256,8 +316,8 @@ def _return_state(conn: sqlite3.Connection, row: dict) -> tuple[bool | None, str
     if not run_id or not context_key:
         return False, "no_return_run"
     run = conn.execute(
-        "SELECT task_id, status, step_id, native_session_id FROM runs WHERE id=?",
-        (run_id,)).fetchone()
+        "SELECT task_id, role_slug, slice_key, status, step_id, native_session_id "
+        "FROM runs WHERE id=?", (run_id,)).fetchone()
     if run is None:
         return False, "return_run_missing"
     if run["status"] in ("completed", "failed", "abandoned",
@@ -265,6 +325,10 @@ def _return_state(conn: sqlite3.Connection, row: dict) -> tuple[bool | None, str
         return False, f"return_run_{run['status']}"
     if run["status"] != "suspended":
         return None, "return_run_busy"
+    # 原 run 正在等人类确认时不能被派遣回切 resume，否则会绕过 HITL。
+    if tasks_service.waiting_for_human(
+            conn, run["task_id"], run["role_slug"], run["slice_key"]):
+        return False, "return_run_waiting_human"
     sid = str(run["native_session_id"] or "")
     if sid and not sid.startswith("rs:"):
         # one-shot 运行没有可恢复的常驻会话；resume 会新建进程并丢失原上下文。
@@ -320,27 +384,7 @@ def on_task_done(conn: sqlite3.Connection, target_task_id: str) -> dict | None:
     if ok:
         append_wake_note(conn, d["return_run_id"],
                          _return_note(conn, d, target_task_id))
-    requester = str(d.get("requested_by") or "")
-    if requester and requester != str(d.get("target_role") or ""):
-        try:
-            tasks_service.mention(
-                conn, d["source_task_id"], "system",
-                requester if requester != "human" else "human",
-                f"独立派遣任务 {target_task_id}「{_task_title(conn, target_task_id)}」"
-                f"已完成，结果：{summary}",
-                slice_key=d.get("source_slice_key"))
-        except Exception:  # noqa: BLE001 —— 通知失败不阻断回切状态
-            pass
-    ledger.emit(
-        conn, "dispatch.completed", task_id=d["source_task_id"],
-        slice_key=d.get("source_slice_key"), step_id=d.get("source_step_id"),
-        run_id=d.get("requester_run_id"),
-        actor_type="system", actor="dispatch",
-        payload={"dispatch_id": d["id"], "target_task_id": target_task_id,
-                 "target_role": d.get("target_role"), "summary": summary,
-                 "return_status": status, "return_reason": reason},
-        mirror_activity=True, activity_kind="dispatch_result", activity_role="system",
-    )
+    _notify_dispatch_completed(conn, d, target_task_id, summary, status, reason)
     conn.commit()
     return {**d, "status": status, "result_summary": summary}
 
@@ -353,11 +397,11 @@ def _task_title(conn: sqlite3.Connection, task_id: str) -> str:
 def _return_note(conn: sqlite3.Connection, d: dict, target_task_id: str) -> str:
     summary = _result_summary(conn, target_task_id)
     return (
-        f"独立任务 {target_task_id}「{_task_title(conn, target_task_id)}」已完成。\n"
+        f"派遣任务 {target_task_id}「{_task_title(conn, target_task_id)}」已完成。\n"
         f"结果摘要：{summary}\n"
         f"来源任务：{d['source_task_id']}"
         + (f" / 切片 {d['source_slice_key']}" if d.get("source_slice_key") else "")
-        + "\n请把该结果与当前切片工作合并；不要重复创建同一个独立任务。")
+        + "\n请把该结果与当前切片工作合并；不要重复创建同一个派遣任务。")
 
 
 def _promote_open_returns(conn: sqlite3.Connection) -> None:
@@ -368,9 +412,14 @@ def _promote_open_returns(conn: sqlite3.Connection) -> None:
     for raw in rows:
         d = dict(raw)
         ok, reason = _return_state(conn, d)
-        if ok is None:
-            continue
+        summary = _result_summary(conn, d["target_task_id"])
         now = now_iso()
+        if ok is None:
+            # 崩溃恢复时即使 return run 还在忙，也要先幂等回流结果。
+            _notify_dispatch_completed(conn, d, d["target_task_id"], summary,
+                                       d["status"], reason)
+            conn.commit()
+            continue
         if ok:
             conn.execute(
                 "UPDATE task_dispatches SET status='return_ready', updated_at=? WHERE id=?",
@@ -380,6 +429,7 @@ def _promote_open_returns(conn: sqlite3.Connection) -> None:
                 (now, d["target_task_id"]))
             append_wake_note(conn, d["return_run_id"],
                              _return_note(conn, d, d["target_task_id"]))
+            status = "return_ready"
         else:
             conn.execute(
                 "UPDATE task_dispatches SET status='no_return', updated_at=? WHERE id=?",
@@ -387,6 +437,8 @@ def _promote_open_returns(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "UPDATE tasks SET dispatch_status='no_return', updated_at=? WHERE id=?",
                 (now, d["target_task_id"]))
+            status = "no_return"
+        _notify_dispatch_completed(conn, d, d["target_task_id"], summary, status, reason)
         conn.commit()
 
 
@@ -439,7 +491,12 @@ def resolve_dispatch_returns(conn: sqlite3.Connection, pump,
         ok_pump = bool(pump(d["return_run_id"], "resume"))
         run = conn.execute("SELECT status FROM runs WHERE id=?",
                            (d["return_run_id"],)).fetchone()
-        if ok_pump and run is not None and run["status"] not in ("failed", "abandoned"):
+        # pump 可能因 run 并发进入 submitted/completed 而空转；只有仍可投递才算回切成功。
+        returned_ok = (
+            ok_pump and run is not None
+            and runs_service.is_dispatchable_status(run["status"])
+        )
+        if returned_ok:
             now = now_iso()
             # 同一个 return run 的多个派遣结果已在 wake_note 中合并；一次 resume
             # 即视为全部返回，避免为同一 run 重复 pump。
@@ -474,9 +531,30 @@ def record_context_return(conn: sqlite3.Connection, *, switched_run_id: str,
                           return_context_key: str | None,
                           return_run_id: str | None) -> None:
     """跨切片临时处理：在切过去的 run 上记录“本轮结束后回到 B”。"""
-    if not switched_run_id or not return_context_key or not return_run_id:
+    if not switched_run_id or not return_context_key:
         return
     if return_context_key == _context_for_run(conn, switched_run_id):
+        return
+    switched = conn.execute(
+        "SELECT role_slug FROM runs WHERE id=?", (switched_run_id,)).fetchone()
+    if switched is None:
+        return
+    # idle release 后 current_run_id 可能为空：按 return context 找回最近 suspended run。
+    if not return_run_id:
+        from . import daemon as daemon_service
+        task_id, slice_key = daemon_service.context_parts(return_context_key)
+        if task_id:
+            q = ("SELECT id FROM runs WHERE task_id=? AND role_slug=? "
+                 "AND status='suspended'")
+            params: list = [task_id, switched["role_slug"]]
+            if slice_key:
+                q += " AND slice_key=?"
+                params.append(slice_key)
+            else:
+                q += " AND slice_key IS NULL"
+            found = conn.execute(q + " ORDER BY started_at DESC LIMIT 1", params).fetchone()
+            return_run_id = found["id"] if found else None
+    if not return_run_id:
         return
     ret = conn.execute(
         "SELECT status FROM runs WHERE id=?", (return_run_id,)).fetchone()
@@ -485,7 +563,9 @@ def record_context_return(conn: sqlite3.Connection, *, switched_run_id: str,
         return
     conn.execute(
         "UPDATE runs SET context_return_context_key=?, context_return_run_id=?, "
-        "context_return_after_turn=1 WHERE id=? AND context_return_after_turn=0",
+        "context_return_after_turn=1, context_return_attempts=0, "
+        "context_return_last_attempt_at=NULL "
+        "WHERE id=? AND context_return_after_turn=0",
         (return_context_key, return_run_id, switched_run_id))
     conn.commit()
 
@@ -524,57 +604,150 @@ def _context_return_note(conn: sqlite3.Connection, run: dict) -> str:
     return "\n".join(lines)
 
 
+def _parse_dt(value) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _context_return_valid(conn: sqlite3.Connection, ret: sqlite3.Row,
+                          ret_key: str) -> bool:
+    if ret is None or ret["status"] != "suspended":
+        return False
+    sid = str(ret["native_session_id"] or "")
+    if sid and not sid.startswith("rs:"):
+        return False
+    task = conn.execute(
+        "SELECT status, archived_at FROM tasks WHERE id=?",
+        (ret["task_id"],)).fetchone()
+    if task is None or task["status"] in ("done", "closed") or task["archived_at"]:
+        return False
+    if ret["step_id"]:
+        step = conn.execute(
+            "SELECT ws.status, w.status AS wf_status FROM workflow_steps ws "
+            "JOIN workflows w ON w.id=ws.workflow_id WHERE ws.run_id=?",
+            (ret["id"],)).fetchone()
+        if step is None or step["status"] != "running" or step["wf_status"] != "running":
+            return False
+    slot = conn.execute(
+        "SELECT 1 FROM role_task_sessions WHERE role_slug=? AND task_key=? LIMIT 1",
+        (ret["role_slug"], ret_key)).fetchone()
+    if slot is None:
+        return False
+    if tasks_service.waiting_for_human(
+            conn, ret["task_id"], ret["role_slug"], ret["slice_key"]):
+        return False
+    return True
+
+
+def _clear_context_return(conn: sqlite3.Connection, run_id: str, now: str) -> None:
+    conn.execute(
+        "UPDATE runs SET context_return_after_turn=0, context_returned_at=? WHERE id=?",
+        (now, run_id))
+
+
 def resolve_context_returns(conn: sqlite3.Connection, pump) -> int:
-    """临时切换的 run 已结束/失败 → 自动 resume 原来的切片/任务 run 一次。"""
+    """临时切换的 run 已结束/失败 → 自动 resume 原来的切片/任务 run 一次。
+
+    同一个 return run 的多个临时结果合并为一次 pump；submitted/reviewing 不等待；
+    失败按 attempts/backoff 重试，避免重复追加 wake_note 或永久挂起。
+    """
     rows = conn.execute(
         "SELECT * FROM runs WHERE context_return_after_turn=1 "
-        "AND context_returned_at IS NULL "
-        "AND status IN ('suspended','completed','failed','abandoned')").fetchall()
-    done = 0
+        "AND context_returned_at IS NULL ORDER BY id").fetchall()
+    groups: dict[tuple[str, str], list[dict]] = {}
     for raw in rows:
         run = dict(raw)
         ret_id = run.get("context_return_run_id")
         ret_key = run.get("context_return_context_key")
         if not ret_id or not ret_key:
-            conn.execute(
-                "UPDATE runs SET context_return_after_turn=0, context_returned_at=? "
-                "WHERE id=?", (now_iso(), run["id"]))
-            conn.commit()
+            _clear_context_return(conn, run["id"], now_iso())
             continue
+        groups.setdefault((ret_id, ret_key), []).append(run)
+    conn.commit()
+
+    done = 0
+    for (ret_id, ret_key), entries in groups.items():
         ret = conn.execute(
-            "SELECT task_id, status, step_id, native_session_id FROM runs "
-            "WHERE id=?", (ret_id,)).fetchone()
-        valid = ret is not None and ret["status"] == "suspended"
-        sid = str(ret["native_session_id"] or "") if ret is not None else ""
-        if sid and not sid.startswith("rs:"):
-            valid = False
-        if valid:
-            task = conn.execute(
-                "SELECT status, archived_at FROM tasks WHERE id=?",
-                (ret["task_id"],)).fetchone()
-            valid = bool(task and task["status"] not in ("done", "closed")
-                         and not task["archived_at"])
-        if valid and ret["step_id"]:
-            step = conn.execute(
-                "SELECT ws.status, w.status AS wf_status FROM workflow_steps ws "
-                "JOIN workflows w ON w.id=ws.workflow_id WHERE ws.run_id=?",
-                (ret_id,)).fetchone()
-            valid = bool(step and step["status"] == "running"
-                         and step["wf_status"] == "running")
-        if not valid:
-            conn.execute(
-                "UPDATE runs SET context_return_after_turn=0, context_returned_at=? "
-                "WHERE id=?", (now_iso(), run["id"]))
+            "SELECT id, task_id, role_slug, slice_key, status, step_id, "
+            "native_session_id FROM runs WHERE id=?", (ret_id,)).fetchone()
+        if ret is None or ret["status"] in (
+                "completed", "failed", "abandoned", "submitted", "reviewing"):
+            for run in entries:
+                _clear_context_return(conn, run["id"], now_iso())
             conn.commit()
             continue
-        append_wake_note(conn, ret_id, _context_return_note(conn, run))
-        conn.commit()
-        if pump(ret_id, "resume"):
-            conn.execute(
-                "UPDATE runs SET context_return_after_turn=0, context_returned_at=? "
-                "WHERE id=?", (now_iso(), run["id"]))
+        if ret["status"] != "suspended":
+            # 临时上下文仍在 running/created，等它真正结束再回切。
+            continue
+        if not _context_return_valid(conn, ret, ret_key):
+            for run in entries:
+                _clear_context_return(conn, run["id"], now_iso())
             conn.commit()
+            continue
+
+        valid: list[dict] = []
+        for run in entries:
+            if run["status"] in ("submitted", "reviewing"):
+                # 临时工作已进入 HITL；按非阻塞规则不等待，清标记。
+                _clear_context_return(conn, run["id"], now_iso())
+                continue
+            if run["status"] not in ("suspended", "completed", "failed", "abandoned"):
+                continue
+            valid.append(run)
+        if not valid:
+            conn.commit()
+            continue
+
+        attempts = max(int(run.get("context_return_attempts") or 0) for run in valid) + 1
+        limit = max(0, int(config.CONTEXT_RETURN_MAX_ATTEMPTS))
+        if attempts > limit:
+            for run in valid:
+                _clear_context_return(conn, run["id"], now_iso())
+            conn.commit()
+            continue
+        last_attempts = [
+            parsed for parsed in (_parse_dt(run.get("context_return_last_attempt_at"))
+                                  for run in valid) if parsed is not None
+        ]
+        if last_attempts:
+            backoff = max(0.0, float(config.CONTEXT_RETURN_BACKOFF_SECONDS))
+            delay = min(300.0, backoff * (2 ** max(0, attempts - 2)))
+            if (datetime.now(timezone.utc) - max(last_attempts)).total_seconds() < delay:
+                continue
+
+        # 同一 return run 的多个结果合并；note 用 run id 去重，pump 失败不会重复膨胀。
+        for run in valid:
+            append_wake_note(
+                conn, ret_id, _context_return_note(conn, run),
+                once_marker=f"run {run['id']}")
+        now = now_iso()
+        for run in valid:
+            conn.execute(
+                "UPDATE runs SET context_return_attempts=?, "
+                "context_return_last_attempt_at=? WHERE id=?",
+                (attempts, now, run["id"]))
+        conn.commit()
+
+        ok_pump = bool(pump(ret_id, "resume"))
+        ret_after = conn.execute(
+            "SELECT status FROM runs WHERE id=?", (ret_id,)).fetchone()
+        returned_ok = bool(
+            ok_pump and ret_after is not None
+            and runs_service.is_dispatchable_status(ret_after["status"]))
+        if returned_ok:
+            for run in valid:
+                _clear_context_return(conn, run["id"], now_iso())
             done += 1
+        elif attempts >= limit:
+            for run in valid:
+                _clear_context_return(conn, run["id"], now_iso())
+        conn.commit()
     return done
 
 

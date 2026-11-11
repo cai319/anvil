@@ -423,5 +423,5 @@ POST /api/v1/me/session/reset              # 只清当前任务槽（角色自�
 - 静态 `slices` 也补 `slice_key`，但不补 `source_step_id`（后者只标识运行期动态切片）。
 - workflow 重启/新 execution 清旧 slice 槽，避免 resume 上一次执行的对话。
 
-独立派遣任务和自动回切见
+派遣子任务和自动回切见
 `docs/superpowers/specs/2026-11-10-slice-context-dispatch-design.md`。

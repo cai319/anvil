@@ -121,7 +121,8 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
            depends_on: list[str] | None = None,
            knowledge_repos: list | None = None,
            knowledge_repos_source: str = "human",
-           issue_board_enabled: bool = False) -> dict:
+           issue_board_enabled: bool = False,
+           commit: bool = True) -> dict:
     tid = id or new_id()
     if str(tid).startswith("__") or "::slice::" in str(tid):
         # `__global__` 是角色上下文槽保留 key；`::slice::` 是 context key 分隔符。
@@ -183,8 +184,12 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
         conn.execute("INSERT OR IGNORE INTO task_assignees (task_id, role_slug, joined_at) VALUES (?,?,?)", (tid, a, now))
     _init_role_claims(conn, tid, list(assignees or []), now)
     # 任务数据存储（与知识库完全分开）：先登记 workspace，目录在首次执行时创建。
+    # 派遣子任务共享来源 task 的 workspace，不创建独立目录。
+    ws_task_id = tid
+    if type in task_workspace.DISPATCH_TASK_TYPES and parent_id:
+        ws_task_id = task_workspace.owner_task_id(conn, parent_id)
     ws = task_workspace.ensure(
-        conn, tid, source_repo=effective_source_repo, base_branch=base_branch,
+        conn, ws_task_id, source_repo=effective_source_repo, base_branch=base_branch,
         create_dir=False, commit=False)
     # 显式指定是人工决策：落库并加锁，后续 auto/Cindy 不再覆盖。
     if knowledge_repos:
@@ -198,7 +203,8 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
             "workspace_id": workspace_id, "parent_id": parent_id,
             "workspace_path": ws.get("path") or "",
         }, commit=False)
-    conn.commit()
+    if commit:
+        conn.commit()
     repo_catalog.invalidate_catalog()
     return get(conn, tid)  # type: ignore[return-value]
 
@@ -229,6 +235,11 @@ def get(conn: sqlite3.Connection, tid: str) -> dict | None:
     ws = conn.execute(
         "SELECT source_repo, path, kind, status FROM task_workspaces WHERE task_id=?",
         (tid,)).fetchone()
+    if ws is None and d.get("type") in ("dispatch", "dispatched") and d.get("parent_id"):
+        owner = task_workspace.owner_task_id(conn, tid)
+        ws = conn.execute(
+            "SELECT source_repo, path, kind, status FROM task_workspaces WHERE task_id=?",
+            (owner,)).fetchone()
     d["source_repo"] = ws["source_repo"] if ws is not None else None
     d["task_workspace"] = dict(ws) if ws is not None else None
     knowledge_binding.attach_bindings(conn, [d])
@@ -236,7 +247,10 @@ def get(conn: sqlite3.Connection, tid: str) -> dict | None:
 
 
 def list_delegations(conn: sqlite3.Connection, parent_id: str) -> list[dict]:
-    """父任务下的委派工单（含旧子任务），带父 step 与最新 run 的展示信息。"""
+    """父任务下的委派工单（含旧子任务），带父 step 与最新 run 的展示信息。
+
+    派遣子任务由 list_dispatches 单独展示，不能混入委派列表。
+    """
     if get(conn, parent_id) is None:
         raise LookupError(parent_id)
     rows = conn.execute(
@@ -262,6 +276,7 @@ def list_delegations(conn: sqlite3.Connection, parent_id: str) -> list[dict]:
                ON r.id=(SELECT x.id FROM runs x WHERE x.task_id=t.id
                         ORDER BY x.started_at DESC, x.rowid DESC LIMIT 1)
             WHERE t.parent_id=?
+              AND COALESCE(t.type,'') NOT IN ('dispatch','dispatched')
             ORDER BY t.created_at, t.id""", (parent_id,)).fetchall()
     out: list[dict] = []
     for row in rows:
@@ -633,6 +648,34 @@ def submit(conn: sqlite3.Connection, tid: str, *, summary: str | None = None,
         raise ConflictError(f"task {tid} is {t['status']}, expected in_progress to submit")
 
     now = now_iso()
+    # 派遣子任务：角色提交即完成，不进入人工评审。
+    if t.get("type") in ("dispatch", "dispatched"):
+        if role and t.get("assignee") and role != t["assignee"]:
+            raise ConflictError(
+                f"task {tid} is assigned to {t['assignee']}, not {role}")
+        if role:
+            claim = _role_claim(conn, tid, role)
+            if claim is not None:
+                conn.execute(
+                    "UPDATE task_role_claims SET status='approved', summary=?, "
+                    "submitted_at=COALESCE(submitted_at, ?), lease_expires_at=NULL, "
+                    "updated_at=? WHERE task_id=? AND role_slug=?",
+                    (summary, now, now, tid, role))
+        conn.execute(
+            "UPDATE tasks SET status='done', lease_expires_at=NULL, updated_at=? WHERE id=?",
+            (now, tid))
+        _complete_runs(conn, tid, role)
+        _audit(conn, role, tid, "submit", {
+            "summary": summary, "branch": branch, "changed_paths": changed,
+            "reported_paths": changed_paths, "final": True, "dispatch": True,
+        })
+        conn.commit()
+        try:
+            from . import dispatch as dispatch_service
+            dispatch_service.on_task_done(conn, tid)
+        except Exception:  # noqa: BLE001 —— 回切/回流失败不阻断任务完成
+            pass
+        return get(conn, tid)  # type: ignore[return-value]
     if t["assignees"]:
         # 团队任务：每个角色独立提交；全部参与角色提交后才进入任务级评审。
         force_finalize = role is None  # 人类可从 UI 直接收口
@@ -801,6 +844,25 @@ def cancel(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
         "UPDATE task_role_claims SET status='released', lease_expires_at=NULL, updated_at=? "
         "WHERE task_id=? AND status IN ('pending','working')", (now_iso(), tid)
     )
+    # 父任务终止：派遣子任务随父任务终止；先关闭子任务，再由下面按 source 标记 cancelled。
+    child_ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM tasks WHERE parent_id=? "
+        "AND COALESCE(type,'') IN ('dispatch','dispatched') "
+        "AND status NOT IN ('done','closed')", (tid,)).fetchall()]
+    for cid in child_ids:
+        conn.execute(
+            "UPDATE tasks SET status='closed', lease_expires_at=NULL, updated_at=? WHERE id=?",
+            (now_iso(), cid))
+        conn.execute(
+            "UPDATE task_role_claims SET status='released', lease_expires_at=NULL, updated_at=? "
+            "WHERE task_id=? AND status IN ('pending','working')", (now_iso(), cid))
+        for row in conn.execute(
+                "SELECT id, source_task_id FROM task_dispatches WHERE target_task_id=? "
+                "AND status IN ('open','return_ready','returning')", (cid,)).fetchall():
+            if row["source_task_id"] != tid:
+                conn.execute(
+                    "UPDATE task_dispatches SET status='cancelled', updated_at=? WHERE id=?",
+                    (now_iso(), row["id"]))
     # closed 是失败/终止，不是成功完成：派遣任务不再自动回切。
     now = now_iso()
     target_dispatch = conn.execute(
@@ -983,11 +1045,23 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
     if active and not force:
         raise ConflictError(f"task {tid} has {len(active)} active run(s); use force to delete")
 
-    children = conn.execute("SELECT id FROM tasks WHERE parent_id=?", (tid,)).fetchall()
+    children = conn.execute(
+        "SELECT id FROM tasks WHERE parent_id=? "
+        "AND COALESCE(type,'') NOT IN ('dispatch','dispatched')", (tid,)).fetchall()
     if children and not force:
         raise ConflictError(f"task {tid} has child tasks; delete them first or use force")
 
-    # 独立派遣任务不随来源删除：来源删除后只标记软关联失效/不再回切。
+    # 派遣子任务随父任务级联删除，不作为阻塞子任务；先清理它们，避免孤儿顶层任务。
+    dispatch_children = [r["id"] for r in conn.execute(
+        "SELECT id FROM tasks WHERE parent_id=? "
+        "AND COALESCE(type,'') IN ('dispatch','dispatched')", (tid,)).fetchall()]
+    for cid in dispatch_children:
+        try:
+            delete(conn, cid, force=True, role=role)
+        except Exception:  # noqa: BLE001 —— 级联清理失败不应阻断父任务删除
+            pass
+
+    # 派遣记录不随来源删除而保留回切能力：来源删除后只标记软关联失效/不再回切。
     now = now_iso()
     for row in conn.execute(
             "SELECT id, target_task_id FROM task_dispatches WHERE source_task_id=? "
@@ -1200,6 +1274,36 @@ def timeline(conn: sqlite3.Connection, tid: str) -> list[dict]:
     return out
 
 
+def waiting_for_human(conn: sqlite3.Connection, task_id: str | None,
+                      role: str, slice_key: str | None = None) -> bool:
+    """该角色最后一条 @ 是 @human 且之后没有人类回复 → 合法 HITL 等待。"""
+    if not task_id:
+        return False
+    timeline = []
+    for event in timeline_events(conn, task_id):
+        value = event.get("slice_key")
+        if slice_key:
+            if value in (None, slice_key):
+                timeline.append(event)
+        elif value is None:
+            timeline.append(event)
+    own = [i for i, event in enumerate(timeline)
+           if event["kind"] == "mention" and event["role"] == role]
+    if not own:
+        return False
+    last = own[-1]
+    target = (timeline[last].get("payload") or {}).get("target")
+    if target != "human":
+        return False
+    # 人类评论/mention 都视为已回应；保持与旧看门狗行为一致。
+    return not any(e["role"] == "human" for e in timeline[last + 1:])
+
+
+def timeline_events(conn: sqlite3.Connection, tid: str) -> list[dict]:
+    """timeline 的别名；避免调用方为了一个判断反复拼 audit/activities。"""
+    return timeline(conn, tid)
+
+
 def _timeline_row(src: str, r) -> dict:
     return {
         "key": f"{src}-{r['id']}",
@@ -1226,9 +1330,15 @@ def _assert_claimable(conn: sqlite3.Connection, t: dict) -> None:
 
 
 def _assert_submittable(conn: sqlite3.Connection, t: dict) -> None:
-    """§5.1 提交守卫：父任务在所有子任务（parent_id==本任务）done 前不可 submit。"""
+    """§5.1 提交守卫：委派子任务 done 前父任务不可 submit。
+
+    派遣子任务是空闲角色临时抽离的小切片，明确不阻塞父任务提交。
+    """
     _assert_claimable(conn, t)
-    children = conn.execute("SELECT status FROM tasks WHERE parent_id=?", (t["id"],)).fetchall()
+    children = conn.execute(
+        "SELECT status FROM tasks WHERE parent_id=? "
+        "AND COALESCE(type,'') NOT IN ('dispatch','dispatched')",
+        (t["id"],)).fetchall()
     if any(c["status"] != "done" for c in children):
         raise ConflictError("child tasks not all done")
 
