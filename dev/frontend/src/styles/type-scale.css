@@ -497,9 +497,9 @@ select { height: var(--control-h); }
   box-shadow: 2px 2px 0 var(--role-status, var(--status-gray));
 }
 /* 五色 tone：橙=处理中，黄=等人工，红=需关注，绿=空闲/成功，灰=未开始/未参与/结束。 */
-.role-avatar[data-role-tone="orange"] { --role-status: var(--orange); }
+.role-avatar[data-role-tone="orange"] { --role-status: var(--role-shadow-orange); }
 .role-avatar[data-role-tone="yellow"] { --role-status: var(--yellow); }
-.role-avatar[data-role-tone="red"] { --role-status: var(--red); }
+.role-avatar[data-role-tone="red"] { --role-status: var(--role-shadow-red); }
 .role-avatar[data-role-tone="green"] { --role-status: var(--green); }
 .role-avatar[data-role-tone="gray"] { --role-status: var(--status-gray); }
 

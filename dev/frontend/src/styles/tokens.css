@@ -32,6 +32,9 @@
   --red: #f87171;
   --green: #4ade80;
   --status-gray: #8b8496;
+  /* 头像阴影专用：红色加深，避免与橙色阴影混淆。 */
+  --role-shadow-orange: #f97316;
+  --role-shadow-red: var(--red-on-paper);
   --blue: #60a5fa;
   --paper-hover: #fff3c4;
 
