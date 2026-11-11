@@ -1,17 +1,18 @@
 import type { WorkflowStep } from "./api/client";
+import type { StatusTone } from "./roleStatus";
 
 /** 工作流步骤状态的展示元数据（图谱与列表共用）。 */
 export const STATUS_META: Record<WorkflowStep["status"], {
-  label: string; color: string; bg: string;
+  label: string; tone: StatusTone; color: string; bg: string;
 }> = {
-  // 绿=空闲/成功，橙=处理中，黄=等待人工，红=排队/繁忙/失败，灰=结束/未开始
-  pending:   { label: "待办",   color: "#8b8496", bg: "rgba(139,132,150,.14)" },
-  running:   { label: "进行中", color: "#fb923c", bg: "rgba(251,146,60,.16)" },
-  submitted: { label: "待审核", color: "#facc15", bg: "rgba(250,204,21,.16)" },
-  approved:  { label: "完成",   color: "#4ade80", bg: "rgba(74,222,128,.14)" },
-  rejected:  { label: "已驳回", color: "#f87171", bg: "rgba(248,113,113,.16)" },
-  failed:    { label: "失败",   color: "#f87171", bg: "rgba(248,113,113,.16)" },
-  skipped:   { label: "跳过",   color: "#8b8496", bg: "rgba(139,132,150,.12)" },
+  // 橙=处理中，黄=等人工，红=需关注，绿=完成，灰=未开始/结束
+  pending:   { label: "待办",   tone: "gray",   color: "var(--status-gray)", bg: "rgba(139,132,150,.14)" },
+  running:   { label: "进行中", tone: "orange", color: "var(--orange)", bg: "rgba(251,146,60,.16)" },
+  submitted: { label: "待审核", tone: "yellow", color: "var(--yellow)", bg: "rgba(250,204,21,.16)" },
+  approved:  { label: "完成",   tone: "green",  color: "var(--green)", bg: "rgba(74,222,128,.14)" },
+  rejected:  { label: "已驳回", tone: "red",    color: "var(--red)", bg: "rgba(248,113,113,.16)" },
+  failed:    { label: "失败",   tone: "red",    color: "var(--red)", bg: "rgba(248,113,113,.16)" },
+  skipped:   { label: "跳过",   tone: "gray",   color: "var(--status-gray)", bg: "rgba(139,132,150,.12)" },
 };
 
 export function isDoneStatus(status: WorkflowStep["status"]): boolean {
@@ -37,11 +38,13 @@ export function phaseLabel(step: WorkflowStep): string {
 }
 
 function groupStatus(steps: WorkflowStep[]): WorkflowStep["status"] {
+  // 失败/返工最需要关注；其次才是执行中、待审核。部分完成但无活跃步骤的 slice
+  // 仍是 pending，不能误显示成橙色进行中。
   if (steps.some((s) => s.status === "failed")) return "failed";
-  if (steps.every((s) => isDoneStatus(s.status))) return "approved";
   if (steps.some((s) => s.status === "rejected")) return "rejected";
-  if (steps.some((s) => s.status === "running" || s.status === "submitted")) return "running";
-  if (steps.some((s) => isDoneStatus(s.status))) return "running";
+  if (steps.some((s) => s.status === "running")) return "running";
+  if (steps.some((s) => s.status === "submitted")) return "submitted";
+  if (steps.length > 0 && steps.every((s) => isDoneStatus(s.status))) return "approved";
   return "pending";
 }
 

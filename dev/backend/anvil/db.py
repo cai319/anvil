@@ -309,6 +309,7 @@ CREATE TABLE IF NOT EXISTS task_role_claims (
     claimed_at       TEXT,
     lease_expires_at TEXT,
     submitted_at     TEXT,
+    release_requested_at TEXT,  -- 有活跃 run 时先登记释放请求，run 结束后再 released
     updated_at       TEXT NOT NULL,
     PRIMARY KEY (task_id, role_slug)
 );
@@ -1314,6 +1315,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_dispatch_child_v1(conn)
     _migrate_dispatch_notify_v1(conn)
     _migrate_context_return_v1(conn)
+    _migrate_claim_release_v1(conn)
     _migrate_subagents_v1(conn)
     _migrate_knowledge_repos_v1(conn)
     _migrate_notes_repo_ids_v2(conn)
@@ -1872,6 +1874,35 @@ def _migrate_context_return_v1(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
     _set_setting(conn, "schema.context_return_v1", "1")
+    conn.commit()
+
+
+def _migrate_claim_release_v1(conn: sqlite3.Connection) -> None:
+    """claim 延迟释放：有活跃 run 时先登记请求，run 结束后再 released。"""
+    if _setting(conn, "schema.claim_release_v1"):
+        return
+    try:
+        conn.execute(
+            "ALTER TABLE task_role_claims ADD COLUMN release_requested_at TEXT")
+    except sqlite3.OperationalError:
+        pass
+    # 旧数据里单负责人任务 claim 只写在 tasks.assignee 上；补一条 claim 记录，
+    # 让 unclaim/submit/review 与团队任务使用同一套状态。
+    conn.execute(
+        "INSERT OR IGNORE INTO task_role_claims "
+        "(task_id, role_slug, status, claimed_at, lease_expires_at, updated_at) "
+        "SELECT id, assignee, 'working', COALESCE(claimed_at, updated_at), "
+        "lease_expires_at, updated_at FROM tasks "
+        "WHERE status='in_progress' AND assignee IS NOT NULL AND assignee<>''"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO task_role_claims "
+        "(task_id, role_slug, status, claimed_at, lease_expires_at, submitted_at, updated_at) "
+        "SELECT id, assignee, 'submitted', COALESCE(claimed_at, updated_at), "
+        "NULL, updated_at, updated_at FROM tasks "
+        "WHERE status='in_review' AND assignee IS NOT NULL AND assignee<>''"
+    )
+    _set_setting(conn, "schema.claim_release_v1", "1")
     conn.commit()
 
 

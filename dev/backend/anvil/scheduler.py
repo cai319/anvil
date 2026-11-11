@@ -92,6 +92,7 @@ class Scheduler:
             ("monitor", lambda: self._monitor(conn)),
             ("clear_terminal_role_runs", lambda: self._clear_terminal_role_runs(conn)),
             ("reap_dead_runs", lambda: self._reap_dead_runs(conn)),
+            ("release_requested_claims", lambda: tasks_service.process_release_requests(conn)),
             ("reap_orphaned_step_runs", lambda: self._reap_orphaned_step_runs(conn)),
             ("reap_stalled_phases", lambda: self._reap_stalled_phases(conn)),
             ("cleanup_workspaces", lambda: self._cleanup_workspaces(conn)),

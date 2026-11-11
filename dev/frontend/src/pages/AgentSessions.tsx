@@ -3,6 +3,7 @@ import { api, subscribeEvents, type Role, type RoleRuntimeStatus, type Run, type
 import { formatClock, parseTime, useNow } from "../time";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
+import { globalRoleState } from "../roleStatus";
 
 const RUN_LABEL: Record<string, string> = {
   created: "已创建",
@@ -56,20 +57,16 @@ export function AgentSessions({ slug }: { slug: string }) {
   if (error) return <p className="error">{error}</p>;
   if (!role) return <p className="muted">加载中…</p>;
 
-  // 头像阴影/指示灯与任务卡、RoleSessions 使用同一五色语义。
-  const headerStatus = runs.some((r) => ["created", "projecting", "running"].includes(r.status))
-    ? "running"
-    : runs.some((r) => ["submitted", "reviewing"].includes(r.status))
-      ? "submitted"
-      : (runtime?.alive ? "idle" : "closed");
-  const headerLight = headerStatus === "running" || headerStatus === "submitted"
-    ? headerStatus
-    : headerStatus === "idle" ? "idle" : "closed";
-  const headerTitle = headerStatus === "running"
-    ? "处理中"
-    : headerStatus === "submitted"
-      ? "等待人工评审/确认"
-      : headerStatus === "idle" ? "空闲" : "未运行";
+  // 全局角色状态：只看角色整体是否在工作，历史 run 不单独染色。
+  const latestRun = [...runs]
+    .sort((a, b) => String(b.started_at ?? "").localeCompare(String(a.started_at ?? "")))[0];
+  const header = runtime
+    ? globalRoleState({ runtime, latestRunStatus: latestRun?.status ?? null })
+    : {
+      key: "loading", label: "加载中", tone: "gray" as const,
+      detail: "状态加载中…", title: "加载中 · 状态加载中…",
+      queued: 0, workingHere: false, busyElsewhere: false,
+    };
 
   return (
     <div className="session">
@@ -83,10 +80,11 @@ export function AgentSessions({ slug }: { slug: string }) {
             avatar={role.avatar}
             color={role.avatar_color}
             size={34}
-            status={headerStatus}
+            tone={header.tone}
+            label={`${role.display_name} · ${header.label}`}
           />
           <h1>{role.display_name}</h1>
-          <span className={`status-light ${headerLight}`} title={headerTitle} />
+          <span className={`status-light ${header.tone}`} title={`${header.label} · ${header.detail}`} />
         </div>
         <div className="session-meta">
           <span className="mono">{slug}</span>

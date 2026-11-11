@@ -15,9 +15,11 @@ router = APIRouter()
 @router.post("/control/tick")
 def control_tick(request: Request, conn=Depends(get_db),
                  auth: Auth = Depends(require_human)):
-    """编排器 tick：回收 lease 过期的认领。测试旁路（test_auth）下 force 回收。"""
+    """编排器 tick：回收 lease 过期的认领，并处理已登记的 claim 延迟释放。"""
     force = bool(getattr(request.app.state, "test_auth", False))
-    return services.governance.tick(conn, force=force)
+    result = services.governance.tick(conn, force=force)
+    result["released_claims"] = services.tasks.process_release_requests(conn)
+    return result
 
 
 @router.get("/control/freeze")

@@ -63,8 +63,8 @@ def _init_role_claims(conn: sqlite3.Connection, tid: str, roles: list[str], now:
 
 def _role_claims(conn: sqlite3.Connection, tid: str) -> list[dict]:
     rows = conn.execute(
-        "SELECT role_slug, status, summary, run_id, claimed_at, lease_expires_at, submitted_at "
-        "FROM task_role_claims WHERE task_id=? ORDER BY role_slug", (tid,)
+        "SELECT role_slug, status, summary, run_id, claimed_at, lease_expires_at, submitted_at, "
+        "release_requested_at FROM task_role_claims WHERE task_id=? ORDER BY role_slug", (tid,)
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -312,6 +312,11 @@ def assign_roles(conn: sqlite3.Connection, tid: str, roles: list[str]) -> dict:
     task = get(conn, tid)
     if task is None:
         raise LookupError(tid)
+    executing = _executing_roles(conn, tid)
+    if executing:
+        raise ConflictError(
+            f"task {tid} still has executing role(s): {', '.join(sorted(executing))}; "
+            "stop their runs before reassigning roles")
     _assert_assignable(conn, roles)
     if task.get("issue_board_enabled"):
         reviewers = set(task.get("reviewer_roles") or [])
@@ -560,6 +565,17 @@ def claim(conn: sqlite3.Connection, tid: str, role: str, paths: list[str] | None
                         f"ask {owner} to `anvil task unclaim {tid}` or add you as a team "
                         f"assignee before claiming")
                 raise ConflictError(f"task {tid} is not claimable (already claimed or not todo)")
+            # 单负责人任务同样记录 claim，保证释放/提交/评审状态与团队任务一致。
+            run = _active_run_for_role(conn, tid, role)
+            conn.execute(
+                "INSERT INTO task_role_claims (task_id, role_slug, status, run_id, claimed_at, "
+                "lease_expires_at, updated_at) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(task_id, role_slug) DO UPDATE SET status='working', "
+                "run_id=excluded.run_id, claimed_at=excluded.claimed_at, "
+                "lease_expires_at=excluded.lease_expires_at, submitted_at=NULL, summary=NULL, "
+                "release_requested_at=NULL, updated_at=excluded.updated_at",
+                (tid, role, "working", run["id"] if run else None, now, lease, now),
+            )
         _audit(conn, role, tid, "claim", {"paths": paths, "team": bool(t["assignees"])})
     except BaseException:
         conn.rollback()
@@ -568,46 +584,142 @@ def claim(conn: sqlite3.Connection, tid: str, role: str, paths: list[str] | None
     return get(conn, tid)  # type: ignore[return-value]
 
 
+_EXECUTING_RUN_STATUSES = ("created", "projecting", "running")
+
+
+def _executing_roles(conn: sqlite3.Connection, tid: str) -> set[str]:
+    """本任务上仍在执行的角色的 run；这些角色不能立即释放 claim。"""
+    rows = conn.execute(
+        "SELECT DISTINCT role_slug FROM runs WHERE task_id=? "
+        f"AND status IN ({','.join('?' for _ in _EXECUTING_RUN_STATUSES)})",
+        (tid, *_EXECUTING_RUN_STATUSES),
+    ).fetchall()
+    return {r["role_slug"] for r in rows if r["role_slug"]}
+
+
+def _reconcile_after_release(conn: sqlite3.Connection, tid: str, now: str,
+                             released_roles: set[str]) -> None:
+    """释放若干 claim 后，按剩余 working claim 维护任务负责人/状态。"""
+    active = conn.execute(
+        "SELECT role_slug FROM task_role_claims WHERE task_id=? AND status='working' "
+        "ORDER BY claimed_at, role_slug LIMIT 1", (tid,)
+    ).fetchone()
+    task_row = conn.execute(
+        "SELECT assignee, status FROM tasks WHERE id=?", (tid,)).fetchone()
+    if task_row is None or task_row["status"] != "in_progress":
+        return
+    if active:
+        assignee = task_row["assignee"]
+        if not assignee or assignee in released_roles:
+            assignee = active["role_slug"]
+        conn.execute(
+            "UPDATE tasks SET assignee=?, lease_expires_at=?, updated_at=? WHERE id=?",
+            (assignee, now, now, tid),
+        )
+        return
+    conn.execute(
+        "UPDATE tasks SET status='todo', assignee=NULL, claimed_at=NULL, "
+        "lease_expires_at=NULL, updated_at=? WHERE id=?", (now, tid),
+    )
+
+
+def _release_or_defer_claims(conn: sqlite3.Connection, tid: str, role: str | None,
+                             team: bool, now: str) -> tuple[list[str], list[str]]:
+    """释放 claim；仍有执行中 run 的角色只登记延迟释放请求。"""
+    role_specific = bool(team) and bool(role) and role != "human"
+    if role_specific:
+        rows = conn.execute(
+            "SELECT role_slug, status FROM task_role_claims "
+            "WHERE task_id=? AND role_slug=? AND status IN ('pending','working')",
+            (tid, role),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT role_slug, status FROM task_role_claims "
+            "WHERE task_id=? AND status IN ('pending','working')", (tid,)
+        ).fetchall()
+
+    executing = _executing_roles(conn, tid)
+    released: list[str] = []
+    deferred: list[str] = []
+    for row in rows:
+        slug = row["role_slug"]
+        if slug in executing:
+            conn.execute(
+                "UPDATE task_role_claims SET release_requested_at=COALESCE(release_requested_at, ?), "
+                "updated_at=? WHERE task_id=? AND role_slug=? AND status IN ('pending','working')",
+                (now, now, tid, slug),
+            )
+            deferred.append(slug)
+            continue
+        conn.execute(
+            "UPDATE task_role_claims SET status='released', lease_expires_at=NULL, "
+            "submitted_at=NULL, release_requested_at=NULL, updated_at=? "
+            "WHERE task_id=? AND role_slug=? AND status IN ('pending','working')",
+            (now, tid, slug),
+        )
+        released.append(slug)
+    return released, deferred
+
+
 def unclaim(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
+    """放弃任务认领。
+
+    角色仍在执行本任务（run 处于 created/projecting/running）时不能立即释放
+    claim，否则会出现“claim=released、角色仍在该 slice 执行”的矛盾状态。
+    此时只登记 release_requested_at，等 run 结束后由调度器释放。
+    """
     t = get(conn, tid)
     if t is None:
         raise LookupError(tid)
     _assert_not_terminal(t, "unclaim")
     now = now_iso()
-    if t["assignees"] and role:
-        conn.execute(
-            "UPDATE task_role_claims SET status='released', lease_expires_at=NULL, "
-            "submitted_at=NULL, updated_at=? WHERE task_id=? AND role_slug=?",
-            (now, tid, role),
-        )
-        active = conn.execute(
-            "SELECT role_slug FROM task_role_claims WHERE task_id=? AND status='working' "
-            "ORDER BY claimed_at LIMIT 1", (tid,)
-        ).fetchone()
-        if active:
-            conn.execute(
-                "UPDATE tasks SET assignee=?, lease_expires_at=?, updated_at=? WHERE id=?",
-                (active["role_slug"] if t["assignee"] == role else t["assignee"], now, now, tid),
-            )
-        else:
-            conn.execute(
-                "UPDATE tasks SET status='todo', assignee=NULL, claimed_at=NULL, "
-                "lease_expires_at=NULL, updated_at=? WHERE id=?", (now, tid),
-            )
-    else:
-        # 单负责人任务，或人类对团队任务执行「整体放弃」
-        conn.execute(
-            "UPDATE task_role_claims SET status='released', lease_expires_at=NULL, "
-            "submitted_at=NULL, updated_at=? WHERE task_id=? AND status IN ('pending','working')",
-            (now, tid),
-        )
-        conn.execute(
-            "UPDATE tasks SET status='todo', assignee=NULL, claimed_at=NULL, "
-            "lease_expires_at=NULL, updated_at=? WHERE id=?", (now, tid),
-        )
-    _audit(conn, role, tid, "unclaim")
+
+    # 团队任务由具体角色释放时只影响该角色；human/单负责人任务释放整体认领。
+    released, deferred = _release_or_defer_claims(
+        conn, tid, role, bool(t["assignees"]), now)
+
+    _reconcile_after_release(conn, tid, now, set(released))
+    _audit(conn, role, tid, "unclaim", {
+        "released": sorted(released),
+        "deferred": sorted(deferred),
+    })
     conn.commit()
     return get(conn, tid)  # type: ignore[return-value]
+
+
+def process_release_requests(conn: sqlite3.Connection) -> list[dict]:
+    """执行已登记的延迟释放：对应角色没有活跃执行 run 后把 claim 置 released。"""
+    rows = conn.execute(
+        "SELECT task_id, role_slug FROM task_role_claims "
+        "WHERE release_requested_at IS NOT NULL ORDER BY task_id, role_slug"
+    ).fetchall()
+    done: list[dict] = []
+    by_task: dict[str, set[str]] = {}
+    now = now_iso()
+    for row in rows:
+        tid, slug = row["task_id"], row["role_slug"]
+        if slug in _executing_roles(conn, tid):
+            continue
+        cur = conn.execute(
+            "UPDATE task_role_claims SET status='released', lease_expires_at=NULL, "
+            "submitted_at=NULL, release_requested_at=NULL, updated_at=? "
+            "WHERE task_id=? AND role_slug=? AND status='working'",
+            (now, tid, slug),
+        )
+        if cur.rowcount == 0:
+            # 已 submitted/approved 或已 released：请求失效，不再延迟。
+            conn.execute(
+                "UPDATE task_role_claims SET release_requested_at=NULL, updated_at=? "
+                "WHERE task_id=? AND role_slug=?", (now, tid, slug))
+            continue
+        by_task.setdefault(tid, set()).add(slug)
+        done.append({"task_id": tid, "role_slug": slug})
+        _audit(conn, slug, tid, "unclaim", {"released": [slug], "deferred": True})
+    for tid, roles in by_task.items():
+        _reconcile_after_release(conn, tid, now, roles)
+    conn.commit()
+    return done
 
 
 def heartbeat(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
@@ -616,7 +728,7 @@ def heartbeat(conn: sqlite3.Connection, tid: str, role: str | None = None) -> di
         raise LookupError(tid)
     lease = (datetime.now(timezone.utc) + timedelta(seconds=LEASE_SECONDS)).isoformat()
     conn.execute("UPDATE tasks SET lease_expires_at=?, updated_at=? WHERE id=?", (lease, now_iso(), tid))
-    if t["assignees"] and role:
+    if role:
         conn.execute(
             "UPDATE task_role_claims SET lease_expires_at=?, updated_at=? "
             "WHERE task_id=? AND role_slug=? AND status='working'",
@@ -722,6 +834,11 @@ def submit(conn: sqlite3.Connection, tid: str, *, summary: str | None = None,
         return get(conn, tid)  # type: ignore[return-value]
 
     conn.execute("UPDATE tasks SET status='in_review', updated_at=? WHERE id=?", (now, tid))
+    conn.execute(
+        "UPDATE task_role_claims SET status='submitted', summary=?, submitted_at=?, "
+        "lease_expires_at=NULL, updated_at=? WHERE task_id=? AND status IN ('pending','working')",
+        (summary, now, now, tid),
+    )
     _notify_delegator(conn, t, role)
     _audit(conn, role, tid, "submit", {"summary": summary, "branch": branch,
                                        "changed_paths": changed, "reported_paths": changed_paths})
@@ -744,18 +861,17 @@ def review(conn: sqlite3.Connection, tid: str, approve: bool, role: str | None =
         "UPDATE tasks SET status=?, lease_expires_at=?, updated_at=? WHERE id=?",
         (new_status, lease, now_iso(), tid),
     )
-    if t["assignees"]:
-        if approve:
-            conn.execute(
-                "UPDATE task_role_claims SET status='approved', updated_at=? WHERE task_id=?",
-                (now_iso(), tid),
-            )
-        else:
-            # 驳回：已提交的角色回到 working，可重新派发/继续修改
-            conn.execute(
-                "UPDATE task_role_claims SET status='working', submitted_at=NULL, updated_at=? "
-                "WHERE task_id=? AND status='submitted'", (now_iso(), tid)
-            )
+    if approve:
+        conn.execute(
+            "UPDATE task_role_claims SET status='approved', updated_at=? WHERE task_id=?",
+            (now_iso(), tid),
+        )
+    else:
+        # 驳回：已提交的角色回到 working，可重新派发/继续修改
+        conn.execute(
+            "UPDATE task_role_claims SET status='working', submitted_at=NULL, updated_at=? "
+            "WHERE task_id=? AND status='submitted'", (now_iso(), tid)
+        )
     _audit(conn, role, tid, "review", {"approve": approve})
     conn.commit()
     if approve:
@@ -836,14 +952,12 @@ def cancel(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
     if t is None:
         raise LookupError(tid)
     _assert_can_terminate(t)
+    now = now_iso()
     conn.execute(
         "UPDATE tasks SET status='closed', lease_expires_at=NULL, updated_at=? WHERE id=?",
-        (now_iso(), tid),
+        (now, tid),
     )
-    conn.execute(
-        "UPDATE task_role_claims SET status='released', lease_expires_at=NULL, updated_at=? "
-        "WHERE task_id=? AND status IN ('pending','working')", (now_iso(), tid)
-    )
+    _release_or_defer_claims(conn, tid, role, bool(t["assignees"]), now)
     # 父任务终止：派遣子任务随父任务终止；先关闭子任务，再由下面按 source 标记 cancelled。
     child_ids = [r["id"] for r in conn.execute(
         "SELECT id FROM tasks WHERE parent_id=? "
@@ -853,9 +967,7 @@ def cancel(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
         conn.execute(
             "UPDATE tasks SET status='closed', lease_expires_at=NULL, updated_at=? WHERE id=?",
             (now_iso(), cid))
-        conn.execute(
-            "UPDATE task_role_claims SET status='released', lease_expires_at=NULL, updated_at=? "
-            "WHERE task_id=? AND status IN ('pending','working')", (now_iso(), cid))
+        _release_or_defer_claims(conn, cid, None, False, now_iso())
         for row in conn.execute(
                 "SELECT id, source_task_id FROM task_dispatches WHERE target_task_id=? "
                 "AND status IN ('open','return_ready','returning')", (cid,)).fetchall():

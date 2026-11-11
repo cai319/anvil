@@ -2,11 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { api, isOnboardingRole, type Channel, type Role, type Task, type WorkflowTemplate } from "../api/client";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
+import type { StatusTone } from "../roleStatus";
 
 /** 新建任务弹窗（参考 multica/raft：名称 + 描述 + 可滚动角色多选）。 */
 export function NewTaskModal({ roles, roleStatus, channels = [], defaultChannelId, onClose, onCreated }: {
   roles: Role[];
-  roleStatus?: Record<string, string>;
+  roleStatus?: Record<string, StatusTone>;
   channels?: Channel[];
   defaultChannelId?: string | null;
   onClose: () => void;
@@ -187,7 +188,7 @@ export function NewTaskModal({ roles, roleStatus, channels = [], defaultChannelI
                     avatar={r.avatar}
                     color={r.avatar_color}
                     size={30}
-                    status={roleStatus?.[r.slug] ?? "idle"}
+                    tone={roleStatus?.[r.slug] ?? "gray"}
                   />
                   <span className="member-main">
                     <span className="member-line">

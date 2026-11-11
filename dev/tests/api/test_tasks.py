@@ -97,6 +97,148 @@ async def test_S3_unclaim(client):
     assert body["status"] == "todo" and body["assignee"] is None
 
 
+def _insert_run(app, run_id: str, task_id: str, role: str, status: str = "running"):
+    from anvil.db import open_conn
+    conn = open_conn(app.state.db_path)
+    conn.execute(
+        "INSERT INTO runs (id, role_slug, task_id, status, started_at) VALUES (?,?,?,?,?)",
+        (run_id, role, task_id, status, "2026-11-11T00:00:00+00:00"),
+    )
+    conn.commit()
+    return conn
+
+
+async def test_unclaim_deferred_while_role_executing(client, app):
+    """角色仍在执行 slice 时不能立即释放 claim；run 结束后再 released。"""
+    await _seed(client)
+    await _post_task(client)
+    await _claim(client, "T-0001")
+    conn = _insert_run(app, "R-ACTIVE", "T-0001", "qa-role")
+    conn.close()
+
+    r = await client.post(f"{API}/tasks/T-0001/unclaim", headers=auth_headers())
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "in_progress"
+    claim = body["role_claims"][0]
+    assert claim["status"] == "working"
+    assert claim["release_requested_at"]
+
+    from anvil.db import open_conn
+    from anvil.services import tasks as tasks_service
+    conn = open_conn(app.state.db_path)
+    conn.execute("UPDATE runs SET status='completed', ended_at=? WHERE id=?",
+                 ("2026-11-11T00:01:00+00:00", "R-ACTIVE"))
+    conn.commit()
+    assert tasks_service.process_release_requests(conn) == [
+        {"task_id": "T-0001", "role_slug": "qa-role"}]
+    conn.close()
+
+    final = (await client.get(f"{API}/tasks/T-0001")).json()
+    assert final["status"] == "todo"
+    claim = final["role_claims"][0]
+    assert claim["status"] == "released"
+    assert claim["release_requested_at"] is None
+
+
+async def test_team_unclaim_releases_only_after_role_run_ends(client, app):
+    """多角色：执行中的角色延迟释放，其他角色的 working claim 不受影响。"""
+    await _seed(client)
+    await client.post(f"{API}/roles", json=role_payload("dev"))
+    await _post_task(client, id_="T-TEAM-DEFER", assignees=["qa-role", "dev"])
+    await _claim(client, "T-TEAM-DEFER", role="qa-role")
+    await _claim(client, "T-TEAM-DEFER", role="dev")
+    conn = _insert_run(app, "R-DEV", "T-TEAM-DEFER", "dev")
+    conn.close()
+
+    r = await client.post(f"{API}/tasks/T-TEAM-DEFER/unclaim", headers=auth_headers("dev"))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "in_progress"
+    claims = {c["role_slug"]: c for c in body["role_claims"]}
+    assert claims["dev"]["status"] == "working"
+    assert claims["dev"]["release_requested_at"]
+    assert claims["qa-role"]["status"] == "working"
+
+    from anvil.db import open_conn
+    from anvil.services import tasks as tasks_service
+    conn = open_conn(app.state.db_path)
+    conn.execute("UPDATE runs SET status='completed', ended_at=? WHERE id=?",
+                 ("2026-11-11T00:01:00+00:00", "R-DEV"))
+    conn.commit()
+    tasks_service.process_release_requests(conn)
+    conn.close()
+
+    mid = (await client.get(f"{API}/tasks/T-TEAM-DEFER")).json()
+    claims = {c["role_slug"]: c for c in mid["role_claims"]}
+    assert mid["status"] == "in_progress"
+    assert claims["dev"]["status"] == "released"
+    assert claims["qa-role"]["status"] == "working"
+
+    last = await client.post(f"{API}/tasks/T-TEAM-DEFER/unclaim", headers=auth_headers("qa-role"))
+    assert last.status_code == 200
+    assert last.json()["status"] == "todo"
+
+
+async def test_human_unclaim_team_task_releases_all_roles(client):
+    """人类对团队任务整体放弃时，释放所有 pending/working claim。"""
+    await _seed(client)
+    await client.post(f"{API}/roles", json=role_payload("dev"))
+    await _post_task(client, id_="T-TEAM-HUMAN", assignees=["qa-role", "dev"])
+    await _claim(client, "T-TEAM-HUMAN", role="qa-role")
+    await _claim(client, "T-TEAM-HUMAN", role="dev")
+
+    r = await client.post(f"{API}/tasks/T-TEAM-HUMAN/unclaim", headers=human_headers())
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "todo"
+    assert {c["status"] for c in body["role_claims"]} == {"released"}
+
+
+async def test_cancel_defers_claim_release_while_role_executing(client, app):
+    """终止任务也不能让 claim 先于活跃 run 释放。"""
+    await _seed(client)
+    await _post_task(client)
+    await _claim(client, "T-0001")
+    conn = _insert_run(app, "R-CANCEL", "T-0001", "qa-role")
+    conn.close()
+
+    r = await client.post(f"{API}/tasks/T-0001/cancel", headers=human_headers())
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "closed"
+    claim = body["role_claims"][0]
+    assert claim["status"] == "working"
+    assert claim["release_requested_at"]
+
+    from anvil.db import open_conn
+    from anvil.services import tasks as tasks_service
+    conn = open_conn(app.state.db_path)
+    conn.execute("UPDATE runs SET status='abandoned', ended_at=? WHERE id=?",
+                 ("2026-11-11T00:01:00+00:00", "R-CANCEL"))
+    conn.commit()
+    tasks_service.process_release_requests(conn)
+    conn.close()
+
+    final = (await client.get(f"{API}/tasks/T-0001")).json()
+    assert final["role_claims"][0]["status"] == "released"
+
+
+async def test_reassign_roles_blocked_while_role_executing(client, app):
+    """角色仍在执行时不允许重新绑定参与角色（会作废旧 claim）。"""
+    await _seed(client)
+    await _post_task(client)
+    await _claim(client, "T-0001")
+    conn = _insert_run(app, "R-ASSIGN", "T-0001", "qa-role")
+    conn.close()
+
+    r = await client.post(
+        f"{API}/tasks/T-0001/assign", json={"assignees": ["qa-role"]},
+        headers=human_headers())
+    assert r.status_code == 409
+    assert "executing" in r.json()["detail"]
+
+
 async def test_S6_deps_block_claim(client):
     """S6 依赖未完成不可 claim（§5.4 NOT EXISTS，退出码 3 语义）。"""
     await _seed(client)

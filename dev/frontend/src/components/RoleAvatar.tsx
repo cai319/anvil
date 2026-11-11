@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { avatarColor } from "../avatarColor";
+import { legacyStatusTone, type StatusTone } from "../roleStatus";
 import { initialFor, resolveAvatar } from "./avatarPresets";
 
 type Props = {
@@ -9,7 +10,9 @@ type Props = {
   color?: string | null;
   size?: number;
   className?: string;
-  /** 角色/会话状态；由 CSS 映射为头像阴影颜色。 */
+  /** 五色状态 tone；由 CSS 映射为头像阴影颜色。 */
+  tone?: StatusTone;
+  /** 兼容旧调用的状态字符串；新代码应使用 tone。 */
   status?: string;
   /** 无可见姓名时提供可访问名称（角色名 + 状态）。 */
   label?: string;
@@ -22,12 +25,14 @@ export function RoleAvatar({
   color,
   size = 28,
   className = "",
+  tone,
   status,
   label,
 }: Props) {
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
   const resolved = resolveAvatar(avatar, slug);
   const failed = resolved.kind === "image" && failedSrc === resolved.src;
+  const resolvedTone = tone ?? legacyStatusTone(status);
   const sizing = {
     width: `var(--avatar-size, ${size}px)`,
     height: `var(--avatar-size, ${size}px)`,
@@ -44,7 +49,7 @@ export function RoleAvatar({
       <span
         className={`role-avatar role-avatar-image ${className}`}
         style={sizing}
-        data-role-status={status}
+        data-role-tone={resolvedTone}
         {...a11y}
       >
         <img
@@ -65,7 +70,7 @@ export function RoleAvatar({
         background: color || avatarColor(slug),
         fontSize: `var(--avatar-font, ${Math.max(10, Math.round(size * 0.4))}px)`,
       }}
-      data-role-status={status}
+      data-role-tone={resolvedTone}
       {...a11y}
     >
       {initialFor(name, slug)}

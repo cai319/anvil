@@ -11,9 +11,8 @@ import { UNBOUND_CHANNEL_VIEW } from "../channelView";
 import { RoleSessions } from "./RoleSessions";
 import { ApplyTemplateModal } from "./ApplyTemplateModal";
 import { WorkflowGraph } from "./WorkflowGraph";
-import { roleStatusFromWorkflow } from "../workflowStatus";
+import { taskRoleState } from "../roleStatus";
 import { formatClock, formatDateTime, formatDuration } from "../time";
-import { roleLiveDot, roleLiveState, stateClassForTone } from "../roleLive";
 import { useRoleRuntimes } from "../useRoleRuntimes";
 import { usePanelLayout } from "../usePanelLayout";
 import { STATUS_META, isDynamicStep, summarizeLoops, type LoopSummary } from "../workflowGroups";
@@ -1244,6 +1243,11 @@ export function TaskDetail({ id }: { id: string }) {
   if (!task) return <p className="muted">加载中…</p>;
 
   /** 任务信息面板统一取数：点灯、状态徽标、排队数、详情文案。 */
+  const relatedTaskIds = [
+    task.id,
+    ...delegations.map((d) => d.id),
+    ...dispatches.map((d) => d.target_task_id),
+  ];
   const roleLiveFor = (slug: string) => {
     const rt = roleRuntimes[slug];
     const ctxList = (rt?.contexts ?? []).filter((c) => c.task_id === task.id);
@@ -1255,8 +1259,6 @@ export function TaskDetail({ id }: { id: string }) {
     const wfSlice = ctxList.length
       ? (ctxHere?.slice_key ?? rt?.context_slice_key ?? null)
       : undefined;
-    const wfState = roleStatusFromWorkflow(workflow, slug, wfSlice);
-    const taskClosed = task.status === "closed" || workflow?.status === "terminated";
     // 优先展示角色此刻真正执行的 run；排队/尚未投递的新 run 只有启动头。
     const currentRun = rt?.current_run_id && rt.current_task_id === task.id
       ? runs.find((r) => r.id === rt.current_run_id)
@@ -1270,86 +1272,41 @@ export function TaskDetail({ id }: { id: string }) {
       ?? runs
         .filter((r) => r.role_slug === slug)
         .sort((a, b) => String(b.started_at ?? "").localeCompare(String(a.started_at ?? "")))[0];
-    const queueInfo = rt?.queue_tasks?.find((q) => q.id === task.id);
-    const queueCtx = rt?.queue_contexts?.find(
-      (q) => q.task_id === task.id && (q.slice_key ?? null) === (wfSlice ?? null));
-    const queued = queueCtx?.count ?? queueInfo?.count ?? 0;
-    const queueAhead = queueCtx?.ahead_count ?? queueInfo?.ahead_count ?? 0;
     const returnPending = dispatches.some(
       (d) => d.target_role === slug
         && (d.status === "return_ready" || d.status === "returning"));
-    const retryWait = wfState?.label === "等待重试";
-    const stepFailed = wfState?.cls === "failed";
-    const live = roleLiveState(rt, task.id, {
-      hasOpenStep: wfState?.cls === "in_progress",
-      allDone: wfState?.cls === "done",
-      queuedHere: queued,
-      queueAhead,
+    let state = taskRoleState({
+      task,
+      role: slug,
+      runtime: rt,
+      workflow,
+      relatedTaskIds,
+      sliceKey: wfSlice,
       runStatus: latestRun?.status ?? null,
-      retryWait,
-      stepFailed,
-      taskClosed,
-      taskDone: task.status === "done",
-      taskInReview: task.status === "in_review",
-      hasReviewStep: wfState?.cls === "in_review",
-      hasContext: Boolean(ctxHere?.has_session),
       returnPending,
     });
-    let state = live;
-    if (stepFailed && task.status !== "done" && !taskClosed) {
-      state = { label: wfState?.label ?? "失败", cls: "failed", tone: "failed" };
+    if (!rt) {
+      state = {
+        ...state, key: "loading", label: "加载中", tone: "gray",
+        detail: "状态加载中…", title: "加载中 · 状态加载中…",
+      };
+    } else if (rt.switching && (state.workingHere || state.queued > 0)) {
+      state = {
+        ...state, key: "switching", label: "切换上下文", tone: "orange",
+        detail: "正在切换到本任务…", title: "切换上下文 · 正在切换到本任务…",
+      };
     }
-    const dot = roleLiveDot(rt, task.id, {
-      hasContext: Boolean(ctxHere?.has_session),
-      hasOpenStep: wfState?.cls === "in_progress",
-      allDone: wfState?.cls === "done",
-      failed: stepFailed,
-      runStatus: latestRun?.status ?? null,
-      taskClosed, taskDone: task.status === "done",
-      queueAhead, retryWait,
-      taskInReview: task.status === "in_review",
-      hasReviewStep: wfState?.cls === "in_review",
-      queuedHere: queued,
-      returnPending,
-    });
     const display = roles.find((r) => r.slug === slug)?.display_name ?? slug;
-    let detail = "";
-    if (rt?.switching) detail = "正在切换任务上下文…";
-    else if (live.tone === "in_review") detail = "等待人工评审/确认";
-    else if (live.tone === "in_progress" && returnPending) {
-      detail = "等待派遣任务回切原切片";
+    let detail = state.detail;
+    if (state.key === "working" && ctxHere?.slice_key) {
+      detail += ` · 切片 ${ctxHere.slice_key}`;
+    } else if (state.key === "queued" && state.queued > 0) {
+      detail += ` · 本任务/子任务待处理 ${state.queued} 条`;
     }
-    else if (live.tone === "idle") detail = ctxHere?.has_session
-      ? "空闲 · 本任务上下文已保留" : "空闲 · 可安排任务";
-    else if (live.tone === "busy") {
-      detail = `正在处理「${rt?.current_task?.title ?? rt?.current_task_id}」`;
-      if (queued) detail += ` · 本任务排队 ${queued} 条`;
-    } else if (live.tone === "in_progress") {
-      detail = rt?.current_step_id ? `当前步骤 ${rt.current_step_id}` : "正在本任务工作";
-      if (queued > 0) detail += ` · 本任务待处理 ${queued} 条`;
-    } else if (live.tone === "queued") {
-      detail = live.label === "等待唤醒"
-        ? `等待唤醒后处理本任务 ${queued} 条消息`
-        : live.label === "等待重试"
-          ? "等待自动恢复重试"
-          : (queued > 0 ? `本任务待处理 ${queued} 条` : "等待上下文切换");
-    } else if (live.tone === "failed") {
-      detail = wfState?.label === "返工"
-        ? "步骤被驳回，等待返工"
-        : "最近一次 run/步骤失败，等待重试或人工处理";
-    } else if (live.tone === "closed") {
-      detail = "任务已终止";
-    } else if (!rt) {
-      detail = "状态加载中…";
-    } else if (ctxHere?.has_session) {
-      detail = "空闲 · 本任务上下文已保留";
-    } else {
-      detail = "空闲 · 可安排任务";
-    }
-    const title = `${display}：${dot.title}`
-      + (queued ? ` · 本任务有 ${queued} 条消息排队，等当前轮结束` : "");
-    return { slug, rt, claim: (task.role_claims ?? []).find((c) => c.role_slug === slug),
-             state, dot, queued, detail, title };
+    return {
+      slug, rt, claim: (task.role_claims ?? []).find((c) => c.role_slug === slug),
+      state, queued: state.queued, detail, title: `${display}：${state.title}`,
+    };
   };
 
   /** 点灯 -> 状态徽标 -> slug 的统一呈现。 */
@@ -1361,10 +1318,10 @@ export function TaskDetail({ id }: { id: string }) {
         avatar={roles.find((r) => r.slug === live.slug)?.avatar}
         color={roles.find((r) => r.slug === live.slug)?.avatar_color}
         size={18}
-        status={live.dot.cls}
+        tone={live.state.tone}
       />
-      <i className={`role-live-dot ${live.dot.cls}`} aria-label={live.title} />
-      <span className={`status status-${stateClassForTone(live.state.tone)} role-live-state`}>
+      <i className={`role-live-dot ${live.state.tone}`} aria-label={live.title} />
+      <span className={`status tone-${live.state.tone} role-live-state`}>
         {live.state.label}
       </span>
       {(live.rt?.active_subagents?.length ?? 0) > 0 && (
@@ -1573,12 +1530,7 @@ export function TaskDetail({ id }: { id: string }) {
     scrollToBottom("smooth");
   };
 
-  const statusClass = (status: WorkflowStep["status"]) =>
-    status === "approved" ? "done"
-      : status === "running" ? "in_progress"
-      : status === "submitted" ? "in_review"
-      : status === "pending" ? "todo"
-      : status; // rejected/failed=红，skipped=终结灰，统一走 components.css
+  const statusTone = (status: WorkflowStep["status"]) => STATUS_META[status].tone;
 
   const isReviewable = (st: WorkflowStep) =>
     !isViewingHistory && (
@@ -1587,7 +1539,7 @@ export function TaskDetail({ id }: { id: string }) {
         && (st.status === "submitted" || st.status === "running")));
 
   const renderStepRow = (st: WorkflowStep) => {
-    const cls = statusClass(st.status);
+    const tone = statusTone(st.status);
     const label = STATUS_META[st.status].label;
     const stepDelegations = delegations.filter((d) => d.parent_step_id === st.step_id);
     return (
@@ -1613,7 +1565,7 @@ export function TaskDetail({ id }: { id: string }) {
                 委派 {stepDelegations.length}
               </span>
             )}
-            <span className={`status status-${cls}`}>{label}</span>
+            <span className={`status tone-${tone}`}>{label}</span>
           </div>
           {st.depends_on?.length > 0 && <div className="muted wf-deps">依赖：{st.depends_on.join("、")}</div>}
           {st.contract && <div className="muted wf-deps">契约：{st.contract}</div>}
@@ -1662,7 +1614,7 @@ export function TaskDetail({ id }: { id: string }) {
       <details key={`loop-${loop.sourceStepId}`} className="wf-loop-list">
         <summary className="wf-loop-summary">
           <span className="wf-loop-mark"><Icon name="refresh" size={12} /> 切片循环</span>
-          <span className={`status status-${statusClass(loop.status)}`}>{meta.label}</span>
+          <span className={`status tone-${statusTone(loop.status)}`}>{meta.label}</span>
           <span className="muted">
             {loop.totalSlices} 片 · {loop.totalSteps} 步 · 已完成 {loop.doneSlices}/{loop.totalSlices} 片
           </span>
@@ -2116,7 +2068,7 @@ export function TaskDetail({ id }: { id: string }) {
                       color={roleInfo?.avatar_color}
                       size={32}
                       className="thread-role-avatar"
-                      status={liveRole?.dot.cls}
+                      tone={liveRole?.state.tone}
                     />
                   )}
                   <div className="thread-body">
@@ -2614,7 +2566,7 @@ export function TaskDetail({ id }: { id: string }) {
         );
       })()}
 
-      {tab === "runtime" && <RoleSessions task={task} roles={roles} workflow={workflow} dispatches={dispatches} focus={runtimeFocus} />}
+      {tab === "runtime" && <RoleSessions task={task} roles={roles} workflow={workflow} dispatches={dispatches} relatedTaskIds={relatedTaskIds} focus={runtimeFocus} />}
       </div>
       {reviewStep && workflow && (
         <GateReviewDrawer

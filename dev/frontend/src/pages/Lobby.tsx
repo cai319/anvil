@@ -7,6 +7,7 @@ import { NewTaskModal } from "./NewTaskModal";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
 import { PageHeader } from "../components/ui";
+import { globalRoleState, taskRoleState, type StatusTone } from "../roleStatus";
 
 const COLUMNS: Task["status"][] = ["todo", "in_progress", "in_review", "done", "closed"];
 const MAX_CARD_TAGS = 2;
@@ -50,86 +51,17 @@ const RUN_STATUS_LABEL: Record<string, string> = {
   suspended: "等待唤醒",
 };
 
-const AVATAR_STATUS_LABEL: Record<string, string> = {
-  pending: "待认领",
-  working: "进行中",
-  running: "进行中",
-  projecting: "准备中",
-  queued: "排队中",
-  submitted: "待评审",
-  approved: "已通过",
-  completed: "已完成",
-  released: "已释放",
-  closed: "已终止",
-  abandoned: "已放弃",
-  failed: "失败",
-  error: "失败",
-  idle: "空闲",
-};
-
-/** 运行状态 → 五色语义：绿=空闲/成功，橙=处理中，黄=等人工，红=失败，灰=结束。 */
-function runStatusClass(status: string): string {
-  if (status === "created" || status === "projecting" || status === "running") return "running";
-  if (status === "submitted" || status === "reviewing") return "submitted";
-  if (status === "failed" || status === "error") return "error";
-  if (status === "abandoned" || status === "closed") return "abandoned";
-  if (status === "completed") return "approved";
-  return "idle";
-}
-
-/** 运行卡片指示灯 class；与徽标/头像使用同一套五色语义。 */
-function runStatusLight(status: string): string {
-  const cls = runStatusClass(status);
-  if (cls === "running" || cls === "submitted" || cls === "error") return cls;
-  if (cls === "abandoned") return "closed";
-  return "idle";
-}
-
-/**
- * 单张任务卡上某个角色的阴影状态。结合角色运行时：
- * - 角色正忙在这张卡上 → running（橙，处理中）
- * - 角色正忙在别的卡上，本任务消息等待 → queued（红，排队/繁忙）
- * - 已提交/已通过/已完成优先于“忙碌”
- */
-function taskRoleStatus(task: Task, slug: string, rt?: RoleRuntimeStatus): string {
-  const claim = task.role_claims.find((c) => c.role_slug === slug)?.status ?? "pending";
-  if (task.status === "closed") return "closed";
-  if (task.status === "done") {
-    return claim === "approved" ? "approved" : "completed";
-  }
-  if (claim === "approved") return "approved";
-  if (task.status === "in_review" || claim === "submitted") return "submitted";
-  if (claim === "released") return "released";
-
-  const busy = Boolean(rt?.alive && rt.status === "busy");
-  const assigned = (task.assignees ?? []).includes(slug) || task.assignee === slug;
-  const queueInfo = rt?.queue_tasks?.find((q) => q.id === task.id);
-  const queuedCount = queueInfo?.count ?? 0;
-  const queueAhead = queueInfo?.ahead_count ?? 0;
-  const queuedHere = Boolean(queuedCount > 0 || (rt?.switching && assigned));
-
-  if (busy && rt?.current_task_id === task.id) return "running";
-  // 角色正在别的任务/系统任务上：本任务再排多少条也仍是等待。
-  if (busy && assigned
-      && (!rt?.current_task_id || rt.current_task_id !== task.id)) {
-    return "queued";
-  }
-  // 只有本任务前面确实排着其他消息才是 queued；ahead_count=0 表示下一条就是本任务。
-  if (queuedCount > 0 && queueAhead === 0 && rt?.alive) return "running";
-  if (queuedHere) return "queued";
-  if (claim === "working") return "running";
-  return claim;
-}
-
-/** 任务卡头像：只显示头像，阴影色表示该角色在这张任务上的实时状态。 */
-function TaskRoleAvatar({ task, slug, roles, runtime }: {
+/** 任务卡头像：只显示头像，阴影色表示该角色是否投入这张任务。 */
+function TaskRoleAvatar({ task, slug, roles, runtime, relatedTaskIds, runStatus }: {
   task: Task;
   slug: string;
   roles: Role[];
   runtime?: RoleRuntimeStatus;
+  relatedTaskIds: string[];
+  runStatus?: string | null;
 }) {
   const role = roles.find((r) => r.slug === slug);
-  const status = taskRoleStatus(task, slug, runtime);
+  const state = taskRoleState({ task, role: slug, runtime, relatedTaskIds, runStatus });
   const name = role?.display_name ?? slug;
   return (
     <RoleAvatar
@@ -138,8 +70,8 @@ function TaskRoleAvatar({ task, slug, roles, runtime }: {
       avatar={role?.avatar}
       color={role?.avatar_color}
       size={28}
-      status={status}
-      label={`${name} · ${AVATAR_STATUS_LABEL[status] ?? status}`}
+      tone={state.tone}
+      label={`${name} · ${state.label} · ${state.detail}`}
     />
   );
 }
@@ -219,6 +151,57 @@ export function Lobby() {
     }
     return [...byRole.values()].sort((a, b) => startedAt(b) - startedAt(a));
   }, [runs, roleRuntimes]);
+
+  // 任务卡的角色状态按“当前任务 + 其委派/派遣子任务”归属队列与上下文。
+  const relatedTaskIds = useMemo(() => {
+    const children = new Map<string, Set<string>>();
+    for (const t of tasks) {
+      for (const parent of [t.parent_id, t.source_task_id]) {
+        if (!parent) continue;
+        const set = children.get(parent) ?? new Set<string>();
+        set.add(t.id);
+        children.set(parent, set);
+      }
+    }
+    const out = new Map<string, string[]>();
+    for (const t of tasks) {
+      const ids: string[] = [];
+      const walk = (id: string) => {
+        if (ids.includes(id)) return;
+        ids.push(id);
+        for (const child of children.get(id) ?? []) walk(child);
+      };
+      walk(t.id);
+      out.set(t.id, ids);
+    }
+    return out;
+  }, [tasks]);
+
+  const runStatusByTaskRole = useMemo(() => {
+    const out = new Map<string, { status: string; started: string }>();
+    for (const r of runs) {
+      if (!r.task_id) continue;
+      const key = `${r.task_id}:${r.role_slug}`;
+      const started = r.started_at ?? "";
+      const current = out.get(key);
+      if (!current || started > current.started) {
+        out.set(key, { status: r.status, started });
+      }
+    }
+    return out;
+  }, [runs]);
+
+  const globalToneByRole = useMemo(() => {
+    const out: Record<string, StatusTone> = {};
+    for (const role of roles) {
+      const visible = visibleRuns.find((r) => r.role_slug === role.slug);
+      out[role.slug] = globalRoleState({
+        runtime: runtimeByRole.get(role.slug),
+        latestRunStatus: visible?.status ?? null,
+      }).tone;
+    }
+    return out;
+  }, [roles, visibleRuns, roleRuntimes]);
 
   const refresh = () =>
     Promise.all([
@@ -367,6 +350,8 @@ export function Lobby() {
                                 slug={slug}
                                 roles={roles}
                                 runtime={runtimeByRole.get(slug)}
+                                relatedTaskIds={relatedTaskIds.get(t.id) ?? [t.id]}
+                                runStatus={runStatusByTaskRole.get(`${t.id}:${slug}`)?.status}
                               />
                             ))}
                           </span>
@@ -377,6 +362,8 @@ export function Lobby() {
                               slug={t.assignee}
                               roles={roles}
                               runtime={runtimeByRole.get(t.assignee)}
+                              relatedTaskIds={relatedTaskIds.get(t.id) ?? [t.id]}
+                              runStatus={runStatusByTaskRole.get(`${t.id}:${t.assignee}`)?.status}
                             />
                           </span>
                         ) : (
@@ -486,25 +473,32 @@ export function Lobby() {
           {visibleRuns.map((r) => {
             const task = tasks.find((t) => t.id === r.task_id);
             const roleName = roles.find((x) => x.slug === r.role_slug)?.display_name ?? r.role_slug;
-            const live = r.status === "created" || r.status === "running" || r.status === "projecting";
+            const state = globalRoleState({
+              runtime: runtimeByRole.get(r.role_slug),
+              latestRunStatus: r.status,
+            });
+            const live = state.tone === "orange";
             return (
-              <a key={r.id} className="run-card" href={`/runs/${r.id}`} title="查看该会话详情">
+              <a key={r.id} className="run-card" href={`/runs/${r.id}`}
+                title={`${state.label} · ${state.detail} · run ${RUN_STATUS_LABEL[r.status] ?? r.status}`}>
                 <RoleAvatar
                   slug={r.role_slug}
                   name={roleName}
                   avatar={roles.find((x) => x.slug === r.role_slug)?.avatar}
                   color={roles.find((x) => x.slug === r.role_slug)?.avatar_color}
                   size={36}
-                  status={runStatusClass(r.status)}
-                  label={`${roleName} · ${RUN_STATUS_LABEL[r.status] ?? r.status}`}
+                  tone={state.tone}
+                  label={`${roleName} · ${state.label}`}
                 />
                 <div className="run-body">
                   <div className="run-title">
-                    {roleName} · <span className={live ? "run-live" : "muted"}>{RUN_STATUS_LABEL[r.status] ?? r.status}</span>
+                    {roleName} · <span className={live ? "run-live" : "muted"}>{state.label}</span>
                   </div>
-                  <div className="muted run-sub">{task?.title ?? "无任务会话"} · {fmtElapsed(r.started_at, now)}</div>
+                  <div className="muted run-sub">
+                    {task?.title ?? "无任务会话"} · {RUN_STATUS_LABEL[r.status] ?? r.status} · {fmtElapsed(r.started_at, now)}
+                  </div>
                 </div>
-                <span className={`status-light ${runStatusLight(r.status)}`} />
+                <span className={`status-light ${state.tone}`} />
               </a>
             );
           })}
@@ -536,7 +530,7 @@ export function Lobby() {
           roles={roles}
           channels={channels}
           defaultChannelId={null}
-          roleStatus={Object.fromEntries(visibleRuns.map((r) => [r.role_slug, runStatusClass(r.status)]))}
+          roleStatus={globalToneByRole}
           onClose={() => setShowNew(false)}
           onCreated={(task) => {
             setShowNew(false);

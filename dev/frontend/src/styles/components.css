@@ -333,6 +333,7 @@ select { height: 34px; }
 /* 中性灰：未开始/未知（不是终止态） */
 .status-todo, .badge-todo,
 .status-pending,
+.status-suspended, .badge-suspended,
 .status-unknown, .badge-unknown,
 .status-unverified,
 .status-missing {
@@ -375,10 +376,30 @@ select { height: 34px; }
 .status-done, .badge-done,
 .status-completed, .badge-completed,
 .status-approved,
-.status-suspended, .badge-suspended,
 .status-ready {
   background: var(--green);
   color: var(--ink-900);
+}
+/* 统一五色 tone：头像/点灯/徽标共用同一套语义。 */
+.status.tone-orange, .badge.tone-orange {
+  background: var(--orange);
+  color: var(--ink-900);
+}
+.status.tone-yellow, .badge.tone-yellow {
+  background: var(--yellow);
+  color: var(--ink-900);
+}
+.status.tone-red, .badge.tone-red {
+  background: var(--red);
+  color: var(--ink-900);
+}
+.status.tone-green, .badge.tone-green {
+  background: var(--green);
+  color: var(--ink-900);
+}
+.status.tone-gray, .badge.tone-gray {
+  background: var(--paper-2);
+  color: var(--text-on-paper-soft);
 }
 .review-flag {
   background: var(--yellow);
@@ -757,23 +778,21 @@ select { height: 34px; }
   border: 1.5px solid var(--ink-900);
   border-radius: 50%;
 }
-.status-light.running { background: var(--orange); box-shadow: 0 0 8px var(--orange); animation: pulse 1.6s infinite; }
-.status-light.idle { background: var(--green); }
-.status-light.submitted { background: var(--yellow); box-shadow: 0 0 8px var(--yellow); }
-.status-light.error { background: var(--red); box-shadow: 0 0 8px var(--red); }
-.status-light.closed { background: var(--text-on-paper-muted); }
+.status-light.orange { background: var(--orange); box-shadow: 0 0 8px var(--orange); animation: pulse 1.6s infinite; }
+.status-light.yellow { background: var(--yellow); box-shadow: 0 0 8px var(--yellow); }
+.status-light.red { background: var(--red); box-shadow: 0 0 8px var(--red); }
+.status-light.green { background: var(--green); }
+.status-light.gray { background: var(--status-gray); }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-/* ===== 角色点灯：绿=空闲/成功，橙=处理中，黄=等人工，红=排队/繁忙/失败，灰=结束/未开始 ===== */
+/* ===== 角色点灯：橙=处理中，黄=等人工，红=需关注，绿=空闲/成功，灰=未开始/未参与/结束 ===== */
 .role-live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-on-paper-muted); flex: none; }
 .role-live-dot.green { background: var(--green); box-shadow: 0 0 0 3px rgba(74, 222, 128, 0.18); }
 .role-live-dot.orange { background: var(--orange); box-shadow: 0 0 0 3px rgba(251, 146, 60, 0.18); animation: role-live-pulse 1.6s ease-in-out infinite; }
 .role-live-dot.yellow { background: var(--yellow); box-shadow: 0 0 0 3px rgba(250, 204, 21, 0.18); animation: role-live-pulse 2s ease-in-out infinite; }
 .role-live-dot.red { background: var(--red); box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.18); animation: role-live-pulse 1.1s ease-in-out infinite; }
-.role-live-dot.gray { background: var(--text-on-paper-muted); }
-/* 兼容旧类名 */
-.role-live-dot.amber { background: var(--yellow); box-shadow: 0 0 0 3px rgba(250, 204, 21, 0.18); }
-.role-live-dot.blue { background: var(--green); }
+.role-live-dot.gray { background: var(--status-gray); }
+@keyframes role-live-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 .role-live-chip {
   display: inline-flex;
   align-items: center;
