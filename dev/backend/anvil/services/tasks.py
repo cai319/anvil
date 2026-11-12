@@ -312,11 +312,11 @@ def assign_roles(conn: sqlite3.Connection, tid: str, roles: list[str]) -> dict:
     task = get(conn, tid)
     if task is None:
         raise LookupError(tid)
-    executing = _executing_roles(conn, tid)
+    executing = _executing_claimed_roles(conn, tid)
     if executing:
         raise ConflictError(
-            f"task {tid} still has executing role(s): {', '.join(sorted(executing))}; "
-            "stop their runs before reassigning roles")
+            f"task {tid} still has executing role(s) with active claims: "
+            f"{', '.join(sorted(executing))}; stop their runs before reassigning roles")
     _assert_assignable(conn, roles)
     if task.get("issue_board_enabled"):
         reviewers = set(task.get("reviewer_roles") or [])
@@ -592,6 +592,18 @@ def _executing_roles(conn: sqlite3.Connection, tid: str) -> set[str]:
     rows = conn.execute(
         "SELECT DISTINCT role_slug FROM runs WHERE task_id=? "
         f"AND status IN ({','.join('?' for _ in _EXECUTING_RUN_STATUSES)})",
+        (tid, *_EXECUTING_RUN_STATUSES),
+    ).fetchall()
+    return {r["role_slug"] for r in rows if r["role_slug"]}
+
+
+def _executing_claimed_roles(conn: sqlite3.Connection, tid: str) -> set[str]:
+    """仍在执行、且持有有效 claim 的角色；重新绑定 Roster 会删除这些 claim。"""
+    rows = conn.execute(
+        "SELECT DISTINCT c.role_slug FROM task_role_claims c "
+        "JOIN runs r ON r.task_id=c.task_id AND r.role_slug=c.role_slug "
+        "WHERE c.task_id=? AND c.status IN ('working','submitted','approved') "
+        f"AND r.status IN ({','.join('?' for _ in _EXECUTING_RUN_STATUSES)})",
         (tid, *_EXECUTING_RUN_STATUSES),
     ).fetchall()
     return {r["role_slug"] for r in rows if r["role_slug"]}

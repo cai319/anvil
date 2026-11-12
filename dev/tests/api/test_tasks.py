@@ -236,7 +236,37 @@ async def test_reassign_roles_blocked_while_role_executing(client, app):
         f"{API}/tasks/T-0001/assign", json={"assignees": ["qa-role"]},
         headers=human_headers())
     assert r.status_code == 409
-    assert "executing" in r.json()["detail"]
+    assert "active claims" in r.json()["detail"]
+
+
+async def test_assign_existing_returns_409_not_500_for_active_claim(client, app):
+    """CLI 的 task assign 走 /assign-existing；冲突必须是 409 而不是 500。"""
+    await _seed(client)
+    await _post_task(client, id_="T-ASSIGN-EXIST", planner="qa-role")
+    await _claim(client, "T-ASSIGN-EXIST")
+    conn = _insert_run(app, "R-ASSIGN-EXIST", "T-ASSIGN-EXIST", "qa-role")
+    conn.close()
+
+    r = await client.post(
+        f"{API}/tasks/T-ASSIGN-EXIST/assign-existing",
+        json={"roles": ["qa-role"]}, headers=auth_headers("qa-role"))
+    assert r.status_code == 409
+    assert "active claims" in r.json()["detail"]
+
+
+async def test_assign_existing_allows_unclaimed_planner_run(client, app):
+    """plan_first + 空 Roster：Cindy 规划 run 没有 claim，绑定 Roster 不应被误拦截。"""
+    await _seed(client)
+    await client.post(f"{API}/roles", json=role_payload("cindy"))
+    await _post_task(client, id_="T-PLANNER", planner="cindy", plan_first=True)
+    conn = _insert_run(app, "R-PLANNER", "T-PLANNER", "cindy")
+    conn.close()
+
+    r = await client.post(
+        f"{API}/tasks/T-PLANNER/assign-existing",
+        json={"roles": ["qa-role"]}, headers=auth_headers("cindy"))
+    assert r.status_code == 200
+    assert r.json()["assignees"] == ["qa-role"]
 
 
 async def test_S6_deps_block_claim(client):

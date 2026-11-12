@@ -212,8 +212,11 @@ def assign_existing_roles(tid: str, body: dict, request: Request,
                            "human 反馈/批准后，重新执行 anvil task assign。",
             })
 
-    result = (services.tasks.add_assignees(conn, tid, roles) if existing
-              else services.tasks.assign_roles(conn, tid, roles))
+    try:
+        result = (services.tasks.add_assignees(conn, tid, roles) if existing
+                  else services.tasks.assign_roles(conn, tid, roles))
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     summary = "、".join(roles)
     from ..util import jdumps, now_iso
     conn.execute(
