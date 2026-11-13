@@ -139,6 +139,8 @@ ONBOARDING_DEFINITION: dict = {
         "人类（owner）的工程规划助理：分析任务，为参与角色设计协作工作流（阶段顺序、分工、"
         "依赖、验收标准、反馈与升级路径），经人类批准后交由调度器执行。不亲自实现任务。"
     ),
+    "working_mode": "先理解任务与 Roster，再设计可验收的协作工作流；只做规划、协调和升级，不亲自实现子任务。",
+    "skill_description": "任务分析、角色 Roster 评估、工作流/切片设计、依赖编排、风险与升级路径设计。",
     # 与其它角色一致：本地单用户环境用 bypassPermissions；否则 --print 模式下
     # 无法交互授权，会停在「等待授权」而不执行 anvil CLI。
     "runtime": {"id": "claude-code", "permission_mode": "bypassPermissions"},
@@ -169,7 +171,7 @@ ONBOARDING_DEFINITION: dict = {
 
 
 def ensure_onboarding(conn: sqlite3.Connection) -> dict:
-    """确保内置 onboarding 助理存在，并修复历史版本缺失的执行权限（幂等）。"""
+    """确保内置 onboarding 助理存在，并补齐默认画像/执行权限（幂等）。"""
     role = get(conn, ONBOARDING_SLUG)
     if role is None:
         create(conn, slug=ONBOARDING_SLUG, display_name="Cindy · 规划助理",
@@ -177,11 +179,22 @@ def ensure_onboarding(conn: sqlite3.Connection) -> dict:
         role = get(conn, ONBOARDING_SLUG)
     else:
         definition = jloads(role.get("definition_json") or "{}", {})
+        changed = False
+        # 补齐历史版本缺失的默认任务助理画像；已有自定义值不覆盖。
+        for key, value in ONBOARDING_DEFINITION.items():
+            if key == "runtime":
+                continue
+            if key not in definition or definition[key] in (None, "", [], {}):
+                definition[key] = value
+                changed = True
         runtime = definition.get("runtime")
         if not isinstance(runtime, dict):
             runtime = {"id": runtime or "claude-code"}
+            changed = True
         if runtime.get("permission_mode") != "bypassPermissions":
             runtime["permission_mode"] = "bypassPermissions"
+            changed = True
+        if changed:
             definition["runtime"] = runtime
             update(conn, ONBOARDING_SLUG, display_name=role["display_name"],
                    definition=definition)

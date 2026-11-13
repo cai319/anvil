@@ -366,10 +366,8 @@ def _emit(data: Any, as_json: bool) -> None:
 @app.command("init")
 def init_cmd(
     json_out: bool = typer.Option(False, "--json"),
-    with_roles: bool = typer.Option(False, "--with-roles", help="创建默认角色模板"),
-    workspace: str = typer.Option("main", "--workspace", help="默认频道/工作区名称"),
 ):
-    """首启引导：发现运行时 → 建默认频道 → （可选）导入角色模板。"""
+    """首启引导：只发现运行时。Cindy 由后端启动时默认创建；不创建频道/角色模板。"""
     try:
         runtimes = _call("POST", "/api/v1/runtimes/discover") or []
     except typer.Exit:
@@ -382,44 +380,16 @@ def init_cmd(
     if not ready:
         typer.echo("提示：没有 ready 的运行时，可用 `anvil` 手工注册或安装后重试。", err=True)
 
+    # 即使没有 ready 运行时也确保内置助理存在；画像由后端定义，CLI 只触发幂等初始化。
+    try:
+        cindy = _call("POST", "/api/v1/roles/onboarding/ensure") or {}
+        typer.echo(f"Cindy 任务助理已就绪：{cindy.get('display_name') or 'Cindy · 规划助理'}")
+    except typer.Exit:
+        typer.echo("提示：当前后端未提供 Cindy 自动初始化；重启后端后会自动创建。", err=True)
+
     if not ready:
         return
-    runtime_id = ready[0]["id"]
-
-    channels = _call("GET", "/api/v1/workspaces") or []
-    if not any(c.get("name") == workspace for c in channels):
-        _call("POST", "/api/v1/workspaces", {"name": workspace})
-        typer.echo(f"已创建默认频道：{workspace}")
-    else:
-        typer.echo(f"频道已存在：{workspace}")
-
-    if with_roles:
-        defaults = [
-            ("developer", "开发工程师"),
-            ("tester", "测试工程师"),
-            ("reviewer", "评审员"),
-        ]
-        for slug, name in defaults:
-            if _role_exists(slug):
-                continue
-            _call("POST", "/api/v1/roles", {
-                "slug": slug, "display_name": name,
-                "runtime": {"id": runtime_id},
-                "workspace": {"home": f"agents/{slug}/", "repos": []},
-                "tools": {"preset": "backend-default", "max_tool_tokens": 3500},
-                "concurrency": {"max_parallel": 2},
-            })
-            typer.echo(f"  已导入角色：{name} ({slug})")
-
-    typer.echo("下一步：打开界面创建第一个任务，或 `anvil task create --title ...`。")
-
-
-def _role_exists(slug: str) -> bool:
-    try:
-        with _client() as c:
-            return c.get(f"/api/v1/roles/{slug}", headers=_headers()).status_code < 300
-    except httpx.HTTPError:
-        return False
+    typer.echo("下一步：打开界面创建频道和角色；Cindy 已由后端默认启用。")
 
 
 @app.command("self", help="当前身份、会话与自我维护。", epilog=SELF_EPILOG,

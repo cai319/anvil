@@ -78,8 +78,10 @@ python run_server.py             # 打开 http://127.0.0.1:7317
 ```bash
 cd <项目根>/dev
 source .venv/bin/activate
-anvil init --with-roles          # 发现运行时 → 建默认频道 → 导入 developer/tester/reviewer
+anvil init                       # 发现运行时；Cindy 默认创建，不建频道/角色模板
 ```
+
+> 全新安装默认只有内置规划助理 Cindy，没有预置频道或其他角色。Cindy 的职责提示词、默认任务助理画像由后端内置并在启动时自动创建/补齐；频道和角色请按需创建。
 
 ### 2.3 Windows
 
@@ -105,7 +107,7 @@ python run_server.py
 ```powershell
 cd C:\path\to\aliceAgent\dev
 .\.venv\Scripts\Activate.ps1
-anvil init --with-roles
+anvil init
 ```
 
 > Windows 优先使用原生 `claude.exe`，不要用 `claude.cmd`（`cmd.exe` 可能破坏 UTF-8 中文参数）。
@@ -241,7 +243,7 @@ anvil init --with-roles
 
 ```bash
 # 人类/运维
-anvil init --with-roles
+anvil init
 anvil task list
 anvil task show <task-id>
 anvil task create --title "..." --description "..."
@@ -596,14 +598,14 @@ Compress-Archive -Path data -DestinationPath anvil-data.zip
 ```bash
 # 停止后端后
 mv data data.backup-$(date +%Y%m%d)
-anvil init --with-roles
+anvil init
 ```
 
 Windows PowerShell：
 
 ```powershell
 Move-Item data data.backup
-anvil init --with-roles
+anvil init
 ```
 
 ### 8.4 安全
@@ -641,6 +643,7 @@ anvil init --with-roles
 - [docs/v1.42.4-release.md](docs/v1.42.4-release.md)：v1.42.4 侧栏分组标题排版与开发方署名
 - [docs/v1.42.5-release.md](docs/v1.42.5-release.md)：v1.42.5 派遣子任务模型修正、回切状态机与 runtime subagent
 - [docs/v1.42.6-release.md](docs/v1.42.6-release.md)：v1.42.6 切片关联角色执行上下文
+- [docs/v1.42.7-release.md](docs/v1.42.7-release.md)：v1.42.7 默认 Cindy 助理、首次安装清理与 assign 修复
 - [docs/workflow-revision.md](docs/workflow-revision.md)：运行中 workflow 的增量修订（安全变更不重启任务）
 - [docs/operations.md](docs/operations.md)：打包、备份/迁移/重置、卸载
 - [docs/troubleshooting.md](docs/troubleshooting.md)：详细排查

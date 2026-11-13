@@ -11,7 +11,7 @@
 | M2 协作与治理 | 认领/租约/快照/依赖/评审/diff/四层闸门/审计/角色工坊 | ✅ 基本完成 | 本轮补齐真实 git diff 校验、`.anvilignore`、系统/运行时并发闸门、日成本闸门、cancel/reopen、角色 message、版本回滚、home 文件读取、运行级会话令牌 |
 | M3 工具治理 | skill/MCP 投影、工具白名单/预算、勾选矩阵、能力门控 | 🚧 部分完成（原定 v2） | 已有 skill/MCP CRUD + stdio 握商、`tools.yaml` 预设、DB→投影合并、allowlist→`permissions.allow`、能力门控展示；条件加载与完整矩阵 UI 未做 |
 | M4 长程能力 | 三档 reset、reminder、FTS5、lessons 升格、提案审批、角色主页 | 🚧 大部分完成 | 本轮补齐 reminder 触发、三档 reset、FTS 检索与上下文注入、lessons 审批/80 上限、提案生效、`self edit-instruction`、角色主页/指标/版本 |
-| M5 打磨 | 更多运行时、模板、指标、打包、首启引导 | 🚧 部分完成 | 成本/指标接口与前端、`anvil init --with-roles`、PyInstaller 数据清单已补；更多运行时 YAML 与完整首启向导未做 |
+| M5 打磨 | 更多运行时、模板、指标、打包、首启引导 | 🚧 部分完成 | 成本/指标接口与前端、`anvil init`、PyInstaller 数据清单已补；更多运行时 YAML 与完整首启向导未做 |
 
 ## 本轮已补齐（2026-10-18）
 
@@ -113,7 +113,7 @@
 | 容器/WSL2 强隔离 | design 列为 v4 |
 | 默认每周复盘 reminder | ✅ 已实现（创建角色时自动附带） |
 | 更多内置运行时 YAML | ✅ 已加 codex-cli / gemini-cli；其余按 §2.2 加 YAML 即可 |
-| 完整首启向导 UI | CLI `anvil init --with-roles` 提供最小路径 |
+| 完整首启向导 UI | CLI `anvil init` 提供最小路径 |
 
 ## 本轮已补齐（2026-10-19，P0 可靠性 + P1-0 计划先行）
 

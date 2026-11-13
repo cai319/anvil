@@ -119,7 +119,7 @@ async def test_human_mention_cindy_starts_planner_run(client, app, seeded):
     try:
         now = now_iso()
         conn.execute(
-            "INSERT INTO roles (slug, display_name, home_path, definition_json, "
+            "INSERT OR IGNORE INTO roles (slug, display_name, home_path, definition_json, "
             "created_at, updated_at, enabled) VALUES (?,?,?,?,?,?,1)",
             ("cindy", "Cindy", os.path.join(tempfile.gettempdir(), "cindy"),
              json.dumps({"kind": "onboarding"}), now, now))

@@ -256,6 +256,13 @@ def list_role_runtimes(conn=Depends(get_db)):
     return [role_runtime(role["slug"], conn) for role in services.roles.list_all(conn)]
 
 
+@router.post("/roles/onboarding/ensure", response_model=RoleOut)
+def ensure_onboarding_role(conn=Depends(get_db),
+                           auth: Auth = Depends(require_human)):
+    """确保内置任务助理 Cindy 存在；供 anvil init/运维显式调用（幂等）。"""
+    return services.roles.ensure_onboarding(conn)
+
+
 @router.get("/roles/{slug}", response_model=RoleOut)
 def get_role(slug: str, conn=Depends(get_db)):
     role = services.roles.get(conn, slug)

@@ -383,6 +383,30 @@ def test_workflow_revise_preview_maps_to_endpoint(mock_backend, tmp_path):
     assert _Handler.bodies[-1] == {"intent": intent}
 
 
+def test_init_only_discovers_runtimes(monkeypatch):
+    """首启只发现运行时；不创建频道或 developer/tester/reviewer 等模板角色。"""
+    from anvil_cli import main as cli
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_call(method: str, path: str, *args, **kwargs):
+        calls.append((method, path))
+        if path == f"{API}/runtimes/discover":
+            return [{"id": "rt-1", "display_name": "Claude Code", "status": "ready"}]
+        if path == f"{API}/roles/onboarding/ensure":
+            return {"slug": "cindy", "display_name": "Cindy · 规划助理"}
+        raise AssertionError(f"unexpected init call: {method} {path}")
+
+    monkeypatch.setattr(cli, "_call", fake_call)
+    cli.init_cmd(json_out=False)
+    assert calls == [
+        ("POST", f"{API}/runtimes/discover"),
+        ("POST", f"{API}/roles/onboarding/ensure"),
+    ]
+    assert not any(path == f"{API}/workspaces" for _, path in calls)
+    assert not any(path == f"{API}/roles" for _, path in calls)
+
+
 @pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
 def test_workflow_revise_creates_revision_draft(mock_backend, tmp_path):
     """不带 --preview 时提交修订草案，并带上 rationale。"""

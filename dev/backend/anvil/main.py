@@ -200,6 +200,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     ledger_service.backfill_once(_init)
     # 历史删除遗留的孤儿 workflow/run：启动时清理，避免调度器继续推进已删除任务。
     _cleanup_orphans(_init)
+    # 内置规划助理 Cindy 默认存在；创建任务/规划时也会幂等补齐。
+    if os.environ.get("ANVIL_ONBOARDING", "1") != "0":
+        roles_service.ensure_onboarding(_init)
     # 跨平台/迁移修复：数据库里的角色 home_path 可能来自旧系统（如 macOS → Windows）。
     roles_service.repair_home_paths(_init)
     # 旧角色可能早于每日复盘功能创建；启动时为所有启用角色补齐/迁移 reminder。
