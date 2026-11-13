@@ -453,14 +453,17 @@ def role_runtime(slug: str, conn=Depends(get_db)):
         row = conn.execute(
             "SELECT * FROM role_sessions WHERE role_slug=?", (slug,)
         ).fetchone()
+        context_key = row["current_context_key"] if row else None
+        ctx_task_id, ctx_slice_key = daemon_service.context_parts(context_key)
         st = {
             "alive": False, "status": "dead", "pid": None,
             "current_task_id": row["current_task_id"] if row else None,
             "current_run_id": row["current_run_id"] if row else None,
             "current_step_id": row["current_step_id"] if row else None,
-            "current_slice_key": None,
-            "current_context_key": row["current_context_key"] if row else None,
-            "context_task_id": None, "context_slice_key": None, "context_key": None,
+            "current_slice_key": ctx_slice_key,
+            "current_context_key": context_key,
+            "context_task_id": ctx_task_id, "context_slice_key": ctx_slice_key,
+            "context_key": context_key,
             "queue_len": 0, "queue": [], "queue_tasks": [], "queue_contexts": [],
             "context_tokens": int(row["last_context_tokens"] or 0) if row else 0,
             "session_id": (row["session_id"] or "") if row else "",

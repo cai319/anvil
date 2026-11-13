@@ -27,6 +27,12 @@ export interface KnowledgeRepoScope {
   repo: string | null;
 }
 
+export interface TaskRoleStatusSummary {
+  task_id: string;
+  workflow: Pick<Workflow, "id" | "status" | "steps"> | null;
+  run_statuses: Record<string, { status: string; started_at: string | null }>;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -542,6 +548,9 @@ export const api = {
     req("POST", `/tasks/${id}/delegation/reject`, { feedback }).then((r) => json<Task>(r)),
   listTaskRuns: (taskId: string): Promise<Run[]> =>
     authFetch(`${BASE}/runs?task_id=${encodeURIComponent(taskId)}`).then((r) => json<Run[]>(r)),
+  getTaskStatusSummaries: (taskIds: string[]): Promise<TaskRoleStatusSummary[]> =>
+    authFetch(`${BASE}/tasks/status-summary?task_ids=${encodeURIComponent(taskIds.join(","))}`)
+      .then((r) => json<TaskRoleStatusSummary[]>(r)),
   getTaskWorkflow: (taskId: string): Promise<Workflow> =>
     authFetch(`${BASE}/tasks/${taskId}/workflow`).then((r) => json<Workflow>(r)),
   getWorkflow: (wid: string): Promise<Workflow> =>

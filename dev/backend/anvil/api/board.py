@@ -140,6 +140,55 @@ def approve_drafts(body: dict, request: Request, conn=Depends(get_db),
     return result
 
 
+def _wake_rejected_planner(conn, request: Request, draft: dict,
+                           feedback: str | None) -> dict | None:
+    """驳回 workflow 草案后唤醒作者（通常是 Cindy）重新规划。
+
+    `services.board.reject` 只写 mention 活动，不等于唤醒：daemon 不轮询 activities，
+    真正的唤醒入口在 @mention API。这里复用 planner run 语义，避免驳回后无人接手。
+    """
+    if draft.get("kind") not in ("workflow", "workflow_revision"):
+        return None
+    task_id = draft.get("source_task")
+    if not task_id:
+        return None
+    task = services.tasks.get(conn, task_id)
+    if task is None or task.get("status") in ("done", "closed"):
+        return None
+    creator = str(draft.get("created_by") or "").strip()
+    if creator.startswith("agent:"):
+        creator = creator[6:]
+    planner = creator or str(task.get("planner") or "").strip()
+    if not planner or planner == "human":
+        return None
+    role = services.roles.get(conn, planner)
+    if (planner != services.roles.ONBOARDING_SLUG
+            and not (role and role.get("enabled", True))):
+        return None
+    assignees = [r["role_slug"] for r in conn.execute(
+        "SELECT role_slug FROM task_assignees WHERE task_id=?", (task_id,))]
+    try:
+        run = services.planning.start_planner_run(
+            conn, request.app.state.db_path,
+            getattr(request.app.state, "orchestrator", None),
+            task_id, planner, assignees=assignees,
+            extra_constraint=(
+                f"自然人驳回了你提交的{('工作流修订' if draft.get('kind') == 'workflow_revision' else '工作流草案')}"
+                f"（draft={draft.get('id')}）。\n"
+                f"驳回意见：{feedback or '请重新评估工作流方案'}\n\n"
+                "请读取该草案、任务最新状态和已有 workflow，按规划职责重新提交："
+                "能用增量修订表达时先用 `anvil workflow revise --preview`，否则提交新的完整草案。"
+                "不要原样复用被驳回的 tree；每个 loop 阶段必须显式写 "
+                "subagent_hint true/false。"),
+            replace_active=True,
+        )
+    except Exception:  # noqa: BLE001 —— 唤醒失败不改变驳回结果
+        return None
+    from . import events
+    events.publish("task", {"id": task_id, "kind": "plan", "planner": planner})
+    return {"run_id": run.get("id"), "planner": planner}
+
+
 @router.post("/board/drafts/reject")
 def reject_draft(body: dict, request: Request, conn=Depends(get_db),
                  auth: Auth = Depends(require_human)):
@@ -158,5 +207,6 @@ def reject_draft(body: dict, request: Request, conn=Depends(get_db),
         "feedback": body.get("feedback"),
         "human_decision": True,
     })
-    # 驳回本身不替自然人 @ 任何角色；自然人在任务会话中自行 @ 对应角色处理。
-    return {**draft, "replan": None, "blocked": result.get("blocked")}
+    # 驳回后由草案作者（通常是 Cindy）重新规划；不替自然人做其它角色决策。
+    replan = _wake_rejected_planner(conn, request, draft, body.get("feedback"))
+    return {**draft, "replan": replan, "blocked": result.get("blocked")}

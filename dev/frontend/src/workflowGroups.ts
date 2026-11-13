@@ -1,18 +1,38 @@
 import type { WorkflowStep } from "./api/client";
-import type { StatusTone } from "./roleStatus";
+import { workflowSliceState, workflowStepTone, type StatusTone } from "./roleStatus";
 
-/** 工作流步骤状态的展示元数据（图谱与列表共用）。 */
+const TONE_COLOR: Record<StatusTone, string> = {
+  orange: "var(--orange)",
+  yellow: "var(--yellow)",
+  red: "var(--red)",
+  green: "var(--green)",
+  gray: "var(--status-gray)",
+};
+const TONE_BG: Record<StatusTone, string> = {
+  orange: "rgba(251,146,60,.16)",
+  yellow: "rgba(250,204,21,.16)",
+  red: "rgba(248,113,113,.16)",
+  green: "rgba(74,222,128,.14)",
+  gray: "rgba(139,132,150,.14)",
+};
+
+function stepMeta(label: string, status: WorkflowStep["status"]) {
+  const tone = workflowStepTone(status);
+  return { label, tone, color: TONE_COLOR[tone], bg: TONE_BG[tone] };
+}
+
+/** 工作流步骤状态的展示元数据（图谱与列表共用）；tone 由统一状态函数给出。 */
 export const STATUS_META: Record<WorkflowStep["status"], {
   label: string; tone: StatusTone; color: string; bg: string;
 }> = {
   // 橙=处理中，黄=等人工，红=需关注，绿=完成，灰=未开始/结束
-  pending:   { label: "待办",   tone: "gray",   color: "var(--status-gray)", bg: "rgba(139,132,150,.14)" },
-  running:   { label: "进行中", tone: "orange", color: "var(--orange)", bg: "rgba(251,146,60,.16)" },
-  submitted: { label: "待审核", tone: "yellow", color: "var(--yellow)", bg: "rgba(250,204,21,.16)" },
-  approved:  { label: "完成",   tone: "green",  color: "var(--green)", bg: "rgba(74,222,128,.14)" },
-  rejected:  { label: "已驳回", tone: "red",    color: "var(--red)", bg: "rgba(248,113,113,.16)" },
-  failed:    { label: "失败",   tone: "red",    color: "var(--red)", bg: "rgba(248,113,113,.16)" },
-  skipped:   { label: "跳过",   tone: "gray",   color: "var(--status-gray)", bg: "rgba(139,132,150,.12)" },
+  pending:   stepMeta("待办", "pending"),
+  running:   stepMeta("进行中", "running"),
+  submitted: stepMeta("待审核", "submitted"),
+  approved:  stepMeta("完成", "approved"),
+  rejected:  stepMeta("已驳回", "rejected"),
+  failed:    stepMeta("失败", "failed"),
+  skipped:   stepMeta("跳过", "skipped"),
 };
 
 export function isDoneStatus(status: WorkflowStep["status"]): boolean {
@@ -38,14 +58,15 @@ export function phaseLabel(step: WorkflowStep): string {
 }
 
 function groupStatus(steps: WorkflowStep[]): WorkflowStep["status"] {
-  // 失败/返工最需要关注；其次才是执行中、待审核。部分完成但无活跃步骤的 slice
-  // 仍是 pending，不能误显示成橙色进行中。
-  if (steps.some((s) => s.status === "failed")) return "failed";
-  if (steps.some((s) => s.status === "rejected")) return "rejected";
-  if (steps.some((s) => s.status === "running")) return "running";
-  if (steps.some((s) => s.status === "submitted")) return "submitted";
-  if (steps.length > 0 && steps.every((s) => isDoneStatus(s.status))) return "approved";
-  return "pending";
+  // 统一走 roleStatus.workflowSliceState，避免图谱与角色卡片各自维护聚合优先级。
+  switch (workflowSliceState(steps).key) {
+    case "failed": return "failed";
+    case "rejected": return "rejected";
+    case "running": return "running";
+    case "submitted": return "submitted";
+    case "done": return "approved";
+    default: return "pending";
+  }
 }
 
 export interface LoopGroup {

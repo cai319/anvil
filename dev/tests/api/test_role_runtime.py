@@ -4,6 +4,8 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip("anvil.main")
+from anvil.db import open_conn  # noqa: E402
+from anvil.util import now_iso  # noqa: E402
 from tests.conftest import API, auth_headers, human_headers, role_payload, runtime_payload  # noqa: E402
 
 
@@ -21,6 +23,33 @@ async def test_update_role_runtime_preserves_definition(client):
     assert definition["runtime"]["id"] == "rt-b"
     assert definition["system_prompt"] == "keep me"
     assert definition["responsibilities"] == ["x"]
+
+
+async def test_role_runtime_fallback_keeps_current_slice(client, app):
+    """daemon 未启用时，DB 里的 current_context_key 仍要投影为 task/slice。"""
+    await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
+    await client.post(f"{API}/roles", json=role_payload("dev"), headers=auth_headers())
+    now = now_iso()
+    conn = open_conn(app.state.db_path)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO role_sessions "
+            "(role_slug, session_id, status, updated_at, current_task_id, "
+            " current_run_id, current_step_id, current_context_key, current_slice_key) "
+            "VALUES ('dev','',?,?,?,?,?,?,?)",
+            ("dead", now, "T-CTX", "R-CTX", "S1",
+             "T-CTX::slice::auth", "auth"))
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = await client.get(f"{API}/roles/dev/runtime")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["current_slice_key"] == "auth"
+    assert body["context_task_id"] == "T-CTX"
+    assert body["context_slice_key"] == "auth"
+    assert body["context_key"] == "T-CTX::slice::auth"
 
 
 async def test_update_role_runtime_rejects_unknown(client):

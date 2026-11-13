@@ -83,7 +83,7 @@ def test_protocols_define_delegation_contract():
         assert "排队" in protocol
         assert "delegation-accept" in protocol
         assert "delegation-reject" in protocol
-    assert "运行时自带的 subagent" in render.STEP_PROTOCOL
+    assert "subagent_hint" in render.STEP_PROTOCOL
     assert "summary/evidence" in render.STEP_PROTOCOL
     assert "委派" in render.REPLY_PROTOCOL
     assert "--parent-step" in render.REPLY_PROTOCOL

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, subscribeEvents, type Channel, type Role, type RoleRuntimeStatus, type Run, type Task } from "../api/client";
+import { api, subscribeEvents, type Channel, type Role, type RoleRuntimeStatus, type Run, type Task, type TaskRoleStatusSummary, type Workflow } from "../api/client";
 import { navigate } from "../router";
 import { formatClock, formatDateTime, formatRelative, parseTime, useNow } from "../time";
 import { usePanelLayout } from "../usePanelLayout";
@@ -52,16 +52,19 @@ const RUN_STATUS_LABEL: Record<string, string> = {
 };
 
 /** 任务卡头像：只显示头像，阴影色表示该角色是否投入这张任务。 */
-function TaskRoleAvatar({ task, slug, roles, runtime, relatedTaskIds, runStatus }: {
+function TaskRoleAvatar({ task, slug, roles, runtime, relatedTaskIds, workflow, runStatus }: {
   task: Task;
   slug: string;
   roles: Role[];
   runtime?: RoleRuntimeStatus;
   relatedTaskIds: string[];
+  workflow?: Pick<Workflow, "status" | "steps"> | null;
   runStatus?: string | null;
 }) {
   const role = roles.find((r) => r.slug === slug);
-  const state = taskRoleState({ task, role: slug, runtime, relatedTaskIds, runStatus });
+  const state = taskRoleState({
+    task, role: slug, runtime, relatedTaskIds, workflow, runStatus,
+  });
   const name = role?.display_name ?? slug;
   return (
     <RoleAvatar
@@ -120,6 +123,9 @@ export function Lobby() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [roleRuntimes, setRoleRuntimes] = useState<RoleRuntimeStatus[]>([]);
+  const [taskSummaries, setTaskSummaries] = useState<Map<string, TaskRoleStatusSummary>>(
+    () => new Map(),
+  );
   const [activity, setActivity] = useState<Activity[]>([]);
   const [showNew, setShowNew] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -191,34 +197,57 @@ export function Lobby() {
     return out;
   }, [runs]);
 
+  // 终态 run 不在 active runs 里；用批量摘要补上“最近一次 run”，大厅才能显示失败/等待人工。
+  const latestRunStatusByRole = useMemo(() => {
+    const out = new Map<string, { status: string; started: string }>();
+    for (const summary of taskSummaries.values()) {
+      for (const [role, info] of Object.entries(summary.run_statuses)) {
+        const started = info.started_at ?? "";
+        const current = out.get(role);
+        if (!current || started > current.started) {
+          out.set(role, { status: info.status, started });
+        }
+      }
+    }
+    return out;
+  }, [taskSummaries]);
+
   const globalToneByRole = useMemo(() => {
     const out: Record<string, StatusTone> = {};
     for (const role of roles) {
       const visible = visibleRuns.find((r) => r.role_slug === role.slug);
       out[role.slug] = globalRoleState({
         runtime: runtimeByRole.get(role.slug),
-        latestRunStatus: visible?.status ?? null,
+        latestRunStatus: latestRunStatusByRole.get(role.slug)?.status
+          ?? visible?.status ?? null,
       }).tone;
     }
     return out;
-  }, [roles, visibleRuns, roleRuntimes]);
+  }, [roles, visibleRuns, roleRuntimes, latestRunStatusByRole]);
 
-  const refresh = () =>
-    Promise.all([
-      api.listTasks(),
-      api.listRoles(),
-      api.listActiveRuns(),
-      api.listRoleRuntimes().catch(() => [] as RoleRuntimeStatus[]),
-      api.listChannels().catch(() => [] as Channel[]),
-    ])
-      .then(([t, r, n, rt, cs]) => {
-        setTasks(t);
-        setRoles(r);
-        setRuns(n);
-        setRoleRuntimes(rt);
-        setChannels(cs);
-      })
-      .catch((e) => setError(String(e)));
+  const refresh = async () => {
+    try {
+      const [t, r, n, rt, cs] = await Promise.all([
+        api.listTasks(),
+        api.listRoles(),
+        api.listActiveRuns(),
+        api.listRoleRuntimes().catch(() => [] as RoleRuntimeStatus[]),
+        api.listChannels().catch(() => [] as Channel[]),
+      ]);
+      setTasks(t);
+      setRoles(r);
+      setRuns(n);
+      setRoleRuntimes(rt);
+      setChannels(cs);
+      const ids = t.map((task) => task.id);
+      const summaries = ids.length
+        ? await api.getTaskStatusSummaries(ids).catch(() => [])
+        : [];
+      setTaskSummaries(new Map(summaries.map((s) => [s.task_id, s])));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   const refreshActivity = () =>
     api.listAudit({ limit: 200 })
@@ -322,7 +351,9 @@ export function Lobby() {
                   {STATUS_LABEL[status]}
                   <span className="n">{boardTasks.filter((t) => t.status === status).length}</span>
                 </h2>
-                {boardTasks.filter((t) => t.status === status).map((t) => (
+                {boardTasks.filter((t) => t.status === status).map((t) => {
+                  const summary = taskSummaries.get(t.id);
+                  return (
                   <div
                     key={t.id}
                     className="card"
@@ -351,7 +382,9 @@ export function Lobby() {
                                 roles={roles}
                                 runtime={runtimeByRole.get(slug)}
                                 relatedTaskIds={relatedTaskIds.get(t.id) ?? [t.id]}
-                                runStatus={runStatusByTaskRole.get(`${t.id}:${slug}`)?.status}
+                                workflow={summary?.workflow}
+                                runStatus={summary?.run_statuses?.[slug]?.status
+                                  ?? runStatusByTaskRole.get(`${t.id}:${slug}`)?.status}
                               />
                             ))}
                           </span>
@@ -363,7 +396,9 @@ export function Lobby() {
                               roles={roles}
                               runtime={runtimeByRole.get(t.assignee)}
                               relatedTaskIds={relatedTaskIds.get(t.id) ?? [t.id]}
-                              runStatus={runStatusByTaskRole.get(`${t.id}:${t.assignee}`)?.status}
+                              workflow={summary?.workflow}
+                              runStatus={summary?.run_statuses?.[t.assignee]?.status
+                                ?? runStatusByTaskRole.get(`${t.id}:${t.assignee}`)?.status}
                             />
                           </span>
                         ) : (
@@ -430,7 +465,8 @@ export function Lobby() {
                       </div>
                     )}
                   </div>
-                ))}
+                  );
+                })}
                 {boardTasks.filter((t) => t.status === status).length === 0 && (
                   <p className="muted kanban-empty">暂无任务</p>
                 )}

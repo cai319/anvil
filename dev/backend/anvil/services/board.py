@@ -111,7 +111,9 @@ def create_draft(conn: sqlite3.Connection, goal: str, tree: dict,
         # 「大型多角色但无决策点」的串行工作流，让 planner 当场修正。
         from . import workflow as workflow_service
         tree = workflow_service.normalize_definition(conn, tree)
-        workflow_service.validate_definition(conn, tree)
+        workflow_service.validate_definition(
+            conn, tree,
+            require_subagent_decisions=not str(created_by).startswith("human"))
         if enforce_role_coverage:
             workflow_service.validate_role_coverage(conn, source_task, tree)
         # 把任务的规划种子附着到草案，批准后写进 workflow provenance。
@@ -561,6 +563,17 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
                     "Confirm restart_running to terminate the current execution and restart.")
             from . import knowledge_binding
             from . import workflow as workflow_service
+            # 创建草案时校验过显式 hint，审批是另一条入口；旧草案/人工编辑过的
+            # tree 可能已缺少该字段，必须在生成 workflow 前再校验一次。
+            if str(draft.get("created_by") or "").startswith("agent:"):
+                try:
+                    workflow_service.validate_definition(
+                        conn, draft["tree"], require_subagent_decisions=True)
+                except ConflictError as exc:
+                    raise ConflictError(
+                        f"workflow draft {did} 不能批准：{exc}。"
+                        "请驳回草案让作者重新提交，或在草案里补全各 loop 阶段的 "
+                        "subagent_hint: true/false。") from exc
             try:
                 knowledge_binding.apply_cindy_draft(conn, draft["source_task"], draft["tree"])
             except Exception as exc:  # noqa: BLE001 —— 绑定失败不阻断审批

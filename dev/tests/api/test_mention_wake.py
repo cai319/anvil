@@ -141,6 +141,31 @@ async def test_human_mention_cindy_starts_planner_run(client, app, seeded):
     assert any(e == "wake" for _, e, _ in seeded.pumped)
 
 
+async def test_reject_workflow_draft_wakes_its_author(client, app, seeded):
+    """驳回 workflow 草案必须唤醒作者（Cindy）重新规划，而不是只写一条 mention。"""
+    r = await client.post(f"{API}/tasks", headers=auth_headers(),
+                          json=task_payload(id="T-REJECT-WAKE", assignee="pm"))
+    assert r.status_code == 201, r.text
+    created = await client.post(f"{API}/board/drafts", headers=auth_headers("pm"), json={
+        "goal": "重新规划", "source_task": "T-REJECT-WAKE", "kind": "workflow",
+        "created_by": "agent:cindy",
+        "tree": {"steps": [{"id": "S1", "title": "x", "role": "pm"}]}})
+    assert created.status_code == 201, created.text
+    rejected = await client.post(f"{API}/board/drafts/reject", headers=human_headers(),
+                                 json={"draft_id": created.json()["id"],
+                                       "feedback": "补 subagent_hint 后重提"})
+    assert rejected.status_code == 200, rejected.text
+    body = rejected.json()
+    assert body["status"] == "rejected"
+    assert body["replan"]["planner"] == "cindy"
+    runs = _runs(app, "T-REJECT-WAKE", "cindy")
+    assert len(runs) == 1
+    assert runs[0]["status"] == "created"
+    assert str(runs[0]["prompt"]).startswith("[anvil:plan]")
+    assert "补 subagent_hint 后重提" in str(runs[0]["prompt"])
+    assert any(e == "wake" for _, e, _ in seeded.pumped)
+
+
 async def test_mention_pseudo_role_never_wakes(client, app, seeded):
     """workflow/system 是系统伪发送者；即使历史数据里有同名 role 行也不能被 @ 唤醒。"""
     r = await client.post(f"{API}/tasks", headers=auth_headers(),

@@ -26,6 +26,17 @@ def _as_list(value) -> list:
     return list(value) if isinstance(value, (list, tuple)) else []
 
 
+def _hint_flag(value, where: str) -> int:
+    """subagent_hint 只接受 JSON bool（内部生成步骤也允许 0/1）。"""
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, int) and value in (0, 1):
+        return value
+    raise ConflictError(f"{where}.subagent_hint must be a JSON boolean (true|false)")
+
+
 def _expand_slices(definition: dict) -> dict:
     """把 Cindy 的 slices 定义展开成每个切片的固定闭环。
 
@@ -76,6 +87,8 @@ def _expand_slices(definition: dict) -> dict:
         decision_role = str(
             raw_slice.get("decision_role") or raw_slice.get("lead_role") or "").strip()
         lead_role = str(raw_slice.get("lead_role") or decision_role).strip()
+        slice_hint = _hint_flag(raw_slice.get("subagent_hint"), f"slice {base}")
+        scope_spec = raw_slice.get("scope") if isinstance(raw_slice.get("scope"), dict) else {}
 
         if not execute_role:
             raise ConflictError(f"slice {base}: execute_role is required")
@@ -121,6 +134,9 @@ def _expand_slices(definition: dict) -> dict:
                 "执行角色与验证角色已确认范围可执行、可验证。",
                 "验收标准可直接用于后续 verify/decide 判定。",
             ],
+            "subagent_hint": 1 if (
+                slice_hint or _hint_flag(scope_spec.get("subagent_hint"),
+                                         f"slice {base}.scope")) else 0,
         })
 
         execute_specs = raw_slice.get("execute_steps") or raw_slice.get("tasks") or []
@@ -155,6 +171,12 @@ def _expand_slices(definition: dict) -> dict:
                 "acceptance": _as_list(raw_execute.get("acceptance")),
                 "contract": str(raw_execute.get("contract")
                                 or raw_slice.get("contract") or "") or None,
+                "subagent_hint": 1 if (
+                    slice_hint
+                    or _hint_flag(raw_execute.get("subagent_hint"),
+                                  f"slice {base}.{slug}")
+                    or _hint_flag(raw_slice.get("execute_hint"),
+                                  f"slice {base}.execute")) else 0,
             })
             execute_ids.append(execute_id)
             previous_execute = execute_id
@@ -175,6 +197,7 @@ def _expand_slices(definition: dict) -> dict:
                 "关键结论已独立复现，或说明无法复现的原因。",
                 "发现的问题已 @ 执行角色并附定位与证据。",
             ],
+            "subagent_hint": 1 if (slice_hint or _hint_flag(verify_spec.get("subagent_hint"), f"slice {base}.verify")) else 0,
         })
 
         fix_spec = raw_slice.get("fix") if isinstance(raw_slice.get("fix"), dict) else {}
@@ -193,6 +216,7 @@ def _expand_slices(definition: dict) -> dict:
                 "每项修复附回归方式或复验证据。",
                 "未解决的阻塞项已 @ 决策角色并说明风险。",
             ],
+            "subagent_hint": 1 if (slice_hint or _hint_flag(fix_spec.get("subagent_hint"), f"slice {base}.fix")) else 0,
         })
 
         verify2_spec = (raw_slice.get("verify2")
@@ -210,6 +234,7 @@ def _expand_slices(definition: dict) -> dict:
                 "原验证问题逐条确认关闭或仍存在，并附证据。",
                 "关键回归用例通过，未引入新问题。",
             ],
+            "subagent_hint": 1 if (slice_hint or _hint_flag(verify2_spec.get("subagent_hint"), f"slice {base}.verify2")) else 0,
         })
 
         decide_spec = (raw_slice.get("decide")
@@ -238,6 +263,7 @@ def _expand_slices(definition: dict) -> dict:
                 "通过时写明放行依据与剩余风险；打回时列出可执行的返工要求。",
                 "决策结论已写入任务会话，下一片据此决定是否开工。",
             ],
+            "subagent_hint": 1 if (slice_hint or _hint_flag(decide_spec.get("subagent_hint"), f"slice {base}.decide")) else 0,
         })
         slice_decide[base] = decide_id
         previous_decide = decide_id
@@ -359,6 +385,7 @@ def _plan_steps(conn: sqlite3.Connection, steps: list[dict]):
             "decision_options": options,
             "evidence_required": 1 if s.get("evidence_required") else 0,
             "scope_paths": [str(x) for x in scope_paths],
+            "subagent_hint": _hint_flag(s.get("subagent_hint"), f"step {sid}"),
         }
         on_reject: list[str] = []
         max_rework = 0
@@ -428,6 +455,37 @@ def _plan_steps(conn: sqlite3.Connection, steps: list[dict]):
 
 
 LOOP_PHASES = ("execute", "verify", "fix", "verify2", "decide")
+LOOP_HINT_PHASES = ("scope", *LOOP_PHASES)
+
+
+def _require_loop_subagent_decisions(loop: dict) -> None:
+    """Cindy 必须对每个写出的 loop 阶段显式决定是否注入 subagent 提示。
+
+    提示词是软约束，首个真实审计任务里 Cindy 直接漏写了该字段，导致
+    verify/fix/verify2 全部按 false 生成。这里把「决策」变成草案校验的一部分：
+    可以写 false，但不能不写，避免静默退化。
+    """
+    missing = [
+        phase for phase in LOOP_HINT_PHASES
+        if isinstance(loop.get(phase), dict) and "subagent_hint" not in loop[phase]
+    ]
+    if missing:
+        raise ConflictError(
+            "workflow loop phases must explicitly set `subagent_hint` (true|false): "
+            + ", ".join(f"loop.{phase}" for phase in missing)
+            + ". Set true only when the phase must verify multiple independent conditions, "
+              "trace source/sink across modules, or read enough surrounding code to overflow "
+              "the checker context; otherwise false.")
+    invalid = [
+        phase for phase in LOOP_HINT_PHASES
+        if isinstance(loop.get(phase), dict)
+        and "subagent_hint" in loop[phase]
+        and not isinstance(loop[phase]["subagent_hint"], bool)
+    ]
+    if invalid:
+        raise ConflictError(
+            "workflow loop phase subagent_hint must be a JSON boolean (true|false): "
+            + ", ".join(f"loop.{phase}" for phase in invalid))
 
 
 def _validate_loop(conn: sqlite3.Connection, definition: dict,
@@ -502,6 +560,10 @@ def _validate_loop(conn: sqlite3.Connection, definition: dict,
         raise ConflictError("workflow loop.decide.max_rework must be an integer")
     if max_rework < 0:
         raise ConflictError("workflow loop.decide.max_rework must be >= 0")
+    for phase in LOOP_HINT_PHASES:
+        spec = loop.get(phase)
+        if isinstance(spec, dict) and "subagent_hint" in spec:
+            _hint_flag(spec["subagent_hint"], f"workflow loop.{phase}")
 
 
 SLICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -590,6 +652,10 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
                 f"slice {slice_id}: onboarding assistant cannot execute workflow steps")
         return role
 
+    def phase_hint(spec: dict | None) -> int:
+        # 只认 Cindy 的 loop 模板；运行期切片计划不得覆盖提示编排。
+        return _hint_flag((spec or {}).get("subagent_hint"), "workflow loop phase")
+
     for raw_slice in slices:
         if not isinstance(raw_slice, dict):
             raise ConflictError("each slice must be an object")
@@ -614,6 +680,10 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
                 f"slice {slice_id}: role fields are not allowed in a runtime slice plan "
                 f"({', '.join(overrides)}); roles are fixed by Cindy's loop template. "
                 "If the loop structure must change, mention Cindy to revise the workflow.")
+        if "subagent_hint" in raw_slice:
+            raise ConflictError(
+                f"slice {slice_id}: subagent_hint is controlled by Cindy's loop template; "
+                "runtime slice plans must not set it.")
         execute_role = check_role(execute_default, slice_id, "execute")
         verify_role = check_role(verify_default, slice_id, "verify")
         fix_role = check_role(fix_default or execute_role, slice_id, "fix")
@@ -645,6 +715,7 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
                 "acceptance": _merge_unique(scope_spec.get("acceptance")),
                 "source_step_id": plan_step_id,
                 "slice_key": slice_id,
+                "subagent_hint": phase_hint(scope_spec),
             })
             cursor = scope_id
 
@@ -658,6 +729,11 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
         for offset, raw_execute in enumerate(execute_specs):
             if not isinstance(raw_execute, dict):
                 raw_execute = {"instructions": str(raw_execute)}
+            if "subagent_hint" in raw_execute:
+                raise ConflictError(
+                    f"slice {slice_id}: execute step "
+                    f"{raw_execute.get('id') or offset + 1} must not set subagent_hint; "
+                    "it is controlled by Cindy's loop template.")
             slug = str(raw_execute.get("id") or (
                 "execute" if offset == 0 else f"execute{offset + 1}")).strip()
             if slug in LOOP_RESERVED_IDS or not SLICE_ID_RE.match(slug):
@@ -697,6 +773,7 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
                                 or execute_spec.get("contract") or "") or None,
                 "source_step_id": plan_step_id,
                 "slice_key": slice_id,
+                "subagent_hint": phase_hint(execute_spec),
             })
             execute_ids.append(execute_id)
             previous_execute = execute_id
@@ -714,6 +791,7 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
             "contract": str(verify_spec.get("contract") or "") or None,
             "source_step_id": plan_step_id,
             "slice_key": slice_id,
+            "subagent_hint": phase_hint(verify_spec),
         })
 
         fix_id = None
@@ -732,6 +810,7 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
                 "contract": str(fix_spec.get("contract") or "") or None,
                 "source_step_id": plan_step_id,
                 "slice_key": slice_id,
+                "subagent_hint": phase_hint(fix_spec),
             })
 
             verify2_spec = _loop_spec(loop, "verify2")
@@ -747,6 +826,7 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
                 "contract": str(verify2_spec.get("contract") or "") or None,
                 "source_step_id": plan_step_id,
                 "slice_key": slice_id,
+                "subagent_hint": phase_hint(verify2_spec),
             })
 
         decide_spec = _loop_spec(loop, "decide")
@@ -776,6 +856,7 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
             "acceptance": decide_acceptance,
             "source_step_id": plan_step_id,
             "slice_key": slice_id,
+            "subagent_hint": phase_hint(decide_spec),
         })
         previous_decide = decide_id
 
@@ -900,8 +981,8 @@ def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
                 "INSERT INTO workflow_steps (workflow_id, step_id, title, role_slug, "
                 "instructions, depends_on_json, acceptance_json, gate, reviewer, contract, "
                 "kind, on_reject_json, max_rework, rework_count, source_step_id, slice_key, "
-                "evidence_required, status, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "evidence_required, subagent_hint, status, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (wid, raw_step["id"], raw_step.get("title") or raw_step["id"],
                  raw_step.get("role") or "", raw_step.get("instructions") or "",
                  jdumps(raw_step.get("depends_on") or []),
@@ -913,6 +994,7 @@ def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
                  int(raw_step.get("max_rework") or 0), 0,
                  raw_step.get("source_step_id"), raw_step.get("slice_key"),
                  1 if raw_step.get("evidence_required") else 0,
+                 1 if raw_step.get("subagent_hint") else 0,
                  "pending", now),
             )
             if str(raw_step.get("kind") or "task") == "decision":
@@ -1070,16 +1152,24 @@ def validate_role_coverage(conn: sqlite3.Connection, task_id: str | None,
             "unneeded roles from the task before planning.")
 
 
-def validate_definition(conn: sqlite3.Connection, definition: dict) -> None:
+def validate_definition(conn: sqlite3.Connection, definition: dict, *,
+                        require_subagent_decisions: bool = False) -> None:
     """落板/草案提交前的结构校验。
 
     关键约束：大型多角色工作流不能是一条没有决策点的串行长链。Cindy 必须按
     「切片 → 多角色闭环 → 决策 → 下一片」组织；否则打回并给出可执行的修正要求。
+
+    require_subagent_decisions=True 时（agent 提交的 workflow 草案），每个写出的
+    loop 阶段都必须显式带 subagent_hint，禁止静默省略。
     """
     definition = normalize_definition(conn, definition)
     steps = definition.get("steps") or definition.get("children") or []
     if not steps:
         raise ConflictError("workflow has no steps")
+    if require_subagent_decisions:
+        loop = definition.get("loop")
+        if isinstance(loop, dict):
+            _require_loop_subagent_decisions(loop)
     raw, _plan = _plan_steps(conn, steps)
     _validate_loop(conn, definition, raw)
 
@@ -1241,8 +1331,8 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
             "depends_on_json, acceptance_json, gate, reviewer, contract, kind, on_reject_json, "
             "max_rework, rework_count, decision_authority, risk_level, reversible, escalate_json, "
             "decision_question, decision_options_json, evidence_required, scope_paths_json, "
-            "slice_key, source_step_id, status, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "subagent_hint, slice_key, source_step_id, status, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (wid, sid, str(s.get("title") or sid), role,
              str(s.get("instructions") or s.get("description") or ""),
              jdumps(s.get("depends_on") or []), jdumps(s.get("acceptance") or []),
@@ -1252,7 +1342,7 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
              jdumps(meta["escalate"]), meta["decision_question"],
              jdumps(meta["decision_options"]),
              1 if (meta["evidence_required"] or (weight == "strict" and kind == "task")) else 0,
-             jdumps(meta["scope_paths"]), s.get("slice_key"),
+             jdumps(meta["scope_paths"]), meta["subagent_hint"], s.get("slice_key"),
              s.get("source_step_id"), "pending", now),
         )
     conn.execute(
@@ -1687,7 +1777,7 @@ def _slice_last_step(steps: list[dict], plan_step_id: str) -> str | None:
 def _step_fields_from_patch(fields: dict) -> dict:
     allowed = {
         "title", "instructions", "acceptance", "contract", "role_slug",
-        "depends_on", "scope_paths", "evidence_required",
+        "depends_on", "scope_paths", "evidence_required", "subagent_hint",
     }
     unknown = sorted(set(fields) - allowed)
     if unknown:
@@ -2124,8 +2214,8 @@ def _insert_revision_steps(conn: sqlite3.Connection, wid: str,
             "INSERT INTO workflow_steps (workflow_id, step_id, title, role_slug, "
             "instructions, depends_on_json, acceptance_json, gate, reviewer, contract, "
             "kind, on_reject_json, max_rework, rework_count, source_step_id, slice_key, "
-            "evidence_required, status, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "evidence_required, subagent_hint, status, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (wid, raw_step["id"], raw_step.get("title") or raw_step["id"],
              raw_step.get("role") or "", raw_step.get("instructions") or "",
              jdumps(raw_step.get("depends_on") or []),
@@ -2137,6 +2227,7 @@ def _insert_revision_steps(conn: sqlite3.Connection, wid: str,
              int(raw_step.get("max_rework") or 0), 0,
              raw_step.get("source_step_id"), raw_step.get("slice_key"),
              1 if raw_step.get("evidence_required") else 0,
+             1 if raw_step.get("subagent_hint") else 0,
              "pending", now),
         )
 
@@ -2222,6 +2313,8 @@ def _apply_revision_locked(conn: sqlite3.Connection, wid: str, intent: dict,
                 db_fields["scope_paths_json"] = jdumps(fields["scope_paths"] or [])
             if "evidence_required" in fields:
                 db_fields["evidence_required"] = 1 if fields["evidence_required"] else 0
+            if "subagent_hint" in fields:
+                db_fields["subagent_hint"] = 1 if fields["subagent_hint"] else 0
             if db_fields:
                 sets = ", ".join(f"{k}=?" for k in db_fields)
                 conn.execute(
@@ -2246,6 +2339,8 @@ def _apply_revision_locked(conn: sqlite3.Connection, wid: str, intent: dict,
                         dstep["scope_paths"] = fields["scope_paths"] or []
                     if "evidence_required" in fields:
                         dstep["evidence_required"] = bool(fields["evidence_required"])
+                    if "subagent_hint" in fields:
+                        dstep["subagent_hint"] = bool(fields["subagent_hint"])
 
         _validate_runtime_graph(conn, wid)
         plan = dict(state["plan"] or {})

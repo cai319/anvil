@@ -254,6 +254,48 @@ def list_tasks(status: str | None = Query(default=None), assignee: str | None = 
                                    archived_only=archived_only)
 
 
+@router.get("/status-summary")
+def task_status_summary(task_ids: str = Query(default=""), conn=Depends(get_db)):
+    """大厅/任务卡用的批量角色状态源：当前 workflow + 每角色最近一次 run。
+
+    只返回展示所需字段；前端 taskRoleState 需要 workflow（失败/返工/等待人工）和
+    最近 run（包括 completed/failed 等终态），不能只依赖 active runs。
+    """
+    ids = [x.strip() for x in task_ids.split(",") if x.strip()][:200]
+    if not ids:
+        return []
+    out = []
+    for tid in ids:
+        wf = services.workflow.get_for_task(conn, tid)
+        wf_summary = None
+        if wf is not None:
+            wf_summary = {
+                "id": wf.get("id"),
+                "status": wf.get("status"),
+                "steps": [
+                    {key: step.get(key) for key in (
+                        "step_id", "role_slug", "status", "slice_key",
+                        "recovery_count", "next_retry_at")}
+                    for step in (wf.get("steps") or [])
+                ],
+            }
+        rows = conn.execute(
+            "SELECT role_slug, status, started_at FROM runs "
+            "WHERE task_id=? AND role_slug IS NOT NULL "
+            "ORDER BY COALESCE(started_at,'') DESC, rowid DESC", (tid,),
+        ).fetchall()
+        statuses: dict[str, dict] = {}
+        for row in rows:
+            role = row["role_slug"]
+            if role not in statuses:
+                statuses[role] = {
+                    "status": row["status"],
+                    "started_at": row["started_at"],
+                }
+        out.append({"task_id": tid, "workflow": wf_summary, "run_statuses": statuses})
+    return out
+
+
 @router.get("/{tid}", response_model=TaskOut)
 def get_task(tid: str, conn=Depends(get_db)):
     t = services.tasks.get(conn, tid)

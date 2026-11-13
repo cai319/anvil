@@ -1,6 +1,8 @@
 """Workflow API：草案批准 → 创建工作流（不生成子任务）、步骤提交、gate 审核、收件箱聚合。"""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytest.importorskip("anvil.main")
@@ -173,13 +175,73 @@ DYNAMIC_TREE = {
     ],
     "loop": {
         "from": "P1",
-        "execute": {"role": "developer"},
-        "verify": {"role": "pm"},
-        "fix": {"role": "developer"},
-        "verify2": {"role": "pm"},
-        "decide": {"role": "pm", "max_rework": 2},
+        "execute": {"role": "developer", "subagent_hint": False},
+        "verify": {"role": "pm", "subagent_hint": False},
+        "fix": {"role": "developer", "subagent_hint": False},
+        "verify2": {"role": "pm", "subagent_hint": False},
+        "decide": {"role": "pm", "max_rework": 2, "subagent_hint": False},
     },
 }
+
+
+async def test_task_status_summary_includes_workflow_and_terminal_run(client, seeded, app):
+    """大厅批量状态必须能拿到 workflow 与终态 run，而不是只看 active runs。"""
+    await client.post("/api/v1/tasks", json=task_payload(
+        id="T-SUM", assignees=["pm", "developer"]), headers=auth_headers())
+    created = await client.post("/api/v1/board/drafts", headers=auth_headers("pm"), json={
+        "goal": "状态摘要", "source_task": "T-SUM", "kind": "workflow", "tree": WF_TREE})
+    assert created.status_code == 201, created.text
+    approved = await client.post("/api/v1/board/drafts/approve", headers=human_headers(),
+                                 json={"draft_ids": [created.json()["id"]]})
+    assert approved.status_code == 200, approved.text
+
+    from anvil.services import runs as runs_service
+    conn = open_conn(app.state.db_path)
+    try:
+        run = runs_service.create_run(conn, "pm", "T-SUM", prompt="状态摘要")
+        runs_service.set_status(conn, run["id"], "failed", ended_at="2026-11-13T00:00:00+00:00",
+                                failure_class="test")
+    finally:
+        conn.close()
+
+    r = await client.get("/api/v1/tasks/status-summary?task_ids=T-SUM")
+    assert r.status_code == 200, r.text
+    item = r.json()[0]
+    assert item["task_id"] == "T-SUM"
+    assert item["workflow"]["steps"]
+    assert item["run_statuses"]["pm"]["status"] == "failed"
+
+
+async def test_approve_revalidates_agent_draft_subagent_hint(client, seeded, app):
+    """旧草案/人工改过的草案在审批时必须重新检查显式 hint，不能静默按 false 落库。"""
+    await client.post("/api/v1/tasks", json=task_payload(
+        id="T-HINT", assignees=["pm", "developer"]), headers=auth_headers())
+    created = await client.post("/api/v1/board/drafts", headers=auth_headers("pm"), json={
+        "goal": "运行时切片", "source_task": "T-HINT", "kind": "workflow",
+        "tree": DYNAMIC_TREE})
+    assert created.status_code == 201, created.text
+    did = created.json()["id"]
+
+    conn = open_conn(app.state.db_path)
+    try:
+        row = conn.execute("SELECT tree_json FROM board_drafts WHERE id=?", (did,)).fetchone()
+        tree = json.loads(row["tree_json"])
+        del tree["loop"]["verify"]["subagent_hint"]
+        conn.execute("UPDATE board_drafts SET tree_json=? WHERE id=?",
+                     (json.dumps(tree), did))
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = await client.post("/api/v1/board/drafts/approve", headers=human_headers(),
+                          json={"draft_ids": [did]})
+    assert r.status_code == 409, r.text
+    assert "subagent_hint" in r.text
+    conn = open_conn(app.state.db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) AS n FROM workflows").fetchone()["n"] == 0
+    finally:
+        conn.close()
 
 
 async def test_plan_slices_api_expands_runtime_plan(client, seeded, app):

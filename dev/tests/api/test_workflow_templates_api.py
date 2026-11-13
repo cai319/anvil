@@ -209,11 +209,12 @@ async def test_import_workflow_keeps_loop_and_slots(client, seeded):
         ],
         "loop": {
             "from": "P1",
-            "execute": {"role": "developer", "title": "执行"},
-            "verify": {"role": "tester", "title": "验证"},
-            "fix": {"role": "developer", "title": "修复"},
-            "verify2": {"role": "tester", "title": "复验"},
-            "decide": {"role": "pm", "title": "决策", "max_rework": 2},
+            "execute": {"role": "developer", "title": "执行", "subagent_hint": False},
+            "verify": {"role": "tester", "title": "验证", "subagent_hint": False},
+            "fix": {"role": "developer", "title": "修复", "subagent_hint": False},
+            "verify2": {"role": "tester", "title": "复验", "subagent_hint": False},
+            "decide": {"role": "pm", "title": "决策", "max_rework": 2,
+                       "subagent_hint": False},
         },
     }
     await client.post(f"{API}/tasks", json=task_payload(

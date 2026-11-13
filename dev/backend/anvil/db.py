@@ -283,6 +283,7 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     decision_options_json TEXT NOT NULL DEFAULT '[]',
     evidence_json    TEXT NOT NULL DEFAULT '[]',
     evidence_required INTEGER NOT NULL DEFAULT 0,
+    subagent_hint    INTEGER NOT NULL DEFAULT 0,  -- 1 = 该 step 注入只读 subagent 调查提示
     packet_id        TEXT,
     submitted_at     TEXT,
     scope_paths_json TEXT NOT NULL DEFAULT '[]',
@@ -1317,6 +1318,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_context_return_v1(conn)
     _migrate_claim_release_v1(conn)
     _migrate_subagents_v1(conn)
+    _migrate_subagent_hint_v1(conn)
     _migrate_knowledge_repos_v1(conn)
     _migrate_notes_repo_ids_v2(conn)
     _migrate_knowledge_quality_v1(conn)
@@ -1846,6 +1848,19 @@ def _migrate_subagents_v1(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
     _set_setting(conn, "schema.subagents_v1", "1")
+    conn.commit()
+
+
+def _migrate_subagent_hint_v1(conn: sqlite3.Connection) -> None:
+    """workflow step 是否注入只读 subagent 调查提示。"""
+    if _setting(conn, "schema.subagent_hint_v1"):
+        return
+    try:
+        conn.execute(
+            "ALTER TABLE workflow_steps ADD COLUMN subagent_hint INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    _set_setting(conn, "schema.subagent_hint_v1", "1")
     conn.commit()
 
 

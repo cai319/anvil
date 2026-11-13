@@ -36,6 +36,7 @@ ROLE_SLUG_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 STEP_FIELDS = {
     "id", "title", "kind", "role_slot", "reviewer_slot", "depends_on",
     "instructions", "acceptance", "gate", "contract", "on_reject", "max_rework",
+    "subagent_hint",
 }
 
 

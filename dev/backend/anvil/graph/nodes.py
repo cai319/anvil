@@ -83,14 +83,50 @@ def _runtime_id(effective: dict) -> str | None:
 
 def _supports_subagents(conn: sqlite3.Connection, run: dict,
                         effective: dict) -> bool:
-    """运行时是否声明支持原生 subagent；能力来自 runtime YAML capabilities。"""
+    """运行时是否声明支持原生 subagent。
+
+    优先使用 run 的 effective/snapshot 能力，避免 DB 未 discover 或运行中改 YAML
+    造成误判；最后回退到内置 runtime 定义。
+    """
     try:
+        projection = effective.get("projection") or {}
+        caps = projection.get("runtime_capabilities")
+        if isinstance(caps, dict) and "supports_subagents" in caps:
+            return bool(caps["supports_subagents"])
         runtime_id = _runtime_id(effective) or config.DEFAULT_RUNTIME
         row = runtime_service.get(conn, runtime_id) or {}
-        caps = row.get("capabilities") or {}
-        return bool(caps.get("supports_subagents"))
+        db_caps = row.get("capabilities") or {}
+        if isinstance(db_caps, str):
+            db_caps = jloads(db_caps, {})
+        if isinstance(db_caps, dict) and "supports_subagents" in db_caps:
+            return bool(db_caps["supports_subagents"])
+        definition = runtime_service.load_definitions().get(runtime_id) or {}
+        yaml_caps = definition.get("capabilities") or {}
+        return bool(yaml_caps.get("supports_subagents"))
     except Exception:  # noqa: BLE001 —— 能力查询失败按不支持处理
         return False
+
+
+def _step_subagent_hint(conn: sqlite3.Connection, run: dict) -> bool:
+    """当前 run 对应的 workflow step 是否由 Cindy 标记了 subagent_hint。"""
+    step_id = run.get("step_id")
+    workflow_id = run.get("workflow_id")
+    if not step_id or not workflow_id:
+        return False
+    row = conn.execute(
+        "SELECT subagent_hint FROM workflow_steps WHERE workflow_id=? AND step_id=?",
+        (workflow_id, step_id),
+    ).fetchone()
+    return bool(row and row["subagent_hint"])
+
+
+def _projection_protocol(conn: sqlite3.Connection, run: dict,
+                         effective: dict) -> str:
+    """投影到 CLAUDE.md/AGENTS.md 的协议；只有标记 step 才附带 subagent 提示。"""
+    protocol = _protocol_for_run(conn, run)
+    if _step_subagent_hint(conn, run) and _supports_subagents(conn, run, effective):
+        protocol = protocol + "\n\n" + render.SUBAGENT_PROTOCOL
+    return protocol
 
 
 def _persistent_session(conn: sqlite3.Connection, effective: dict) -> dict | None:
@@ -628,10 +664,8 @@ def _project_run(conn: sqlite3.Connection, run: dict, *,
         topic_knowledge=ctx.get("topic_knowledge", ""),
         knowledge_repos=ctx.get("knowledge_repos"),
         prompt=(((str(run.get("wake_note") or "").strip() + "\n\n")
-                 if run.get("wake_note") else "") + (run.get("prompt") or "")
-                + ("\n\n" + render.SUBAGENT_PROTOCOL
-                   if _supports_subagents(conn, run, effective) else "")),
-        protocol=_protocol_for_run(conn, run),
+                 if run.get("wake_note") else "") + (run.get("prompt") or "")),
+        protocol=_projection_protocol(conn, run, effective),
     )
     _project_catalog(conn, effective, workspace_path, run["role_slug"])
     if app_config.CONTEXT_MANIFEST_ENABLED:
@@ -752,8 +786,6 @@ def spawn_node(state: dict, config) -> dict:
                  window_floor, runtime_id, ws_path) = _render_persistent(
                     conn, run, task, effective, role, workspace_path)
                 prompt = _prompt_for_run(conn, run, task)
-                if _supports_subagents(conn, run, effective):
-                    prompt = prompt + "\n\n" + render.SUBAGENT_PROTOCOL
                 delivery = daemon_service.get_manager().ensure_and_deliver(
                     conn, run["role_slug"], executable=exe, args_new=args_new,
                     args_resume=args_resume, ctx=pctx, cwd=cwd, env=env, prompt=prompt,

@@ -14,6 +14,8 @@ export interface RoleStatus {
   busyElsewhere: boolean;
 }
 
+type WorkflowRoleInput = Pick<Workflow, "status" | "steps">;
+
 interface WorkflowRoleSignal {
   hasSteps: boolean;
   failed: boolean;
@@ -26,7 +28,7 @@ interface WorkflowRoleSignal {
 }
 
 function workflowRoleSignal(
-  workflow: Workflow | null | undefined,
+  workflow: WorkflowRoleInput | null | undefined,
   role: string,
   sliceKey?: string | null,
 ): WorkflowRoleSignal {
@@ -50,7 +52,7 @@ export interface TaskRoleStateInput {
   task: Task;
   role: string;
   runtime?: RoleRuntimeStatus;
-  workflow?: Workflow | null;
+  workflow?: WorkflowRoleInput | null;
   /** 当前任务 + 它的委派/派遣子任务；排队和上下文按这个集合归属。 */
   relatedTaskIds?: string[];
   sliceKey?: string | null;
