@@ -93,6 +93,18 @@ def run_timeline(rid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth))
     return services.runs.run_timeline(conn, rid)
 
 
+@router.get("/runs/{rid}/subagents")
+def run_subagents(rid: str, status: str | None = None, limit: int = 100,
+                  conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    """该 run 的运行时子代理观测记录（只读；Anvil 不管理其状态机）。"""
+    run = services.runs.get_run(conn, rid)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    access.assert_run_read(conn, auth, run)
+    return services.runs.list_subagents(
+        conn, run_id=rid, status=status, limit=limit)
+
+
 @router.get("/runs/{rid}/log")
 def run_log(rid: str, conn=Depends(get_db),
             auth: Auth = Depends(require_human)):
@@ -232,6 +244,16 @@ def _reset(run_id: str, mode: str, request: Request, conn) -> dict:
             conn.execute("DELETE FROM memory_fts WHERE role_slug=?", (run["role_slug"],))
         except Exception:  # noqa: BLE001
             pass
+        conn.commit()
+
+    if mode == "restart" and run.get("workflow_id") and run.get("step_id"):
+        marker = f"manual-restart {run_id} {now_iso()}"
+        dispatch_service.append_wake_note(
+            conn, run_id,
+            f"[{marker}] 人工重启：继续步骤 {run['step_id']}（workflow "
+            f"{run['workflow_id']}）。旧的交叉确认/重复唤醒已处理，不要重复回复；"
+            "先 `anvil step show` 确认步骤仍 running，再继续推进。",
+            once_marker=marker)
         conn.commit()
 
     # 三档重置都回到 created，由调度器重新 project + spawn：

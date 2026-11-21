@@ -246,7 +246,8 @@ def test_help_contains_rules_and_examples():
     """--help 必须能直接指导执行，而不是只列参数名。"""
     cases = [
         (["task", "-h"], ["示例:", "knowledge-write", "anvil task create", "reviewers",
-                          "--issue-board", "anvil task reviewers"]),
+                          "--issue-board", "anvil task reviewers", "task note",
+                          "--for-step", "委派只用于", "派遣只用于"]),
         (["step", "plan", "-h"], ["plan.json", "slices", "不得指定角色"]),
         (["role", "-h"], ["role list", "role expand"]),
         (["workflow", "revise", "-h"], ["revision.json", "--preview", "requires_restart"]),

@@ -24,6 +24,7 @@ from .services import board as board_service
 from .services import daemon as daemon_service
 from .services import dispatch as dispatch_service
 from .services import governance, leases, runs as runs_service, tasks as tasks_service
+from .services import wake as wake_service
 from .services import workflow as workflow_service
 from .util import ConflictError, now_iso
 
@@ -84,6 +85,7 @@ class Scheduler:
         phases = (
             ("governance", lambda: governance.tick(conn, dispatch=True, plans_only=True)),
             ("advance_workflows", lambda: self._advance_workflows(conn)),
+            ("flush_wake_requests", lambda: self._flush_wake_requests(conn)),
             ("reap_revision_drafts",
              lambda: board_service.reap_stale_revision_drafts(conn)),
             ("finalize_ready_tasks", lambda: self._finalize_ready_tasks(conn)),
@@ -95,6 +97,8 @@ class Scheduler:
             ("pump_created", lambda: self._pump_created(conn)),
             ("monitor", lambda: self._monitor(conn)),
             ("clear_terminal_role_runs", lambda: self._clear_terminal_role_runs(conn)),
+            ("reap_interrupted_subagents",
+             lambda: self._reap_interrupted_subagents(conn)),
             ("reap_dead_runs", lambda: self._reap_dead_runs(conn)),
             ("release_requested_claims", lambda: tasks_service.process_release_requests(conn)),
             ("reap_orphaned_step_runs", lambda: self._reap_orphaned_step_runs(conn)),
@@ -222,6 +226,207 @@ class Scheduler:
                                        failure_class=fc)
         self._nudge_stalled(conn)
 
+    def _flush_wake_requests(self, conn) -> None:
+        """投递服务层登记的唤醒请求；目标解析与 spawn 能力都只在调度器里。"""
+        cutoff = (datetime.now(timezone.utc) - timedelta(
+            seconds=max(1, int(config.WAKE_REQUEST_LEASE_SECONDS)))).isoformat()
+        stale = wake_service.reset_stale(conn, cutoff)
+        pruned = wake_service.prune(
+            conn, (datetime.now(timezone.utc) - timedelta(days=7)).isoformat())
+        if stale or pruned:
+            conn.commit()
+        for req in wake_service.pending(conn):
+            try:
+                self._deliver_wake_request(conn, req)
+            except Exception:  # noqa: BLE001 —— 单条失败不阻断其它请求
+                logger.exception("wake request delivery failed id=%s", req.get("id"))
+                try:
+                    conn.rollback()
+                    wake_service.requeue(conn, int(req["id"]), "delivery error")
+                    conn.commit()
+                except sqlite3.Error:
+                    pass
+
+    def _deliver_wake_request(self, conn, req: dict) -> None:
+        req_id = int(req["id"])
+        cur = conn.execute(
+            "UPDATE wake_requests SET status='processing', claimed_at=? "
+            "WHERE id=? AND status='pending'", (now_iso(), req_id))
+        conn.commit()
+        if cur.rowcount != 1:
+            return  # 另一个调度器实例已领取
+        if int(req.get("attempts") or 0) >= config.WAKE_REQUEST_MAX_ATTEMPTS:
+            wake_service.mark(conn, req_id, "failed", "max delivery attempts")
+            conn.commit()
+            return
+        marker = f"wake-request #{req_id}"
+        if req.get("workflow_id") and req.get("step_id"):
+            self._deliver_step_wake(conn, req, marker)
+        else:
+            self._deliver_task_wake(conn, req, marker)
+
+    def _retry_or_persist_note(self, conn, req: dict, run: dict,
+                               marker: str) -> None:
+        """目标仍 running：持久化 note，保留 pending 重试到可投递状态。
+
+        重试有上限；超过后 note 已持久化，标 done，等下一次 resume/nudge 消费。
+        """
+        req_id = int(req["id"])
+        dispatch_service.append_wake_note(
+            conn, run["id"], req["note"], once_marker=marker)
+        attempts = int(req.get("attempts") or 0) + 1
+        if attempts >= config.WAKE_REQUEST_MAX_ATTEMPTS:
+            wake_service.mark(conn, req_id, "done", "run running; note persisted")
+        else:
+            wake_service.requeue(conn, req_id, "run running; retrying")
+        conn.commit()
+
+    def _deliver_step_wake(self, conn, req: dict, marker: str) -> None:
+        """唤醒父 step：suspended run → note+resume；无 run → 重置 pending 后 advance。"""
+        req_id = int(req["id"])
+        wf = workflow_service.get_workflow(conn, req["workflow_id"])
+        if wf is None or wf["status"] != "running":
+            wake_service.mark(conn, req_id, "skipped", "workflow not running")
+            conn.commit()
+            return
+        task_row = conn.execute(
+            "SELECT t.status, t.archived_at FROM workflows w "
+            "JOIN tasks t ON t.id=w.task_id WHERE w.id=?",
+            (req["workflow_id"],)).fetchone()
+        if (task_row is None or task_row["status"] in ("done", "closed")
+                or task_row["archived_at"]):
+            wake_service.mark(conn, req_id, "skipped", "task not active")
+            conn.commit()
+            return
+        step = next((s for s in wf["steps"]
+                     if s["step_id"] == req["step_id"]), None)
+        if step is None or step["status"] not in ("pending", "running"):
+            wake_service.mark(
+                conn, req_id, "skipped",
+                f"step {req['step_id']} is {step['status'] if step else 'missing'}")
+            conn.commit()
+            return
+        if step["status"] == "pending":
+            # 新 run 由 advance 创建，续跑头会带上 child task 等待状态。
+            wake_service.mark(conn, req_id, "done", "step pending; advance")
+            conn.commit()
+            self._advance_workflows(conn)
+            return
+        # workflow_steps.run_id 是权威绑定；历史/重置数据可能缺少 runs 上的
+        # workflow_id/step_id，不能只按 run 字段反查。
+        run = None
+        if step.get("run_id"):
+            run = conn.execute(
+                "SELECT * FROM runs WHERE id=?", (step["run_id"],)).fetchone()
+        if run is None:
+            run = conn.execute(
+                "SELECT * FROM runs WHERE workflow_id=? AND step_id=? "
+                "ORDER BY started_at DESC LIMIT 1",
+                (req["workflow_id"], req["step_id"])).fetchone()
+        if run is not None and run["status"] in ("submitted", "reviewing"):
+            wake_service.mark(conn, req_id, "skipped", "run is in HITL review")
+            conn.commit()
+            return
+        if run is None or run["status"] not in (
+                "created", "projecting", "running", "suspended"):
+            # 步骤 running 但 run 丢失/终态：与 nudge 的恢复路径一致，释放 lease
+            # 后重置 pending，重新启动。
+            lease_row = conn.execute(
+                "SELECT lease_id FROM workflow_steps WHERE workflow_id=? AND step_id=?",
+                (req["workflow_id"], req["step_id"])).fetchone()
+            leases.release(
+                conn, lease_row["lease_id"] if lease_row else None, commit=False)
+            conn.execute(
+                "UPDATE workflow_steps SET status='pending', run_id=NULL, "
+                "started_at=NULL, next_retry_at=NULL, lease_id=NULL, "
+                "fence_token=0, updated_at=? "
+                "WHERE workflow_id=? AND step_id=? AND status='running'",
+                (now_iso(), req["workflow_id"], req["step_id"]))
+            wake_service.mark(conn, req_id, "done", "step reset to pending")
+            conn.commit()
+            self._advance_workflows(conn)
+            return
+        if run["status"] == "running":
+            self._retry_or_persist_note(conn, req, run, marker)
+            return
+        # 等待人类决策的 suspended run 不自动 resume。
+        if tasks_service.waiting_for_human(
+                conn, wf["task_id"], req["role_slug"], req.get("slice_key")):
+            wake_service.mark(conn, req_id, "skipped", "waiting for human")
+            conn.commit()
+            return
+        dispatch_service.append_wake_note(
+            conn, run["id"], req["note"], once_marker=marker)
+        conn.commit()
+        if not self._pump(run["id"], "wake" if run["status"] == "created" else "resume"):
+            wake_service.requeue(conn, req_id, "pump failed")
+            conn.commit()
+            return
+        wake_service.mark(conn, req_id, "done", f"delivered to run {run['id']}")
+        conn.commit()
+
+    def _deliver_task_wake(self, conn, req: dict, marker: str) -> None:
+        """唤醒 child task 的责任角色（如委派被打回后返工）。"""
+        req_id = int(req["id"])
+        task = tasks_service.get(conn, req["task_id"])
+        if task is None or task["status"] in ("done", "closed"):
+            wake_service.mark(conn, req_id, "skipped", "task not active")
+            conn.commit()
+            return
+        # 先按任务状态门禁：in_review 的返工唤醒不能把 HITL run 拉回执行。
+        if task["status"] not in ("todo", "in_progress"):
+            wake_service.mark(
+                conn, req_id, "skipped", f"task is {task['status']}")
+            conn.commit()
+            return
+        role = req["role_slug"]
+        assignees = task.get("assignees") or []
+        if role not in assignees and task.get("assignee") != role:
+            wake_service.mark(conn, req_id, "skipped", f"role {role} not assigned")
+            conn.commit()
+            return
+        from .services import roles as roles_service
+        role_row = roles_service.get(conn, role)
+        if role_row is None or not role_row.get("enabled", True):
+            wake_service.mark(conn, req_id, "skipped", f"role {role} disabled")
+            conn.commit()
+            return
+        run = runs_service.find_active_run(conn, req["task_id"], role)
+        if run is not None:
+            if run["status"] in ("submitted", "reviewing"):
+                wake_service.mark(conn, req_id, "skipped", "run is in HITL review")
+                conn.commit()
+                return
+            if run["status"] == "running":
+                self._retry_or_persist_note(conn, req, run, marker)
+                return
+            if tasks_service.waiting_for_human(
+                    conn, req["task_id"], role, req.get("slice_key")):
+                wake_service.mark(conn, req_id, "skipped", "waiting for human")
+                conn.commit()
+                return
+            dispatch_service.append_wake_note(
+                conn, run["id"], req["note"], once_marker=marker)
+            conn.commit()
+            if not self._pump(
+                    run["id"], "wake" if run["status"] == "created" else "resume"):
+                wake_service.requeue(conn, req_id, "pump failed")
+                conn.commit()
+                return
+            wake_service.mark(conn, req_id, "done", f"delivered to run {run['id']}")
+            conn.commit()
+            return
+        created = runs_service.create_run(conn, role, req["task_id"])
+        dispatch_service.append_wake_note(
+            conn, created["id"], req["note"], once_marker=marker)
+        conn.commit()
+        if not self._pump(created["id"], "wake"):
+            wake_service.requeue(conn, req_id, "pump failed after create")
+            conn.commit()
+            return
+        wake_service.mark(conn, req_id, "done", f"created run {created['id']}")
+        conn.commit()
+
     def _finalize_ready_tasks(self, conn) -> None:
         """兜底：workflow 已 done 但 task 仍在 in_progress 时重试进入最终评审。"""
         rows = conn.execute(
@@ -294,8 +499,14 @@ class Scheduler:
                 return True
         return False
 
-    def _awaiting_external_work(self, conn, run_id: str | None, role: str) -> bool:
-        """该 suspended run 是否在等派遣/临时切片处理完成，而不是步骤停滞。"""
+    def _awaiting_external_work(self, conn, run_id: str | None, role: str,
+                                workflow_id: str | None = None,
+                                step_id: str | None = None) -> bool:
+        """该 suspended run 是否在等 child task/临时切片处理完成，而不是步骤停滞。
+
+        等待必须有界：委派负责人长期无产出时恢复 nudge，由父 step 显式上报，
+        最终走 step_stalled 的失败路径，不能永久静默。
+        """
         if not run_id:
             return False
         # 只有“回切已经就绪/正在投递”才短暂等待；open 派遣不阻塞来源 watchdog。
@@ -307,6 +518,21 @@ class Scheduler:
                 "AND COALESCE(updated_at, created_at) >= ? LIMIT 1",
                 (run_id, cutoff)).fetchone():
             return True
+        # 委派工单：负责人 todo/in_progress 时父 step 合法休眠；
+        # in_review 表示“等父 step 验收”，必须让父 step 被唤醒而不是继续抑制。
+        if workflow_id and step_id:
+            wf = workflow_service.get_workflow(conn, workflow_id)
+            if wf is not None and wf["status"] == "running":
+                wait = workflow_service.child_task_wait_state(
+                    conn, wf, step_id, run_id)
+                if wait["state"] == "delegation":
+                    oldest = min(
+                        (_elapsed_seconds(c.get("created_at")) for c in wait["children"]),
+                        default=0.0)
+                    if oldest < config.DELEGATION_WAIT_SECONDS:
+                        return True
+                elif wait["state"] == "dispatch":
+                    return True
         # 临时切片只有在标记仍“可推进”时才等待：attempts 耗尽或超过 TTL 后
         # 必须放行，否则一条陈旧标记会永久抑制步骤 nudge。
         dispatch_service.expire_stale_context_returns(conn, run_id)
@@ -350,7 +576,9 @@ class Scheduler:
         ).fetchall()
         for r in rows:
             rs = r["run_status"]
-            if self._awaiting_external_work(conn, r["run_id"], r["role_slug"]):
+            if self._awaiting_external_work(
+                    conn, r["run_id"], r["role_slug"],
+                    workflow_id=r["workflow_id"], step_id=r["step_id"]):
                 continue
             # run 丢失/已结束但步骤仍 running：重置为 pending，让 advance 重新启动
             if rs is None or rs == "completed":
@@ -406,6 +634,29 @@ class Scheduler:
                 continue
             # 放行 nudge 前再清一次过期标记，避免 resolver 与本路径双投递。
             dispatch_service.expire_stale_context_returns(conn, r["run_id"])
+            nudge_no = int(r["nudge_count"] or 0) + 1
+            marker = f"step-nudge {r['step_id']} #{nudge_no}"
+            wait = {"state": "none", "children": []}
+            wf = workflow_service.get_workflow(conn, r["workflow_id"])
+            if wf is not None:
+                wait = workflow_service.child_task_wait_state(
+                    conn, wf, r["step_id"], r["run_id"])
+            if wait["state"] == "delegation_review":
+                ids = "、".join(c["id"] for c in wait["children"][:3])
+                detail = (f"委派 {ids} 已提交待验收：先执行 `anvil task delegation-accept` "
+                          "或 `delegation-reject`，再继续本步骤。")
+            elif wait["state"] == "delegation":
+                ids = "、".join(c["id"] for c in wait["children"][:3])
+                detail = (f"仍在等待委派 {ids}；若长期无产出，@human 说明情况并请求处理，"
+                          "不要重复创建同一委派。")
+            else:
+                detail = "请先检查最近反馈是否已处理，再继续或提交。"
+            dispatch_service.append_wake_note(
+                conn, r["run_id"],
+                f"[{marker}] 步骤 {r['step_id']} 已超过 "
+                f"{int(config.STEP_NUDGE_SECONDS)} 秒未推进；{detail}",
+                once_marker=marker)
+            conn.commit()
             if not self._pump(r["run_id"], "resume"):
                 continue
             conn.execute(
@@ -446,7 +697,11 @@ class Scheduler:
             "AND (r.step_id IS NULL OR r.step_id='') "
             "AND COALESCE(r.recovered_by,'')='' "
             "AND COALESCE(r.recovery_exhausted,0)=0 "
-            "AND t.status='in_progress' AND t.archived_at IS NULL "
+            # 派遣/委派子任务的 run 在负责人 claim 之前就已创建；失败时任务仍是 todo，
+            # 若只恢复 in_progress 会永久卡住该子任务。
+            "AND (t.status='in_progress' OR (t.status='todo' "
+            "AND COALESCE(t.type,'') IN ('dispatch','dispatched','delegation'))) "
+            "AND t.archived_at IS NULL "
             "AND COALESCE(r.ended_at,r.started_at) >= ? "
             "ORDER BY COALESCE(r.ended_at,r.started_at) LIMIT 20",
             (cutoff,)).fetchall()
@@ -651,6 +906,46 @@ class Scheduler:
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "clear terminal role run failed role=%s run=%s", role, run_id)
+
+    def _reap_interrupted_subagents(self, conn) -> None:
+        """观测收尾：run 已非 running 或进程已不再持有该子代理 → interrupted。
+
+        只写 run_subagents，不参与/不触发任何调度、唤醒或等待判定。
+        """
+        rows = conn.execute(
+            "SELECT id, run_id, role_slug, tool_use_id FROM run_subagents "
+            "WHERE status='running' LIMIT 500").fetchall()
+        if not rows:
+            return
+        mgr = daemon_service.get_manager()
+        managed = mgr is not None and getattr(mgr, "enabled", False)
+        now = now_iso()
+        changed = False
+        for row in rows:
+            run = conn.execute(
+                "SELECT status FROM runs WHERE id=?", (row["run_id"],)).fetchone()
+            if run is None:
+                reason = "run_deleted"
+            elif run["status"] != "running":
+                reason = f"run_{run['status']}"
+            elif managed:
+                try:
+                    active = mgr.active_subagent_ids(row["run_id"])
+                except Exception:  # noqa: BLE001 —— 观测失败不误伤
+                    active = None
+                reason = (None if active is None or row["tool_use_id"] in active
+                          else "turn_ended_or_process_lost")
+            else:
+                reason = None
+            if reason:
+                conn.execute(
+                    "UPDATE run_subagents SET status='interrupted', "
+                    "interrupt_reason=?, ended_at=COALESCE(ended_at, ?), updated_at=? "
+                    "WHERE id=? AND status='running'",
+                    (reason, now, now, row["id"]))
+                changed = True
+        if changed:
+            conn.commit()
 
     def _reap_dead_runs(self, conn) -> None:
         """常驻进程已死但 run 仍 running → 宽限期后转 suspended。

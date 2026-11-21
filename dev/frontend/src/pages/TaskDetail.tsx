@@ -109,7 +109,7 @@ function DelegationCard({ d, onChanged }: { d: Delegation; onChanged: () => void
   const cancel = async () => {
     const ok = await confirmDialog({
       title: "取消委派？",
-      message: "取消后父 step 仍需人工处理该委派才能收口。",
+      message: "取消后视为该委派已解除，父 step 会被自动唤醒继续；子任务保留审计但不再参与门禁。",
       confirmLabel: "取消委派",
       danger: true,
     });
@@ -117,7 +117,8 @@ function DelegationCard({ d, onChanged }: { d: Delegation; onChanged: () => void
     void run(() => api.cancelTask(d.id));
   };
 
-  const canAccept = d.status === "in_review";
+  // 只有绑定父 step 的委派工单才有验收/打回语义；普通历史子任务不显示。
+  const canAccept = Boolean(d.parent_step_id) && d.status === "in_review";
   const canCancel = d.status === "todo" || d.status === "in_progress";
   const delegator = d.created_by?.startsWith("agent:")
     ? d.created_by.slice("agent:".length)
@@ -595,7 +596,7 @@ const KNOWLEDGE_MODE_LABEL: Record<string, string> = {
 const REPO_STATE_HINT: Record<string, string> = {
   applied: "已按任务标签/文本自动关联。",
   suggested: "低置信度建议，确认后才会参与检索。",
-  needs_cindy: "任务还没有标签，派发后由 Cindy 识别。",
+  needs_cindy: "任务还没有标签，启动后由 Cindy 识别。",
   fallback: "未匹配到主题知识库，回退到任务级/临时知识空间 + shared。",
   locked: "已人工固定，自动识别和 Cindy 不会覆盖。",
   off: "知识仓库功能已关闭。",
@@ -1542,6 +1543,9 @@ export function TaskDetail({ id }: { id: string }) {
     const tone = statusTone(st.status);
     const label = STATUS_META[st.status].label;
     const stepDelegations = delegations.filter((d) => d.parent_step_id === st.step_id);
+    const openDelegations = stepDelegations.filter(
+      (d) => d.status !== "done" && d.status !== "closed");
+    const reviewPending = openDelegations.some((d) => d.status === "in_review");
     return (
       <div key={st.step_id} className="wf-step">
         <span className="wf-id mono">{st.step_id}</span>
@@ -1551,6 +1555,12 @@ export function TaskDetail({ id }: { id: string }) {
             <span className="wf-role">{st.role_slug}</span>
             {st.reviewer && <span className="wf-role">验证：{st.reviewer}</span>}
             {st.gate && <span className="badge wf-gate">审核门</span>}
+            {st.subagent_hint && (
+              <span className="badge wf-gate"
+                title="该步骤角色可在同一 turn 内使用运行时只读子代理；由运行时管理，Anvil 只观测">
+                子代理调查
+              </span>
+            )}
             {st.kind === "decision" && (
               <span className={`badge wf-gate ${stepAuthority(st) === "joint" ? "is-joint" : ""}`}>
                 {stepAuthority(st) === "human" ? "人工决策"
@@ -1563,6 +1573,14 @@ export function TaskDetail({ id }: { id: string }) {
             {stepDelegations.length > 0 && (
               <span className="badge wf-gate" title="本步骤的委派工单">
                 委派 {stepDelegations.length}
+              </span>
+            )}
+            {st.status === "running" && openDelegations.length > 0 && (
+              <span className="badge wf-gate"
+                title={reviewPending
+                  ? "委派已提交，等待本步骤角色验收"
+                  : "父步骤休眠等待委派负责人完成；完成后会自动唤醒"}>
+                {reviewPending ? "待验收委派" : "等待委派"} {openDelegations.length}
               </span>
             )}
             <span className={`status tone-${tone}`}>{label}</span>
@@ -1861,31 +1879,31 @@ export function TaskDetail({ id }: { id: string }) {
               <button
                 className="primary"
                 disabled={busy}
-                title="0 角色时 Cindy 会先分析并建议角色；plan_first 或多角色任务先由 planner/Cindy 规划工作流；单角色任务若无标签或知识仓库匹配较弱，也会先由 Cindy 识别知识仓库。草案经你批准后执行"
+                title="0 角色时 Cindy 会先分析并建议角色；plan_first 或多角色任务先由 planner/Cindy 规划工作流；单角色任务若无标签或知识仓库匹配较弱，也会先由 Cindy 识别知识仓库。草案经你批准后执行。这是启动/规划入口，不是派遣子任务。"
                 onClick={() => act(async () => {
                   const res = await api.dispatchTask(id);
                   setDispatchNote(
                     res.mode === "planning"
                       ? (task.assignees?.length
-                          ? `规划助理 ${res.planner} 正在分析任务并设计工作流…草案将出现在收件箱，批准后自动派发子任务。`
+                          ? `规划助理 ${res.planner} 正在分析任务并设计工作流…草案将出现在收件箱，批准后自动启动步骤执行。`
                           : `规划助理 ${res.planner} 正在分析任务与角色缺口；若角色不足，会先提交角色建议等待你审批。`)
                       : res.mode === "pending_review"
                         ? (res.draft_kind === "role_suggestion"
                             ? "已有待审角色建议，请到收件箱审阅批准。"
                             : "已有待审工作流草案，请到收件箱审阅批准。")
-                        : "已直接派发参与角色。");
+                        : "已直接启动参与角色执行。");
                 })}
               >{(task.assignees?.length ?? 0) === 0
-                  ? "派发（Cindy 分析并建议角色）"
+                  ? "启动（Cindy 分析并建议角色）"
                   : (task.assignees?.length ?? 0) >= 2
-                    ? "派发（先由 Cindy 规划）"
+                    ? "启动（先由 Cindy 规划）"
                     : task.plan_first
-                      ? "派发（先规划工作流）"
+                      ? "启动（先规划工作流）"
                       : (!task.knowledge_binding_locked
                           && ["needs_cindy", "suggested", "fallback"].includes(
                             task.knowledge_binding_state ?? ""))
-                        ? "派发（Cindy 识别知识仓库）"
-                        : "派发并执行"}</button>
+                        ? "启动（Cindy 识别知识仓库）"
+                        : "启动并执行"}</button>
             )}
             {task.status === "in_progress" && (
               <>
@@ -2028,7 +2046,7 @@ export function TaskDetail({ id }: { id: string }) {
                       })}
                     >{d.kind === "workflow_revision" ? "应用修订（不重启）"
                       : d.kind === "workflow" ? "批准并启动工作流"
-                        : "批准并落板（子任务按依赖自动派发）"}</button>
+                        : "批准并落板（步骤按依赖自动启动）"}</button>
                   </div>
                 </div>
               ))}
@@ -2376,7 +2394,7 @@ export function TaskDetail({ id }: { id: string }) {
             )}
           </div>
           {!displayWorkflow && (
-            <p className="muted">还没有工作流。多角色任务派发后，Cindy 会生成步骤状态机并在此展示；也可以直接套用已发布模板。</p>
+            <p className="muted">还没有工作流。多角色任务启动后，Cindy 会生成步骤状态机并在此展示；也可以直接套用已发布模板。</p>
           )}
           {displayWorkflow && (
             <>

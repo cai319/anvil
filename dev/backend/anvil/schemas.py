@@ -185,6 +185,14 @@ class TaskOut(BaseModel):
     created_by: str | None = None
     parent_id: str | None = None
     parent_step_id: str | None = None
+    source_task_id: str | None = None
+    source_slice_key: str | None = None
+    source_step_id: str | None = None
+    source_workflow_id: str | None = None
+    requested_by: str | None = None
+    dispatch_status: str | None = None
+    dispatch_reason: str | None = None
+    dispatch_reason_json: Any = None
     due_at: str | None = None
     depends_on: list[str] = Field(default_factory=list)
     knowledge_repos: list[dict[str, Any]] = Field(default_factory=list)

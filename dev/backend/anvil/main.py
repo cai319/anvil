@@ -255,6 +255,12 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             graph_nodes.project_run_by_path(path, run_id)
         role_daemon.on_project = _on_project
 
+        def _on_render(run_id: str) -> str | None:
+            """写 stdin 前按最新 DB 重算提示词（排队期间新增的 wake_note/未读）。"""
+            from .graph import nodes as graph_nodes
+            return graph_nodes.prompt_for_run_by_path(path, run_id)
+        role_daemon.on_render = _on_render
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # 启动自愈（P0-3）：上一实例崩溃遗留的 running/projecting run → suspended（可 @mention 续跑）

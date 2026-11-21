@@ -256,6 +256,82 @@ async def test_delegate_submit_notifies_delegator(client, app):
     assert mention is not None and "委派已提交" in mention[0]
 
 
+def _wake_requests(app, task_id: str | None = None) -> list[tuple]:
+    conn = sqlite3.connect(app.state.db_path)
+    try:
+        sql = ("SELECT task_id, role_slug, workflow_id, step_id, reason, status, note "
+               "FROM wake_requests")
+        params: tuple = ()
+        if task_id:
+            sql += " WHERE task_id=?"
+            params = (task_id,)
+        return conn.execute(sql + " ORDER BY id", params).fetchall()
+    finally:
+        conn.close()
+
+
+async def test_delegation_submit_enqueues_parent_step_wake(client, app):
+    """负责人 submit → 父 step 角色收到待验收唤醒请求（带上 workflow/step）。"""
+    await _seed(client)
+    wid = await _workflow(client, app)
+    child = (await _delegation(client, app)).json()
+    _set_task_status(app, child["id"], "in_progress")
+
+    submitted = await client.post(
+        f"{API}/tasks/{child['id']}/submit",
+        headers=_agent_headers(app, "developer", "tok-owner-dev"),
+        json={"summary": "PoC 完成"})
+    assert submitted.status_code == 200, submitted.text
+
+    rows = _wake_requests(app, "T-WF")
+    row = next(r for r in rows if r[4] == "delegation.submitted")
+    assert row[1] == "pm"
+    assert row[2] == wid and row[3] == "S1"
+    assert row[5] == "pending"
+    assert child["id"] in row[6] and "delegation-accept" in row[6]
+
+
+async def test_delegation_accept_and_cancel_enqueue_parent_step_wake(client, app):
+    await _seed(client)
+    wid = await _workflow(client, app)
+    child = (await _delegation(client, app)).json()
+    _set_task_status(app, child["id"], "in_review")
+
+    accepted = await client.post(
+        f"{API}/tasks/{child['id']}/delegation/accept",
+        headers=_agent_headers(app, "pm", "tok-delegator-pm"))
+    assert accepted.status_code == 200, accepted.text
+    reasons = [r[4] for r in _wake_requests(app, "T-WF")]
+    assert "delegation.accepted" in reasons
+
+    other = (await _delegation(client, app, title="第二个委派")).json()
+    cancelled = await client.post(
+        f"{API}/tasks/{other['id']}/cancel", headers=human_headers())
+    assert cancelled.status_code == 200, cancelled.text
+    rows = [r for r in _wake_requests(app, "T-WF") if r[4] == "delegation.cancelled"]
+    assert rows and rows[-1][2] == wid and rows[-1][3] == "S1"
+    assert "视为已解除" in rows[-1][6]
+
+
+async def test_delegation_reject_enqueues_owner_wake(client, app):
+    await _seed(client)
+    await _workflow(client, app)
+    child = (await _delegation(client, app)).json()
+    _set_task_status(app, child["id"], "in_review")
+
+    rejected = await client.post(
+        f"{API}/tasks/{child['id']}/delegation/reject",
+        headers=_agent_headers(app, "pm", "tok-delegator-pm"),
+        json={"feedback": "缺少命令输出"})
+    assert rejected.status_code == 200, rejected.text
+
+    rows = _wake_requests(app, child["id"])
+    row = next(r for r in rows if r[4] == "delegation.rejected")
+    assert row[1] == "developer"
+    assert row[2] is None and row[3] is None
+    assert "缺少命令输出" in row[6]
+
+
 async def test_final_review_waits_for_children(client, app):
     """workflow 已 done 但委派未完成时，父任务不能进入最终评审。"""
     from anvil.db import open_conn
@@ -286,3 +362,132 @@ async def test_final_review_waits_for_children(client, app):
         assert task["status"] == "in_review"
     finally:
         conn.close()
+
+
+async def test_closed_delegation_does_not_block_parent_submit(client, app):
+    """人工取消的委派（closed）视为已解除，父任务 submit 不再被卡。"""
+    from anvil.util import now_iso
+
+    await _seed(client)
+    created = await client.post(
+        f"{API}/tasks", json=task_payload(id_="T-PLAIN", assignee="pm"),
+        headers=auth_headers())
+    assert created.status_code == 201, created.text
+    now = now_iso()
+    conn = sqlite3.connect(app.state.db_path)
+    try:
+        conn.execute("UPDATE tasks SET status='in_progress' WHERE id='T-PLAIN'")
+        conn.execute(
+            "INSERT INTO tasks (id,title,status,type,parent_id,parent_step_id,"
+            "assignee,created_at,updated_at) VALUES "
+            "('C-CLOSED','已取消委派','closed','delegation','T-PLAIN','S1',"
+            "'developer',?,?)", (now, now))
+        conn.commit()
+    finally:
+        conn.close()
+
+    submitted = await client.post(
+        f"{API}/tasks/T-PLAIN/submit", json={"summary": "父任务完成"},
+        headers=_agent_headers(app, "pm", "tok-parent-submit"))
+    assert submitted.status_code == 200, submitted.text
+
+
+async def test_cannot_delegate_to_current_step_role(client, app):
+    """同角色委派会自锁：目标角色 == 当前 step 角色必须拒绝。"""
+    await _seed(client)
+    await _workflow(client, app)
+    r = await _delegation(client, app, assignee="pm")
+    assert r.status_code == 409, r.text
+    assert "current step" in r.text or "own role" in r.text
+
+
+async def test_step_final_failure_closes_open_delegations(client, app, monkeypatch):
+    from anvil import config
+    from anvil.db import open_conn
+    from anvil.services import workflow as workflow_service
+
+    monkeypatch.setattr(config, "AUTO_RECOVER_ENABLED", False)
+    await _seed(client)
+    wid = await _workflow(client, app)
+    child = (await _delegation(client, app)).json()
+
+    conn = open_conn(app.state.db_path)
+    try:
+        workflow_service.fail_step(conn, wid, "S1", "boom", "agent_error")
+        conn.commit()
+        status = conn.execute(
+            "SELECT status FROM tasks WHERE id=?", (child["id"],)).fetchone()["status"]
+        assert status == "closed"
+    finally:
+        conn.close()
+
+
+async def test_terminate_workflow_closes_open_delegations(client, app):
+    from anvil.db import open_conn
+    from anvil.services import workflow as workflow_service
+
+    await _seed(client)
+    wid = await _workflow(client, app)
+    child = (await _delegation(client, app)).json()
+
+    conn = open_conn(app.state.db_path)
+    try:
+        workflow_service.terminate_running_workflows(conn, "T-WF", "test")
+        status = conn.execute(
+            "SELECT status FROM tasks WHERE id=?", (child["id"],)).fetchone()["status"]
+        assert status == "closed"
+    finally:
+        conn.close()
+
+
+async def test_parent_cancel_closes_delegation_children(client, app):
+    await _seed(client)
+    await _workflow(client, app)
+    child = (await _delegation(client, app)).json()
+
+    cancelled = await client.post(
+        f"{API}/tasks/T-WF/cancel", headers=human_headers())
+    assert cancelled.status_code == 200, cancelled.text
+    conn = sqlite3.connect(app.state.db_path)
+    try:
+        status = conn.execute(
+            "SELECT status FROM tasks WHERE id=?", (child["id"],)).fetchone()[0]
+        assert status == "closed"
+    finally:
+        conn.close()
+
+
+async def test_old_execution_delegation_does_not_block_task_submit(client, app):
+    """旧 execution 的 open 委派不阻塞新 execution 的任务提交。"""
+    from anvil.util import now_iso
+
+    await _seed(client)
+    created = await client.post(
+        f"{API}/tasks", json=task_payload(id_="T-SCOPE", assignee="pm"),
+        headers=auth_headers())
+    assert created.status_code == 201, created.text
+    now = now_iso()
+    conn = sqlite3.connect(app.state.db_path)
+    try:
+        conn.execute("UPDATE tasks SET status='in_progress' WHERE id='T-SCOPE'")
+        conn.execute(
+            "INSERT INTO workflows (id,task_id,definition_json,status,created_by,"
+            "created_at,updated_at,execution_no) VALUES "
+            "('W-OLD','T-SCOPE','{}','terminated','agent:pm',?,?,1)", (now, now))
+        conn.execute(
+            "INSERT INTO workflows (id,task_id,definition_json,status,created_by,"
+            "created_at,updated_at,execution_no) VALUES "
+            "('W-NEW','T-SCOPE','{}','done','agent:pm',?,?,2)", (now, now))
+        conn.execute(
+            "INSERT INTO tasks (id,title,status,type,parent_id,parent_step_id,"
+            "parent_workflow_id,parent_execution_no,assignee,created_at,updated_at) "
+            "VALUES ('C-OLD','旧委派','in_progress','delegation','T-SCOPE','S1',"
+            "'W-OLD',1,'developer',?,?)", (now, now))
+        conn.commit()
+    finally:
+        conn.close()
+
+    submitted = await client.post(
+        f"{API}/tasks/T-SCOPE/submit", json={"summary": "完成"},
+        headers=_agent_headers(app, "pm", "tok-scope-pm"))
+    assert submitted.status_code == 200, submitted.text

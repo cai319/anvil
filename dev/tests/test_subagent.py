@@ -100,6 +100,18 @@ def test_projection_protocol_injects_only_for_marked_step_and_capable_runtime(tm
     protocol = nodes._projection_protocol(conn, run, effective)
     assert render.SUBAGENT_PROTOCOL in protocol
     assert "条件化只读调查" in protocol
+    # 普通步骤不注入安全审计 checker 话术。
+    assert render.SUBAGENT_AUDIT_PROTOCOL not in protocol
+
+    # 问题板 reviewer 的 hint step 才追加审计 checker 协议。
+    conn.execute("UPDATE tasks SET issue_board_enabled=1 WHERE id='T1'")
+    conn.execute(
+        "INSERT INTO task_reviewers (task_id, role_slug, source, added_at) "
+        "VALUES ('T1','auditor','human',?)", (now_iso(),))
+    conn.commit()
+    reviewer_protocol = nodes._projection_protocol(conn, run, effective)
+    assert render.SUBAGENT_AUDIT_PROTOCOL in reviewer_protocol
+    assert "verdict" in reviewer_protocol
 
     # 未标记的 step 不注入。
     conn.execute("UPDATE workflow_steps SET subagent_hint=0 WHERE workflow_id=? AND step_id='S1'",
@@ -124,14 +136,23 @@ def test_subagent_protocol_text_is_condition_based():
     from anvil.graph import render
 
     text = render.SUBAGENT_PROTOCOL
-    for needle in ("拆", "不拆", "单一 condition", "verdict", "confidence",
-                   "evidence", "call_chain", "open_questions", "条件逻辑",
-                   "不投票", "LSP", "tree-sitter", "grep"):
+    for needle in ("拆", "不拆", "单一明确问题", "conclusion", "confidence",
+                   "evidence", "open_questions", "LSP", "tree-sitter", "grep",
+                   "turn 级", "不会跨 turn"):
         assert needle in text, needle
+    # 非审计步骤不被 checker 的 verdict/TP/FP 话术绑死。
+    assert "verdict" not in text
+    assert "TP" not in text
+
+    audit = render.SUBAGENT_AUDIT_PROTOCOL
+    for needle in ("condition_id", "verdict", "call_chain", "TP", "FP", "不投票"):
+        assert needle in audit, needle
     assert "局部实现" not in text
     assert "并行实现" not in render.DELEGATION_PROTOCOL
     assert "subagent_hint" in render.PLANNING_PROTOCOL
     assert "verify/verify2/fix" in render.PLANNING_PROTOCOL
+    assert "Roster" in render.REVISION_PROTOCOL
+    assert "subagent_hint" in render.REVISION_PROTOCOL
 
 
 def test_loop_phase_subagent_hint_propagates_to_generated_steps(tmp_path):
@@ -304,4 +325,371 @@ def test_subagent_protocol_survives_task_description_in_projection(tmp_path):
     text = target.read_text(encoding="utf-8")
     assert "## 协议" in text
     assert "条件化只读调查" in text
-    assert "verdict" in text
+    assert "conclusion" in text
+
+
+def _seed_run(conn, *, run_id="R1", status="running", session="sess-1"):
+    from anvil.util import now_iso
+    now = now_iso()
+    conn.execute(
+        "INSERT OR IGNORE INTO tasks (id,title,status,created_at,updated_at) "
+        "VALUES ('T1','t','in_progress',?,?)", (now, now))
+    conn.execute(
+        "INSERT OR REPLACE INTO runs (id,role_slug,task_id,status,native_session_id,"
+        "slice_key,step_id,started_at) VALUES (?,?,?,?,?,'A','S1',?)",
+        (run_id, "dev", "T1", status, session, now))
+    conn.commit()
+
+
+def _tool_use(tool_id="tu-1", name="Task"):
+    return {"type": "assistant", "message": {"content": [{
+        "type": "tool_use", "id": tool_id, "name": name,
+        "input": {"subagent_type": "Explore", "description": "搜索调用点",
+                  "prompt": "查找所有调用点"},
+    }]}}
+
+
+def _tool_result(tool_id="tu-1", text="找到 3 处调用"):
+    return {"type": "user", "message": {"content": [{
+        "type": "tool_result", "tool_use_id": tool_id,
+        "content": [{"type": "text", "text": text}],
+    }]}}
+
+
+def test_subagent_records_full_runtime_attribution(tmp_path):
+    conn, mgr = _manager(tmp_path)
+    _seed_run(conn)
+    role = mgr._role("dev")
+    role.current_run_id = "R1"
+    role.current_task_id = "T1"
+    role.current_step_id = "S1"
+    role.proc_generation = 3
+    role.session_id = "sess-1"
+
+    mgr._track_subagent(role, _tool_use())  # noqa: SLF001
+
+    row = open_conn(str(tmp_path / "sub.db")).execute(
+        "SELECT * FROM run_subagents WHERE run_id='R1'").fetchone()
+    assert row["subagent_type"] == "Explore"
+    assert row["proc_generation"] == 3
+    assert row["native_session_id"] == "sess-1"
+    assert row["slice_key"] == "A"
+    assert row["step_id"] == "S1"
+    conn.close()
+
+
+def test_turn_end_marks_running_subagent_interrupted(tmp_path):
+    conn, mgr = _manager(tmp_path)
+    _seed_run(conn)
+    role = mgr._role("dev")
+    role.current_run_id = "R1"
+    role.current_task_id = "T1"
+    mgr._track_subagent(role, _tool_use())  # noqa: SLF001
+
+    mgr._finish_subagents(conn, role, "R1")  # noqa: SLF001
+
+    row = conn.execute(
+        "SELECT status, interrupt_reason FROM run_subagents WHERE run_id='R1'"
+    ).fetchone()
+    assert row["status"] == "interrupted"
+    assert row["interrupt_reason"] == "turn_ended"
+    assert role.active_subagents == {}
+    conn.close()
+
+
+def test_late_tool_result_keeps_interrupted_but_records_result(tmp_path):
+    conn, mgr = _manager(tmp_path)
+    _seed_run(conn)
+    role = mgr._role("dev")
+    role.current_run_id = "R1"
+    role.current_task_id = "T1"
+    mgr._track_subagent(role, _tool_use())  # noqa: SLF001
+    mgr._finish_subagents(conn, role, "R1")  # noqa: SLF001
+
+    mgr._track_subagent(role, _tool_result())  # noqa: SLF001 —— 内存已清，走晚到路径
+
+    row = conn.execute(
+        "SELECT status, interrupt_reason, result_summary FROM run_subagents "
+        "WHERE run_id='R1'").fetchone()
+    assert row["status"] == "interrupted"
+    assert row["interrupt_reason"] == "turn_ended"
+    assert "找到 3 处" in row["result_summary"]
+    conn.close()
+
+
+def test_late_tool_result_completes_still_running_row(tmp_path):
+    conn, mgr = _manager(tmp_path)
+    _seed_run(conn)
+    role = mgr._role("dev")
+    role.current_run_id = "R1"
+    role.current_task_id = "T1"
+    mgr._track_subagent(role, _tool_use())  # noqa: SLF001
+    role.active_subagents.clear()  # 模拟内存丢失但 turn 未结束
+
+    mgr._track_subagent(role, _tool_result())  # noqa: SLF001
+
+    row = conn.execute(
+        "SELECT status, result_summary FROM run_subagents WHERE run_id='R1'"
+    ).fetchone()
+    assert row["status"] == "completed"
+    assert "找到 3 处" in row["result_summary"]
+    conn.close()
+
+
+def test_repeated_tool_use_does_not_reset_terminal_state(tmp_path):
+    conn, mgr = _manager(tmp_path)
+    _seed_run(conn)
+    role = mgr._role("dev")
+    role.current_run_id = "R1"
+    role.current_task_id = "T1"
+    mgr._track_subagent(role, _tool_use())  # noqa: SLF001
+    mgr._track_subagent(role, _tool_result())  # noqa: SLF001
+    ended = conn.execute(
+        "SELECT ended_at FROM run_subagents WHERE run_id='R1'").fetchone()["ended_at"]
+
+    mgr._track_subagent(role, _tool_use())  # noqa: SLF001 —— 重复事件
+
+    row = conn.execute(
+        "SELECT status, ended_at, result_summary FROM run_subagents WHERE run_id='R1'"
+    ).fetchone()
+    assert row["status"] == "completed"
+    assert row["ended_at"] == ended
+    assert "找到 3 处" in row["result_summary"]
+    conn.close()
+
+
+def test_daemon_restart_heals_running_subagents(tmp_path):
+    conn, mgr = _manager(tmp_path)
+    _seed_run(conn)
+    role = mgr._role("dev")
+    role.current_run_id = "R1"
+    role.current_task_id = "T1"
+    mgr._track_subagent(role, _tool_use())  # noqa: SLF001
+
+    mgr._heal_subagents()  # noqa: SLF001 —— 进程重启后不存在存活子代理
+
+    row = conn.execute(
+        "SELECT status, interrupt_reason FROM run_subagents WHERE run_id='R1'"
+    ).fetchone()
+    assert row["status"] == "interrupted"
+    assert row["interrupt_reason"] == "daemon_restart"
+    conn.close()
+
+
+def test_subagent_state_is_not_read_by_scheduling_decisions():
+    """运行时 subagent 只可观测：调度/工作流/租约/上下文清单不得读取其状态。"""
+    import inspect
+    from pathlib import Path
+    from anvil import scheduler as scheduler_mod
+    from anvil.services import context_manifest, leases, workflow
+
+    decision_sources = [
+        inspect.getsource(scheduler_mod.Scheduler._awaiting_external_work),
+        inspect.getsource(scheduler_mod.Scheduler._nudge_stalled),
+        inspect.getsource(scheduler_mod.Scheduler._advance_workflows),
+        Path(inspect.getsourcefile(workflow)).read_text(encoding="utf-8"),
+        Path(inspect.getsourcefile(leases)).read_text(encoding="utf-8"),
+        Path(inspect.getsourcefile(context_manifest)).read_text(encoding="utf-8"),
+    ]
+    for source in decision_sources:
+        assert "run_subagents" not in source
+        assert "active_subagents" not in source
+
+
+def _insert_role_with_runtime(conn, slug: str, runtime_id: str) -> None:
+    from anvil.util import now_iso
+    now = now_iso()
+    conn.execute(
+        "INSERT OR REPLACE INTO roles (slug,display_name,home_path,definition_json,"
+        "created_at,updated_at,enabled) VALUES (?,?,?,?,?,?,1)",
+        (slug, slug, f"/tmp/{slug}",
+         __import__("json").dumps({"runtime": {"id": runtime_id}}), now, now))
+    conn.commit()
+
+
+def test_unsupported_runtime_downgrades_flat_step_hint_with_audit(tmp_path):
+    from anvil.services import runtime as runtime_service
+    from anvil.services import workflow as wf_service
+    from anvil.util import now_iso
+
+    conn = connect(str(tmp_path / "downgrade-flat.db"))
+    now = now_iso()
+    runtime_service.register(
+        conn, id="nocap", display_name="nocap", executable_path="/bin/true",
+        status="ready", capabilities={"supports_subagents": False})
+    _insert_role_with_runtime(conn, "dev", "nocap")
+    conn.execute("INSERT INTO tasks (id,title,status,created_at,updated_at) "
+                 "VALUES ('T1','t','todo',?,?)", (now, now))
+    conn.commit()
+
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [{
+        "id": "S1", "title": "x", "role": "dev", "subagent_hint": True}]},
+        enforce_role_coverage=False)
+    step = conn.execute(
+        "SELECT subagent_hint FROM workflow_steps WHERE workflow_id=? AND step_id='S1'",
+        (wf["id"],)).fetchone()
+    assert step["subagent_hint"] == 0
+    event = conn.execute(
+        "SELECT payload_json FROM events WHERE event_type='subagent_hint.downgraded' "
+        "ORDER BY id DESC LIMIT 1").fetchone()
+    assert event is not None and "nocap" in event["payload_json"]
+    conn.close()
+
+
+def test_unsupported_runtime_downgrades_loop_phases(tmp_path):
+    from anvil.services import runtime as runtime_service
+    from anvil.services import workflow as wf_service
+    from anvil.util import now_iso
+
+    conn = connect(str(tmp_path / "downgrade-loop.db"))
+    now = now_iso()
+    runtime_service.register(
+        conn, id="nocap", display_name="nocap", executable_path="/bin/true",
+        status="ready", capabilities={"supports_subagents": False})
+    for slug in ("dev", "auditor", "lead"):
+        _insert_role_with_runtime(conn, slug, "nocap")
+    conn.execute("INSERT INTO tasks (id,title,status,created_at,updated_at) "
+                 "VALUES ('T1','切片','todo',?,?)", (now, now))
+    conn.commit()
+
+    definition = {
+        "steps": [{"id": "P1", "title": "切片", "role": "lead",
+                   "kind": "plan_slices", "instructions": "切",
+                   "acceptance": ["可闭环"]}],
+        "loop": {
+            "from": "P1",
+            "execute": {"role": "dev", "subagent_hint": True},
+            "verify": {"role": "auditor", "subagent_hint": True},
+            "decide": {"role": "lead", "subagent_hint": True},
+        },
+    }
+    wf = wf_service.create_workflow(
+        conn, "T1", definition, enforce_role_coverage=False)
+    stored_loop = wf["definition"]["loop"]
+    for phase in ("execute", "verify", "decide"):
+        assert stored_loop[phase]["subagent_hint"] is False, phase
+
+    generated = wf_service._dynamic_slice_steps(
+        conn, "P1", stored_loop, [{"id": "A", "title": "A"}],
+        existing_ids=set(), weight="standard")
+    assert all(g["subagent_hint"] == 0 for g in generated)
+
+    count = conn.execute(
+        "SELECT COUNT(*) AS n FROM events "
+        "WHERE event_type='subagent_hint.downgraded'").fetchone()["n"]
+    assert count >= 3
+    conn.close()
+
+
+def test_supported_runtime_keeps_hint(tmp_path):
+    from anvil.services import runtime as runtime_service
+    from anvil.services import workflow as wf_service
+    from anvil.util import now_iso
+
+    conn = connect(str(tmp_path / "keep-hint.db"))
+    now = now_iso()
+    runtime_service.register(
+        conn, id="cap", display_name="cap", executable_path="/bin/true",
+        status="ready", capabilities={"supports_subagents": True})
+    _insert_role_with_runtime(conn, "dev", "cap")
+    conn.execute("INSERT INTO tasks (id,title,status,created_at,updated_at) "
+                 "VALUES ('T1','t','todo',?,?)", (now, now))
+    conn.commit()
+
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [{
+        "id": "S1", "title": "x", "role": "dev", "subagent_hint": True}]},
+        enforce_role_coverage=False)
+    step = conn.execute(
+        "SELECT subagent_hint FROM workflow_steps WHERE workflow_id=? AND step_id='S1'",
+        (wf["id"],)).fetchone()
+    assert step["subagent_hint"] == 1
+    assert conn.execute(
+        "SELECT 1 FROM events WHERE event_type='subagent_hint.downgraded'"
+    ).fetchone() is None
+    conn.close()
+
+
+def test_planner_roster_exposes_subagent_capability(tmp_path):
+    from anvil.services import planning
+    from anvil.services import runtime as runtime_service
+    from anvil.util import now_iso
+
+    conn = connect(str(tmp_path / "roster.db"))
+    now = now_iso()
+    runtime_service.register(
+        conn, id="nocap", display_name="nocap", executable_path="/bin/true",
+        status="ready", capabilities={"supports_subagents": False})
+    _insert_role_with_runtime(conn, "dev", "nocap")
+    conn.execute("INSERT INTO tasks (id,title,status,created_at,updated_at) "
+                 "VALUES ('T1','t','todo',?,?)", (now, now))
+    conn.execute("INSERT INTO task_assignees (task_id, role_slug, joined_at) "
+                 "VALUES ('T1','dev',?)", (now,))
+    conn.commit()
+
+    roster = planning.build_roster(conn, "T1", ["dev"])
+    assert roster[0]["runtime"]["supports_subagents"] is False
+    text = planning.render_roster(conn, "T1", roster)
+    assert "不支持 subagent" in text
+    conn.close()
+
+
+def test_revision_steps_downgrade_unsupported_hint(tmp_path):
+    from anvil.services import runtime as runtime_service
+    from anvil.services import workflow as wf_service
+    from anvil.util import now_iso
+
+    conn = connect(str(tmp_path / "revision-hint.db"))
+    now = now_iso()
+    runtime_service.register(
+        conn, id="nocap", display_name="nocap", executable_path="/bin/true",
+        status="ready", capabilities={"supports_subagents": False})
+    _insert_role_with_runtime(conn, "dev", "nocap")
+    conn.execute("INSERT INTO tasks (id,title,status,created_at,updated_at) "
+                 "VALUES ('T1','t','todo',?,?)", (now, now))
+    conn.commit()
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [{
+        "id": "S1", "title": "x", "role": "dev"}]},
+        enforce_role_coverage=False)
+
+    wf_service._insert_revision_steps(conn, wf["id"], [{
+        "id": "R1", "title": "新增", "role": "dev", "subagent_hint": True,
+        "depends_on": [], "acceptance": [], "kind": "task",
+    }], now)
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT subagent_hint FROM workflow_steps WHERE workflow_id=? AND step_id='R1'",
+        (wf["id"],)).fetchone()
+    assert row["subagent_hint"] == 0
+    assert conn.execute(
+        "SELECT 1 FROM events WHERE event_type='subagent_hint.downgraded' "
+        "AND workflow_id=?", (wf["id"],)).fetchone() is not None
+    conn.close()
+
+
+def test_hint_true_with_runtime_drift_audits_skip_once(tmp_path):
+    """执行侧 runtime 不再支持时不注入协议，并写一次性 subagent_hint.skipped。"""
+    from anvil.graph import nodes, render
+    from anvil.services import workflow as wf_service
+    from anvil.util import now_iso
+
+    conn = connect(str(tmp_path / "drift.db"))
+    now = now_iso()
+    conn.execute("INSERT INTO tasks (id,title,status,created_at,updated_at) "
+                 "VALUES ('T1','t','todo',?,?)", (now, now))
+    conn.commit()
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [{
+        "id": "S1", "title": "x", "role": "dev", "subagent_hint": True}]},
+        enforce_role_coverage=False)
+    run = {"id": "R1", "role_slug": "dev", "task_id": "T1",
+           "workflow_id": wf["id"], "step_id": "S1"}
+    effective = {"projection": {"runtime": {"id": "nocap"}}}
+
+    protocol = nodes._projection_protocol(conn, run, effective)
+    assert render.SUBAGENT_PROTOCOL not in protocol
+    nodes._projection_protocol(conn, run, effective)
+    count = conn.execute(
+        "SELECT COUNT(*) AS n FROM events "
+        "WHERE event_type='subagent_hint.skipped'").fetchone()["n"]
+    assert count == 1
+    conn.close()

@@ -205,7 +205,7 @@ export function NewTaskModal({ roles, roleStatus, channels = [], defaultChannelI
             })}
           </div>
           <small className="muted">
-            多角色任务派发时，会先由规划助理 Cindy 分析并设计工作流，草案经你批准后按依赖执行。
+            多角色任务启动时，会先由规划助理 Cindy 分析并设计工作流，草案经你批准后按依赖执行。
             任务创建后还会按标签自动关联知识仓库；没有标签时由 Cindy 识别，关联结果可在任务详情查看和修改。
           </small>
         </div>

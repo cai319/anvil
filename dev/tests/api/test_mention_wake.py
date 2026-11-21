@@ -208,3 +208,118 @@ async def test_mention_unknown_role_only_records_text(client, app, seeded):
     finally:
         conn.close()
     assert row is not None
+
+
+async def test_mention_prefers_running_step_run_over_newer_reply(client, app, seeded):
+    """步骤 run 仍 running 时，mention 必须 resume 它，而不是最新的 reply run。"""
+    r = await client.post(f"{API}/tasks", headers=auth_headers(),
+                          json=task_payload(id="T-MENTION-STEP", assignee="pm"))
+    assert r.status_code == 201, r.text
+    conn = open_conn(app.state.db_path)
+    try:
+        wf = workflow_service.create_workflow(conn, "T-MENTION-STEP", {
+            "steps": [{"id": "S1", "title": "x", "role": "report-collector"}]})
+        now = now_iso()
+        conn.execute(
+            "INSERT INTO runs (id,role_slug,task_id,status,workflow_id,step_id,"
+            "started_at) VALUES ('R-STEP','report-collector','T-MENTION-STEP',"
+            "'suspended',?,'S1','2026-01-01T00:00:00+00:00')", (wf["id"],))
+        # 更新、但不是步骤 run 的 reply run：旧逻辑会选中它。
+        conn.execute(
+            "INSERT INTO runs (id,role_slug,task_id,status,started_at) "
+            "VALUES ('R-REPLY','report-collector','T-MENTION-STEP','suspended',?)",
+            ("2026-02-01T00:00:00+00:00",))
+        conn.execute(
+            "UPDATE workflow_steps SET status='running', run_id='R-STEP' "
+            "WHERE workflow_id=? AND step_id='S1'", (wf["id"],))
+        conn.commit()
+    finally:
+        conn.close()
+
+    m = await client.post(f"{API}/tasks/T-MENTION-STEP/mention",
+                          headers=auth_headers("pm"),
+                          json={"target": "report-collector", "message": "请复核 S1 产出"})
+    assert m.status_code == 200, m.text
+
+    pumped = [rid for rid, event, _ in seeded.pumped if event == "resume"]
+    assert "R-STEP" in pumped
+    assert "R-REPLY" not in pumped
+    conn = open_conn(app.state.db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM runs WHERE task_id='T-MENTION-STEP'"
+        ).fetchone()["n"] == 2  # 没有新建 run
+    finally:
+        conn.close()
+
+
+async def test_mention_on_created_step_run_wakes_it_without_reply_run(client, app, seeded):
+    """步骤 run 尚未启动（created）：mention 作为 wake_note 带过去，不另建 reply run。"""
+    r = await client.post(f"{API}/tasks", headers=auth_headers(),
+                          json=task_payload(id="T-MENTION-CREATED", assignee="pm"))
+    assert r.status_code == 201, r.text
+    conn = open_conn(app.state.db_path)
+    try:
+        wf = workflow_service.create_workflow(conn, "T-MENTION-CREATED", {
+            "steps": [{"id": "S1", "title": "x", "role": "report-collector"}]})
+        conn.execute(
+            "INSERT INTO runs (id,role_slug,task_id,status,workflow_id,step_id,"
+            "started_at) VALUES ('R-CREATED','report-collector','T-MENTION-CREATED',"
+            "'created',?,'S1','2026-01-01T00:00:00+00:00')", (wf["id"],))
+        conn.execute(
+            "UPDATE workflow_steps SET status='running', run_id='R-CREATED' "
+            "WHERE workflow_id=? AND step_id='S1'", (wf["id"],))
+        conn.commit()
+    finally:
+        conn.close()
+
+    m = await client.post(f"{API}/tasks/T-MENTION-CREATED/mention",
+                          headers=auth_headers("pm"),
+                          json={"target": "report-collector", "message": "请先看接口契约"})
+    assert m.status_code == 200, m.text
+
+    assert ("R-CREATED", "wake") in [
+        (rid, event) for rid, event, _ in seeded.pumped]
+    conn = open_conn(app.state.db_path)
+    try:
+        run = conn.execute(
+            "SELECT wake_note FROM runs WHERE id='R-CREATED'").fetchone()
+        assert "请先看接口契约" in (run["wake_note"] or "")
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM runs WHERE task_id='T-MENTION-CREATED'"
+        ).fetchone()["n"] == 1
+    finally:
+        conn.close()
+
+
+async def test_governance_suppressed_dispatch_does_not_fallback_reply(client, app, seeded):
+    """frozen/budget 下不能把 dispatch 降级为 reply run 绕过治理闸门。"""
+    from anvil.services import governance
+    from anvil.db import open_conn
+
+    r = await client.post(f"{API}/tasks", headers=auth_headers(),
+                          json=task_payload(id="T-GOV-DISP",
+                                            assignees=["pm", "report-collector"]))
+    assert r.status_code == 201, r.text
+    conn = open_conn(app.state.db_path)
+    try:
+        governance.set_freeze(conn, True)
+    finally:
+        conn.close()
+
+    m = await client.post(
+        f"{API}/tasks/T-GOV-DISP/mention", headers=auth_headers("pm"),
+        json={"target": "report-collector", "message": "请处理独立工作",
+              "context_mode": "dispatch"})
+    assert m.status_code == 200, m.text
+
+    conn = open_conn(app.state.db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM runs WHERE task_id='T-GOV-DISP'"
+        ).fetchone()["n"] == 0
+        assert conn.execute(
+            "SELECT 1 FROM audit WHERE task_id='T-GOV-DISP' "
+            "AND action='dispatch.suppressed'").fetchone() is not None
+    finally:
+        conn.close()

@@ -663,3 +663,36 @@ def test_recover_failed_run_skips_workflow_step_and_non_retryable(tmp_path, monk
         "SELECT recovery_exhausted FROM runs WHERE id='R-HUMAN'").fetchone()
     assert human["recovery_exhausted"] == 1
     conn.close()
+
+
+def test_recover_failed_dispatch_run_before_claim(tmp_path, monkeypatch):
+    """派遣 run 在目标角色 claim 前失败：任务仍是 todo，也必须进入自动恢复。"""
+    monkeypatch.setattr(config, "RUN_AUTO_RECOVER_MAX_ATTEMPTS", 3)
+    env = make_env(tmp_path, monkeypatch)
+    conn = open_conn(env["db_path"])
+    from datetime import datetime, timedelta, timezone
+    now = now_iso()
+    old = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    conn.execute(
+        "INSERT INTO tasks (id,title,status,type,scope_paths_json,acceptance_json,"
+        "created_at,updated_at) VALUES ('T-SRC','来源','in_progress','task','[]','[]',?,?)",
+        (now, now))
+    conn.execute(
+        "INSERT INTO tasks (id,title,status,type,parent_id,scope_paths_json,"
+        "acceptance_json,created_at,updated_at) "
+        "VALUES ('T-DISP','派遣','todo','dispatch','T-SRC','[]','[]',?,?)",
+        (now, now))
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,started_at,ended_at,"
+        "failure_class,origin) VALUES ('R-DISP','dev','T-DISP','failed',?,?,"
+        "'spawn_error','dispatch')", (now, old))
+    conn.commit()
+
+    Scheduler(env["db_path"], env["orch"])._recover_failed_runs(conn)
+
+    new = conn.execute(
+        "SELECT * FROM runs WHERE task_id='T-DISP' AND id<>'R-DISP'").fetchone()
+    assert new is not None
+    assert new["status"] == "created"
+    assert new["recovery_of_run_id"] == "R-DISP"
+    conn.close()

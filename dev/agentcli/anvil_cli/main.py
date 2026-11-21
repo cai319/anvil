@@ -179,6 +179,7 @@ TASK_EPILOG = """\b
 动作:
   list [--type T] [--tag T]             列出任务
   show <id>                             查看任务详情
+  delegations <id>                      查看父任务下的委派工单与父 step 状态
   create --title "..." [--assignee r | --assignees a,b] [--issue-board]
                                         创建任务或委派工单（--parent/--parent-step）
   assign <id> --assignees a,b           追加角色；已有 Roster 时自动提案 @human
@@ -188,6 +189,7 @@ TASK_EPILOG = """\b
   delegation-accept <id>                派发者验收委派工单
   delegation-reject <id> --feedback "…" 派发者打回委派工单
   comment <id> "正文"                   评论，不唤醒任何人
+  note <id> --for-step <step> "正文"    系统备注：带入未来步骤上下文，不唤醒
   mention <id> --to <role> "正文"       @提及并唤醒；自动复用/切换切片上下文
           [--slice S] [--context-mode auto|reuse|switch|dispatch]
   dispatch <id> --to <role> "正文"      创建来源 task 下的派遣子任务（不阻塞，submit 即 done）
@@ -234,9 +236,10 @@ STEP_EPILOG = """\b
   · 只对 running 步骤操作；409 时先用 step show 确认状态，不要反复重试。
   · plan_slices 用 step plan；decision 用 step decide；普通步骤用 step submit。
   · 工作流步骤不要 task claim / task submit，也不要在切片里指定角色。
-  · 同 task 同 slice 的复核用 `anvil task mention` 复用当前上下文；
-    与当前切片弱相关、需要新上下文时用 `anvil task dispatch` 建派遣子任务，
-    不要用 --parent/--parent-step 伪装成委派工单。
+  · 评审/挑战/澄清用 `anvil task mention`；切片外、不影响本步骤完成且需新上下文的工作用
+    `anvil task dispatch`；只有验收依赖另一角色独立交付物（如独立 PoC/复现）且 workflow
+    未排定时，才用 `anvil task create --parent ... --parent-step ...` 建委派，并在提交前验收。
+  · 同一角色不能被委派自己的当前 step（会自锁）；跨角色才会建委派。
   · `anvil inbox check` 默认只看当前切片；要拉全任务需显式 `--task-wide`。
 """
 
@@ -657,6 +660,10 @@ def task_cmd(
         None, "--feedback",
         help="delegation-reject：打回原因",
         rich_help_panel="执行 / 协作"),
+    for_step: str = typer.Option(
+        None, "--for-step",
+        help="note：该备注面向的未来步骤 id",
+        rich_help_panel="执行 / 协作"),
     message: str = typer.Option(None, "--message", "-m",
                                 help="comment/mention：正文（等价位置参数 body）",
                                 rich_help_panel="执行 / 协作"),
@@ -682,9 +689,10 @@ def task_cmd(
     json_out: bool = typer.Option(False, "--json", help="输出 JSON",
                                   rich_help_panel="输出"),
 ):
-    """anvil task <list|show|create|assign|reviewers|claim|unclaim|heartbeat|submit|comment|mention|dispatch|delegation-accept|delegation-reject|cancel|reopen|delete|block|archive|unarchive|knowledge-list|knowledge-write|knowledge-delete> …"""
+    """anvil task <list|show|delegations|create|assign|reviewers|claim|unclaim|heartbeat|submit|comment|mention|dispatch|delegation-accept|delegation-reject|cancel|reopen|delete|block|archive|unarchive|knowledge-list|knowledge-write|knowledge-delete> …"""
     tid = target or DEFAULT_TASK
-    needs_target = {"show", "claim", "unclaim", "heartbeat", "submit", "comment", "mention",
+    needs_target = {"show", "delegations", "delegation-list", "note",
+                    "claim", "unclaim", "heartbeat", "submit", "comment", "mention",
                     "dispatch", "delegation-accept", "delegation-reject",
                     "cancel", "reopen", "delete", "block", "assign", "reviewers",
                     "archive", "unarchive", "knowledge-list", "knowledge-write",
@@ -706,6 +714,8 @@ def task_cmd(
                                     ("parent_id", parent)) if v}
     elif action == "show":
         method, path = "GET", f"/api/v1/tasks/{tid}"
+    elif action in ("delegations", "delegation-list"):
+        method, path = "GET", f"/api/v1/tasks/{tid}/delegations"
     elif action == "create":
         p = {"title": title or body or "untitled"}
         if type_:
@@ -802,17 +812,24 @@ def task_cmd(
             payload["acceptance"] = [x.strip() for x in acceptance.split(";") if x.strip()]
         if scope_paths:
             payload["scope_paths"] = [x.strip() for x in scope_paths.split(",") if x.strip()]
-        if repo:
-            payload["repo"] = repo.strip()
-        if workspace:
-            payload["workspace_id"] = workspace.strip()
-        if base_branch:
-            payload["base_branch"] = base_branch.strip()
+        if repo or workspace or base_branch:
+            typer.echo(
+                "warning: dispatch 子任务继承来源 task 的 repo/workspace/base-branch，"
+                "--repo/--workspace/--base-branch 对 dispatch 不生效。", err=True)
         if context_mode:
             payload["context_mode"] = context_mode.strip()
         if force:
             payload["force"] = True
         method, path = "POST", f"/api/v1/tasks/{tid}/dispatches"
+    elif action == "note":
+        if not body_text:
+            _usage_error(
+                "task note 需要正文",
+                "例如 `anvil task note $ANVIL_TASK_ID --for-step S3 \"该产出已由委派处理\"`。")
+        payload = {"body": body_text}
+        if for_step:
+            payload["for_step"] = for_step.strip()
+        method, path = "POST", f"/api/v1/tasks/{tid}/note"
     elif action == "comment":
         if body_text and "@" in body_text:
             typer.echo(
@@ -1755,6 +1772,55 @@ revision.json 只描述变更 intent（add_slices/remove_slices/update_slices/
 patch_steps）；后端会重新计算影响。安全修订进入收件箱等 human 批准，
 requires_restart 时请改交完整 workflow 草案，由 human 决定是否重启。
 """
+
+subagent_app = typer.Typer(
+    help="运行时子代理（只读观测；由父运行时管理，Anvil 不调度/不唤醒）",
+    context_settings=HELP_CTX)
+app.add_typer(subagent_app, name="subagent")
+
+
+@subagent_app.command("list")
+def subagent_list(
+    run: str = typer.Option(None, "--run", help="按 run id 查询"),
+    role: str = typer.Option(None, "--role", help="按角色查询历史"),
+    task: str = typer.Option(None, "--task", help="按任务查询"),
+    status: str = typer.Option(
+        None, "--status", help="running|completed|interrupted"),
+    limit: int = typer.Option(50, "--limit"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """列出运行时 subagent 观测记录（只读，不创建/终止/唤醒）。"""
+    if run:
+        path = f"/api/v1/runs/{run}/subagents"
+    elif task:
+        path = f"/api/v1/tasks/{task}/subagents"
+    elif role:
+        path = f"/api/v1/roles/{role}/subagents"
+    else:
+        _usage_error(
+            "subagent list 需要 --run / --task / --role 之一",
+            "例如 `anvil subagent list --run <run-id>` 或 "
+            "`anvil subagent list --role auditor --status interrupted`。")
+    params: dict = {"limit": limit}
+    if status:
+        params["status"] = status
+    out = _call("GET", path, params=params)
+    if json_out:
+        _emit(out, True)
+        return
+    if not out:
+        typer.echo("（无记录）")
+        return
+    for it in out:
+        result = str(it.get("result_summary") or "").replace("\n", " ")[:120]
+        typer.echo(
+            f"[{it.get('status')}] {it.get('subagent_type') or it.get('tool_name') or 'subagent'}"
+            f" · {it.get('description') or ''}"
+            f" · run={it.get('run_id')} step={it.get('step_id') or '-'}"
+            + (f" · {result}" if result else "")
+            + (f" · {it.get('interrupt_reason')}"
+               if it.get("interrupt_reason") else ""))
+
 
 workflow_app = typer.Typer(
     help="运行中 workflow 的增量修订（不重启执行）",

@@ -76,7 +76,8 @@ Cindy 在规划时从已选角色中指定 reviewer，并保证 workflow 覆盖�
 ## 当前实现状态
 
 详见 `implementation-status.md`（各里程碑的已实现 / 未实现清单）。当前自动化测试：
-**781 passed + 58 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；未设置时相关用例跳过）。
+**964 passed + 61 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；模型评测需要
+`ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。
 
 切片上下文与派遣子任务默认已启用显式入口（`anvil task dispatch` /
 `POST /tasks/{id}/dispatches`）。`anvil task mention` 默认复用/切换当前切片上下文，
@@ -86,3 +87,22 @@ Agent 之间的自动 mention 派遣由 `ANVIL_DISPATCH_AUTO_FROM_MENTION=1` 开
 `ANVIL_DISPATCH_MAX_DEPTH`（默认 2），回切重试上限
 `ANVIL_DISPATCH_RETURN_MAX_ATTEMPTS`（默认 5）。设计见
 `../docs/superpowers/specs/2026-11-10-slice-context-dispatch-design.md`。
+
+委派工单（`anvil task create --parent ... --parent-step ...`）由 Anvil 管理为阻塞式
+child task：负责人在 `submit`、派发者在 `accept/reject`、human 在 `cancel` 时，都会通过
+持久化唤醒队列（`wake_requests`）主动唤醒父 step 或负责人，不等 10 分钟看门狗。看门狗能
+识别“父 step 正在等委派”，不会误判停滞；等待有上限（`ANVIL_DELEGATION_WAIT_SECONDS`，
+默认 21600 秒），超时后恢复 nudge，要求父 step 上报或 @human 处理。`closed/cancelled`
+的委派视为已解除，不再永久阻塞父 step。
+
+运行时原生 subagent 只做观测：`run_subagents` 记录父运行时归属（role/run/task、
+proc_generation、native_session_id、parent_tool_use_id、slice/step），turn 结束或进程
+退出后统一收尾为 `interrupted`；Anvil 不调度、不唤醒、不把其状态纳入 workflow/lease
+决策。只读查询入口：`GET /runs/{id}/subagents`、`GET /roles/{slug}/subagents`、
+`GET /tasks/{id}/subagents` 与 `anvil subagent list --run|--role|--task`。设计见
+`../docs/superpowers/specs/2026-11-21-runtime-subagent-observability-design.md`。
+
+`subagent_hint` 是规划期提示：角色 runtime 不支持原生 subagent 时，服务端会把所有
+载体的 `true` 自动降为 `false` 并写审计（不拒绝草案）；Cindy 的 Roster 会标注每个角色
+runtime 是否支持 subagent。设计见
+`../docs/superpowers/specs/2026-11-21-subagent-hint-contract-design.md`。

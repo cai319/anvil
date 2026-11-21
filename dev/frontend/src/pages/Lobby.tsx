@@ -106,7 +106,7 @@ async function moveTask(task: Task, target: Task["status"]): Promise<unknown> {
     const team = task.assignees ?? [];
     if (team.length) await api.assignRoles(task.id, team);
     // 0 角色时 Cindy 先分析并建议角色；多角色任务默认先由 Cindy 规划；
-    // 单角色任务直接派发。
+    // 单角色任务直接启动执行。
     await api.dispatchTask(task.id);
     return task;
   }
@@ -363,14 +363,6 @@ export function Lobby() {
                   >
                     <a className="card-link" href={`/tasks/${t.id}`} draggable={false}>
                       <strong className="card-title" title={t.title}>{t.title}</strong>
-                      {t.parent_id && (
-                        <div className="card-tags" title="派遣子任务：挂在来源 task 下，不进入顶层大厅">
-                          <span className="card-tag">
-                            派遣任务 · 来自 {t.parent_id.slice(0, 8)}
-                            {t.source_slice_key ? ` / ${t.source_slice_key}` : ""}
-                          </span>
-                        </div>
-                      )}
                       <div className="card-meta">
                         {t.assignees?.length ? (
                           <span className="card-roles">
@@ -454,8 +446,8 @@ export function Lobby() {
                           className="small"
                           onClick={() => act(t.id, () => moveTask(t, "in_progress"))}
                           disabled={busy === t.id}
-                          title={t.assignees.length >= 2 ? "先由 Cindy 规划工作流，批准后按依赖执行" : "直接派发该角色"}
-                        >{t.assignees.length >= 2 ? "派发（Cindy 规划）" : "派发并执行"}</button>
+                          title={t.assignees.length >= 2 ? "先由 Cindy 规划工作流，批准后按依赖执行" : "直接启动该角色执行"}
+                        >{t.assignees.length >= 2 ? "启动（Cindy 规划）" : "启动并执行"}</button>
                       </div>
                     )}
                     {status === "in_review" && (

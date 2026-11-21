@@ -124,9 +124,42 @@ def _projection_protocol(conn: sqlite3.Connection, run: dict,
                          effective: dict) -> str:
     """投影到 CLAUDE.md/AGENTS.md 的协议；只有标记 step 才附带 subagent 提示。"""
     protocol = _protocol_for_run(conn, run)
-    if _step_subagent_hint(conn, run) and _supports_subagents(conn, run, effective):
+    hinted = _step_subagent_hint(conn, run)
+    supported = _supports_subagents(conn, run, effective)
+    if hinted and supported:
         protocol = protocol + "\n\n" + render.SUBAGENT_PROTOCOL
+        task = (tasks_service.get(conn, run["task_id"])
+                if run.get("task_id") else None)
+        if _is_finding_reviewer(conn, task, run.get("role_slug")):
+            protocol = protocol + "\n\n" + render.SUBAGENT_AUDIT_PROTOCOL
+    elif hinted and not supported:
+        # 执行侧漂移（规划后 runtime 能力变化/旧数据）：不注入协议，但必须留下
+        # 一次性审计，避免「hint=true 却静默失效」。按 run+step 去重。
+        _audit_hint_skipped(conn, run)
     return protocol
+
+
+def _audit_hint_skipped(conn: sqlite3.Connection, run: dict) -> None:
+    run_id = run.get("id")
+    step_id = run.get("step_id")
+    if not run_id or not step_id:
+        return
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM events WHERE event_type='subagent_hint.skipped' "
+            "AND run_id=? AND step_id=? LIMIT 1", (run_id, step_id)).fetchone()
+        if exists is not None:
+            return
+        from ..services import ledger as ledger_service
+        ledger_service.emit(
+            conn, "subagent_hint.skipped", task_id=run.get("task_id"),
+            workflow_id=run.get("workflow_id"), step_id=step_id, run_id=run_id,
+            actor_type="system", actor="projection",
+            payload={"role": run.get("role_slug"),
+                     "reason": "runtime does not support subagents"})
+        conn.commit()
+    except Exception:  # noqa: BLE001 —— 审计失败不影响投影
+        pass
 
 
 def _persistent_session(conn: sqlite3.Connection, effective: dict) -> dict | None:
@@ -401,6 +434,68 @@ def _with_wake_note(run: dict, text: str) -> str:
     return ("## 回到原切片上下文\n" + note + "\n\n" + text).strip()
 
 
+def _continuation_header(conn: sqlite3.Connection, run: dict) -> str:
+    """步骤续跑头：首次/nudge/restart/回切统一告知当前状态与正确动作。"""
+    if not run.get("step_id"):
+        return ""
+    step = conn.execute(
+        "SELECT status, nudge_count, summary, feedback, failure_reason "
+        "FROM workflow_steps WHERE workflow_id=? AND step_id=?",
+        (run.get("workflow_id"), run["step_id"])).fetchone()
+    if step is None:
+        return ""
+    note = str(run.get("wake_note") or "")
+    if "manual-restart" in note or "人工重启" in note:
+        source = "人工重启"
+    elif "step-nudge" in note or "自动唤醒" in note:
+        source = "步骤超时 nudge"
+    elif "回到原切片" in note or "临时上下文" in note:
+        source = "回复结束回切"
+    else:
+        source = "首次启动/继续"
+    lines = [
+        f"## 步骤续跑（{source}）",
+        f"继续步骤 {run['step_id']}（workflow {run.get('workflow_id') or '-'}，"
+        f"角色 {run.get('role_slug') or '-'}）。",
+        f"当前步骤状态：{step['status']}；累计自动唤醒 "
+        f"{int(step['nudge_count'] or 0)} 次。",
+    ]
+    if step["summary"]:
+        lines.append(f"上次摘要：{str(step['summary'])[:400]}")
+    if step["feedback"]:
+        lines.append(f"最近反馈：{str(step['feedback'])[:400]}")
+    if step["failure_reason"]:
+        lines.append(f"失败原因：{str(step['failure_reason'])[:300]}")
+    # child task 等待关系：委派/派遣的推进权在 Anvil，提示词必须显式告诉角色。
+    try:
+        from ..services import workflow as workflow_service
+        wf = workflow_service.get_workflow(conn, run["workflow_id"])
+        if wf is not None:
+            wait = workflow_service.child_task_wait_state(
+                conn, wf, run["step_id"], run.get("id"))
+            items = "；".join(
+                f"{c.get('id')}《{str(c.get('title') or '')[:60]}》{c.get('status')}"
+                for c in wait["children"][:3])
+            if wait["state"] == "delegation":
+                lines.append(
+                    f"等待中的委派：{items}。负责人完成后本步骤会被自动唤醒；"
+                    "不要重复创建同一委派，也不要空转等待。")
+            elif wait["state"] == "delegation_review":
+                lines.append(
+                    f"待验收的委派：{items}。先 `anvil task delegation-accept` "
+                    "或 `delegation-reject` 处理，再提交本步骤。")
+            elif wait["state"] == "dispatch":
+                lines.append("派遣回切已就绪，按回切消息处理后再提交本步骤。")
+    except Exception:  # noqa: BLE001 —— 续跑头增强失败不影响主提示词
+        pass
+    lines.extend([
+        "先执行 `anvil step show <workflow-id> --json` 确认步骤仍为 running；"
+        "若已 approved/pending/被重排，不要 submit，改为回复或报告当前状态。",
+        "旧的交叉确认/重复唤醒可能已处理，不要重复回复同一条消息；确认后继续推进本步骤。",
+    ])
+    return "\n".join(lines)
+
+
 def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> str:
     """按 run 类型选择协议：
     - 工作流步骤：步骤说明 + 最近会话（含 @ 反馈）+ STEP_PROTOCOL
@@ -418,7 +513,7 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
     if run.get("step_id"):
         from ..services import agent_inbox
         task_id = run.get("task_id")
-        parts = [prompt]
+        parts = [_continuation_header(conn, run), prompt]
         if task_id:
             unread = agent_inbox.unread_count(
                 conn, run["role_slug"], task_id, slice_key=run.get("slice_key"))
@@ -428,9 +523,11 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
                     slice_key=run.get("slice_key"))
                 lines = "\n".join(f"- [{i['role']}] {i['text'][:300]}" for i in items)
                 parts.append(
+                    "<!-- ANVIL:UNREAD_START -->\n"
                     f"## 未读会话（{unread} 条，最近 3 条）\n{lines}\n\n"
-                    f"处理完反馈后执行 `anvil inbox commit {task_id} --up-to <最大消息 id>`；"
-                    f"完整未读用 `anvil inbox check {task_id}` 按需拉取（拉模式）。")
+                    f"处理完反馈后执行 `anvil inbox commit --task {task_id} --up-to <最大消息 id>`；"
+                    f"完整未读用 `anvil inbox check --task {task_id}` 按需拉取（拉模式）。\n"
+                    "<!-- ANVIL:UNREAD_END -->")
         hint = _knowledge_hint(conn, run, task)
         if hint:
             parts.append(hint)
@@ -718,6 +815,18 @@ def project_run_by_path(db_path: str, run_id: str) -> bool:
             return False
         _project_run(conn, run, mark_status=False)
         return True
+    finally:
+        conn.close()
+
+
+def prompt_for_run_by_path(db_path: str, run_id: str) -> str | None:
+    """供 daemon 在写 stdin 前重算提示词；失败由调用方退回入队快照。"""
+    conn = open_conn(db_path)
+    try:
+        run = _run(conn, run_id)
+        if not run:
+            return None
+        return _prompt_for_run(conn, run, _task(conn, run.get("task_id")))
     finally:
         conn.close()
 

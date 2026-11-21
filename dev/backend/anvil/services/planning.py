@@ -28,6 +28,19 @@ def _assignees(conn: sqlite3.Connection, task_id: str) -> list[str]:
         "SELECT role_slug FROM task_assignees WHERE task_id=? ORDER BY joined_at", (task_id,))]
 
 
+def _runtime_supports_subagents(conn: sqlite3.Connection,
+                                runtime_id: str | None) -> bool:
+    """规划期能力：让 Cindy 知道该角色是否真能使用运行时原生 subagent。"""
+    if not runtime_id:
+        return False
+    row = runtime_service.get(conn, runtime_id) or {}
+    caps = row.get("capabilities") or {}
+    if isinstance(caps, dict) and "supports_subagents" in caps:
+        return bool(caps["supports_subagents"])
+    definition = runtime_service.load_definitions().get(runtime_id) or {}
+    return bool((definition.get("capabilities") or {}).get("supports_subagents"))
+
+
 def build_roster(conn: sqlite3.Connection, task_id: str,
                  assignees: list[str] | None = None) -> list[dict]:
     """构建规划用 Roster：能力、职责、运行时、负载、写权限、工具。"""
@@ -42,7 +55,9 @@ def build_roster(conn: sqlite3.Connection, task_id: str,
         definition = role.get("definition") or {}
         runtime = definition.get("runtime") or {}
         runtime_id = runtime.get("id") if isinstance(runtime, dict) else runtime
-        runtime_row = runtime_service.get(conn, runtime_id) if runtime_id else None
+        # 未显式绑定时，执行期回退系统默认 runtime；Roster 必须展示同一口径。
+        effective_runtime = runtime_id or config.DEFAULT_RUNTIME
+        runtime_row = runtime_service.get(conn, effective_runtime)
         concurrency = definition.get("concurrency") or {}
         max_parallel = concurrency.get("max_parallel") if isinstance(concurrency, dict) else None
         try:
@@ -65,9 +80,11 @@ def build_roster(conn: sqlite3.Connection, task_id: str,
             "skill_description": definition.get("skill_description") or "",
             "responsibilities": definition.get("responsibilities") or [],
             "runtime": {
-                "id": runtime_id or "",
+                "id": effective_runtime,
                 "status": (runtime_row or {}).get("status") or "unknown",
-            } if runtime_id else {},
+                "supports_subagents": _runtime_supports_subagents(
+                    conn, effective_runtime),
+            },
             "max_parallel": max_parallel,
             "active_runs": active_runs,
             "repos": list(repos or []),
@@ -106,7 +123,11 @@ def render_roster(conn: sqlite3.Connection, task_id: str, roster: list[dict]) ->
         if r.get("responsibilities"):
             parts.append("职责：" + "、".join(str(x) for x in r["responsibilities"]))
         if r.get("runtime", {}).get("id"):
-            parts.append(f"运行时：{r['runtime']['id']}({r['runtime'].get('status')})")
+            subagent = "支持 subagent" if r["runtime"].get(
+                "supports_subagents") else "不支持 subagent"
+            parts.append(
+                f"运行时：{r['runtime']['id']}({r['runtime'].get('status')}; "
+                f"{subagent})")
         if r.get("max_parallel"):
             parts.append(f"并发上限：{r['max_parallel']}")
         parts.append(f"当前活跃 run：{r.get('active_runs', 0)}")

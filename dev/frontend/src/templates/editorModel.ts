@@ -301,6 +301,7 @@ export function definitionFromConcrete(concrete: Record<string, unknown>): {
       contract: raw.contract ? String(raw.contract) : null,
       on_reject: (raw.on_reject as string[]) || [],
       max_rework: raw.max_rework == null ? undefined : Number(raw.max_rework),
+      subagent_hint: raw.subagent_hint === true,
     };
     if (reviewer) step.reviewer_slot = addSlot(reviewer, `reviewer_${reviewer}`);
     return step;
@@ -318,6 +319,7 @@ export function definitionFromConcrete(concrete: Record<string, unknown>): {
             instructions: spec.instructions ? String(spec.instructions) : undefined,
             acceptance: (spec.acceptance as string[]) || [],
             max_rework: spec.max_rework == null ? undefined : Number(spec.max_rework),
+            subagent_hint: spec.subagent_hint === true,
           }]];
         }),
     ),

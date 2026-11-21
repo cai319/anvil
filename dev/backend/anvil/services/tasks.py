@@ -17,7 +17,7 @@ from pathlib import Path
 from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso, read_text_file
 from . import (governance, knowledge, knowledge_binding, ledger, repo_catalog,
-               task_workspace, workspace)
+               task_workspace, wake as wake_service, workspace)
 
 LEASE_SECONDS = 1800  # design §5.5 租期 30 分钟
 TERMINAL_TASK_STATUSES = ("done", "closed")
@@ -162,18 +162,33 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
     else:
         # `repo` 是知识主题；`source_repo` 是可选的 Git 数据来源（不再叫执行 repo）。
         effective_source_repo = source_repo if source_repo is not None else repo
+    # 委派工单绑定创建时正在运行的 workflow/execution；旧 execution 的委派
+    # 不应阻塞重试后的新 step。
+    parent_wf_id = None
+    parent_exec_no = None
+    if parent_id and parent_step_id:
+        wf_row = conn.execute(
+            "SELECT id, execution_no FROM workflows "
+            "WHERE task_id=? AND status='running' "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (parent_id,)).fetchone()
+        if wf_row is not None:
+            parent_wf_id = wf_row["id"]
+            parent_exec_no = int(wf_row["execution_no"] or 1)
     board_enabled = bool(issue_board_enabled)
     conn.execute(
         """INSERT INTO tasks (id, title, type, status, priority, tags_json, repo, workspace_id,
                               base_branch, scope_paths_json, description, acceptance_json,
                               assignee, plan_first, planner, plan_seed_json, created_by, parent_id,
-                              parent_step_id, due_at, created_at, updated_at, issue_board_enabled)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                              parent_step_id, parent_workflow_id, parent_execution_no, due_at,
+                              created_at, updated_at, issue_board_enabled)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (tid, title, type, "todo", priority, jdumps(tags), repo, workspace_id, base_branch,
          jdumps(scope_paths or []), description, jdumps(acceptance or []),
          assignee, int(plan_first or board_enabled), planner,
          jdumps(plan_seed) if plan_seed else None,
-         created_by, parent_id, parent_step_id, due_at, now, now, int(board_enabled)),
+         created_by, parent_id, parent_step_id, parent_wf_id, parent_exec_no, due_at,
+         now, now, int(board_enabled)),
     )
     if board_enabled:
         from . import findings as findings_service
@@ -318,6 +333,20 @@ def assign_roles(conn: sqlite3.Connection, tid: str, roles: list[str]) -> dict:
             f"task {tid} still has executing role(s) with active claims: "
             f"{', '.join(sorted(executing))}; stop their runs before reassigning roles")
     _assert_assignable(conn, roles)
+    removed = set(task.get("assignees") or []) - set(roles)
+    if removed:
+        rows = conn.execute(
+            "SELECT DISTINCT ws.role_slug FROM workflow_steps ws "
+            "JOIN workflows w ON w.id=ws.workflow_id "
+            "WHERE w.task_id=? AND w.status='running' "
+            "AND ws.role_slug IS NOT NULL",
+            (tid,)).fetchall()
+        referenced = sorted(removed & {row["role_slug"] for row in rows})
+        if referenced:
+            raise ConflictError(
+                "cannot remove roles still referenced by the running workflow: "
+                + ", ".join(referenced)
+                + "; revise the workflow or remove the corresponding steps first")
     if task.get("issue_board_enabled"):
         reviewers = set(task.get("reviewer_roles") or [])
         dropped = reviewers - set(roles)
@@ -909,9 +938,17 @@ def review(conn: sqlite3.Connection, tid: str, approve: bool, role: str | None =
             raise ConflictError(
                 f"task {tid} still has a running workflow {with_workflow['id']}; "
                 "terminate it before final review")
-        pending_child = conn.execute(
+        latest = _current_workflow_id(conn, tid)
+        child_sql = (
             "SELECT id FROM tasks WHERE parent_id=? "
-            "AND status NOT IN ('done','closed') LIMIT 1", (tid,)).fetchone()
+            "AND COALESCE(type,'') NOT IN ('dispatch','dispatched') "
+            "AND status NOT IN ('done','closed')")
+        child_params: list = [tid]
+        if latest:
+            child_sql += " AND (parent_workflow_id IS NULL OR parent_workflow_id=?)"
+            child_params.append(latest)
+        pending_child = conn.execute(
+            child_sql + " LIMIT 1", child_params).fetchone()
         if pending_child is not None:
             raise ConflictError(
                 f"task {tid} still has open child task {pending_child['id']}; "
@@ -983,6 +1020,14 @@ def accept_delegation(conn: sqlite3.Connection, tid: str, actor: str | None) -> 
     if delegator and actor != delegator:
         mention(conn, tid, actor or "system", delegator,
                 "委派已验收，请继续父 step")
+    parent = _parent_step_target(conn, t)
+    if parent is not None:
+        wake_service.enqueue(
+            conn, task_id=parent["task_id"], role_slug=parent["role_slug"],
+            workflow_id=parent["workflow_id"], step_id=parent["step_id"],
+            reason="delegation.accepted",
+            note=(f"[委派已解除] 子任务 {tid} 已验收通过；父步骤 "
+                  f"{parent['step_id']} 的委派门已释放，继续推进并提交。"))
     _audit(conn, actor, tid, "delegation.accept", {
         "delegator": t.get("created_by"), "owner": t.get("assignee"),
     })
@@ -1004,6 +1049,12 @@ def reject_delegation(conn: sqlite3.Connection, tid: str, actor: str | None,
     if t.get("assignee"):
         mention(conn, tid, actor or "system", t["assignee"],
                 f"委派打回：{feedback}")
+        wake_service.enqueue(
+            conn, task_id=tid, role_slug=t["assignee"],
+            reason="delegation.rejected",
+            note=(f"[委派打回] 子任务 {tid} 被派发者打回：{feedback[:500]}。"
+                  "该任务仍由你认领（不要重复 claim）：按反馈返工后重新 "
+                  "`anvil task submit`；父步骤会继续等待。"))
     _audit(conn, actor, tid, "delegation.reject", {
         "delegator": t.get("created_by"), "owner": t.get("assignee"),
         "feedback": feedback,
@@ -1030,6 +1081,18 @@ def cancel(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
     if cur.rowcount != 1:
         raise ConflictError(f"task {tid} state changed; refresh before cancelling")
     _release_or_defer_claims(conn, tid, role, bool(t["assignees"]), now)
+    # 委派子任务被人工终止 = 视为已解除：唤醒父 step 继续，避免门禁永久卡死。
+    if t.get("parent_step_id") and t.get("parent_id"):
+        parent = _parent_step_target(conn, t)
+        if parent is not None:
+            mention(conn, t["parent_id"], role or "system", parent["role_slug"],
+                    f"委派 {tid} 已取消，视为解除；父步骤可继续")
+            wake_service.enqueue(
+                conn, task_id=parent["task_id"], role_slug=parent["role_slug"],
+                workflow_id=parent["workflow_id"], step_id=parent["step_id"],
+                reason="delegation.cancelled",
+                note=(f"[委派已取消] 子任务 {tid} 被人工终止，视为已解除；"
+                      f"父步骤 {parent['step_id']} 不再被阻塞，继续推进并提交。"))
     # 父任务终止：派遣子任务随父任务终止；先关闭子任务，再由下面按 source 标记 cancelled。
     child_ids = [r["id"] for r in conn.execute(
         "SELECT id FROM tasks WHERE parent_id=? "
@@ -1047,6 +1110,24 @@ def cancel(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
                 conn.execute(
                     "UPDATE task_dispatches SET status='cancelled', updated_at=? WHERE id=?",
                     (now_iso(), row["id"]))
+    # 父任务终止：delegation 子任务同样关闭，避免子任务继续等待/阻塞后续流程。
+    delegation_children = [r["id"] for r in conn.execute(
+        "SELECT id FROM tasks WHERE parent_id=? "
+        "AND COALESCE(type,'') NOT IN ('dispatch','dispatched') "
+        "AND parent_step_id IS NOT NULL "
+        "AND status NOT IN ('done','closed')", (tid,)).fetchall()]
+    for cid in delegation_children:
+        conn.execute(
+            "UPDATE tasks SET status='closed', lease_expires_at=NULL, updated_at=? "
+            "WHERE id=? AND status NOT IN ('done','closed')", (now_iso(), cid))
+        conn.execute(
+            "UPDATE task_role_claims SET status='released', lease_expires_at=NULL, "
+            "updated_at=? WHERE task_id=? AND status IN ('pending','working')",
+            (now_iso(), cid))
+        conn.execute(
+            "UPDATE runs SET status='abandoned', ended_at=? WHERE task_id=? "
+            "AND status IN ('created','projecting','running','suspended',"
+            "'submitted','reviewing')", (now_iso(), cid))
     # closed 是失败/终止，不是成功完成：派遣任务不再自动回切。
     now = now_iso()
     target_dispatch = conn.execute(
@@ -1348,6 +1429,10 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
     for wf in conn.execute("SELECT id FROM workflows WHERE task_id=?", (tid,)).fetchall():
         conn.execute("DELETE FROM workflow_steps WHERE workflow_id=?", (wf["id"],))
         conn.execute("DELETE FROM workflows WHERE id=?", (wf["id"],))
+    # 观测记录随任务清理（含 task_id 为空、仅 run 归属的历史行）。
+    conn.execute(
+        "DELETE FROM run_subagents WHERE task_id=? OR run_id IN "
+        "(SELECT id FROM runs WHERE task_id=?)", (tid, tid))
     conn.execute("DELETE FROM runs WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM task_deps WHERE task_id=? OR depends_on=?", (tid, tid))
     conn.execute("DELETE FROM task_assignees WHERE task_id=?", (tid,))
@@ -1408,6 +1493,34 @@ def comment(conn: sqlite3.Connection, tid: str, role: str, body: str,
         actor_type="human" if role == "human" else "role", actor=role,
         payload={"body": body}, mirror_activity=True, activity_kind="comment",
         activity_role=role,
+    )
+    conn.commit()
+    return get(conn, tid)  # type: ignore[return-value]
+
+
+def context_note(conn: sqlite3.Connection, tid: str, role: str, body: str,
+                 for_step: str | None = None) -> dict:
+    """写入 task-wide、system 作者的备注，供未来 slice/step 的上下文使用。
+
+    普通 comment 会被当前 run 的 slice 作用域限制，且 agent_inbox 会过滤自己发出的
+    活动；这里用 role_slug=NULL、slice_key=NULL 的 comment 活动，保证任意未来切片可见，
+    同时不产生 mention、不唤醒任何角色。
+    """
+    t = get(conn, tid)
+    if t is None:
+        raise LookupError(tid)
+    body = (body or "").strip()
+    if not body:
+        raise ConflictError("note body is required")
+    for_step = (for_step or "").strip() or None
+    prefix = "系统备注" + (f"（给 {for_step}）" if for_step else "") + "："
+    ledger.emit(
+        conn, "message.context_note", task_id=tid, slice_key=None,
+        actor_type="human" if role == "human" else "system",
+        actor=role,
+        payload={"body": prefix + body, "author": role, "for_step": for_step},
+        mirror_activity=True, activity_kind="comment",
+        activity_role=ledger.ACTIVITY_ROLE_NULL,
     )
     conn.commit()
     return get(conn, tid)  # type: ignore[return-value]
@@ -1516,18 +1629,59 @@ def _assert_claimable(conn: sqlite3.Connection, t: dict) -> None:
             raise ConflictError(f"dependency {dep} not done")
 
 
+def _current_workflow_id(conn: sqlite3.Connection, tid: str) -> str | None:
+    row = conn.execute(
+        "SELECT id FROM workflows WHERE task_id=? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1", (tid,)).fetchone()
+    return row["id"] if row else None
+
+
 def _assert_submittable(conn: sqlite3.Connection, t: dict) -> None:
-    """§5.1 提交守卫：委派子任务 done 前父任务不可 submit。
+    """§5.1 提交守卫：当前 execution 的委派未 done/closed 前父任务不可 submit。
 
     派遣子任务是空闲角色临时抽离的小切片，明确不阻塞父任务提交。
+    closed（人工取消）视为已解除；旧 execution 的残留委派不阻塞新执行。
     """
     _assert_claimable(conn, t)
-    children = conn.execute(
-        "SELECT status FROM tasks WHERE parent_id=? "
-        "AND COALESCE(type,'') NOT IN ('dispatch','dispatched')",
-        (t["id"],)).fetchall()
-    if any(c["status"] != "done" for c in children):
+    latest = _current_workflow_id(conn, t["id"])
+    sql = ("SELECT 1 FROM tasks WHERE parent_id=? "
+           "AND COALESCE(type,'') NOT IN ('dispatch','dispatched') "
+           "AND status NOT IN ('done','closed')")
+    params: list = [t["id"]]
+    if latest:
+        sql += " AND (parent_workflow_id IS NULL OR parent_workflow_id=?)"
+        params.append(latest)
+    if conn.execute(sql + " LIMIT 1", params).fetchone() is not None:
         raise ConflictError("child tasks not all done")
+
+
+def _parent_step_target(conn: sqlite3.Connection, t: dict) -> dict | None:
+    """委派子任务对应的父 step 目标（task/workflow/step/role）。
+
+    parent_workflow_id 优先；历史数据没有该字段时回退到父任务当前 running workflow。
+    """
+    parent_id = t.get("parent_id")
+    step_id = t.get("parent_step_id")
+    if not parent_id or not step_id:
+        return None
+    wf_id = t.get("parent_workflow_id")
+    if wf_id:
+        row = conn.execute(
+            "SELECT role_slug FROM workflow_steps WHERE workflow_id=? AND step_id=?",
+            (wf_id, step_id)).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT ws.role_slug, ws.workflow_id FROM workflow_steps ws "
+            "JOIN workflows w ON w.id=ws.workflow_id "
+            "WHERE w.task_id=? AND ws.step_id=? AND w.status='running' "
+            "ORDER BY w.created_at DESC, w.rowid DESC LIMIT 1",
+            (parent_id, step_id)).fetchone()
+        if row is not None:
+            wf_id = row["workflow_id"]
+    if row is None or not row["role_slug"]:
+        return None
+    return {"task_id": parent_id, "workflow_id": wf_id, "step_id": step_id,
+            "role_slug": row["role_slug"]}
 
 
 def _notify_delegator(conn: sqlite3.Connection, t: dict, actor: str | None) -> bool:
@@ -1540,6 +1694,20 @@ def _notify_delegator(conn: sqlite3.Connection, t: dict, actor: str | None) -> b
     delegator = created[len("agent:"):]
     target = "human" if delegator == (actor or "") else delegator
     mention(conn, t["id"], actor or "system", target, "委派已提交，请验收")
+    if target != "human":
+        # 父任务时间线也留一条，派发者切回父任务时能在会话里看到。
+        mention(conn, t["parent_id"], actor or "system", target,
+                f"委派 {t['id']}《{t.get('title') or ''}》已提交，请验收")
+        parent = _parent_step_target(conn, t)
+        if parent is not None:
+            wake_service.enqueue(
+                conn, task_id=parent["task_id"], role_slug=delegator,
+                workflow_id=parent["workflow_id"], step_id=parent["step_id"],
+                reason="delegation.submitted",
+                note=(f"[委派待验收] 子任务 {t['id']}《{t.get('title') or ''}》"
+                      f"已提交，父步骤 {parent['step_id']} 暂停等待验收。"
+                      "先 `anvil task show` 查看产出，再执行 delegation-accept 或 "
+                      "delegation-reject；处理完继续父步骤。"))
     return True
 
 

@@ -284,6 +284,29 @@ export interface RoleTaskContext {
   workspace_path: string | null;
 }
 
+export interface SubagentRecord {
+  id: string;
+  run_id: string;
+  role_slug: string;
+  task_id: string | null;
+  tool_use_id: string;
+  tool_name: string | null;
+  subagent_type: string | null;
+  description: string | null;
+  prompt_summary: string | null;
+  status: "running" | "completed" | "interrupted" | string;
+  started_at: string;
+  ended_at: string | null;
+  result_summary: string | null;
+  context_available: number;
+  proc_generation: number | null;
+  native_session_id: string | null;
+  parent_tool_use_id: string | null;
+  slice_key: string | null;
+  step_id: string | null;
+  interrupt_reason: string | null;
+}
+
 export interface RoleRuntimeStatus {
   role_slug: string;
   alive: boolean;
@@ -808,6 +831,14 @@ export const api = {
     authFetch(`${BASE}/roles/${slug}/runtime`).then((r) => json<RoleRuntimeStatus>(r)),
   listRoleRuntimes: (): Promise<RoleRuntimeStatus[]> =>
     authFetch(`${BASE}/roles/runtime`).then((r) => json<RoleRuntimeStatus[]>(r)),
+  listRoleSubagents: (slug: string, status?: string): Promise<SubagentRecord[]> => {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+    return authFetch(`${BASE}/roles/${encodeURIComponent(slug)}/subagents${qs}`)
+      .then((r) => json<SubagentRecord[]>(r));
+  },
+  listRunSubagents: (runId: string): Promise<SubagentRecord[]> =>
+    authFetch(`${BASE}/runs/${encodeURIComponent(runId)}/subagents`)
+      .then((r) => json<SubagentRecord[]>(r)),
   resetRoleSession: (slug: string): Promise<{ slug: string; reset: string }> =>
     req("POST", `/roles/${slug}/session-reset`, {}).then((r) => json(r)),
   deleteRole: (slug: string): Promise<void> => {
@@ -1696,6 +1727,7 @@ export interface WorkflowStep {
   decision_question?: string | null;
   decision_options?: { id?: string; label?: string; decision: string; requires_note?: boolean }[];
   evidence_required?: boolean;
+  subagent_hint?: boolean;
   evidence?: ReviewEvidence[];
   packet_id?: string | null;
   submitted_at?: string | null;
@@ -1929,6 +1961,7 @@ export interface TemplateStep {
   contract?: string | null;
   on_reject?: string[];
   max_rework?: number;
+  subagent_hint?: boolean;
 }
 
 export interface TemplateLoopPhase {
@@ -1937,6 +1970,7 @@ export interface TemplateLoopPhase {
   instructions?: string;
   acceptance?: string[];
   max_rework?: number;
+  subagent_hint?: boolean;
 }
 
 export interface TemplateLoop {

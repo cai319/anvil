@@ -325,6 +325,9 @@ class _Queued:
     spec: _SpawnSpec
     slice_key: str | None = None
     priority: int = 100
+    # 入队时 run.wake_note 的快照；写 stdin 成功后按它做 CAS 清除，
+    # 避免把渲染后追加的新 note 一并清掉。
+    wake_note: str | None = None
 
 
 def clear_slice_sessions(conn, role: str, task_id: str,
@@ -425,6 +428,9 @@ class DaemonManager:
         # 回调(role, run_id, task_id, workspace_path)：实际投递前投影当前任务。
         # 由 create_app 注入，避免 daemon 反向依赖 graph/nodes。
         self.on_project = None
+        # 回调(run_id) -> prompt：写 stdin 前按最新 DB 重算提示词（wake_note/未读/
+        # continuation 头）。失败时退回入队快照，且不消费 wake_note。
+        self.on_render = None
         self._roles: dict[str, _Role] = {}
         self._guard = threading.Lock()
         self._stop = threading.Event()
@@ -432,6 +438,8 @@ class DaemonManager:
         self._idle_thread: threading.Thread | None = None
         if enabled:
             self._heal_db()
+            # 进程重启后不可能有存活子代理；把上次运行残留的 running 标 interrupted。
+            self._heal_subagents()
             self._idle_thread = threading.Thread(
                 target=self._idle_loop, daemon=True, name="anvil-role-idle")
 
@@ -465,7 +473,8 @@ class DaemonManager:
         with r.lock:
             self._deliver_locked(conn, r, _Queued(
                 text=prompt, run_id=run_id, task_id=task_id, spec=spec,
-                slice_key=slice_key, priority=priority))
+                slice_key=slice_key, priority=priority,
+                wake_note=self._run_wake_note(conn, run_id)))
             queued = any(item.run_id == run_id for item in r.queue) if run_id else bool(r.queue)
             run_status = None
             delivery_error = None
@@ -501,7 +510,8 @@ class DaemonManager:
                 executable="", args_new=[], args_resume=[], ctx={}, cwd="", env={})
             self._deliver_locked(conn, r, _Queued(
                 text=prompt, run_id=run_id, task_id=task_id, spec=spec,
-                slice_key=slice_key, priority=priority))
+                slice_key=slice_key, priority=priority,
+                wake_note=self._run_wake_note(conn, run_id)))
             return True
 
     def status(self, role: str) -> dict:
@@ -1051,7 +1061,7 @@ class DaemonManager:
         if not lines:
             return ""
         return ("## 你离开任务期间的新进展\n" + "\n".join(lines[-25:])
-                + f"\n（完整内容用 `anvil inbox check {task_id}` 拉取）\n\n")
+                + f"\n（完整内容用 `anvil inbox check --task {task_id}` 拉取）\n\n")
 
     def _slot_clear_memory(self, r: _Role) -> None:
         r.context_key = None
@@ -1272,6 +1282,7 @@ class DaemonManager:
                     queued.spec = item.spec
                     queued.slice_key = item.slice_key
                     queued.task_id = item.task_id
+                    queued.wake_note = item.wake_note
                     queued.priority = min(int(queued.priority), int(item.priority))
                     r.queue.sort(key=lambda q: int(q.priority))
                     if not r.busy:
@@ -1474,6 +1485,60 @@ class DaemonManager:
         self._spawn(conn, r, item.spec)
         return self._send_locked(conn, r, item)
 
+    def _step_wake_is_stale(self, conn, item: _Queued) -> bool:
+        """步骤已 approved/pending/rebound 时，排队中的旧唤醒不应再投递。"""
+        if not item.run_id:
+            return False
+        run = conn.execute(
+            "SELECT workflow_id, step_id FROM runs WHERE id=?",
+            (item.run_id,)).fetchone()
+        if run is None or not run["workflow_id"] or not run["step_id"]:
+            return False
+        step = conn.execute(
+            "SELECT status, run_id FROM workflow_steps "
+            "WHERE workflow_id=? AND step_id=?",
+            (run["workflow_id"], run["step_id"])).fetchone()
+        return (step is None or step["status"] != "running"
+                or str(step["run_id"] or "") != str(item.run_id))
+
+    @staticmethod
+    def _run_wake_note(conn, run_id: str | None) -> str | None:
+        if not run_id:
+            return None
+        row = conn.execute("SELECT wake_note FROM runs WHERE id=?",
+                           (run_id,)).fetchone()
+        return row["wake_note"] if row else None
+
+    @staticmethod
+    def _refresh_unread_block(conn, r: _Role, item: _Queued, text: str) -> str:
+        """投递前按当前 cursor 重算“未读会话”，去掉排队期间已处理的消息。"""
+        from . import agent_inbox
+        start_marker = "<!-- ANVIL:UNREAD_START -->"
+        end_marker = "<!-- ANVIL:UNREAD_END -->"
+        start = text.find(start_marker)
+        if start < 0:
+            return text
+        end = text.find(end_marker, start + len(start_marker))
+        if end < 0:
+            return text
+        end += len(end_marker)
+        if not item.task_id:
+            return text[:start] + text[end:]
+        unread = agent_inbox.unread_count(
+            conn, r.role, item.task_id, slice_key=item.slice_key)
+        if not unread:
+            return text[:start] + text[end:]
+        items = agent_inbox.items(
+            conn, r.role, item.task_id, limit=3, slice_key=item.slice_key)
+        lines = "\n".join(f"- [{i['role']}] {i['text'][:300]}" for i in items)
+        block = (
+            "<!-- ANVIL:UNREAD_START -->\n"
+            f"## 未读会话（{unread} 条，最近 3 条）\n{lines}\n\n"
+            f"处理完反馈后执行 `anvil inbox commit --task {item.task_id} --up-to <最大消息 id>`；"
+            f"完整未读用 `anvil inbox check --task {item.task_id}` 按需拉取（拉模式）。\n"
+            "<!-- ANVIL:UNREAD_END -->")
+        return text[:start] + block + text[end:]
+
     def _send_locked(self, conn, r: _Role, item: _Queued) -> bool:
         # 状态门禁：队列项可能在排队期间被 scheduler/治理置为终态或 HITL 态。
         from . import runs as runs_service
@@ -1482,6 +1547,12 @@ class DaemonManager:
                 "SELECT status FROM runs WHERE id=?", (item.run_id,)).fetchone()
             if row is None or not runs_service.is_dispatchable_status(row["status"]):
                 return False
+        # 步骤已推进/重绑：丢弃旧 step 唤醒，避免角色收到“提交 S1”后才去查状态。
+        if self._step_wake_is_stale(conn, item):
+            self._audit_session(
+                conn, r.role, item.task_id, "delivery.stale_step_wake",
+                {"run_id": item.run_id})
+            return False
         self._project_before_delivery(conn, r, item)
         spec = item.spec
         r.loaded_spec = spec
@@ -1509,7 +1580,29 @@ class DaemonManager:
                       + self._context_hint(r, item.task_id, item.slice_key)
                       + task_prefix)
         r.handoff_pending = ""
+        # 入队时的 text 只是快照；真正写 stdin 前重算一遍，纳入排队期间新增的
+        # wake_note / 未读 / continuation 头。渲染失败退回快照，并保留 wake_note
+        # 供下一次投递消费（at-least-once）。
+        rendered_ok = not item.run_id
+        rendered_note = self._run_wake_note(conn, item.run_id) if item.run_id else None
         text = prefix + item.text
+        if item.run_id:
+            if self.on_render is None:
+                # 没有重渲染回调：入队快照就是权威内容（仍做未读块刷新）。
+                rendered_ok = True
+            else:
+                try:
+                    rendered = self.on_render(item.run_id)
+                except Exception as exc:  # noqa: BLE001
+                    self._audit_session(
+                        conn, r.role, item.task_id, "delivery.render_failed",
+                        {"run_id": item.run_id, "error": str(exc)[:300]})
+                    rendered = None
+                if rendered:
+                    text = prefix + rendered
+                    rendered_ok = True
+        if self.on_render is None or not rendered_ok:
+            text = self._refresh_unread_block(conn, r, item, text)
 
         # 排队期间被标记 suspended/created 的 run，真正投递时恢复 running。
         # 已 running 的排队 run 不重复写；状态迁移必须走 set_status 以写 ledger。
@@ -1552,12 +1645,15 @@ class DaemonManager:
                 r.proc.stdin.flush()
                 r.slot_seen_activity = seen
                 self._slot_persist(r, status="busy", conn=conn)
-                if item.run_id:
-                    # wake_note 是“投递即消费”的一次性 continuation；排队/重启
-                    # 期间必须保留，只有真正写入 stdin 后才清。
+                if item.run_id and rendered_ok:
+                    # wake_note 是“投递即消费”的一次性 continuation；渲染失败时
+                    # 快照可能没包含它，保守保留。按入队/渲染时读到的原文做 CAS，
+                    # 不清掉渲染后追加的新 note。
+                    expected = rendered_note if self.on_render is not None else item.wake_note
                     conn.execute(
-                        "UPDATE runs SET wake_note=NULL WHERE id=? AND wake_note IS NOT NULL",
-                        (item.run_id,))
+                        "UPDATE runs SET wake_note=NULL WHERE id=? "
+                        "AND COALESCE(wake_note,'')=COALESCE(?,'')",
+                        (item.run_id, expected))
                     conn.commit()
             else:
                 raise _DeliveryError("role process is not writable")
@@ -1611,7 +1707,7 @@ class DaemonManager:
                     continue
                 if r.proc is not proc:
                     return
-                self._track_subagent(r, ev)
+                self._track_subagent(r, ev, proc)
                 self._append_run_log(r, self._format_event(ev))
                 # 图片/附件不计 token，但会计入请求体；累计到阈值时主动换新会话，
                 # 避免撞上 “request too large (max 32mb)”。
@@ -1891,17 +1987,28 @@ class DaemonManager:
         except OSError:
             pass
 
-    def _track_subagent(self, r: _Role, ev: dict) -> None:
-        """观测运行时 Task/Agent tool_use；Anvil 不主动创建子代理。"""
+    def _track_subagent(self, r: _Role, ev: dict, proc=None) -> None:
+        """观测运行时 Task/Agent tool_use；Anvil 不主动创建子代理。
+
+        记录完整父运行时归属（role/run/task + proc_generation/native_session_id +
+        parent_tool_use_id + slice/step），但绝不参与调度决策。
+        """
         msg = ev.get("message") or {}
         blocks = msg.get("content")
         if not isinstance(blocks, list):
             return
         with r.lock:
+            if proc is not None and r.proc is not proc:
+                return
             run_id = r.current_run_id
             task_id = r.current_task_id
+            generation = int(r.proc_generation or 0)
+            session_id = r.session_id
+            step_id = r.current_step_id
+            slice_key = slice_key_of(r.context_key) if r.current_task_id else None
         if not run_id:
             return
+        parent_tool_use_id = str(ev.get("parent_tool_use_id") or "") or None
         for block in blocks:
             if not isinstance(block, dict):
                 continue
@@ -1923,7 +2030,12 @@ class DaemonManager:
                     "started_at": now_iso(),
                     "ended_at": None,
                     "result_summary": None,
-                    "context_available": int(bool(ev.get("parent_tool_use_id"))),
+                    "context_available": int(bool(parent_tool_use_id)),
+                    "proc_generation": generation,
+                    "native_session_id": session_id,
+                    "parent_tool_use_id": parent_tool_use_id,
+                    "slice_key": slice_key,
+                    "step_id": step_id,
                 }
                 with r.lock:
                     r.active_subagents[tool_id] = info
@@ -1933,6 +2045,14 @@ class DaemonManager:
                 with r.lock:
                     info = r.active_subagents.get(tool_id)
                 if info is None:
+                    # 晚到结果：内存已清（turn 结束/进程退出），回查 DB 做 CAS。
+                    content = block.get("content")
+                    if isinstance(content, list):
+                        content = "\n".join(
+                            str(x.get("text") or "")
+                            for x in content if isinstance(x, dict))
+                    self._late_subagent_result(
+                        run_id, tool_id, str(content or "")[:1200])
                     continue
                 content = block.get("content")
                 if isinstance(content, list):
@@ -1940,21 +2060,48 @@ class DaemonManager:
                         str(x.get("text") or "") for x in content if isinstance(x, dict))
                 info = {**info, "status": "completed", "ended_at": now_iso(),
                         "result_summary": str(content or "")[:1200],
-                        "context_available": int(bool(ev.get("parent_tool_use_id"))
+                        "context_available": int(bool(parent_tool_use_id)
                                                  or info.get("context_available"))}
                 with r.lock:
                     r.active_subagents.pop(tool_id, None)
                 self._persist_subagent(r, run_id, task_id, info)
 
+    def _late_subagent_result(self, run_id: str, tool_id: str, content: str) -> None:
+        """tool_result 晚于内存清理到达：running → completed；interrupted 只补结果。"""
+        try:
+            conn = open_conn(self.db_path)
+            try:
+                now = now_iso()
+                cur = conn.execute(
+                    "UPDATE run_subagents SET status='completed', "
+                    "ended_at=COALESCE(ended_at, ?), result_summary=?, updated_at=? "
+                    "WHERE run_id=? AND tool_use_id=? AND status='running'",
+                    (now, content, now, run_id, tool_id))
+                if cur.rowcount == 0:
+                    conn.execute(
+                        "UPDATE run_subagents SET "
+                        "result_summary=COALESCE(result_summary, ?), updated_at=? "
+                        "WHERE run_id=? AND tool_use_id=? AND status='interrupted'",
+                        (content, now, run_id, tool_id))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 —— 观测失败不影响角色执行
+            pass
+
     def _finish_subagents(self, conn, r: _Role, run_id: str | None,
-                          status: str = "completed") -> None:
+                          status: str = "interrupted",
+                          reason: str = "turn_ended") -> None:
+        """turn 结束：仍 running 的子代理随 turn 终止（不会跨 turn 存活）。"""
         if not run_id:
             return
         try:
             conn.execute(
-                "UPDATE run_subagents SET status=?, ended_at=COALESCE(ended_at, ?), "
-                "updated_at=? WHERE run_id=? AND status='running'",
-                (status, now_iso(), now_iso(), run_id))
+                "UPDATE run_subagents SET status=?, interrupt_reason=?, "
+                "ended_at=COALESCE(ended_at, ?), updated_at=? "
+                "WHERE run_id=? AND status='running'",
+                (status, None if status == "completed" else reason,
+                 now_iso(), now_iso(), run_id))
             conn.commit()
         except Exception:  # noqa: BLE001
             pass
@@ -1967,26 +2114,90 @@ class DaemonManager:
             conn = open_conn(self.db_path)
             try:
                 now = now_iso()
+                run = conn.execute(
+                    "SELECT native_session_id, slice_key, step_id FROM runs WHERE id=?",
+                    (run_id,)).fetchone()
                 conn.execute(
                     "INSERT INTO run_subagents "
                     "(id, run_id, role_slug, task_id, tool_use_id, tool_name, "
                     " description, prompt_summary, status, started_at, ended_at, "
-                    " result_summary, context_available, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    " result_summary, context_available, subagent_type, "
+                    " proc_generation, native_session_id, parent_tool_use_id, "
+                    " slice_key, step_id, interrupt_reason, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(run_id, tool_use_id) DO UPDATE SET "
-                    "status=excluded.status, ended_at=excluded.ended_at, "
-                    "result_summary=excluded.result_summary, "
-                    "context_available=excluded.context_available, updated_at=excluded.updated_at",
+                    # 终态不可被重复 tool_use 重置；仅 running 行接受新状态。
+                    "status=CASE WHEN run_subagents.status='running' "
+                    "  THEN excluded.status ELSE run_subagents.status END, "
+                    "ended_at=CASE WHEN run_subagents.status='running' "
+                    "  THEN excluded.ended_at ELSE run_subagents.ended_at END, "
+                    "result_summary=CASE WHEN run_subagents.status='running' "
+                    "  THEN excluded.result_summary ELSE run_subagents.result_summary END, "
+                    "interrupt_reason=CASE WHEN run_subagents.status='running' "
+                    "  THEN excluded.interrupt_reason ELSE run_subagents.interrupt_reason END, "
+                    "description=COALESCE(NULLIF(excluded.description,''), "
+                    "  run_subagents.description), "
+                    "prompt_summary=COALESCE(NULLIF(excluded.prompt_summary,''), "
+                    "  run_subagents.prompt_summary), "
+                    "subagent_type=COALESCE(excluded.subagent_type, "
+                    "  run_subagents.subagent_type), "
+                    "proc_generation=COALESCE(excluded.proc_generation, "
+                    "  run_subagents.proc_generation), "
+                    "native_session_id=COALESCE(excluded.native_session_id, "
+                    "  run_subagents.native_session_id), "
+                    "parent_tool_use_id=COALESCE(excluded.parent_tool_use_id, "
+                    "  run_subagents.parent_tool_use_id), "
+                    "slice_key=COALESCE(excluded.slice_key, run_subagents.slice_key), "
+                    "step_id=COALESCE(excluded.step_id, run_subagents.step_id), "
+                    "context_available=MAX(run_subagents.context_available, "
+                    "  excluded.context_available), "
+                    "updated_at=excluded.updated_at",
                     (uuid.uuid4().hex, run_id, r.role, task_id,
                      info["tool_use_id"], info.get("tool_name"),
                      info.get("description"), info.get("prompt_summary"),
                      info.get("status") or "running", info.get("started_at") or now,
                      info.get("ended_at"), info.get("result_summary"),
-                     int(info.get("context_available") or 0), now))
+                     int(info.get("context_available") or 0),
+                     info.get("subagent_type"),
+                     info.get("proc_generation"),
+                     info.get("native_session_id") or (
+                         run["native_session_id"] if run else None),
+                     info.get("parent_tool_use_id"),
+                     info.get("slice_key") or (run["slice_key"] if run else None),
+                     info.get("step_id") or (run["step_id"] if run else None),
+                     info.get("interrupt_reason"), now))
                 conn.commit()
             finally:
                 conn.close()
         except Exception:  # noqa: BLE001 —— 观测失败不影响角色执行
+            pass
+
+    def active_subagent_ids(self, run_id: str) -> set[str]:
+        """该 run 在当前进程内仍存活的 tool_use id；Anvil 只用于观测收尾判定。"""
+        with self._guard:
+            roles = list(self._roles.values())
+        for r in roles:
+            with r.lock:
+                if r.current_run_id == run_id:
+                    return {
+                        tid for tid, info in r.active_subagents.items()
+                        if info.get("status") == "running"}
+        return set()
+
+    def _heal_subagents(self) -> None:
+        """daemon 重启后不存在任何存活子代理：残留 running 统一标 interrupted。"""
+        try:
+            conn = open_conn(self.db_path)
+            try:
+                now = now_iso()
+                conn.execute(
+                    "UPDATE run_subagents SET status='interrupted', "
+                    "interrupt_reason='daemon_restart', ended_at=COALESCE(ended_at, ?), "
+                    "updated_at=? WHERE status='running'", (now, now))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
             pass
 
     @staticmethod

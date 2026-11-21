@@ -106,6 +106,24 @@ def _audit_human_decision(conn, task_id: str | None, action: str,
         pass
 
 
+@router.get("/board/drafts/{did}/participants")
+def draft_participants(did: str, conn=Depends(get_db),
+                       auth: Auth = Depends(require_human)):
+    """审批前预览：workflow 角色与任务参与者的差异（add/missing/invalid）。"""
+    from ..services import workflow as workflow_service
+
+    draft = services.board.get_draft(conn, did)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="draft not found")
+    if (draft.get("kind") or "tasks") != "workflow":
+        raise HTTPException(status_code=422, detail="only workflow drafts have participants")
+    source_task = draft.get("source_task")
+    if not source_task:
+        raise HTTPException(status_code=422, detail="draft has no source_task")
+    return workflow_service.preview_participant_sync(
+        conn, source_task, draft.get("tree") or {})
+
+
 @router.post("/board/drafts/approve")
 def approve_drafts(body: dict, request: Request, conn=Depends(get_db),
                    auth: Auth = Depends(require_human)):

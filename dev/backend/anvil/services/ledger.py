@@ -11,6 +11,9 @@ import sqlite3
 from ..util import jdumps, jloads, now_iso
 
 
+ACTIVITY_ROLE_NULL = object()  # 显式写入 activities.role_slug=NULL（system 作者）
+
+
 def emit(conn: sqlite3.Connection, event_type: str, *,
          task_id: str | None = None,
          workflow_id: str | None = None,
@@ -42,11 +45,14 @@ def emit(conn: sqlite3.Connection, event_type: str, *,
     )
     event_id = int(cur.lastrowid)
     if mirror_activity:
+        role_value = (
+            None if activity_role is ACTIVITY_ROLE_NULL else
+            (activity_role or (actor if actor_type == "role" else "workflow")))
         conn.execute(
             "INSERT INTO activities (task_id, role_slug, run_id, kind, payload_json, "
             "created_at, event_id, workflow_id, step_id, slice_key, execution_no) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (task_id, activity_role or (actor if actor_type == "role" else "workflow"),
+            (task_id, role_value,
              run_id, activity_kind or event_type.split(".", 1)[0], jdumps(payload or {}),
              now, event_id, workflow_id, step_id, slice_key, execution_no),
         )

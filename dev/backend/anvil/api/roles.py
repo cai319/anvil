@@ -17,6 +17,18 @@ from ..util import ConflictError
 router = APIRouter()
 logger = logging.getLogger("anvil.roles")
 
+
+@router.get("/roles/{slug}/subagents")
+def role_subagents(slug: str, status: str | None = None, limit: int = 100,
+                   conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    """角色历史运行时子代理（只读观测）；Agent 只能读自己。"""
+    if auth.role not in (None, "human") and not auth.test_bypass \
+            and auth.role != slug:
+        raise HTTPException(
+            status_code=403, detail="cannot list another role's subagents")
+    return services.runs.list_subagents(
+        conn, role_slug=slug, status=status, limit=limit)
+
 def _validate_avatar(value: object) -> str | None:
     """头像只接受 null / initials / big-smile:<id>（规则见 services.roles）。"""
     if not services.roles.is_valid_avatar(value):
