@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import config
-from ..util import ConflictError
+from ..util import ConflictError, read_text_file
 from . import runtime as runtime_service
 from . import tooling as tooling_service
 
@@ -135,7 +135,7 @@ def _extract_tar(archive: Path, root: Path) -> None:
 def _skill_description(skill_dir: Path) -> str:
     md = skill_dir / "SKILL.md"
     try:
-        for line in md.read_text(encoding="utf-8", errors="replace").splitlines()[:30]:
+        for line in read_text_file(md).splitlines()[:30]:
             if line.lower().startswith("description:"):
                 return line.split(":", 1)[1].strip()
     except OSError:
@@ -232,7 +232,7 @@ def _find_mcp_configs(root: Path) -> list[tuple[Path, dict[str, Any]]]:
         try:
             if path.stat().st_size > 2 * 1024 * 1024:
                 continue
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(read_text_file(path))
         except (OSError, ValueError, UnicodeError):
             continue
         if not isinstance(data, dict):

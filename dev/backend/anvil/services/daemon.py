@@ -34,7 +34,7 @@ from pathlib import Path
 
 from .. import config
 from ..db import open_conn
-from ..util import decode_child_output, jdumps, jloads, now_iso
+from ..util import decode_child_output, force_utf8_stdio, jdumps, jloads, now_iso
 
 # 不泄漏给子进程的编排器会话变量（与 platform/darwin.py 保持一致）。
 # 注意：不能按 `CLAUDE_CODE_` 前缀整片剥离——该命名空间里还有自动压缩窗口、
@@ -59,13 +59,10 @@ class _DeliveryError(RuntimeError):
 def _clean_env(extra: dict[str, str]) -> dict[str, str]:
     merged = {k: v for k, v in os.environ.items() if k not in _SESSION_ENV_KEYS}
     merged.update(extra)
-    if os.name == "nt":
-        # Windows 默认按系统 ANSI/OEM 代码页输出；强制 Python 子进程使用 UTF-8，
-        # 避免角色/tool 输出的中文在 stdout 日志里变成乱码。
-        merged.setdefault("PYTHONIOENCODING", "utf-8")
-        merged.setdefault("PYTHONUTF8", "1")
-        merged.setdefault("PYTHONLEGACYWINDOWSSTDIO", "0")
-    return merged
+    # Windows 默认按系统 ANSI/OEM 代码页输出；强制 Python 子进程使用 UTF-8，
+    # 避免角色/tool 输出的中文在 stdout 日志里变成乱码。必须覆盖继承值：
+    # 父环境或 runtime env 里的 PYTHONIOENCODING=gbk 会让 setdefault 失效。
+    return force_utf8_stdio(merged)
 
 
 def _hard_limit_for(window: int) -> int:

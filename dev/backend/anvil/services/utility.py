@@ -19,6 +19,7 @@ import tempfile
 
 from .. import config
 from ..graph.render import render_template
+from ..util import decode_text_file, force_utf8_stdio
 from . import governance, runtime as runtime_service
 
 DEFAULT_RUNTIME_KEY = "default_runtime"
@@ -67,7 +68,8 @@ def _clean_env(extra: dict[str, str]) -> dict[str, str]:
         if not k.startswith(_SESSION_ENV_PREFIXES) and k not in _SESSION_ENV_KEYS
     }
     merged.update(extra)
-    return merged
+    # 与 daemon/one-shot 一致：Windows 上强制 Python 子进程 UTF-8 stdio。
+    return force_utf8_stdio(merged)
 
 
 def _resolve_runtime(conn: sqlite3.Connection, preferred_id: str | None = None) -> tuple[dict, dict]:
@@ -150,9 +152,6 @@ def generate(conn: sqlite3.Connection, prompt: str, *, runtime_id: str | None = 
                 cwd=cwd,
                 env=_clean_env(env),
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 timeout=timeout_s,
             )
         except subprocess.TimeoutExpired as exc:
@@ -160,9 +159,11 @@ def generate(conn: sqlite3.Connection, prompt: str, *, runtime_id: str | None = 
         except Exception as exc:  # noqa: BLE001
             raise UtilityError(f"无法启动运行时 {rt['id']}: {exc}") from exc
 
-    text = (proc.stdout or "").strip()
+    stdout = decode_text_file(proc.stdout or b"")
+    stderr = decode_text_file(proc.stderr or b"")
+    text = stdout.strip()
     if proc.returncode != 0:
-        log = ((proc.stdout or "") + (proc.stderr or "")).strip()[:500]
+        log = (stdout + stderr).strip()[:500]
         raise UtilityError(f"运行时 {rt['id']} 退出码 {proc.returncode}: {log or '无输出'}")
     if not text:
         raise UtilityError(f"运行时 {rt['id']} 没有返回内容")

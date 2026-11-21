@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .. import config
-from ..util import ConflictError, jdumps, jloads, new_id, now_iso
+from ..util import ConflictError, jdumps, jloads, new_id, now_iso, read_text_file
 from . import (governance, knowledge, knowledge_binding, ledger, repo_catalog,
                task_workspace, workspace)
 
@@ -1587,7 +1587,7 @@ def _ignore_patterns(t: dict) -> list[str]:
     for base in bases:
         p = base / ".anvilignore"
         try:
-            lines = p.read_text(encoding="utf-8").splitlines()
+            lines = read_text_file(p).splitlines()
         except OSError:
             continue
         for line in lines:

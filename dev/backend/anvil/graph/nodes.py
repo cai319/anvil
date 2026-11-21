@@ -35,7 +35,7 @@ from ..services import (
     tasks as tasks_service,
     tooling as tooling_service,
 )
-from ..util import jloads, now_iso
+from ..util import jloads, now_iso, read_text_file
 
 logger = logging.getLogger("anvil.nodes")
 from . import render
@@ -278,7 +278,7 @@ def _instruction_md(role: dict) -> str:
     if not home:
         return ""
     try:
-        return (Path(home) / "instruction.md").read_text(encoding="utf-8")
+        return read_text_file(Path(home) / "instruction.md")
     except OSError:
         return ""
 
@@ -589,8 +589,7 @@ def _project_catalog(conn: sqlite3.Connection, effective: dict, workspace_path: 
     chosen: dict = {}
     if mcp_config and os.path.isfile(mcp_config):
         try:
-            with open(mcp_config, encoding="utf-8") as f:
-                data = json.load(f)
+            data = json.loads(read_text_file(mcp_config))
             servers = data.get(mcp_pointer, {}) or {}
             chosen.update({k: servers[k] for k in selected_mcp if k in servers})
         except Exception:  # noqa: BLE001
@@ -600,7 +599,7 @@ def _project_catalog(conn: sqlite3.Connection, effective: dict, workspace_path: 
         try:
             settings = mcp_target
             settings.parent.mkdir(parents=True, exist_ok=True)
-            existing = json.loads(settings.read_text(encoding="utf-8")) if settings.exists() else {}
+            existing = json.loads(read_text_file(settings)) if settings.exists() else {}
             existing["mcpServers"] = chosen
             settings.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception:  # noqa: BLE001 —— 投影失败不阻断运行
@@ -612,7 +611,7 @@ def _project_catalog(conn: sqlite3.Connection, effective: dict, workspace_path: 
         try:
             settings = mcp_target
             settings.parent.mkdir(parents=True, exist_ok=True)
-            existing = json.loads(settings.read_text(encoding="utf-8")) if settings.exists() else {}
+            existing = json.loads(read_text_file(settings)) if settings.exists() else {}
             permissions = existing.get("permissions") or {}
             permissions["allow"] = allow
             existing["permissions"] = permissions

@@ -170,13 +170,28 @@ venv 缺少 `langgraph`。执行 `pip install -r backend/requirements.txt`，再
 常驻会话通过 stdin 投递 stream-json 消息。如果中文 prompt 被系统代码页/CRLF 破坏，CLI 可能
 只输出 `init` 事件，然后一直等不到有效输入，表现为“0 输出”。
 
-已修复：常驻进程的 stdin/stdout 显式使用 **UTF-8**，stdin 关闭 CRLF 转换（`newline="\n"`）。
-reader 遇到解码/管道异常时会记录完整 traceback 到 `role-session.log` 并终止子进程，
-不会静默卡死。所有 `text=True` 子进程（git / npm / health / MCP）也统一 UTF-8。
+已修复：常驻进程的 stdin 以 **UTF-8 字节帧**写入（LF 换行），stdout/stderr 走二进制
+管道，由 reader 逐行按 UTF-8 → CJK/GB18030/GBK 回退解码。reader 遇到解码/管道异常时
+会记录完整 traceback 到 `role-session.log` 并终止子进程，不会静默卡死。
+Windows 上 Anvil 会**覆盖**派生 Python 子进程的 `PYTHONIOENCODING=utf-8` /
+`PYTHONUTF8=1`（父环境或 runtime YAML 里已有的值会被覆盖），并移除会误启用
+legacy 控制台 I/O 的 `PYTHONLEGACYWINDOWSSTDIO`。
 
 > **历史乱码不会自动还原**：修复前产生并已写入文件的日志/消息，内容是“先用 GBK 解码
 > UTF-8 再按 UTF-8 保存”后的乱码字符串，无法可靠逆转换。请重启后端并开始一个**新 run**
 > 验证；旧日志仍会是乱码。
+
+> **会话内容乱码的剩余边界（2026-11-21 加固）**：
+> - run 日志超过 200KB 时只展示末尾，并会从完整行/完整字符开始，不会再因截断点切碎
+>   多字节字符；
+> - `anvil` CLI 在 Windows 管道/重定向输出时固定写 UTF-8；`--content-file/--file`
+>   支持 UTF-8（含 BOM）/ UTF-16 / GBK，不再因 PowerShell 5.1 `Out-File`（UTF-16）或
+>   记事本 ANSI（GBK）而崩溃或把 BOM 混入内容；
+> - 角色 `MEMORY.md` / `PRINCIPLES.md` / `instruction.md` / `notes/` / 知识卡 /
+>   `.anvilignore` / runtime 与 tools YAML 的读取同样兼容上述编码，写回统一为 UTF-8；
+> - **上游限制**：Claude Code 在把 Windows 原生命令（cmd 内建、部分原生 exe）的输出
+>   放进 `tool_result` 之前就按 UTF-8 解码，GBK/OEM 字节会先变成 `�`；这不是 Anvil 的
+>   解码器能修复的。优先使用原生 `claude.exe` 与 Git Bash，必要时在命令前 `chcp 65001`。
 
 如果仍出现：
 

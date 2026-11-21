@@ -17,7 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import config
-from ..util import ConflictError, jdumps, jloads, new_id, now_iso
+from ..util import (ConflictError, jdumps, jloads, new_id, now_iso,
+                    read_text_file)
 from . import knowledge as knowledge_service
 from . import knowledge_binding, knowledge_repos, repo_catalog, repo_knowledge
 
@@ -399,11 +400,11 @@ def read_principles(role: str, max_chars: int | None = None) -> str:
     limit = int(max_chars or config.MEMORY_PRINCIPLES_MAX_CHARS)
     p = principles_path(role)
     try:
-        text = p.read_text(encoding="utf-8")
+        text = read_text_file(p)
     except OSError:
         legacy = config.AGENTS_DIR / role / "MEMORY.md"
         try:
-            text = legacy.read_text(encoding="utf-8")[:limit]
+            text = read_text_file(legacy)[:limit]
         except OSError:
             return ""
     return text[:limit] if len(text) > limit else text
@@ -492,7 +493,7 @@ def migrate_memory_file(conn: sqlite3.Connection, role: str, *,
     source = home / "MEMORY.md"
     if not source.exists():
         return {"role": role, "skipped": "no MEMORY.md", "dry_run": dry_run}
-    raw = source.read_text(encoding="utf-8")
+    raw = read_text_file(source)
     lines = _dedupe_lines(raw)
     blocks = _split_blocks(lines)
 
@@ -583,7 +584,7 @@ def read_memory_file(role: str, max_chars: int = 4000) -> str:
     """读角色 MEMORY.md（尾部 max_chars）；仅保留给 legacy/清理逻辑。"""
     p = config.AGENTS_DIR / role / "MEMORY.md"
     try:
-        text = p.read_text(encoding="utf-8")
+        text = read_text_file(p)
     except OSError:
         return ""
     return text[-max_chars:] if len(text) > max_chars else text
@@ -968,7 +969,7 @@ def _append_lesson_file(repo: str, content: str, tags: list[str], source_task: s
 def list_shared_lesson_lines(repo: str = "shared") -> list[str]:
     p = _lesson_path(repo)
     try:
-        return [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        return [ln for ln in read_text_file(p).splitlines() if ln.strip()]
     except OSError:
         return []
 
@@ -1075,7 +1076,7 @@ def _read_home_file(role: str, rel_path: str) -> str:
     if not target.is_relative_to(home):
         raise ValueError("path escapes role home")
     try:
-        return target.read_text(encoding="utf-8")
+        return read_text_file(target)
     except OSError:
         return ""
 

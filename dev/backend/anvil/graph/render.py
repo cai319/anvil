@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from ..util import read_text_file
+
 # 请求体/附件预算：角色自律优先（协议 + 唤醒提示），Anvil 的硬保护只是兜底。
 ATTACHMENT_BUDGET = (
     "## 请求体/附件预算（必须遵守）\n"
@@ -523,7 +525,7 @@ def project_instruction(target: Path, instruction_md: str, task: dict,
     block = f"{_BEGIN}\n{inner}\n{_END}"
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
-        existing = target.read_text(encoding="utf-8")
+        existing = read_text_file(target)
         replaced = _MANAGED.sub(lambda _: block, existing) if _BEGIN in existing else existing.rstrip() + "\n\n" + block + "\n"
     else:
         replaced = block + "\n"

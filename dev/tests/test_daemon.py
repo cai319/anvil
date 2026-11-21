@@ -123,6 +123,20 @@ def test_clean_env_drops_session_identity_but_keeps_cli_config(monkeypatch):
     assert env["CLAUDE_CODE_EFFORT_LEVEL"] == "max"
 
 
+def test_clean_env_forces_utf8_on_windows(monkeypatch):
+    """父环境/ runtime env 里的旧编码设置不能覆盖 UTF-8 强制值。"""
+    import anvil.util as util
+
+    monkeypatch.setattr(util, "_is_windows", lambda: True)
+    monkeypatch.setenv("PYTHONIOENCODING", "gbk")
+    monkeypatch.setenv("PYTHONUTF8", "0")
+    monkeypatch.setenv("PYTHONLEGACYWINDOWSSTDIO", "1")
+    env = _clean_env({})
+    assert env["PYTHONIOENCODING"] == "utf-8"
+    assert env["PYTHONUTF8"] == "1"
+    assert "PYTHONLEGACYWINDOWSSTDIO" not in env
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "AGENTS_DIR", tmp_path / "agents")
