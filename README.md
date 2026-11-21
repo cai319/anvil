@@ -6,6 +6,7 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **前端**：React + TypeScript + Vite
 - **Agent CLI**：`anvil`，Agent 在自己的工具循环里调用它上报状态
 - **地址**：`http://127.0.0.1:7317`（仅回环）
+- **当前版本**：v1.46.0（知识入库必须条款、智能补全、任务完成自动收割）
 
 > 架构、数据模型、工作流引擎与实现细节见 [design.md](design.md)。
 
@@ -32,7 +33,10 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **记忆与知识**：`PRINCIPLES.md`（耐久准则）+ 角色经验卡 + FTS5 + 分层知识作用域
   （频道 / 主题知识库 / 任务级知识库 / 角色 / 共享）；知识卡模板、审批、版本、过期/复核/冲突检测；
   角色知识必须经过“成功实践 + 提炼”门控。任务起始上下文以角色画像与能力为主，历史知识按
-  tag/相关性检索带入，不再整段注入 `MEMORY.md`。
+  tag/相关性检索带入，不再整段注入 `MEMORY.md`。知识提交/批准/收割统一执行必须条款
+  （标题/TLDR/正文/字段长度 + 质量字段 + kind 必填，不满足返回 422）；共享经验与角色知识
+  支持角色按自身上下文智能补全（忙碌排队）；顶层任务在 Cindy 规划、human 落板 workflow 后
+  自动获得任务完成知识收割提醒，由 Cindy 收割任务/主题/频道知识且只写 proposed。
 - **任务隔离**：每个任务有独立的 Task Workspace（`data/task-workspaces/<task-id>/`），
   代码/产物/任务级知识草稿互不串扰；无强相关主题时在 workspace 内创建任务级知识库，
   人工批准后可晋升为主题知识库/频道/共享经验。
@@ -461,6 +465,9 @@ cd dev
 pytest tests/ -q
 ```
 
+当前基线：**1005 passed + 63 skipped**（CLI 契约需要 `ANVIL_BIN`，模型评测需要
+`ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。
+
 CLI 契约测试需要安装 `anvil` 并指定可执行文件：
 
 ```bash
@@ -629,6 +636,7 @@ anvil init
 - [design.md](design.md)：架构、数据模型、工作流引擎、上下文与模型策略
 - [docs/cli-reference.md](docs/cli-reference.md)：CLI 命令、参数、规则、错误处理与示例
 - [docs/v1.30-channel-knowledge.md](docs/v1.30-channel-knowledge.md)：频道、知识作用域、知识卡、归档与效果评估方案
+- [docs/issue-board.md](docs/issue-board.md)：问题板（安全 findings）字段、状态机与提交/确认流程
 - [docs/v1.40.0-release.md](docs/v1.40.0-release.md)：v1.40.0 任务上下文隔离、分层知识库、质量门与 LLM 清洗变更方案
 - [docs/v1.41.0-release.md](docs/v1.41.0-release.md)：v1.41.0 问题板外部问题跟踪提交
 - [docs/v1.41.1-release.md](docs/v1.41.1-release.md)：v1.41.1 问题板提交反馈、tracker 超时/代理诊断与 CLI 帮助修复
@@ -644,6 +652,13 @@ anvil init
 - [docs/v1.42.5-release.md](docs/v1.42.5-release.md)：v1.42.5 派遣子任务模型修正、回切状态机与 runtime subagent
 - [docs/v1.42.6-release.md](docs/v1.42.6-release.md)：v1.42.6 切片关联角色执行上下文
 - [docs/v1.42.7-release.md](docs/v1.42.7-release.md)：v1.42.7 默认 Cindy 助理、首次安装清理与 assign 修复
+- [docs/v1.43.0-release.md](docs/v1.43.0-release.md)：v1.43.0 subagent 提示编排、驳回唤醒与整体工程修复
+- [docs/v1.44.0-release.md](docs/v1.44.0-release.md)：v1.44.0 旁路验证节点、按步骤 subagent 提示与 Windows 编码加固
+- [docs/v1.44.1-release.md](docs/v1.44.1-release.md)：v1.44.1 context_return 死标记修复与看门狗有界等待
+- [docs/v1.45.0-release.md](docs/v1.45.0-release.md)：v1.45.0 协作方式判断、角色一致性与 D1–D4 收尾
+- [docs/v1.45.1-release.md](docs/v1.45.1-release.md)：v1.45.1 角色删除关闭委派、dispatch 通知补投与 subagent 幽灵收尾
+- [docs/v1.45.2-release.md](docs/v1.45.2-release.md)：v1.45.2 收件箱委派验收、审批参与者预览与评测实跑
+- [docs/v1.46.0-release.md](docs/v1.46.0-release.md)：v1.46.0 知识入库必须条款、智能补全、任务完成自动收割与弹窗冻结
 - [docs/workflow-revision.md](docs/workflow-revision.md)：运行中 workflow 的增量修订（安全变更不重启任务）
 - [docs/operations.md](docs/operations.md)：打包、备份/迁移/重置、卸载
 - [docs/troubleshooting.md](docs/troubleshooting.md)：详细排查
