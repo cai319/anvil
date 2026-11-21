@@ -1340,6 +1340,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_dispatch_child_v1(conn)
     _migrate_dispatch_notify_v1(conn)
     _migrate_context_return_v1(conn)
+    _migrate_context_return_v2(conn)
+    _migrate_context_return_v3(conn)
     _migrate_claim_release_v1(conn)
     _migrate_subagents_v1(conn)
     _migrate_subagent_hint_v1(conn)
@@ -1913,6 +1915,34 @@ def _migrate_context_return_v1(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
     _set_setting(conn, "schema.context_return_v1", "1")
+    conn.commit()
+
+
+def _migrate_context_return_v2(conn: sqlite3.Connection) -> None:
+    """修复历史二次 arm 死标记：armed 但 returned_at 非空的记录对 resolver 不可见。"""
+    if _setting(conn, "schema.context_return_v2"):
+        return
+    conn.execute(
+        "UPDATE runs SET context_returned_at=NULL "
+        "WHERE context_return_after_turn=1 AND context_returned_at IS NOT NULL")
+    _set_setting(conn, "schema.context_return_v2", "1")
+    conn.commit()
+
+
+def _migrate_context_return_v3(conn: sqlite3.Connection) -> None:
+    """arm 时间/代际锚点：TTL 只看 armed_at，不被重试 attempts 延长；
+    同目标重复 arm 也不刷新它，避免高频 mention 无限续命。"""
+    if _setting(conn, "schema.context_return_v3"):
+        return
+    try:
+        conn.execute("ALTER TABLE runs ADD COLUMN context_return_armed_at TEXT")
+    except sqlite3.OperationalError:
+        pass
+    conn.execute(
+        "UPDATE runs SET context_return_armed_at=COALESCE("
+        "context_return_armed_at, context_return_last_attempt_at, started_at) "
+        "WHERE context_return_after_turn=1 AND context_return_armed_at IS NULL")
+    _set_setting(conn, "schema.context_return_v3", "1")
     conn.commit()
 
 

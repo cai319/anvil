@@ -307,13 +307,10 @@ class Scheduler:
                 "AND COALESCE(updated_at, created_at) >= ? LIMIT 1",
                 (run_id, cutoff)).fetchone():
             return True
-        # 临时切片只有在 resolver 能处理的状态下才等待；submitted/reviewing 按非阻塞
-        # 规则不等待（否则会永久抑制来源 step）。
-        if conn.execute(
-                "SELECT 1 FROM runs WHERE context_return_run_id=? "
-                "AND context_return_after_turn=1 "
-                "AND status IN ('suspended','completed','failed','abandoned') LIMIT 1",
-                (run_id,)).fetchone():
+        # 临时切片只有在标记仍“可推进”时才等待：attempts 耗尽或超过 TTL 后
+        # 必须放行，否则一条陈旧标记会永久抑制步骤 nudge。
+        dispatch_service.expire_stale_context_returns(conn, run_id)
+        if dispatch_service.context_return_is_blocking(conn, run_id):
             return True
         # 不再使用“角色有任意未完成 dispatched 任务”的角色级兜底；那会让无关派遣
         # 永久阻塞来源 step。角色真正忙碌由下面的 active run / daemon 检查处理。
@@ -407,6 +404,8 @@ class Scheduler:
                     f"步骤停滞：{r['nudge_count']} 次唤醒后仍未提交", "environment",
                     failure_class="step_stalled")
                 continue
+            # 放行 nudge 前再清一次过期标记，避免 resolver 与本路径双投递。
+            dispatch_service.expire_stale_context_returns(conn, r["run_id"])
             if not self._pump(r["run_id"], "resume"):
                 continue
             conn.execute(
@@ -744,7 +743,7 @@ class Scheduler:
         """步骤已重排/结束，但关联 run 仍活跃 → 结束孤儿 run。
 
         fail_step 会把步骤重置为 pending 并清空 run_id；若旧 run 仍是
-        created/projecting/running，advance 会认为该角色忙而永远跳过该步骤。
+        created/projecting/running/suspended，advance 会认为该角色忙而永远跳过该步骤。
         这里兜底清理历史残留与异常窗口，保证重派不被僵尸 run 阻塞。
         """
         rows = conn.execute(
@@ -752,11 +751,12 @@ class Scheduler:
                  FROM runs r
                  LEFT JOIN workflow_steps s
                    ON s.workflow_id=r.workflow_id AND s.step_id=r.step_id
-                WHERE r.status IN ('created','projecting','running')
+                WHERE r.status IN ('created','projecting','running','suspended')
                   AND r.workflow_id IS NOT NULL AND r.step_id IS NOT NULL
                   AND (s.step_id IS NULL OR s.status != 'running' OR s.run_id != r.id)"""
         ).fetchall()
         for row in rows:
+            dispatch_service.clear_inbound_context_returns(conn, row["id"])
             runs_service.set_status(conn, row["id"], "failed", ended_at=now_iso(),
                                     failure_class="orphaned_step_run")
 

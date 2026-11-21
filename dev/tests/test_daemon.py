@@ -17,7 +17,7 @@ pytest.importorskip("anvil.graph")
 from anvil.services import runs as runs_service  # noqa: E402
 from anvil.services import tasks as tasks_service  # noqa: E402
 from anvil.services.daemon import (  # noqa: E402
-    DaemonManager, _SpawnSpec, _clean_env, frame_user_message,
+    DaemonManager, _Queued, _SpawnSpec, _clean_env, frame_user_message,
 )
 
 FAKE_RUNTIME = '''
@@ -1357,3 +1357,33 @@ def test_task_level_reset_does_not_clear_slice_slot(env):
         c.close()
     assert task["id"] not in rows
     assert f"{task['id']}::slice::A" in rows
+
+
+def test_context_switch_marks_old_running_run_suspended(env, monkeypatch):
+    """切走旧上下文时旧 run 必须落 suspended，否则 resolver 会永久等 running 结束。"""
+    conn, mgr, fake, log = env
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    runs_service.set_status(conn, run["id"], "running")
+
+    class AliveProc:
+        def poll(self):
+            return None
+
+    r = mgr._role("qa-role")
+    r.current_run_id = run["id"]
+    r.context_key = None
+    r.proc = AliveProc()
+    monkeypatch.setattr(mgr, "_kill_locked", lambda *a, **k: None)
+    monkeypatch.setattr(mgr, "_slot_load", lambda *a, **k: None)
+    monkeypatch.setattr(mgr, "_spawn", lambda *a, **k: None)
+    monkeypatch.setattr(mgr, "_send_locked", lambda *a, **k: True)
+    monkeypatch.setattr(mgr, "_project_before_delivery", lambda *a, **k: None)
+    item = _Queued(
+        text="x", run_id=run["id"], task_id=None,
+        spec=_SpawnSpec(executable=sys.executable, args_new=[], args_resume=[],
+                        ctx={}, cwd=str(fake.parent), env={}),
+        slice_key=None, priority=100,
+    )
+
+    assert mgr._switch_context_inner(conn, r, item, "__global__") is True
+    assert _run_status(mgr.db_path, run["id"]) == "suspended"

@@ -46,6 +46,17 @@ def env(tmp_path, monkeypatch):
     return conn, Scheduler(db_path, orch), orch, wf["id"]
 
 
+def _add_context_return(conn, *, age_seconds: int = 0) -> None:
+    stamp = (datetime.now(timezone.utc) - timedelta(seconds=age_seconds)).isoformat()
+    conn.execute(
+        "INSERT INTO runs (id, role_slug, task_id, status, started_at, "
+        "context_return_context_key, context_return_run_id, "
+        "context_return_after_turn, context_return_last_attempt_at) "
+        "VALUES ('R-TMP','qa','T1','suspended',?,'T1::slice::x','R1',1,?)",
+        (stamp, stamp))
+    conn.commit()
+
+
 def test_nudge_suspended_step(env):
     conn, sched, orch, wid = env
     sched._nudge_stalled(conn)
@@ -53,6 +64,57 @@ def test_nudge_suspended_step(env):
     row = conn.execute("SELECT nudge_count FROM workflow_steps WHERE workflow_id=?",
                        (wid,)).fetchone()
     assert row["nudge_count"] == 1
+
+
+def test_nudge_skips_live_context_return(env):
+    """新 arm 的回切标记仍应阻塞看门狗。"""
+    conn, sched, orch, wid = env
+    _add_context_return(conn)
+    sched._nudge_stalled(conn)
+    assert orch.pumped == []
+    row = conn.execute("SELECT nudge_count FROM workflow_steps WHERE workflow_id=?",
+                       (wid,)).fetchone()
+    assert row["nudge_count"] == 0
+
+
+def test_nudge_resumes_after_context_return_expires(env):
+    """标记超过 TTL 后不再阻塞，nudge_count 必须能递增。"""
+    conn, sched, orch, wid = env
+    _add_context_return(
+        conn, age_seconds=int(config.CONTEXT_RETURN_MAX_WAIT_SECONDS) + 60)
+    sched._nudge_stalled(conn)
+    assert orch.pumped == [("R1", "resume")]
+    row = conn.execute("SELECT nudge_count FROM workflow_steps WHERE workflow_id=?",
+                       (wid,)).fetchone()
+    assert row["nudge_count"] == 1
+    marker = conn.execute(
+        "SELECT context_return_after_turn, context_returned_at FROM runs "
+        "WHERE id='R-TMP'").fetchone()
+    assert marker["context_return_after_turn"] == 0
+    assert marker["context_returned_at"]
+
+
+def test_reap_orphaned_suspended_step_run_clears_inbound(env):
+    """step 已重排但 run 仍 suspended：回收孤儿 run 并清掉指向它的回切标记。"""
+    conn, sched, orch, wid = env
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,workflow_id,step_id,started_at) "
+        "VALUES ('R-ORPH','dev','T1','suspended',?,'S1',?)", (wid, now))
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,started_at,"
+        "context_return_context_key,context_return_run_id,"
+        "context_return_after_turn,context_return_last_attempt_at) "
+        "VALUES ('R-TMP','qa','T1','suspended',?,'K','R-ORPH',1,?)", (now, now))
+    conn.commit()
+
+    sched._reap_orphaned_step_runs(conn)
+
+    orphan = conn.execute("SELECT status FROM runs WHERE id='R-ORPH'").fetchone()
+    assert orphan["status"] == "failed"
+    marker = conn.execute(
+        "SELECT context_return_after_turn FROM runs WHERE id='R-TMP'").fetchone()
+    assert marker["context_return_after_turn"] == 0
 
 
 def test_nudge_skips_step_waiting_for_human(env):

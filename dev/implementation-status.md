@@ -620,3 +620,29 @@ cd frontend && npm run build         # tsc + vite build
 - 测试：`tests/test_slice_context.py`、`tests/test_context_router.py`、
   `tests/test_dispatch_task.py`、`tests/test_auto_return.py`、
   `tests/api/test_dispatch_api.py`，全量 781 passed / 58 skipped；前端构建通过。
+
+## context_return 死标记与看门狗有界等待（2026-11-21）
+
+- **死锁修复**：同一回复 run 二次 arm 时未复位 `context_returned_at`，导致
+  `resolve_context_returns` 的扫描条件（`after_turn=1 AND returned_at IS NULL`）
+  永远看不到该标记；看门狗则每 tick 因 `after_turn=1` 抑制步骤 nudge，
+  `nudge_count` 恒为 0。
+- `record_context_return` 允许 re-arm，arm 时复位
+  `returned_at/attempts/last_attempt_at` 并更新返回目标；resolver 改为扫描
+  `after_turn=1`，`returned_at` 仅作审计。
+- 新增 `ANVIL_CONTEXT_RETURN_MAX_WAIT_SECONDS`（默认 900s）；TTL 锚定
+  `context_return_armed_at`，同目标重复 arm 不刷新（防止高频 mention 无限续命），
+  目标变化/人工 restart 才重置。目标 run 长期非 suspended、entry run 长期活跃、
+  attempts 耗尽时，resolver 清标记并写 `context_return.expired` 审计，不再无限等待。
+- resolver 的 claim/clear 带 `armed_at` 代际 CAS：pump 期间若被二次 arm 改了目标，
+  旧 resolver 不会误清新标记。
+- 看门狗改用 `context_return_is_blocking`，只等待仍可推进的标记；放行 nudge
+  前原子清过期标记，避免 nudge/resolver 双投递。
+- 上下文切换把被切走的 running run 落 `suspended`；`_reap_orphaned_step_runs`
+  纳入 suspended 的 stale step run，并清理指向它的入站标记。
+- 人工 restart：回复 run 重武装自己的回切；步骤 run 清掉所有指向它的入站标记；
+  restart 先 pump 目标 run 再补投队列，避免旧 mention/reply 抢在步骤 run 前投递。
+- 启动迁移 `schema.context_return_v2` 复位历史 `armed + returned_at` 死标记。
+- 测试：`tests/test_auto_return.py`、`tests/test_step_watchdog.py`、
+  `tests/test_daemon.py`、`tests/api/test_m4_completion.py`；全量
+  **896 passed / 60 skipped**。

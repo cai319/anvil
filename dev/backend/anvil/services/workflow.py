@@ -3808,6 +3808,10 @@ def rebind_run_to_step(conn: sqlite3.Connection, wid: str, step_id: str,
         return get_workflow(conn, wid)  # type: ignore[return-value]
     wf = get_workflow(conn, wid)
     step = next(s for s in (wf.get("steps") or []) if s["step_id"] == step_id)
+    # 重新绑定后旧 run 不再代表该步骤：清掉指向它的回切标记，避免看门狗
+    # 继续把步骤当成“在等临时上下文”。
+    from . import dispatch as dispatch_service
+    dispatch_service.clear_inbound_context_returns(conn, step.get("run_id"))
     leases.release(conn, step.get("lease_id"), commit=False)
     lease = leases.acquire(
         conn, "step", f"{wid}:{step_id}", holder_type="role",
@@ -3849,6 +3853,9 @@ def _end_run_for_step(conn: sqlite3.Connection, wf: dict, step: dict, *,
     row = conn.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
     if row is None or row["status"] in ("completed", "failed", "abandoned"):
         return
+    # 步骤结束/重排：清掉指向旧 run 的入站回切标记。
+    from . import dispatch as dispatch_service
+    dispatch_service.clear_inbound_context_returns(conn, run_id)
     conn.execute(
         "UPDATE runs SET status='failed', ended_at=?, "
         "failure_class=COALESCE(?, failure_class) WHERE id=?",
