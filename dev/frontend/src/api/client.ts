@@ -1066,6 +1066,30 @@ export const api = {
     return authFetch(`${BASE}/me/knowledge/search?${qs.toString()}`)
       .then((r) => json(r));
   },
+  getRoleKnowledge: (role: string, noteId: string): Promise<KnowledgeHit> => {
+    const qs = new URLSearchParams({ role });
+    return authFetch(`${BASE}/me/knowledge/${encodeURIComponent(noteId)}?${qs.toString()}`)
+      .then((r) => json<KnowledgeHit>(r));
+  },
+  deleteRoleKnowledge: (role: string, noteId: string): Promise<void> => {
+    const qs = new URLSearchParams({ role });
+    return req("DELETE", `/me/knowledge/${encodeURIComponent(noteId)}?${qs.toString()}`)
+      .then((r) => { if (!r.ok) throw new Error(`${r.status} ${r.statusText}`); });
+  },
+  requestRoleKnowledgeCompletion: (role: string, noteId: string): Promise<{
+    status: "requested" | "already_complete" | "already_queued";
+    role: string;
+    task_id?: string;
+    run_id?: string;
+    wake_request_id?: number | null;
+    queued?: boolean;
+    completion?: KnowledgeCompletion | null;
+  }> => {
+    const qs = new URLSearchParams({ role });
+    return req(
+      "POST", `/me/knowledge/${encodeURIComponent(noteId)}/request-completion?${qs.toString()}`,
+      {}).then((r) => json(r));
+  },
 
   // tasks（补齐 cancel/reopen）
   cancelTask: (id: string): Promise<Task> => req("POST", `/tasks/${id}/cancel`, {}).then((r) => json<Task>(r)),
@@ -1096,10 +1120,36 @@ export const api = {
     req("POST", `/reminders/${id}/fire-now`, {}).then((r) => json(r)),
 
   // lessons
+  getLesson: (id: string): Promise<Lesson> =>
+    authFetch(`${BASE}/lessons/${encodeURIComponent(id)}`).then((r) => json<Lesson>(r)),
+  updateLesson: (id: string, patch: {
+    title?: string; tldr?: string; content?: string;
+    fields?: Record<string, unknown>; tags?: string[]; repo?: string;
+  }): Promise<Lesson> =>
+    req("PUT", `/lessons/${encodeURIComponent(id)}`, patch).then((r) => json<Lesson>(r)),
+  requestLessonCompletion: (id: string): Promise<{
+    status: "requested" | "already_complete" | "already_queued";
+    role: string;
+    task_id?: string;
+    run_id?: string;
+    wake_request_id?: number | null;
+    missing?: string[];
+    queued?: boolean;
+    completion?: KnowledgeCompletion | null;
+  }> =>
+    req("POST", `/lessons/${encodeURIComponent(id)}/request-completion`, {})
+      .then((r) => {
+        if (r.status === 405) {
+          throw new Error("当前后端进程未加载“补全字段”接口，请重启 Anvil 后端后重试");
+        }
+        return json(r);
+      }),
   listLessons: (status?: string): Promise<Lesson[]> =>
     authFetch(`${BASE}/lessons${status ? `?status=${encodeURIComponent(status)}` : ""}`).then((r) => json(r)),
-  proposeLesson: (content: string, tags: string[], repo: string): Promise<Lesson> =>
-    req("POST", "/lessons/pending", { content, tags, repo }).then((r) => json(r)),
+  proposeLesson: (content: string, tags: string[], repo: string, extra?: {
+    title?: string; tldr?: string; fields?: Record<string, unknown>;
+  }): Promise<Lesson> =>
+    req("POST", "/lessons/pending", { content, tags, repo, ...extra }).then((r) => json(r)),
   approveLesson: (id: string): Promise<Lesson> => req("POST", `/lessons/${id}/approve`, {}).then((r) => json(r)),
   rejectLesson: (id: string): Promise<Lesson> => req("POST", `/lessons/${id}/reject`, {}).then((r) => json(r)),
   deleteLesson: (id: string): Promise<void> =>
@@ -1411,6 +1461,10 @@ export interface RoleKnowledgeIndex {
   recent: {
     id: string; path: string; kind: string; repo: string | null;
     repo_id?: string | null; repo_display?: string | null;
+    title?: string | null; tldr?: string | null;
+    content?: string | null; fields?: Record<string, unknown>;
+    ready?: boolean | null; submission_errors?: string[];
+    completion?: KnowledgeCompletion | null;
     updated_at: string | null; hit_count?: number; last_hit_at?: string | null;
   }[];
   total_role: number;
@@ -1487,6 +1541,13 @@ export interface KnowledgeHit {
   repo_display?: string | null;
   module?: string | null;
   tags: string[];
+  title?: string;
+  tldr?: string;
+  fields?: Record<string, unknown>;
+  content?: string;
+  ready?: boolean | null;
+  submission_errors?: string[];
+  completion?: KnowledgeCompletion | null;
   snippet: string;
   updated_at?: string | null;
   created_at?: string | null;
@@ -1607,6 +1668,13 @@ export interface InboxDraftMeta {
   finding_false_positive?: number;
   finding_summary?: string;
   reviewers?: string[];
+  // lesson metadata
+  lesson_id?: string;
+  tldr?: string;
+  repo?: string;
+  source_role?: string | null;
+  source_task?: string | null;
+  lesson?: Lesson;
 }
 
 export interface InboxItem {
@@ -2157,14 +2225,35 @@ export interface Reminder {
   created_at: string;
 }
 
+export interface KnowledgeCompletion {
+  job_id?: string | null;
+  state: "queued" | "running" | "completed" | "failed" | string;
+  active: boolean;
+  ready?: boolean | null;
+  role_slug?: string | null;
+  run_id?: string | null;
+  wake_request_id?: number | null;
+  updated_at?: string | null;
+  completed_at?: string | null;
+  /** 无补全任务记录、但历史知识已满足入库标准时推断为已完成。 */
+  inferred?: boolean;
+}
+
 export interface Lesson {
   id: string;
+  title: string;
+  tldr: string;
   content: string;
+  fields: Record<string, unknown>;
   tags: string[];
   source_task: string | null;
   source_role: string | null;
   repo: string;
   status: "pending" | "approved" | "rejected";
+  quality?: QualityReport;
+  ready?: boolean;
+  submission_errors?: string[];
+  completion?: KnowledgeCompletion | null;
   hit_count?: number;
   last_hit_at?: string | null;
   created_at: string;

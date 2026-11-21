@@ -61,5 +61,9 @@ def test_task_to_repo_to_channel_to_shared(env):
     lesson = harvest.repo_card_to_shared(conn, repo_card["id"], actor="human")
     assert lesson["status"] == "pending"
     assert lesson["repo"] == "shared"
+    # 晋升为共享经验时必须保留知识卡的结构化信息，供人工审批查看。
+    assert lesson["title"] == repo_card["title"]
+    assert lesson["tldr"] == repo_card["tldr"]
+    assert lesson["fields"] == repo_card["fields"]
     # 直接写 data/shared 只能由 approve_lesson 完成，harvest 不直接落文件。
     assert not (data / "shared" / "lessons.md").exists()

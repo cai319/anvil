@@ -122,7 +122,7 @@ export function AvatarPicker({
       }}
     >
       <div
-        className="modal avatar-modal"
+        className="modal avatar-modal modal-flex"
         role="dialog"
         aria-modal="true"
         aria-label="选择角色头像"
@@ -139,11 +139,13 @@ export function AvatarPicker({
             <Icon name="x" size={12} />
           </button>
         </div>
-        <p className="avatar-picker-hint">
-          给「{name}」选一个头像。创建后也可以随时更换。
-        </p>
-        {grid}
-        {saveError && <p className="error">{saveError}</p>}
+        <div className="modal-flex-body">
+          <p className="avatar-picker-hint">
+            给「{name}」选一个头像。创建后也可以随时更换。
+          </p>
+          {grid}
+          {saveError && <p className="error">{saveError}</p>}
+        </div>
         <div className="modal-actions">
           <button type="button" onClick={dismiss} disabled={saving}>取消</button>
           <button type="button" className="primary" onClick={save} disabled={saving}>

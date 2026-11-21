@@ -23,7 +23,8 @@ from .platform import factory
 from .services import board as board_service
 from .services import daemon as daemon_service
 from .services import dispatch as dispatch_service
-from .services import governance, leases, runs as runs_service, tasks as tasks_service
+from .services import (governance, knowledge_completion, leases,
+                       runs as runs_service, tasks as tasks_service)
 from .services import wake as wake_service
 from .services import workflow as workflow_service
 from .util import ConflictError, now_iso
@@ -407,6 +408,8 @@ class Scheduler:
                 wake_service.mark(conn, req_id, "skipped", "waiting for human")
                 conn.commit()
                 return
+            knowledge_completion.link_run(
+                conn, wake_request_id=req_id, run_id=run["id"], status="running")
             dispatch_service.append_wake_note(
                 conn, run["id"], req["note"], once_marker=marker)
             conn.commit()
@@ -419,6 +422,8 @@ class Scheduler:
             conn.commit()
             return
         created = runs_service.create_run(conn, role, req["task_id"])
+        knowledge_completion.link_run(
+            conn, wake_request_id=req_id, run_id=created["id"], status="running")
         dispatch_service.append_wake_note(
             conn, created["id"], req["note"], once_marker=marker)
         conn.commit()

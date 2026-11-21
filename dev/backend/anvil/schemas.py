@@ -324,6 +324,9 @@ class NoteWriteIn(BaseModel):
     outcome: str | None = None
     source_knowledge: list[str] = Field(default_factory=list)
     force: bool = False
+    title: str | None = None
+    tldr: str | None = None
+    fields: dict | None = None
 
 
 class ProposalIn(BaseModel):
@@ -338,6 +341,9 @@ class LessonIn(BaseModel):
     tags: list[str] = Field(default_factory=list)
     repo: str | None = None
     source_task: str | None = None
+    title: str | None = None
+    tldr: str | None = None
+    fields: dict = Field(default_factory=dict)
 
 
 class InstructionIn(BaseModel):

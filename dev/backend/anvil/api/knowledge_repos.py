@@ -227,6 +227,8 @@ def repo_card_create(repo: str, body: dict, conn=Depends(get_db),
             confidence=float(body.get("confidence") or 0.5),
             created_by=auth.role or "human",
         )
+    except knowledge_card.IncompleteKnowledgeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

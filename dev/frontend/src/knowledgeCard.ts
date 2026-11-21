@@ -1,4 +1,39 @@
-import type { KnowledgeAuthority, KnowledgeKind, KnowledgeStatus } from "./api/client";
+import type {
+  KnowledgeAuthority,
+  KnowledgeCompletion,
+  KnowledgeKind,
+  KnowledgeStatus,
+} from "./api/client";
+
+/** 智能补全进度：看板/详情共用的文案。 */
+export function completionLabel(completion?: KnowledgeCompletion | null): string {
+  switch (completion?.state) {
+    case "queued": return "补全排队中";
+    case "running": return "补全处理中";
+    case "completed": return "补全完成";
+    case "failed": return "补全失败";
+    default: return "";
+  }
+}
+
+/** 补全按钮是否应灰化：处理中，或已达成质量要求。 */
+export function completionBlocked(ready?: boolean | null,
+                                  completion?: KnowledgeCompletion | null): boolean {
+  return ready === true || completion?.active === true;
+}
+
+export function completionActionLabel(
+  ready: boolean | null | undefined,
+  completion: KnowledgeCompletion | null | undefined,
+  fallback: string,
+  readyLabel: string,
+): string {
+  if (ready === true) return readyLabel;
+  if (completion?.active) return completionLabel(completion);
+  if (completion?.state === "failed") return "重新补全";
+  if (completion?.state === "completed") return "再次补全";
+  return fallback;
+}
 
 /** 知识卡类型与字段：频道页、任务页、知识库共用同一份定义。 */
 export const KNOWLEDGE_KINDS: KnowledgeKind[] = [
@@ -34,9 +69,11 @@ export const QUALITY_FIELD_LABEL: Record<string, string> = {
   alternatives: "备选方案", consequences: "后果与取舍", purpose: "目的",
   steps: "步骤", rollback: "回滚/失败处理", capability: "能力", why: "为什么需要",
   when: "何时需要", observation: "观察", lesson: "结论/经验", applicability: "适用性",
-  counterexamples: "反例", task_context: "任务上下文", finding: "发现",
+  counterexamples: "不适用/反例", task_context: "任务上下文", finding: "发现",
   reuse_scope: "可复用范围", practice: "实践任务/run", outcome: "结果",
-  confidence: "置信度", title: "标题", tldr: "TLDR", body: "正文",
+  confidence: "置信度", trigger: "触发条件", trigger_point: "触发点",
+  trigger_logic: "触发逻辑", applicable_scenarios: "适用场景", scenario: "场景",
+  title: "标题", tldr: "TLDR", body: "正文",
   title_length: "标题长度", tldr_length: "TLDR 长度", body_length: "正文长度",
 };
 
@@ -66,7 +103,7 @@ export const KNOWLEDGE_CARD_FIELDS: Record<KnowledgeKind, { key: string; label: 
   insight: [
     { key: "observation", label: "观察" }, { key: "evidence", label: "证据" },
     { key: "lesson", label: "结论/经验" }, { key: "applicability", label: "适用性" },
-    { key: "counterexamples", label: "反例" },
+    { key: "counterexamples", label: "不适用/反例" },
   ],
   task_finding: [
     { key: "task_context", label: "任务上下文" }, { key: "finding", label: "发现" },

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .. import config
 from ..util import jdumps, jloads, now_iso, read_text_file
+from . import knowledge_card, knowledge_completion
 
 NOTE_KINDS = {
     "task_snapshot", "vulnerability_pattern", "failure_scenario",
@@ -311,6 +312,17 @@ def _base_where(role: str, task_id: str | None, scope: str,
 def _row_hit(row, snippet: str, score: float, why: list[str],
              snippet_chars: int) -> dict:
     tags = jloads(row["tags_json"], []) if "tags_json" in row.keys() else []
+    fields = (knowledge_card.normalize_fields(
+        jloads(row["fields_json"], {})) if "fields_json" in row.keys() else {})
+    title = row["title"] if "title" in row.keys() else ""
+    tldr = row["tldr"] if "tldr" in row.keys() else ""
+    ready = None
+    submission_errors: list[str] = []
+    if row["kind"] != "task_snapshot":
+        submission_errors = knowledge_card.submission_errors(
+            row["kind"], title or "", tldr or "", row["content"] or "", fields,
+            strict_kind=False)
+        ready = not submission_errors
     return {
         "id": row["id"], "path": row["path"], "kind": row["kind"],
         "scope": row["scope"], "task_id": row["task_id"],
@@ -319,6 +331,11 @@ def _row_hit(row, snippet: str, score: float, why: list[str],
         "repo_id": row["repo_id"] if "repo_id" in row.keys() else None,
         "repo_display": row["repo"],
         "module": row["module"],
+        "title": title,
+        "tldr": tldr,
+        "fields": fields,
+        "ready": ready,
+        "submission_errors": submission_errors,
         "confidence": row["confidence"], "created_at": row["created_at"],
         "updated_at": row["updated_at"] or row["created_at"],
         "hit_count": row["hit_count"] if "hit_count" in row.keys() else 0,
@@ -339,6 +356,15 @@ def _row_hit(row, snippet: str, score: float, why: list[str],
         },
         "why": why,
     }
+
+
+def _attach_completion(conn: sqlite3.Connection, hits: list[dict]) -> list[dict]:
+    from . import knowledge_completion
+    for hit in hits:
+        hit["completion"] = knowledge_completion.status_for(
+            conn, "role_note", str(hit.get("id") or ""),
+            ready=hit.get("ready"))
+    return hits
 
 
 def _attach_repo_display(conn: sqlite3.Connection, hits: list[dict]) -> list[dict]:
@@ -699,7 +725,7 @@ def search_knowledge(conn: sqlite3.Connection, role_slug: str, query: str, *,
         ranked = [h for h in ranked
                   if float(h.get("score") or 0) >= float(min_score)
                   or (task_id and h.get("task_id") == task_id)]
-    return _attach_repo_display(conn, ranked)
+    return _attach_completion(conn, _attach_repo_display(conn, ranked))
 
 
 def latest_task_snapshot(conn: sqlite3.Connection, role_slug: str,
@@ -725,6 +751,38 @@ def latest_task_snapshot(conn: sqlite3.Connection, role_slug: str,
     return _attach_repo_display(conn, [hit])[0]
 
 
+def delete_note(conn: sqlite3.Connection, role_slug: str, note_id: str) -> bool:
+    """删除角色私有知识：DB 索引 + 角色 home 文件（active/draft 两份路径）。
+
+    只允许删除 scope=role 的笔记；task 快照/临时上下文不在知识库页面操作。
+    """
+    row = conn.execute(
+        "SELECT id, path FROM notes WHERE id=? AND role_slug=? AND scope='role'",
+        (note_id, role_slug)).fetchone()
+    if row is None:
+        return False
+    conn.execute("DELETE FROM notes WHERE id=? AND role_slug=?",
+                 (note_id, role_slug))
+    conn.commit()
+    home = (config.AGENTS_DIR / role_slug).resolve()
+    for rel in (f"notes/{row['path']}", f"notes/.draft/{row['path']}"):
+        target = (home / rel).resolve()
+        if not target.is_relative_to(home):
+            continue
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+    try:
+        from . import repo_catalog
+        repo_catalog.invalidate_catalog()
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
 def get_knowledge(conn: sqlite3.Connection, role_slug: str, note_id: str, *,
                   task_id: str | None = None,
                   include_task_scope: bool = False) -> dict | None:
@@ -738,7 +796,8 @@ def get_knowledge(conn: sqlite3.Connection, role_slug: str, note_id: str, *,
             return None
     content = str(row["content"] or "")
     hit = _row_hit(row, content[:4000], 1.0, ["show"], snippet_chars=4000)
-    return _attach_repo_display(conn, [hit])[0]
+    return _attach_completion(
+        conn, _attach_repo_display(conn, [hit]))[0]
 
 
 def knowledge_index(conn: sqlite3.Connection, role_slug: str,
@@ -755,14 +814,29 @@ def knowledge_index(conn: sqlite3.Connection, role_slug: str,
     top = conn.execute(
         "SELECT n.id, n.path, n.kind, n.repo, n.repo_id, "
         "COALESCE(kr.display_name, n.repo) AS repo_display, "
-        "n.updated_at, n.hit_count, n.last_hit_at "
+        "n.updated_at, n.hit_count, n.last_hit_at, "
+        "n.title, n.tldr, n.content, n.fields_json "
         "FROM notes n LEFT JOIN knowledge_repos kr ON kr.id=n.repo_id "
         "WHERE n.role_slug=? AND n.scope='role' "
         "ORDER BY COALESCE(n.updated_at, n.created_at) DESC LIMIT 8",
         (role_slug,)).fetchall()
+    recent = []
+    for row in top:
+        item = dict(row)
+        fields = knowledge_card.normalize_fields(
+            jloads(item.pop("fields_json", "{}"), {}))
+        errors = knowledge_card.submission_errors(
+            item["kind"], item.get("title") or "", item.get("tldr") or "",
+            item.get("content") or "", fields, strict_kind=False)
+        item["fields"] = fields
+        item["ready"] = not errors
+        item["submission_errors"] = errors
+        item["completion"] = knowledge_completion.status_for(
+            conn, "role_note", item["id"], ready=item["ready"])
+        recent.append(item)
     return {
         "role_counts": role_counts, "task_counts": task_counts,
-        "recent": [dict(r) for r in top],
+        "recent": recent,
         "total_role": sum(role_counts.values()),
         "total_task": sum(task_counts.values()),
     }
@@ -1036,10 +1110,14 @@ def reindex_notes(conn: sqlite3.Connection, role_slug: str, *,
             conn.execute("DELETE FROM notes WHERE role_slug=? AND path=?",
                          (role_slug, rel))
         text = body.strip()
-        title = (old["title"] if old is not None and old["title"] else
-                 text.splitlines()[0][:80] if text else "")
-        tldr = (old["tldr"] if old is not None and old["tldr"] else
-                " ".join(text.split())[:200])
+        title = (meta.get("title") or (old["title"] if old is not None else "")
+                 or (text.splitlines()[0] if text else ""))
+        tldr = (meta.get("tldr") or (old["tldr"] if old is not None else "")
+                or " ".join(text.split())[:200])
+        fields_json = (
+            jdumps(knowledge_card.normalize_fields(meta.get("fields")))
+            if isinstance(meta.get("fields"), dict)
+            else (old["fields_json"] if old is not None else "{}"))
         status = _reindex_note_status(
             conn, role_slug, meta, inferred["kind"], old, require_practice)
         practice_task_id = (
@@ -1066,7 +1144,7 @@ def reindex_notes(conn: sqlite3.Connection, role_slug: str, *,
              inferred["source_task"], jdumps(inferred["tags"]), inferred["repo"],
              inferred.get("repo_id"), inferred["module"], inferred["confidence"],
              inferred["updated_at"], "reindex", inferred["content_hash"], title, tldr,
-             old["fields_json"] if old is not None else "{}",
+             fields_json,
              practice_task_id, practice_run_id, outcome, verified_at, status,
              old["source_knowledge_json"] if old is not None else "[]",
              old["hit_count"] if old is not None else 0,

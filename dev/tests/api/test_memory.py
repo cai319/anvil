@@ -5,11 +5,13 @@
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from anvil import config
 from tests.conftest import (  # noqa: E402
-    API, auth_headers, human_headers, task_payload,
+    API, auth_headers, human_headers, role_payload, runtime_payload, task_payload,
 )
 
 pytestmark = pytest.mark.usefixtures("client")
@@ -80,7 +82,15 @@ async def test_proposal_create_and_approve(client):
 async def test_lesson_propose_and_80_cap(client):
     """lesson propose 进待审队列；80 条上限时新增须先淘汰（§8.3）。"""
     r = await client.post(
-        f"{API}/lessons/pending", json={"content": "运行测试前先起 db", "tags": ["testing"]}, headers=auth_headers()
+        f"{API}/lessons/pending",
+        json={"title": "运行测试前先起 db", "content": "运行测试前先起 db", "tags": ["testing"],
+              "fields": {
+                  "use_when": "运行测试前", "expected_effect": "避免连接失败",
+                  "evidence": "测试记录", "observation": "测试失败",
+                  "lesson": "先起 db", "applicability": "同类测试",
+                  "counterexamples": "暂无",
+              }},
+        headers=auth_headers()
     )
     assert r.status_code == 201
     pending = await client.get(f"{API}/lessons/pending", headers=auth_headers())
@@ -202,6 +212,178 @@ async def test_note_path_validation_and_metadata(client):
     assert body["tags"] == ["race", "concurrency"]
     assert body["repo"] == "openssl" and body["module"] == "auth"
     assert body["confidence"] == pytest.approx(0.7)
+
+
+async def test_note_compact_card_fields_visible_in_detail(client):
+    """角色知识也有完整知识卡字段：详情/检索不能只给一段正文。"""
+    created = await client.post(
+        f"{API}/me/notes",
+        json={
+            "path": "decisions/x509.md",
+            "content": "## 观察\n发行版 X509 校验行为不同。",
+            "kind": "decision", "scope": "role",
+            "title": "X509 先核对发行版环境",
+            "tldr": "环境差异可能被误判为漏洞。",
+            "fields": {
+                "use_when": "审计 X509 且使用发行版 OpenSSL 时",
+                "evidence": "T-1 / run r-1",
+                "trigger_point": "读取证书链校验结果时",
+            },
+            "tags": ["x509"],
+        },
+        headers=auth_headers())
+    assert created.status_code == 200, created.text
+    note = created.json()
+    assert note["title"] == "X509 先核对发行版环境"
+    assert note["tldr"] == "环境差异可能被误判为漏洞。"
+    assert note["fields"]["trigger_point"] == "读取证书链校验结果时"
+
+    detail = await client.get(
+        f"{API}/me/knowledge/{note['id']}", headers=auth_headers())
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["title"] == "X509 先核对发行版环境"
+    assert body["fields"] == note["fields"]
+    assert "发行版 X509" in body["content"]
+
+    hits = await client.get(
+        f"{API}/me/knowledge/search", params={"q": "X509"},
+        headers=auth_headers())
+    assert hits.status_code == 200
+    hit = next(item for item in hits.json()["results"] if item["id"] == note["id"])
+    assert hit["fields"]["use_when"] == "审计 X509 且使用发行版 OpenSSL 时"
+
+
+async def test_note_append_preserves_existing_fields(client):
+    first = await client.post(
+        f"{API}/me/notes",
+        json={"path": "decisions/preserve.md", "content": "第一条",
+              "kind": "decision", "scope": "role",
+              "fields": {"use_when": "保留字段"}},
+        headers=auth_headers())
+    assert first.status_code == 200, first.text
+    nid = first.json()["id"]
+    appended = await client.post(
+        f"{API}/me/notes",
+        json={"path": "decisions/preserve.md", "content": "追加一条",
+              "kind": "decision", "scope": "role", "mode": "append"},
+        headers=auth_headers())
+    assert appended.status_code == 200, appended.text
+    detail = await client.get(f"{API}/me/knowledge/{nid}", headers=auth_headers())
+    assert detail.status_code == 200
+    assert detail.json()["fields"] == {"use_when": "保留字段"}
+
+
+async def test_reindex_restores_note_fields_from_file(client, app):
+    """文件是真相：DB 行丢失后 reindex 仍能从文件元数据恢复结构化字段。"""
+    from anvil.db import open_conn
+
+    created = await client.post(
+        f"{API}/me/notes",
+        json={"path": "decisions/reindex.md", "content": "正文",
+              "kind": "decision", "scope": "role",
+              "title": "文件真相标题", "tldr": "文件真相摘要",
+              "fields": {"use_when": "重建索引时"}},
+        headers=auth_headers())
+    assert created.status_code == 200, created.text
+    note_id = created.json()["id"]
+    conn = open_conn(app.state.db_path)
+    try:
+        conn.execute("DELETE FROM notes WHERE id=?", (note_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    rebuilt = await client.post(
+        f"{API}/me/knowledge/reindex", params={"role": "qa-role"},
+        headers=auth_headers())
+    assert rebuilt.status_code == 200, rebuilt.text
+    conn = open_conn(app.state.db_path)
+    try:
+        row = conn.execute(
+            "SELECT title, tldr, fields_json FROM notes "
+            "WHERE role_slug='qa-role' AND path='decisions/reindex.md'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert row["title"] == "文件真相标题"
+    assert row["tldr"] == "文件真相摘要"
+    assert json.loads(row["fields_json"]) == {"use_when": "重建索引时"}
+
+
+async def test_delete_role_knowledge_removes_index_and_file(client):
+    created = await client.post(
+        f"{API}/me/notes",
+        json={"path": "decisions/delete-me.md", "content": "待删除知识",
+              "kind": "decision", "scope": "role",
+              "fields": {"use_when": "删除测试"}},
+        headers=auth_headers())
+    assert created.status_code == 200, created.text
+    note = created.json()
+    note_file = config.AGENTS_DIR / "qa-role" / "notes" / "decisions" / "delete-me.md"
+    assert note_file.exists()
+
+    deleted = await client.delete(
+        f"{API}/me/knowledge/{note['id']}?role=qa-role", headers=human_headers())
+    assert deleted.status_code == 204, deleted.text
+    assert not note_file.exists()
+    hidden = await client.get(
+        f"{API}/me/knowledge/{note['id']}", headers=auth_headers())
+    assert hidden.status_code == 404
+
+
+async def test_role_knowledge_smart_completion(client, app):
+    """角色知识也可让角色用自身上下文补全/精炼；角色忙碌时排队。"""
+    from anvil.db import open_conn
+
+    await client.post(f"{API}/runtimes", json=runtime_payload())
+    await client.post(f"{API}/roles", json=role_payload())
+    created = await client.post(
+        f"{API}/me/notes",
+        json={"path": "modules/auth.md", "content": "旧正文",
+              "kind": "module_knowledge", "scope": "role",
+              "title": "旧标题", "tldr": "旧摘要",
+              "fields": {"use_when": "认证模块"}},
+        headers=auth_headers())
+    assert created.status_code == 200, created.text
+    note = created.json()
+
+    requested = await client.post(
+        f"{API}/me/knowledge/{note['id']}/request-completion",
+        params={"role": "qa-role"}, headers=human_headers())
+    assert requested.status_code == 200, requested.text
+    body = requested.json()
+    assert body["status"] == "requested" and body["role"] == "qa-role"
+    assert body["run_id"] and "queued" in body
+
+    conn = open_conn(app.state.db_path)
+    try:
+        run = conn.execute(
+            "SELECT prompt FROM runs WHERE id=?", (body["run_id"],)).fetchone()
+    finally:
+        conn.close()
+    assert run is not None
+    assert note["id"] in run["prompt"]
+    assert "anvil knowledge fill" in run["prompt"]
+
+    filled = await client.post(
+        f"{API}/me/knowledge/{note['id']}/fill",
+        params={"role": "qa-role"},
+        json={"title": "认证模块知识", "tldr": "精炼摘要",
+              "content": "精炼后的正文与证据路径",
+              "fields": {
+                  "use_when": "认证模块任务", "expected_effect": "减少重复排查",
+                  "evidence": "任务 T-1 的实践记录",
+              }},
+        headers=auth_headers("qa-role"))
+    assert filled.status_code == 200, filled.text
+    updated = filled.json()
+    assert updated["title"] == "认证模块知识"
+    assert updated["tldr"] == "精炼摘要"
+    assert updated["fields"]["use_when"] == "认证模块任务"
+    assert updated["completion"]["state"] == "completed"
+    assert updated["ready"] is True
 
 
 async def test_knowledge_index_and_reindex(client):

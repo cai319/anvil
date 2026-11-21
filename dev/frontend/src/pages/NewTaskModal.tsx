@@ -85,12 +85,13 @@ export function NewTaskModal({ roles, roleStatus, channels = [], defaultChannelI
 
   return (
     <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal" role="dialog" aria-label="新建任务">
+      <div className="modal modal-flex" role="dialog" aria-label="新建任务">
         <div className="modal-head">
           <h2>新建任务</h2>
           <button className="modal-close" onClick={onClose} aria-label="关闭"><Icon name="x" size={12} /></button>
         </div>
 
+        <div className="modal-flex-body">
         <label className="field">
           <span>任务名称</span>
           <input
@@ -211,6 +212,7 @@ export function NewTaskModal({ roles, roleStatus, channels = [], defaultChannelI
         </div>
 
         {error && <p className="error">{error}</p>}
+        </div>
 
         <div className="modal-actions">
           <button onClick={onClose} disabled={busy}>取消</button>

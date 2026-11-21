@@ -2,147 +2,60 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type Channel, type Lesson, type Proposal, type Role } from "../api/client";
 import { PageHeader } from "../components/ui";
 import { Icon } from "../components/Icon";
-import { RoleAvatar } from "../components/RoleAvatar";
+import { CompletionFlag } from "../components/CompletionFlag";
 import { confirmDialog } from "../components/dialogs";
+import {
+  KNOWLEDGE_CARD_FIELDS,
+  KNOWLEDGE_QUALITY_FIELDS,
+  qualityFieldLabel,
+} from "../knowledgeCard";
 import { formatDateTime } from "../time";
 import { ChannelKnowledgeTab } from "./knowledge/ChannelKnowledgeTab";
 import { TaskKnowledgeTab } from "./knowledge/TaskKnowledgeTab";
 import { TopicKnowledgeTab } from "./knowledge/TopicKnowledgeTab";
 import { RoleKnowledgeTab } from "./knowledge/RoleKnowledgeTab";
 import { KnowledgeStatsTab } from "./knowledge/KnowledgeStatsTab";
+import {
+  LessonDetailModal,
+  LessonSource,
+  LessonTags,
+  normalizeLesson,
+} from "./knowledge/LessonDetail";
 
-const LESSON_STATUS_LABEL: Record<Lesson["status"], string> = {
-  pending: "待审批",
-  approved: "已批准",
-  rejected: "已拒绝",
-};
+const LESSON_FORM_FIELDS = [
+  ...KNOWLEDGE_QUALITY_FIELDS.map((field) => field.key),
+  ...(KNOWLEDGE_CARD_FIELDS.insight || []).map((field) => field.key),
+].filter((key, index, all) => key !== "exclusions" && all.indexOf(key) === index);
+const LESSON_REQUIRED_FIELDS = [
+  "use_when", "expected_effect", "evidence",
+  "observation", "lesson", "applicability", "counterexamples",
+];
 
-function LessonTags({ tags }: { tags: string[] }) {
-  return <>{tags.length ? tags.map((t) => `#${t}`).join(" ") : "无标签"}</>;
-}
-
-/** 共享经验的提出者：角色头像；旧数据没有 source_role 时用中性占位头像。 */
-function LessonSource({ lesson, roles, showName = false }: {
-  lesson: Lesson;
-  roles: Role[];
-  showName?: boolean;
-}) {
-  const slug = lesson.source_role;
-  const role = slug ? roles.find((r) => r.slug === slug) : undefined;
-  const human = slug === "human";
-  const unknown = !slug;
-  const name = unknown ? "未知来源" : human ? "人类" : (role?.display_name ?? slug);
-  return (
-    <span className="lesson-source">
-      <RoleAvatar
-        slug={unknown ? "unknown" : human ? "human" : slug}
-        name={unknown ? "?" : name}
-        avatar={unknown || human ? "initials" : role?.avatar}
-        color={unknown ? "#8b8496" : human ? "#22d3ee" : role?.avatar_color}
-        size={24}
-        label={`提供者：${name}`}
-      />
-      {showName && <span className="lesson-source-name">{name}</span>}
-    </span>
-  );
-}
-
-function LessonDetailModal({ lesson, roles, error, onClose, onApprove, onReject, onDelete }: {
-  lesson: Lesson;
-  roles: Role[];
-  error: string | null;
-  onClose: () => void;
-  onApprove: () => void;
-  onReject: () => void;
-  onDelete: () => void;
-}) {
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  return (
-    <div
-      className="modal-overlay"
-      onMouseDown={(event) => event.target === event.currentTarget && onClose()}
-    >
-      <div
-        className="modal lesson-detail"
-        role="dialog"
-        aria-modal="true"
-        aria-label="共享经验详情"
-      >
-        <div className="modal-head">
-          <h2>共享经验详情</h2>
-          <button className="modal-close" onClick={onClose} aria-label="关闭" autoFocus>
-            <Icon name="x" size={12} />
-          </button>
-        </div>
-
-        <p className="lesson-detail-content">{lesson.content}</p>
-
-        <dl className="lesson-detail-meta">
-          <dt>状态</dt>
-          <dd>{LESSON_STATUS_LABEL[lesson.status]}</dd>
-          <dt>提供者</dt>
-          <dd><LessonSource lesson={lesson} roles={roles} showName /></dd>
-          <dt>标签</dt>
-          <dd><LessonTags tags={lesson.tags} /></dd>
-          <dt>仓库</dt>
-          <dd className="mono">{lesson.repo || "shared"}</dd>
-          <dt>命中</dt>
-          <dd>
-            {lesson.status === "approved"
-              ? `${lesson.hit_count ?? 0} 次${lesson.last_hit_at ? ` · 最近 ${formatDateTime(lesson.last_hit_at)}` : ""}`
-              : "批准后开始统计"}
-          </dd>
-          <dt>来源任务</dt>
-          <dd>
-            {lesson.source_task
-              ? <a className="mono" href={`/tasks/${lesson.source_task}`}>{lesson.source_task}</a>
-              : "—"}
-          </dd>
-          <dt>创建时间</dt>
-          <dd className="mono">{formatDateTime(lesson.created_at)}</dd>
-          <dt>批准时间</dt>
-          <dd className="mono">{lesson.approved_at ? formatDateTime(lesson.approved_at) : "—"}</dd>
-        </dl>
-
-        {error && <p className="error">{error}</p>}
-
-        <div className="modal-actions">
-          <button type="button" onClick={onClose}>关闭</button>
-          {lesson.status === "pending" && (
-            <>
-              <button type="button" className="danger" onClick={onReject}>拒绝</button>
-              <button type="button" className="primary" onClick={onApprove}>批准</button>
-            </>
-          )}
-          {lesson.status === "approved" && (
-            <button type="button" className="danger" onClick={onDelete}>删除</button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function LessonProposeModal({ content, tags, repo, repoOptions, error, busy, onContentChange, onTagsChange, onRepoChange, onClose, onSubmit }: {
+function LessonProposeModal({
+  title, tldr, content, tags, repo, repoOptions, fields, error, busy,
+  onTitleChange, onTldrChange, onContentChange, onTagsChange, onRepoChange,
+  onFieldChange, onClose, onSubmit,
+}: {
+  title: string;
+  tldr: string;
   content: string;
   tags: string;
   repo: string;
   repoOptions: string[];
+  fields: Record<string, string>;
   error: string | null;
   busy: boolean;
+  onTitleChange: (value: string) => void;
+  onTldrChange: (value: string) => void;
   onContentChange: (value: string) => void;
   onTagsChange: (value: string) => void;
   onRepoChange: (value: string) => void;
+  onFieldChange: (key: string, value: string) => void;
   onClose: () => void;
   onSubmit: () => void;
 }) {
+  const complete = Boolean(title.trim() && tldr.trim() && content.trim()
+    && LESSON_REQUIRED_FIELDS.every((key) => String(fields[key] || "").trim()));
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !busy) onClose();
@@ -157,7 +70,7 @@ function LessonProposeModal({ content, tags, repo, repoOptions, error, busy, onC
       onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}
     >
       <div
-        className="modal lesson-propose"
+        className="modal lesson-propose modal-flex"
         role="dialog"
         aria-modal="true"
         aria-label="提议升格共享经验"
@@ -169,16 +82,54 @@ function LessonProposeModal({ content, tags, repo, repoOptions, error, busy, onC
           </button>
         </div>
 
+        <div className="modal-flex-body">
+        <p className="muted">
+          知识提交前的必须条款：标题、TLDR、正文、通用质量字段与 insight 类型字段
+          必须完整；缺项会被服务端以“知识格式不合法”拒绝。
+        </p>
         <label className="field">
-          <span>经验内容</span>
+          <span>标题（一句话结论）</span>
+          <input
+            value={title}
+            onChange={(e) => onTitleChange(e.target.value)}
+            maxLength={80}
+            autoFocus
+            placeholder="例如：先核对 OpenSSL 版本再判断漏洞"
+          />
+        </label>
+        <label className="field">
+          <span>TLDR（1–2 句）</span>
+          <textarea
+            value={tldr}
+            onChange={(e) => onTldrChange(e.target.value)}
+            rows={2}
+            maxLength={200}
+            placeholder="让人先读这一句就能判断是否相关…"
+          />
+        </label>
+        <label className="field">
+          <span>正文</span>
           <textarea
             value={content}
             onChange={(e) => onContentChange(e.target.value)}
             rows={4}
-            autoFocus
-            placeholder="要共享给所有角色的经验…"
+            maxLength={4000}
+            placeholder="观察、证据、结论与执行方式…"
           />
         </label>
+        <div className="knowledge-editor-fields">
+          {LESSON_FORM_FIELDS.map((key) => (
+            <label className="field" key={key}>
+              <span>{qualityFieldLabel(key)}</span>
+              <textarea
+                rows={2}
+                maxLength={2000}
+                value={String(fields[key] || "")}
+                onChange={(e) => onFieldChange(key, e.target.value)}
+              />
+            </label>
+          ))}
+        </div>
         <label className="field">
           <span>标签</span>
           <input
@@ -202,6 +153,7 @@ function LessonProposeModal({ content, tags, repo, repoOptions, error, busy, onC
         </label>
 
         {error && <p className="error">{error}</p>}
+        </div>
 
         <div className="modal-actions">
           <button type="button" onClick={onClose} disabled={busy}>取消</button>
@@ -209,7 +161,7 @@ function LessonProposeModal({ content, tags, repo, repoOptions, error, busy, onC
             type="button"
             className="primary"
             onClick={onSubmit}
-            disabled={!content.trim() || busy}
+            disabled={!complete || busy}
           >
             {busy ? "提交中…" : "提交提议"}
           </button>
@@ -235,10 +187,23 @@ function LessonList({ lessons, roles, empty, dateKey, onOpen, onDelete }: {
           <button type="button" className="lesson-row" onClick={() => onOpen(lesson)}>
             <LessonSource lesson={lesson} roles={roles} />
             <span className="lesson-row-main">
-              <span className="lesson-row-title">{lesson.content}</span>
+              <span className="lesson-row-title-row">
+                <span className="lesson-row-title">{lesson.title || lesson.content}</span>
+                <CompletionFlag completion={lesson.completion} />
+              </span>
+              {lesson.tldr && lesson.tldr !== (lesson.title || lesson.content) && (
+                <span className="lesson-row-tldr">{lesson.tldr}</span>
+              )}
               <span className="lesson-row-meta">
                 <LessonTags tags={lesson.tags} />
                 <span>repo={lesson.repo || "shared"}</span>
+                {lesson.status === "pending" && lesson.ready === false && (
+                  <span className="review-reason">未达入库标准</span>
+                )}
+                {lesson.status === "pending" && lesson.ready === true
+                  && !lesson.completion && (
+                  <span className="chip">可入库</span>
+                )}
                 {lesson.status === "approved" && (
                   <span className="knowledge-record-hits"
                     title="共享经验被加入 CIC / one-shot 上下文的次数">
@@ -284,7 +249,10 @@ const SCOPES: { key: Scope; label: string }[] = [
 
 export function Knowledge() {
   const [scope, setScope] = useState<Scope>("channel");
-  const [visited, setVisited] = useState<Set<Scope>>(() => new Set(["channel"]));
+  // 统计数字依赖各 tab 首次加载的数据；先挂载数据页签（隐藏），
+  // 否则首次进入时角色/任务/主题的计数为空，点开后才出现。
+  const [visited, setVisited] = useState<Set<Scope>>(
+    () => new Set<Scope>(["channel", "task", "topic", "role"]));
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [pending, setPending] = useState<Lesson[]>([]);
   const [approved, setApproved] = useState<Lesson[]>([]);
@@ -292,7 +260,10 @@ export function Knowledge() {
   const [roles, setRoles] = useState<Role[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [repoOptions, setRepoOptions] = useState<string[]>(["shared"]);
+  const [lessonTitle, setLessonTitle] = useState("");
+  const [lessonTldr, setLessonTldr] = useState("");
   const [content, setContent] = useState("");
+  const [lessonFields, setLessonFields] = useState<Record<string, string>>({});
   const [tags, setTags] = useState("");
   const [repo, setRepo] = useState("shared");
   const [query, setQuery] = useState("");
@@ -325,8 +296,8 @@ export function Knowledge() {
       api.listKnowledgeRepos().catch(() => ({ repos: [], total: 0, enabled: false })),
     ])
       .then(([p, a, props, rs, tasks, chans, catalog]) => {
-        setPending(p);
-        setApproved(a);
+        setPending(p.map(normalizeLesson));
+        setApproved(a.map(normalizeLesson));
         setProposals(props);
         setRoles(rs);
         setChannels(chans);
@@ -354,8 +325,19 @@ export function Knowledge() {
         content.trim(),
         tags.split(",").map((t) => t.trim()).filter(Boolean),
         repo.trim() || "shared",
+        {
+          title: lessonTitle.trim(),
+          tldr: lessonTldr.trim(),
+          fields: Object.fromEntries(
+            Object.entries(lessonFields)
+              .filter(([, value]) => String(value || "").trim())
+          ),
+        },
       );
+      setLessonTitle("");
+      setLessonTldr("");
       setContent("");
+      setLessonFields({});
       setTags("");
       setRepo("shared");
       setProposeOpen(false);
@@ -369,6 +351,12 @@ export function Knowledge() {
 
   const openPropose = () => {
     setError(null);
+    setLessonTitle("");
+    setLessonTldr("");
+    setContent("");
+    setLessonFields({});
+    setTags("");
+    setRepo("shared");
     setProposeOpen(true);
   };
 
@@ -404,6 +392,19 @@ export function Knowledge() {
       await refresh();
     } catch (e) {
       setError(String(e));
+    }
+  };
+
+  const requestDetailCompletion = async () => {
+    if (!detail) return { status: "already_complete" as const };
+    try {
+      const result = await api.requestLessonCompletion(detail.id);
+      setDetail({ ...detail, completion: result.completion });
+      await refresh();
+      return result;
+    } catch (e) {
+      setError(String(e));
+      throw e;
     }
   };
 
@@ -599,20 +600,27 @@ export function Knowledge() {
           onApprove={() => actDetail(() => api.approveLesson(detail.id))}
           onReject={() => actDetail(() => api.rejectLesson(detail.id))}
           onDelete={() => removeDetail(detail)}
+          onRequestCompletion={requestDetailCompletion}
         />
       )}
 
       {proposeOpen && (
         <LessonProposeModal
+          title={lessonTitle}
+          tldr={lessonTldr}
           content={content}
           tags={tags}
           repo={repo}
           repoOptions={repoOptions}
+          fields={lessonFields}
           error={error}
           busy={proposing}
+          onTitleChange={setLessonTitle}
+          onTldrChange={setLessonTldr}
           onContentChange={setContent}
           onTagsChange={setTags}
           onRepoChange={setRepo}
+          onFieldChange={(key, value) => setLessonFields((prev) => ({ ...prev, [key]: value }))}
           onClose={closePropose}
           onSubmit={() => { void propose(); }}
         />

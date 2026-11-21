@@ -3,8 +3,16 @@ import {
   api, type KnowledgeHit, type Role, type RoleKnowledgeIndex,
 } from "../../api/client";
 import { EmptyState } from "../../components/ui";
+import { confirmDialog } from "../../components/dialogs";
+import { CompletionFlag } from "../../components/CompletionFlag";
+import {
+  completionActionLabel,
+  completionBlocked,
+  completionLabel,
+} from "../../knowledgeCard";
 import { formatDateTime } from "../../time";
 import { useDebouncedValue } from "./useDebouncedValue";
+import { KnowledgeDetailModal } from "./KnowledgeDetail";
 
 const NOTE_KIND_LABEL: Record<string, string> = {
   task_snapshot: "任务快照",
@@ -39,6 +47,11 @@ export function RoleKnowledgeTab({ roles, onTotal }: {
   const [hits, setHits] = useState<KnowledgeHit[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [detail, setDetail] = useState<KnowledgeHit | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [requesting, setRequesting] = useState(false);
+  const [completionNotice, setCompletionNotice] = useState("");
+  const [refreshTick, setRefreshTick] = useState(0);
   const onTotalRef = useRef(onTotal);
   useEffect(() => { onTotalRef.current = onTotal; }, [onTotal]);
 
@@ -74,11 +87,71 @@ export function RoleKnowledgeTab({ roles, onTotal }: {
     };
     void run();
     return () => { alive = false; };
-  }, [roleSlug, debouncedQuery]);
+  }, [roleSlug, debouncedQuery, refreshTick]);
+
+  const openDetail = async (note: { id: string }) => {
+    try {
+      setCompletionNotice("");
+      setDetail(await api.getRoleKnowledge(roleSlug, note.id));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const requestCompletion = async () => {
+    if (!detail) return;
+    setRequesting(true);
+    setError(null);
+    try {
+      const result = await api.requestRoleKnowledgeCompletion(roleSlug, detail.id);
+      setDetail({ ...detail, completion: result.completion });
+      setCompletionNotice(
+        result.status === "already_complete"
+          ? "该知识已满足质量要求，无需补全。"
+          : result.status === "already_queued"
+            ? "补全请求已在排队/处理中。"
+            : result.queued
+              ? `角色 ${result.role} 正在工作，补全请求已排队；当前工作结束后会用自身上下文精炼该知识。`
+              : `已通知角色 ${result.role} 补全/精炼该知识；完成后刷新详情即可查看。`);
+      setRefreshTick((value) => value + 1);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRequesting(false);
+    }
+  };
+
+  const removeNote = (note: { id: string; path?: string }) => {
+    void confirmDialog({
+      title: "删除角色知识？",
+      message: `将删除 ${note.path || "该条知识"} 的索引与角色 home 文件，且不可恢复。`,
+      confirmLabel: "删除",
+      danger: true,
+    }).then(async (ok) => {
+      if (!ok) return;
+      setDeletingId(note.id);
+      setError(null);
+      try {
+        await api.deleteRoleKnowledge(roleSlug, note.id);
+        setRefreshTick((value) => value + 1);
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setDeletingId(null);
+      }
+    });
+  };
 
   if (roles.length === 0) {
     return <EmptyState icon="users" title="暂无角色" hint="请先在角色工坊创建角色。" />;
   }
+
+  const detailCompletion = detail ? completionLabel(detail.completion) : "";
+  const detailBlocked = detail
+    ? completionBlocked(detail.ready, detail.completion)
+    : false;
+  const showDetailCompletion = Boolean(detailCompletion)
+    && !(detail?.completion?.state === "completed" && detail?.ready === true);
 
   return (
     <div>
@@ -111,19 +184,31 @@ export function RoleKnowledgeTab({ roles, onTotal }: {
           <ul className="knowledge-record-list">
             {hits.map((hit) => (
               <li key={hit.id} className="knowledge-record">
-                <div className="knowledge-record-main">
-                  <span className="knowledge-record-title mono">{hit.path}</span>
-                  <span className="knowledge-record-meta">
-                    <span className="chip">{NOTE_KIND_LABEL[hit.kind] ?? hit.kind}</span>
-                    <RepoSource repo={hit.repo} display={hit.repo_display} />
-                    {hit.updated_at && <span>{formatDateTime(hit.updated_at)}</span>}
-                    <span className="knowledge-record-hits"
-                      title="角色知识被检索命中并加入上下文的次数">
-                      {hit.hit_count ? `命中 ${hit.hit_count} 次` : "未命中"}
-                      {hit.last_hit_at ? ` · 最近命中 ${formatDateTime(hit.last_hit_at)}` : ""}
+                <div className="knowledge-record-head">
+                  <div className="knowledge-record-main">
+                    <span className="knowledge-record-title-row knowledge-title-line">
+                      <span className="knowledge-record-title mono">{hit.path}</span>
+                      <CompletionFlag completion={hit.completion} />
                     </span>
+                    <span className="knowledge-record-meta">
+                      <span className="chip">{NOTE_KIND_LABEL[hit.kind] ?? hit.kind}</span>
+                      <RepoSource repo={hit.repo} display={hit.repo_display} />
+                      {hit.updated_at && <span>{formatDateTime(hit.updated_at)}</span>}
+                      <span className="knowledge-record-hits"
+                        title="角色知识被检索命中并加入上下文的次数">
+                        {hit.hit_count ? `命中 ${hit.hit_count} 次` : "未命中"}
+                        {hit.last_hit_at ? ` · 最近命中 ${formatDateTime(hit.last_hit_at)}` : ""}
+                      </span>
+                    </span>
+                    <span className="knowledge-record-tldr">{hit.snippet}</span>
+                  </div>
+                  <span className="knowledge-record-actions">
+                    <button type="button" className="small"
+                      onClick={() => { void openDetail(hit); }}>查看详情</button>
+                    <button type="button" className="small danger"
+                      disabled={deletingId === hit.id}
+                      onClick={() => removeNote(hit)}>删除</button>
                   </span>
-                  <span className="knowledge-record-tldr">{hit.snippet}</span>
                 </div>
               </li>
             ))}
@@ -146,17 +231,29 @@ export function RoleKnowledgeTab({ roles, onTotal }: {
             <ul className="knowledge-record-list">
               {index.recent.map((note) => (
                 <li key={note.id} className="knowledge-record">
-                  <div className="knowledge-record-main">
-                    <span className="knowledge-record-title">{note.path}</span>
-                    <span className="knowledge-record-meta">
-                      <span className="chip">{NOTE_KIND_LABEL[note.kind] ?? note.kind}</span>
-                      <RepoSource repo={note.repo} display={note.repo_display} />
-                      {note.updated_at && <span>{formatDateTime(note.updated_at)}</span>}
-                      <span className="knowledge-record-hits"
-                        title="角色知识被检索命中并加入上下文的次数">
-                        {note.hit_count ? `命中 ${note.hit_count} 次` : "未命中"}
-                        {note.last_hit_at ? ` · 最近命中 ${formatDateTime(note.last_hit_at)}` : ""}
+                  <div className="knowledge-record-head">
+                    <div className="knowledge-record-main">
+                      <span className="knowledge-record-title-row knowledge-title-line">
+                        <span className="knowledge-record-title">{note.path}</span>
+                        <CompletionFlag completion={note.completion} />
                       </span>
+                      <span className="knowledge-record-meta">
+                        <span className="chip">{NOTE_KIND_LABEL[note.kind] ?? note.kind}</span>
+                        <RepoSource repo={note.repo} display={note.repo_display} />
+                        {note.updated_at && <span>{formatDateTime(note.updated_at)}</span>}
+                        <span className="knowledge-record-hits"
+                          title="角色知识被检索命中并加入上下文的次数">
+                          {note.hit_count ? `命中 ${note.hit_count} 次` : "未命中"}
+                          {note.last_hit_at ? ` · 最近命中 ${formatDateTime(note.last_hit_at)}` : ""}
+                        </span>
+                      </span>
+                    </div>
+                    <span className="knowledge-record-actions">
+                      <button type="button" className="small"
+                        onClick={() => { void openDetail(note); }}>查看详情</button>
+                      <button type="button" className="small danger"
+                        disabled={deletingId === note.id}
+                        onClick={() => removeNote(note)}>删除</button>
                     </span>
                   </div>
                 </li>
@@ -166,6 +263,55 @@ export function RoleKnowledgeTab({ roles, onTotal }: {
         </>
       ) : (
         <EmptyState icon="book" title="暂无角色知识" hint="选择角色后查看其最近笔记。" />
+      )}
+      {detail && (
+        <KnowledgeDetailModal
+          heading="角色知识详情"
+          title={detail.title || detail.path}
+          kind={detail.kind}
+          tldr={detail.tldr}
+          fields={detail.fields}
+          body={detail.content || detail.snippet}
+          error={error}
+          meta={[
+            { label: "路径", value: <span className="mono">{detail.path}</span> },
+            { label: "类型", value: NOTE_KIND_LABEL[detail.kind] ?? detail.kind },
+            { label: "来源主题", value: detail.repo_display || detail.repo || "—" },
+            { label: "标签", value: detail.tags.length ? detail.tags.join("、") : "无" },
+            { label: "更新时间", value: formatDateTime(detail.updated_at || "") || "—" },
+            { label: "命中", value: `${detail.hit_count ?? 0} 次` },
+          ]}
+          onClose={() => { setDetail(null); setCompletionNotice(""); }}
+          actions={(
+            <>
+              <button type="button" onClick={() => { setDetail(null); setCompletionNotice(""); }}>
+                关闭
+              </button>
+              {detail.kind !== "task_snapshot" && (
+                <button type="button" className="primary"
+                  disabled={requesting || detailBlocked}
+                  title={detail.ready ? "已满足质量要求"
+                    : detail.completion?.active ? detailCompletion : undefined}
+                  onClick={() => { void requestCompletion(); }}>
+                  {requesting ? "通知中…"
+                    : completionActionLabel(
+                      detail.ready, detail.completion,
+                      "让角色智能补全", "已满足质量要求")}
+                </button>
+              )}
+            </>
+          )}
+        >
+          {showDetailCompletion && (
+            <p className={`lesson-completion-notice ${
+              detail.completion?.state === "failed" ? "is-error" : ""
+            }`}>
+              {detailCompletion}
+              {detail.completion?.role_slug ? ` · ${detail.completion.role_slug}` : ""}
+            </p>
+          )}
+          {completionNotice && <p className="lesson-completion-notice">{completionNotice}</p>}
+        </KnowledgeDetailModal>
       )}
     </div>
   );

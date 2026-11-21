@@ -183,6 +183,9 @@ def create(conn: sqlite3.Connection, task_id: str, *,
         raise ConflictError(f"unknown knowledge kind: {kind}")
     fields = knowledge_card.normalize_fields(fields)
     body_md = knowledge_card.render_markdown(title, tldr, kind, fields)
+    status = status if status in ("active", "proposed", "archived") else "active"
+    # 知识提交前的必须条款：任务知识没有 draft 状态，任何入库都必须完整。
+    knowledge_card.assert_submittable(kind, title, tldr, body_md, fields)
     check = knowledge_card.validate_card(kind, fields, for_approval=False)
     parent_task_id = task.get("parent_id")
     kid = new_id()

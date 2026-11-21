@@ -231,6 +231,9 @@ KNOWLEDGE_REPO_CREATE_THRESHOLD = float(
 # Phase 2：任务执行经验自动草稿（proposed，人工批准）；默认开启，可在「工具」页关闭。
 EXPERIENCE_CAPTURE_ENABLED = _env("ANVIL_EXPERIENCE_CAPTURE", "1") == "1"
 EXPERIENCE_CAPTURE_LLM = _env("ANVIL_EXPERIENCE_CAPTURE_LLM", "0") == "1"
+# 任务完成后的知识收割：自动生成 when(task done) 提醒，触发 Cindy 收割任务/主题/频道知识。
+KNOWLEDGE_HARVEST_REMINDER_ENABLED = _env(
+    "ANVIL_KNOWLEDGE_HARVEST_REMINDER", "1") != "0"
 # 知识质量：人工按需 LLM 清洗（默认关闭；不自动批准）。
 KNOWLEDGE_LLM_CLEANING_ENABLED = _env(
     "ANVIL_KNOWLEDGE_LLM_CLEANING", "0") == "1"

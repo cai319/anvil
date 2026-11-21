@@ -357,8 +357,24 @@ def list_task_knowledge(tid: str, include_subtasks: bool = False, deep: bool = F
 def create_task_knowledge(tid: str, body: dict, conn=Depends(get_db),
                           auth: Auth = Depends(get_auth)):
     is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
-    if is_real_agent and not services.tasks.is_task_participant(conn, tid, auth.role):
+    participant = (not is_real_agent
+                   or services.tasks.is_task_participant(conn, tid, auth.role))
+    # Cindy 作为知识收割者可为非参与任务写 proposed 任务知识；不能直接写 active。
+    harvester = (is_real_agent and auth.role is not None
+                 and services.roles.is_onboarding(conn, auth.role))
+    if not participant and not harvester:
         raise HTTPException(status_code=403, detail="agent is not a participant of this task")
+    requested_status = body.get("status")
+    if not participant:
+        if requested_status not in (None, "proposed"):
+            raise HTTPException(
+                status_code=403,
+                detail="knowledge harvester can only create proposed task knowledge")
+        status = "proposed"
+    else:
+        # 显式 API 写入默认 active（任务参与角色共享，无需预审批）；
+        # 自动捕获走 experience_capture，显式传 status='proposed'。
+        status = str(requested_status or "active")
     try:
         return services.task_knowledge.create(
             conn, tid,
@@ -368,12 +384,12 @@ def create_task_knowledge(tid: str, body: dict, conn=Depends(get_db),
             fields=body.get("fields") or {},
             tags=body.get("tags") or [],
             source_role=auth.role,
-            # 显式 API 写入默认 active（任务参与角色共享，无需预审批）；
-            # 自动捕获走 experience_capture，显式传 status='proposed'。
-            status=str(body.get("status") or "active"),
+            status=status,
         )
     except LookupError:
         raise HTTPException(status_code=404, detail="task not found")
+    except services.knowledge_card.IncompleteKnowledgeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except services.tasks.ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 

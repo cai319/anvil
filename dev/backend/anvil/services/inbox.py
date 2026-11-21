@@ -7,6 +7,7 @@ from __future__ import annotations
 import sqlite3
 
 from ..util import jloads
+from . import memory as memory_service
 
 # 系统伪发送者：workflow 引擎/系统通知不是真实 Agent 角色。
 SYSTEM_SENDERS = {"workflow": "工作流引擎", "system": "系统"}
@@ -336,14 +337,27 @@ def _workflow_decisions(conn: sqlite3.Connection) -> list[dict]:
 def _lessons(conn: sqlite3.Connection) -> list[dict]:
     out = []
     for r in conn.execute(
-        "SELECT id, content, tags_json, created_at FROM lessons WHERE status='pending' ORDER BY created_at"
+        "SELECT * FROM lessons WHERE status='pending' ORDER BY created_at"
     ).fetchall():
-        tags = jloads(r["tags_json"], [])
+        lesson = memory_service._lesson_row(r, conn)
+        # 标题不截断：审批人需要先看清主张；完整正文/字段由单条详情接口提供。
+        title = lesson["title"] or "待审批共享经验"
+        detail = lesson["tldr"] or "知识库升格提案"
         out.append({
-            "id": f"lesson:{r['id']}", "kind": "lesson",
-            "title": (r["content"] or "")[:60],
-            "detail": "知识库升格提案" + (f" · 标签 {','.join(tags)}" if tags else ""),
-            "task_id": None, "created_at": r["created_at"],
+            "id": f"lesson:{lesson['id']}", "kind": "lesson",
+            "title": title,
+            "detail": detail,
+            "task_id": None, "created_at": lesson["created_at"],
+            "meta": {
+                "lesson_id": lesson["id"],
+                "tldr": lesson["tldr"],
+                "tags": lesson["tags"],
+                "repo": lesson["repo"],
+                "source_role": lesson["source_role"],
+                "source_task": lesson["source_task"],
+                # 详情随收件箱一起返回：点击即开，不依赖额外 GET，也避免旧进程 404。
+                "lesson": lesson,
+            },
         })
     return out
 

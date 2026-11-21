@@ -20,7 +20,8 @@ from .. import config
 from ..util import (ConflictError, jdumps, jloads, new_id, now_iso,
                     read_text_file)
 from . import knowledge as knowledge_service
-from . import knowledge_binding, knowledge_repos, repo_catalog, repo_knowledge
+from . import (knowledge_binding, knowledge_card, knowledge_completion,
+               knowledge_repos, repo_catalog, repo_knowledge)
 
 LESSON_CAP = 80
 
@@ -167,7 +168,9 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
                practice_run_id: str | None = None,
                outcome: str | None = None,
                source_knowledge: list | None = None,
-               status: str = "active") -> dict:
+               status: str = "active",
+               title: str | None = None, tldr: str | None = None,
+               fields: dict | None = None) -> dict:
     """写角色笔记：文件 + notes 索引 + notes_fts（触发器同步）。
 
     - path 必须是 notes/ 下的安全相对路径；
@@ -178,8 +181,9 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
     """
     clean_path = knowledge_service.normalize_note_path(path)
     existing = conn.execute(
-        "SELECT id, content, created_at, status, verified_at FROM notes "
-        "WHERE role_slug=? AND path=?", (role, clean_path)).fetchone()
+        "SELECT id, content, created_at, status, verified_at, title, tldr, "
+        "fields_json FROM notes WHERE role_slug=? AND path=?",
+        (role, clean_path)).fetchone()
     # 已验证笔记不能被无证据写入直接覆盖/降级：拒绝并提示改用草稿路径。
     if existing is not None and existing["status"] == "active" and status != "active":
         raise ValueError(
@@ -213,6 +217,12 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
     now = updated_at or now_iso()
     meta["updated_at"] = now
     meta["slice_key"] = slice_key or None
+    text = body.strip()
+    card_title = str(title or "").strip() or _derive_lesson_title(text)
+    card_tldr = str(tldr or "").strip() or _derive_lesson_tldr(text)
+    card_fields = knowledge_card.normalize_fields(
+        fields if fields is not None else (
+            jloads(existing["fields_json"], {}) if existing is not None else {}))
     payload = json.dumps({
         "kind": meta["kind"], "scope": meta["scope"],
         "task_id": meta.get("task_id"), "source_task": meta.get("source_task"),
@@ -222,16 +232,14 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
         "module": meta.get("module"), "confidence": meta.get("confidence"),
         "updated_at": now, "source": source, "status": status,
         "practice_task_id": practice_task_id, "practice_run_id": practice_run_id,
-        "outcome": outcome,
+        "outcome": outcome, "title": card_title, "tldr": card_tldr,
+        "fields": card_fields,
     }, ensure_ascii=False)
     file_content = f"<!-- anvil: {payload} -->\n{body.strip()}\n"
     _replace_home_file(role, rel_path, file_content)
 
     nid = existing["id"] if existing is not None else new_id()
     created_at = existing["created_at"] if existing is not None else now
-    text = body.strip()
-    title = text.splitlines()[0][:80] if text else ""
-    tldr = " ".join(text.split())[:200]
     verified_at = (
         now if status == "active" and (practice_task_id or practice_run_id)
         else (existing["verified_at"] if existing is not None and status == "active"
@@ -241,8 +249,8 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
         meta.get("task_id"), meta.get("source_task"),
         jdumps(meta.get("tags") or []), meta.get("repo"), meta.get("repo_id"),
         meta.get("module"), meta.get("confidence"), now, source,
-        meta.get("content_hash"), title, tldr, "{}", practice_task_id,
-        practice_run_id, outcome, verified_at, status,
+        meta.get("content_hash"), card_title, card_tldr, jdumps(card_fields),
+        practice_task_id, practice_run_id, outcome, verified_at, status,
         jdumps(source_knowledge or []), meta.get("slice_key"),
     )
     columns = (
@@ -290,7 +298,8 @@ def write_note(conn: sqlite3.Connection, role: str, path: str, content: str,
         "module": meta.get("module"), "confidence": meta.get("confidence"),
         "updated_at": now, "created_at": row["created_at"] if row else created_at,
         "content_hash": meta.get("content_hash"), "status": status,
-        "verified_at": verified_at,
+        "verified_at": verified_at, "title": card_title, "tldr": card_tldr,
+        "fields": card_fields,
     }
 
 
@@ -812,15 +821,78 @@ def record_lesson_hits(conn: sqlite3.Connection, lesson_ids: list[str]) -> int:
 # ---- shared lessons（升格审批） -------------------------------------------
 
 
+def _derive_lesson_title(content: str) -> str:
+    """旧 lesson 只有正文：用首行做标题，不在收件箱/详情里截断可读信息。"""
+    text = str(content or "").strip()
+    return text.splitlines()[0] if text else ""
+
+
+def _derive_lesson_tldr(content: str) -> str:
+    return " ".join(str(content or "").split())[:200]
+
+
+def _canonical_lesson_fields(fields: dict | None) -> dict:
+    """lesson 统一用 insight 的 counterexamples；exclusions 是同一语义的别名。"""
+    out = knowledge_card.normalize_fields(fields)
+    if not out.get("counterexamples") and out.get("exclusions"):
+        out["counterexamples"] = out["exclusions"]
+    out.pop("exclusions", None)
+    return out
+
+
+def _lesson_row(row, conn: sqlite3.Connection | None = None) -> dict:
+    d = dict(row)
+    d["tags"] = jloads(d.pop("tags_json", "[]"), [])
+    d["fields"] = _canonical_lesson_fields(
+        jloads(d.pop("fields_json", "{}"), {}))
+    content = str(d.get("content") or "")
+    title = str(d.get("title") or "").strip()
+    first_line = content.strip().splitlines()[0] if content.strip() else ""
+    # 旧迁移把标题截到 80 字；正文首行更长时恢复完整标题，避免审批人看不到主张。
+    if len(title) == 80 and first_line.startswith(title):
+        title = first_line
+    d["title"] = title or first_line
+    d["tldr"] = str(d.get("tldr") or "").strip() or _derive_lesson_tldr(content)
+    # 共享经验也按统一质量门展示缺项/警告；lessons 没有 kind 列，只检查通用质量字段。
+    d["quality"] = knowledge_card.evaluate_quality(
+        "", d["title"], d["tldr"], content, d["fields"],
+        status=str(d.get("status") or "pending"),
+        source_task_id=d.get("source_task"),
+        source_role=d.get("source_role"),
+        legacy=(str(d.get("status") or "") == "approved" and not d["fields"]),
+    )
+    d["submission_errors"] = knowledge_card.submission_errors(
+        "insight", d["title"], d["tldr"], content, d["fields"])
+    d["ready"] = not d["submission_errors"]
+    if conn is not None:
+        # 已批准的历史知识只要满足入库标准就视为补全完成；
+        # 待审仍保留“可入库”提示（无 completion），由前端展示。
+        inferred_ready = d["ready"] if str(d.get("status") or "") == "approved" else None
+        d["completion"] = knowledge_completion.status_for(
+            conn, "lesson", d["id"], ready=inferred_ready)
+    return d
+
+
 def create_lesson(conn: sqlite3.Connection, content: str, tags: list[str],
                   repo: str = "shared", source_task: str | None = None,
-                  source_role: str | None = None) -> dict:
+                  source_role: str | None = None,
+                  title: str | None = None, tldr: str | None = None,
+                  fields: dict | None = None) -> dict:
     lid = new_id()
+    text = str(content or "")
+    # 标题必须由提交者概括（≤80 字）；不从正文首行自动生成，避免长标题/标题党。
+    title = str(title or "").strip()
+    tldr = str(tldr or "").strip() or _derive_lesson_tldr(text)
+    normalized_fields = _canonical_lesson_fields(fields)
+    # 共享经验按 insight 知识卡提交；缺字段即格式不合法（必须条款）。
+    knowledge_card.assert_submittable(
+        "insight", title, tldr, text, normalized_fields)
     conn.execute(
-        "INSERT INTO lessons (id, content, tags_json, source_task, source_role, repo, "
-        "status, created_at) VALUES (?,?,?,?,?,?,?,?)",
-        (lid, content, jdumps(tags), source_task, source_role, repo or "shared",
-         "pending", now_iso()),
+        "INSERT INTO lessons (id, content, title, tldr, fields_json, tags_json, "
+        "source_task, source_role, repo, status, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (lid, text, title, tldr, jdumps(normalized_fields), jdumps(tags),
+         source_task, source_role, repo or "shared", "pending", now_iso()),
     )
     conn.commit()
     _invalidate_repo_catalog()
@@ -829,7 +901,7 @@ def create_lesson(conn: sqlite3.Connection, content: str, tags: list[str],
 
 def get_lesson(conn: sqlite3.Connection, lid: str) -> dict | None:
     row = conn.execute("SELECT * FROM lessons WHERE id=?", (lid,)).fetchone()
-    return _lesson_row(row) if row else None
+    return _lesson_row(row, conn) if row else None
 
 
 def list_lessons(conn: sqlite3.Connection, status: str | None = None,
@@ -848,24 +920,68 @@ def list_lessons(conn: sqlite3.Connection, status: str | None = None,
     rows = conn.execute(
         f"SELECT * FROM lessons{where} ORDER BY created_at DESC", params
     ).fetchall()
-    return [_lesson_row(r) for r in rows]
+    return [_lesson_row(r, conn) for r in rows]
+
+
+def lesson_missing_fields(lesson: dict) -> list[str]:
+    """共享经验按 insight 知识卡提交时缺少的完整知识信息。"""
+    return knowledge_card.submission_errors(
+        "insight", lesson.get("title") or "", lesson.get("tldr") or "",
+        lesson.get("content") or "", lesson.get("fields") or {})
+
+
+def lesson_completion_message(lesson: dict) -> str:
+    """给收割角色（source_role）的补全指令：带上知识上下文与必须条款。"""
+    missing = lesson_missing_fields(lesson)
+    fields = json.dumps(lesson.get("fields") or {}, ensure_ascii=False, indent=2)
+    return (
+        f"请补全共享经验待审知识卡 lesson={lesson['id']}。\n"
+        f"来源任务：{lesson.get('source_task') or '无'}；收割角色：{lesson.get('source_role') or '未知'}。\n"
+        f"当前标题：{lesson.get('title') or '（空）'}\n"
+        f"当前 TLDR：{lesson.get('tldr') or '（空）'}\n"
+        f"当前正文：\n{lesson.get('content') or '（空）'}\n"
+        f"当前字段：\n{fields}\n\n"
+        "请使用你对该来源任务/知识产生过程的上下文与证据补全，不要编造；"
+        "无法确认的边界写明确（例如“暂无已知反例”）。\n"
+        "请同时优化长度：标题必须概括且 ≤80 字（不是正文首行）、TLDR ≤200 字、"
+        "正文 ≤4000 字、单个字段 ≤2000 字；优先写结论与证据路径，不要复制大段日志。\n"
+        "知识提交前的必须条款：title、TLDR、正文、use_when、expected_effect、evidence、"
+        "observation、lesson、applicability、counterexamples 必须一次给全。\n"
+        f"缺少：{('；'.join(missing) if missing else '无')}\n"
+        f"完成后执行：anvil lesson fill {lesson['id']} --title \"...\" --tldr \"...\" "
+        "--field use_when=\"...\" --field expected_effect=\"...\" --field evidence=\"...\" "
+        "--field observation=\"...\" --field lesson=\"...\" --field applicability=\"...\" "
+        "--field counterexamples=\"...\"\n"
+        "提交成功后回复一句“已补全”，不要修改 status。"
+    )
 
 
 def update_lesson(conn: sqlite3.Connection, lid: str, *, content: str | None = None,
-                  tags: list[str] | None = None, repo: str | None = None) -> dict | None:
+                  tags: list[str] | None = None, repo: str | None = None,
+                  title: str | None = None, tldr: str | None = None,
+                  fields: dict | None = None) -> dict | None:
     lesson = get_lesson(conn, lid)
     if lesson is None:
         return None
-    fields: dict = {}
+    updates: dict = {}
     if content is not None:
-        fields["content"] = content
+        updates["content"] = content
     if tags is not None:
-        fields["tags_json"] = jdumps(tags)
+        updates["tags_json"] = jdumps(tags)
     if repo is not None:
-        fields["repo"] = repo
-    if fields:
-        cols = ", ".join(f"{k}=?" for k in fields)
-        conn.execute(f"UPDATE lessons SET {cols} WHERE id=?", (*fields.values(), lid))
+        updates["repo"] = repo
+    if title is not None:
+        updates["title"] = str(title).strip() or _derive_lesson_title(
+            content if content is not None else lesson.get("content") or "")
+    if tldr is not None:
+        updates["tldr"] = str(tldr).strip() or _derive_lesson_tldr(
+            content if content is not None else lesson.get("content") or "")
+    if fields is not None:
+        updates["fields_json"] = jdumps(_canonical_lesson_fields(fields))
+    if updates:
+        cols = ", ".join(f"{k}=?" for k in updates)
+        conn.execute(f"UPDATE lessons SET {cols} WHERE id=?",
+                     (*updates.values(), lid))
         conn.commit()
         _invalidate_repo_catalog()
     return get_lesson(conn, lid)
@@ -875,8 +991,13 @@ def approve_lesson(conn: sqlite3.Connection, lid: str) -> dict | None:
     row = conn.execute("SELECT * FROM lessons WHERE id=?", (lid,)).fetchone()
     if row is None:
         return None
-    if row["status"] == "approved":
-        return _lesson_row(row)
+    lesson = _lesson_row(row, conn)
+    if lesson["status"] == "approved":
+        return lesson
+    # 入库也必须完整：旧待审数据缺字段时先补全，不能直接批准。
+    knowledge_card.assert_submittable(
+        "insight", lesson["title"], lesson["tldr"], lesson["content"],
+        lesson["fields"])
     repo = row["repo"] or "shared"
     count = conn.execute(
         "SELECT COUNT(*) AS n FROM lessons WHERE status='approved' AND repo=?", (repo,)
@@ -934,16 +1055,12 @@ def shared_lessons(conn: sqlite3.Connection, tags: list[str] | None = None,
         item_tags = {str(t).lower() for t in jloads(r["tags_json"], [])}
         if wanted and item_tags and not (wanted & item_tags):
             continue
-        out.append(_lesson_row(r))
+        out.append(_lesson_row(r, conn))
         if len(out) >= limit:
             break
     return out
 
 
-def _lesson_row(row) -> dict:
-    d = dict(row)
-    d["tags"] = jloads(d.pop("tags_json"), [])
-    return d
 
 
 def _safe_repo(repo: str) -> str:

@@ -83,7 +83,8 @@ def _parse_iso(value: str | None) -> datetime | None:
 
 def create_reminder(conn: sqlite3.Connection, *, role_slug: str | None, kind: str = "cron",
                     cron_expr: str | None = None, fire_at: str | None = None,
-                    when_condition: str | None = None, prompt: str | None = None) -> dict:
+                    when_condition: str | None = None, prompt: str | None = None,
+                    commit: bool = True) -> dict:
     kind = (kind or "cron").lower()
     if kind not in ("cron", "at", "when"):
         raise ConflictError(f"unknown reminder kind: {kind}")
@@ -107,7 +108,8 @@ def create_reminder(conn: sqlite3.Connection, *, role_slug: str | None, kind: st
         "status, next_fire_at, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
         (rid, role_slug, kind, cron_expr, fire_at, when_condition, prompt, "pending", next_fire, now_iso()),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return get_reminder(conn, rid)  # type: ignore[return-value]
 
 

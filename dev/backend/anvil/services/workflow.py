@@ -1691,6 +1691,9 @@ def _create_workflow_locked(conn: sqlite3.Connection, task_id: str, definition: 
             conn.rollback()
             raise ConflictError(
                 "draft state changed; refresh before approving")
+    # 工作流落板执行后才创建知识收割提醒；子任务/未规划任务不创建。
+    from . import knowledge_harvest  # 惰性导入，避免 services 循环
+    knowledge_harvest.ensure_task_reminder_by_id(conn, task_id)
     conn.commit()
     if previous_workflow_id:
         _clear_restarted_slice_contexts(conn, task_id)

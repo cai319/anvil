@@ -266,12 +266,13 @@ export function Runtimes() {
 
       {editor && (
         <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && setEditor(null)}>
-          <div className="modal" role="dialog" aria-label="运行时 YAML">
+          <div className="modal modal-flex" role="dialog" aria-label="运行时 YAML">
             <div className="modal-head">
               <h2>{editor.isNew ? "新增自定义运行时" : `编辑运行时 · ${editor.id}`}</h2>
               <button className="modal-close" onClick={() => setEditor(null)} aria-label="关闭"><Icon name="x" size={12} /></button>
             </div>
 
+            <div className="modal-flex-body">
             {editor.isNew && (
               <label className="field">
                 <span>运行时 ID</span>
@@ -302,6 +303,7 @@ export function Runtimes() {
             </small>
 
             {editorError && <p className="error">{editorError}</p>}
+            </div>
             <div className="modal-actions">
               {editor.isNew && (
                 <button onClick={() => setEditor((prev) => prev ? {

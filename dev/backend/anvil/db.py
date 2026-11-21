@@ -1353,6 +1353,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_notes_repo_ids_v2(conn)
     _migrate_knowledge_quality_v1(conn)
     _migrate_repo_split_v1(conn)
+    _migrate_knowledge_completion_v1(conn)
     conn.commit()
 
 
@@ -1969,6 +1970,38 @@ def _migrate_context_return_v2(conn: sqlite3.Connection) -> None:
         "UPDATE runs SET context_returned_at=NULL "
         "WHERE context_return_after_turn=1 AND context_returned_at IS NOT NULL")
     _set_setting(conn, "schema.context_return_v2", "1")
+    conn.commit()
+
+
+def _migrate_knowledge_completion_v1(conn: sqlite3.Connection) -> None:
+    """知识智能补全请求：记录目标、角色、run/wake 与进度，供看板展示。"""
+    if _setting(conn, "schema.knowledge_completion_v1"):
+        return
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS knowledge_completion_jobs (
+            id TEXT PRIMARY KEY,
+            target_type TEXT NOT NULL,       -- lesson | role_note
+            target_id TEXT NOT NULL,
+            role_slug TEXT,
+            run_id TEXT,
+            wake_request_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'queued', -- queued|running|completed|failed
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_knowledge_completion_target "
+        "ON knowledge_completion_jobs(target_type, target_id, created_at DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_knowledge_completion_wake "
+        "ON knowledge_completion_jobs(wake_request_id)"
+    )
+    _set_setting(conn, "schema.knowledge_completion_v1", "1")
     conn.commit()
 
 

@@ -123,11 +123,12 @@ export function ApplyTemplateModal({ task, roles, onClose, onApplied }: {
 
   return (
     <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal wft-apply-modal" role="dialog" aria-modal="true">
+      <div className="modal wft-apply-modal modal-flex" role="dialog" aria-modal="true">
         <div className="modal-head">
           <h2>套用工作流模板</h2>
           <button className="modal-close" onClick={onClose} aria-label="关闭"><Icon name="x" size={12} /></button>
         </div>
+        <div className="modal-flex-body">
         {error && <p className="error">{error}</p>}
         <div className="field">
           <span>已发布模板</span>
@@ -219,6 +220,7 @@ export function ApplyTemplateModal({ task, roles, onClose, onApplied }: {
             )}
           </div>
         )}
+        </div>
 
         <div className="modal-actions">
           <button className="small" onClick={onClose} disabled={busy}>取消</button>

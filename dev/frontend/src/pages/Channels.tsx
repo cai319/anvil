@@ -24,6 +24,7 @@ import {
   KNOWLEDGE_KIND_LABEL,
   KNOWLEDGE_STATUS_LABEL,
 } from "../knowledgeCard";
+import { KnowledgeFieldList } from "./knowledge/KnowledgeDetail";
 
 type Tab = "overview" | "tasks" | "knowledge" | "assets" | "participants" | "settings";
 
@@ -526,6 +527,10 @@ export function Channels() {
                           <option value="reference">reference</option>
                         </select>
                       </label>
+                      <p className="muted">
+                        知识提交前必须条款：标题、TLDR、正文、通用质量字段与该类型必填字段
+                        必须完整；缺项会被服务端以“知识格式不合法”拒绝。
+                      </p>
                       {[...KNOWLEDGE_QUALITY_FIELDS,
                         ...KNOWLEDGE_CARD_FIELDS[cardKind]].map((f) => (
                         <label key={f.key}>
@@ -618,7 +623,8 @@ export function Channels() {
                             </span>
                             <div className="channel-knowledge-tldr">{k.tldr}</div>
                             <details>
-                              <summary>查看知识卡</summary>
+                              <summary>查看完整知识卡（字段 + 正文）</summary>
+                              <KnowledgeFieldList kind={k.kind} fields={k.fields} />
                               <pre style={{ whiteSpace: "pre-wrap" }}>{k.body_md}</pre>
                             </details>
                           </div>
@@ -695,11 +701,12 @@ export function Channels() {
       {createOpen && (
         <div className="modal-overlay"
           onMouseDown={(e) => e.target === e.currentTarget && setCreateOpen(false)}>
-          <div className="modal" role="dialog" aria-label="新建频道">
+          <div className="modal modal-flex" role="dialog" aria-label="新建频道">
             <div className="modal-head">
               <h2>新建频道</h2>
               <button className="modal-close" onClick={() => setCreateOpen(false)} aria-label="关闭">×</button>
             </div>
+            <div className="modal-flex-body">
             <div className="channel-form-grid two-col">
               <label className="span-2">频道名
                 <input autoFocus value={newName} onChange={(e) => setNewName(e.target.value)} />
@@ -717,6 +724,7 @@ export function Channels() {
                   onChange={(e) => setNewDescription(e.target.value)}
                   placeholder="这个频道负责什么、涉及哪些技术领域" />
               </label>
+            </div>
             </div>
             <div className="modal-actions">
               <button onClick={() => setCreateOpen(false)} disabled={busy}>取消</button>

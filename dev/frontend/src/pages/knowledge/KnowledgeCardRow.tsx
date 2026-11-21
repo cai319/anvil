@@ -6,6 +6,7 @@ import {
   KNOWLEDGE_STATUS_LABEL,
 } from "../../knowledgeCard";
 import { QualityBadge, QualityMissing, QualityWarnings } from "./KnowledgeQuality";
+import { KnowledgeFieldList } from "./KnowledgeDetail";
 
 const STATUS_CLASS: Record<KnowledgeStatus, string> = {
   draft: "todo",
@@ -90,7 +91,8 @@ export function ChannelKnowledgeRow({ card, busy, onApprove, onReject }: {
           <span className="knowledge-record-tldr">{card.tldr}</span>
           <QualityWarnings quality={card.quality} />
           <details className="knowledge-record-details">
-            <summary>查看知识卡</summary>
+            <summary>查看完整知识卡（字段 + 正文）</summary>
+            <KnowledgeFieldList kind={card.kind} fields={card.fields} />
             <pre>{card.body_md}</pre>
           </details>
         </div>
@@ -157,7 +159,8 @@ export function TaskKnowledgeRow({ card, busy, onApprove }: {
         <span className="knowledge-record-tldr">{card.tldr}</span>
         <QualityWarnings quality={card.quality} />
         <details className="knowledge-record-details">
-          <summary>查看知识卡</summary>
+          <summary>查看完整知识卡（字段 + 正文）</summary>
+          <KnowledgeFieldList kind={card.kind} fields={card.fields} />
           <pre>{card.body_md}</pre>
         </details>
       </div>

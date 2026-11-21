@@ -15,6 +15,12 @@ from anvil.db import open_conn
 from anvil.util import now_iso
 from tests.conftest import API, app_factory, auth_headers, role_payload, runtime_payload, human_headers  # noqa: E402
 
+LESSON_FIELDS = {
+    "use_when": "同类任务", "expected_effect": "减少返工", "evidence": "任务记录",
+    "observation": "测试观察", "lesson": "测试经验", "applicability": "同类任务",
+    "counterexamples": "暂无",
+}
+
 
 @pytest.fixture
 def app(tmp_path, monkeypatch):
@@ -132,7 +138,9 @@ async def test_lesson_approval_writes_shared_file_and_respects_cap(client, monke
     monkeypatch.setattr(memory_service, "LESSON_CAP", 1)
 
     first = (await client.post(f"{API}/lessons/pending", json={
+        "title": "所有金额字段使用 Decimal",
         "content": "所有金额字段使用 Decimal", "tags": ["backend"], "repo": "shared",
+        "fields": LESSON_FIELDS,
     }, headers=auth_headers())).json()
     assert (await client.post(f"{API}/lessons/{first['id']}/approve",
                               headers=human_headers())).status_code == 200
@@ -140,7 +148,8 @@ async def test_lesson_approval_writes_shared_file_and_respects_cap(client, monke
     assert "Decimal" in shared_file.read_text(encoding="utf-8")
 
     second = (await client.post(f"{API}/lessons/pending", json={
-        "content": "第二条经验", "tags": ["backend"],
+        "title": "第二条经验", "content": "第二条经验", "tags": ["backend"],
+        "fields": LESSON_FIELDS,
     }, headers=auth_headers())).json()
     over_cap = await client.post(f"{API}/lessons/{second['id']}/approve", headers=human_headers())
     assert over_cap.status_code == 409
@@ -504,7 +513,8 @@ async def test_role_message_creates_run(client):
 async def test_lesson_update(client):
     await _seed(client)
     lesson = (await client.post(f"{API}/lessons/pending", json={
-        "content": "旧内容", "tags": ["a"],
+        "title": "旧标题", "content": "旧内容", "tags": ["a"],
+        "fields": LESSON_FIELDS,
     }, headers=auth_headers())).json()
     updated = await client.put(f"{API}/lessons/{lesson['id']}",
                                json={"content": "新内容", "tags": ["b"]},
@@ -521,8 +531,9 @@ async def test_lesson_creation_requires_cap_eviction(client):
     original = memory_service.LESSON_CAP
     memory_service.LESSON_CAP = 0
     try:
-        lesson = (await client.post(f"{API}/lessons/pending", json={"content": "x"},
-                                    headers=auth_headers())).json()
+        lesson = (await client.post(f"{API}/lessons/pending", json={
+            "title": "x", "content": "x", "fields": LESSON_FIELDS,
+        }, headers=auth_headers())).json()
         r = await client.post(f"{API}/lessons/{lesson['id']}/approve", headers=human_headers())
         assert r.status_code == 409
     finally:

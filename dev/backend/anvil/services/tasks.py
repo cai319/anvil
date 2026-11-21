@@ -1150,6 +1150,8 @@ def cancel(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
         conn.execute(
             "UPDATE tasks SET dispatch_status='cancelled' WHERE id=?",
             (row["target_task_id"],))
+    from . import knowledge_harvest  # 惰性导入，避免 services 循环
+    knowledge_harvest.remove_task_reminder(conn, tid)
     _audit(conn, role, tid, "cancel")
     conn.commit()
     return get(conn, tid)  # type: ignore[return-value]
@@ -1186,6 +1188,12 @@ def reopen(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
         "claimed_at=NULL, lease_expires_at=NULL, submitted_at=NULL, updated_at=? WHERE task_id=?",
         (now_iso(), tid),
     )
+    # 取消时移除了未触发的收割提醒；只有已落板（有 workflow）的任务才补回。
+    if conn.execute(
+            "SELECT 1 FROM workflows WHERE task_id=? LIMIT 1", (tid,)
+    ).fetchone() is not None:
+        from . import knowledge_harvest  # 惰性导入，避免 services 循环
+        knowledge_harvest.ensure_task_reminder_by_id(conn, tid)
     _audit(conn, role, tid, "reopen")
     conn.commit()
     return get(conn, tid)  # type: ignore[return-value]
@@ -1450,6 +1458,8 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
         "DELETE FROM role_task_sessions WHERE task_id=? OR task_key=?", (tid, tid))
     # 任务数据目录保留到保留期结束（可审计/可恢复）；标记 deleted，由定期清理删除。
     task_workspace.mark_deleted(conn, tid, commit=False)
+    from . import knowledge_harvest  # 惰性导入，避免 services 循环
+    knowledge_harvest.remove_task_reminder(conn, tid)
     conn.execute("DELETE FROM audit WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM tasks WHERE id=?", (tid,))
     # 留一条删除审计（task_id 仍可读，便于知道这个 id 曾经存在）

@@ -77,11 +77,11 @@ pip install --force-reinstall <anvil-cli-wheel-or-sdist>
 | `anvil task ...` | 任务：列表/创建/委派工单/验收/认领/评论/提交/归档/任务知识 |
 | `anvil step ...` | 工作流步骤：show/plan/submit/decide/escalate/packet |
 | `anvil finding ...` | 问题板：安全 finding 的填写/提交/完成（reviewer） |
-| `anvil knowledge ...` | 角色知识：检索/索引/仓库/知识卡 |
+| `anvil knowledge ...` | 角色知识：检索/索引/补全/仓库/知识卡 |
 | `anvil note write` | 写入角色笔记（实践门控） |
 | `anvil role ...` | 角色：list/expand |
 | `anvil workspace ...` | 频道与频道知识卡 |
-| `anvil lesson propose` | 提议共享经验（human 审批） |
+| `anvil lesson propose/fill` | 提议共享经验 / 收割角色补全字段（human 审批） |
 | `anvil reminder ...` | 定时提醒 |
 | `anvil self ...` / `anvil whoami` | 当前身份、会话、自我维护 |
 | `anvil inbox ...` | Agent 收件箱（拉模式） |
@@ -334,6 +334,8 @@ anvil knowledge show --id <note-id>
 anvil knowledge index [--task <id>]          # 别名 list
 anvil knowledge list
 anvil knowledge reindex [--dry-run] [--prune] [--self | --all]
+anvil knowledge fill --id <note-id> [--title "..."] [--tldr "..."] \
+  [--content-file body.md] [--field use_when="..." ...]
 anvil knowledge repo-list
 anvil knowledge repo-show --repo <name>
 anvil knowledge repo-suggest "任务标题"
@@ -442,7 +444,11 @@ anvil self reset-context --task <id> [--reason "..."]
 anvil self edit-instruction --file instruction.md
 anvil self propose --field <field> --file proposal.json
 
-anvil lesson propose "..." [--tags a,b] [--repo shared]
+anvil lesson propose "..." [--tags a,b] [--repo shared] \
+  [--title "一句话结论"] [--tldr "摘要"] \
+  [--field use_when="何时适用"] [--field evidence="任务/run/证据"]
+anvil lesson fill <lesson-id> [--title "..."] [--tldr "..."] \
+  [--field use_when="..."] [--field observation="..."]
 
 anvil reminder add --in 30m --prompt "检查构建结果"   # 或 --cron / --when
 anvil reminder list
@@ -477,6 +483,17 @@ anvil action list
   后续 slice/step 启动时会进入其未读/上下文；用于“本 step 不需要结果但未来步骤需要”的信息。
 - `subagent list` 只读观测运行时子代理（状态 running/completed/interrupted 与
   result_summary）；Anvil 不创建、不终止、不唤醒子代理。
+- `knowledge fill` 只允许该知识的归属角色或 human 调用；用于角色用自身上下文
+  补全/精炼已有 role notes（标题 ≤80、TLDR ≤200、正文 ≤4000、单字段 ≤2000），
+  来源任务存在且角色绑定时通过 mention/wake 排队，否则创建补全 run；角色 busy 时排队。
+- `lesson propose` 按统一知识卡提交：`title` 必须提供且 ≤80 字（概括知识结论，
+  不从正文自动生成）；`tldr` 可省略（自动从正文推导）。同时必须提供 `use_when`、
+  `expected_effect`、`evidence`、`observation`、`lesson`、`applicability`、
+  `counterexamples`；缺任一项返回 422（知识格式不合法）。
+  `--field key=value` 可重复，其他结构化字段（如 `trigger_point`）会一并展示。
+- `lesson fill <id>` 只允许该经验的收割角色（`source_role`）或 human 调用；
+  按来源任务上下文补全字段，同时把过长标题/正文/字段改写为概括内容
+  （title ≤80、tldr ≤200、正文 ≤4000、单字段 ≤2000 字）；提交时同样执行必须条款。
 
 ## 11. 常见错误与处理
 

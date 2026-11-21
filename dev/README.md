@@ -61,7 +61,11 @@ v1.30 起明确区分三个容易混淆的概念：
 频道知识、任务知识、角色知识、共享经验、演化提案与总体效果评估；单条命中次数显示在
 对应知识条目行内，页面浏览不计命中。
 
-设计细节见 `../docs/v1.30-channel-knowledge.md`。
+知识入库执行统一必须条款（标题/TLDR/正文/字段长度 + 质量字段 + kind 必填），不满足直接
+422；共享经验与角色知识支持角色按自身上下文智能补全，角色忙碌时排队。顶层任务在 Cindy
+规划、human 批准 workflow 落板后自动获得一条 `when(task done)` 知识收割提醒；任务完成时
+Cindy 收割任务/主题/频道知识，只写 proposed，审批仍由 human/任务参与者完成。详见
+`../docs/v1.30-channel-knowledge.md` 与 `../docs/v1.46.0-release.md`。
 
 ## 问题板（Issue Board）
 
@@ -76,7 +80,7 @@ Cindy 在规划时从已选角色中指定 reviewer，并保证 workflow 覆盖�
 ## 当前实现状态
 
 详见 `implementation-status.md`（各里程碑的已实现 / 未实现清单）。当前自动化测试：
-**970 passed + 61 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；模型评测需要
+**1005 passed + 63 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；模型评测需要
 `ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。
 
 切片上下文与派遣子任务默认已启用显式入口（`anvil task dispatch` /
@@ -119,6 +123,7 @@ runtime 是否支持 subagent。设计见
 
 ## 最近版本
 
+- `../docs/v1.46.0-release.md` — 知识入库必须条款、智能补全、任务完成自动收割、弹窗冻结
 - `../docs/v1.45.2-release.md` — 收件箱委派验收、审批参与者预览、评测实跑
 - `../docs/v1.45.1-release.md` — 角色删除关闭委派、dispatch 通知补投、subagent 幽灵收尾
 - `../docs/v1.45.0-release.md` — 协作方式判断、角色一致性、D1–D4 收尾

@@ -115,7 +115,17 @@ async def test_inbox_draft_lesson_proposal(client, seeded):
         "goal": "五子棋", "source_task": "T-D",
         "tree": {"leader": "pm", "children": [{"id": "S1", "title": "设计", "role": "pm"}]}})
     await client.post("/api/v1/lessons/pending", headers=auth_headers("pm"),
-                      json={"content": "AI 需先算连五", "tags": ["gomoku"]})
+                      json={"title": "AI 需先算连五", "content": "AI 需先算连五",
+                            "tags": ["gomoku"],
+                            "fields": {
+                                "use_when": "五子棋 AI 决策时",
+                                "expected_effect": "避免漏算连五",
+                                "evidence": "任务 T-D 的棋谱",
+                                "observation": "AI 漏算连五",
+                                "lesson": "先算连五",
+                                "applicability": "五子棋任务",
+                                "counterexamples": "暂无",
+                            }})
     await client.post("/api/v1/proposals", headers=auth_headers("pm"),
                       json={"field": "tools", "proposed": {"preset": "x"},
                             "rationale": "省 token", "risk": "低"})
@@ -132,6 +142,47 @@ async def test_inbox_draft_lesson_proposal(client, seeded):
     pid = next(i["id"] for i in body["items"] if i["kind"] == "proposal").split(":", 1)[1]
     await client.post(f"/api/v1/proposals/{pid}/approve", headers=human_headers())
     assert (await _inbox(client))["count"] == 0
+
+
+async def test_inbox_lesson_keeps_full_title_and_review_meta(client, seeded):
+    """收件箱不能把经验标题截成 60 字；详情所需上下文放进 meta。"""
+    title = "经验标题不能在中途被截断" + "·补充信息" * 8
+    content = f"{title}\n\n完整正文：适用场景、触发逻辑与证据都应可查看。"
+    created = await client.post(
+        "/api/v1/lessons/pending",
+        headers=auth_headers("pm"),
+        json={
+            "title": title,
+            "tldr": "先看适用场景，再核对触发逻辑与证据。",
+            "content": content,
+            "fields": {
+                "use_when": "同类审计任务", "trigger_point": "读取校验结果时",
+                "expected_effect": "减少误判", "evidence": "任务 T-1 的复现记录",
+                "observation": "环境差异导致误判", "lesson": "先核对环境",
+                "applicability": "同类审计任务", "counterexamples": "暂无",
+            },
+            "tags": ["knowledge"], "repo": "shared", "source_task": "T-1",
+        })
+    assert created.status_code == 201, created.text
+    lid = created.json()["id"]
+
+    body = await _inbox(client)
+    item = next(i for i in body["items"] if i["kind"] == "lesson")
+    assert item["title"] == title
+    assert item["meta"]["lesson_id"] == lid
+    assert item["meta"]["tldr"] == "先看适用场景，再核对触发逻辑与证据。"
+    assert item["meta"]["tags"] == ["knowledge"]
+    assert item["meta"]["repo"] == "shared"
+    assert item["meta"]["source_role"] == "pm"
+    assert item["meta"]["source_task"] == "T-1"
+    assert item["meta"]["lesson"]["title"] == title
+    assert item["meta"]["lesson"]["fields"]["trigger_point"] == "读取校验结果时"
+    assert item["meta"]["lesson"]["ready"] is True
+    assert item["meta"]["lesson"]["submission_errors"] == []
+
+    detail = await client.get(f"/api/v1/lessons/{lid}", headers=auth_headers())
+    assert detail.status_code == 200
+    assert detail.json()["fields"]["trigger_point"] == "读取校验结果时"
 
 
 async def test_inbox_delegation_review_item(client, app, seeded):

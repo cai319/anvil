@@ -337,7 +337,7 @@ export function Roles() {
           className="modal-overlay"
           onMouseDown={(e) => e.target === e.currentTarget && setCreateOpen(false)}
         >
-          <div className="modal create-role-modal" role="dialog" aria-modal="true" aria-label="新建角色">
+          <div className="modal create-role-modal modal-flex" role="dialog" aria-modal="true" aria-label="新建角色">
             <div className="modal-head">
               <h2>新建角色</h2>
               <button
@@ -347,6 +347,7 @@ export function Roles() {
                 aria-label="关闭"
               ><Icon name="x" size={12} /></button>
             </div>
+            <div className="modal-flex-body">
             {error && <p className="error">{error}</p>}
       <section className="create-role-panel">
         <div className="toolbar">
@@ -415,7 +416,9 @@ export function Roles() {
           value={newAvatar}
           onChange={setNewAvatar}
         />
-        <div className="role-create-footer">
+      </section>
+            </div>
+        <div className="role-create-footer modal-actions">
           <button type="button" onClick={() => setCreateOpen(false)}>取消</button>
           <button
             type="button"
@@ -426,7 +429,6 @@ export function Roles() {
             创建角色
           </button>
         </div>
-      </section>
           </div>
         </div>
       )}

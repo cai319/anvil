@@ -153,7 +153,7 @@ export function GateReviewDrawer({
   return (
     <div className="modal-overlay gate-drawer-overlay"
       onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal gate-drawer" role="dialog" aria-modal="true"
+      <div className="modal gate-drawer modal-flex" role="dialog" aria-modal="true"
         aria-label={`审查 ${sid}`}>
         <div className="modal-head">
           <div className="gate-drawer-title">

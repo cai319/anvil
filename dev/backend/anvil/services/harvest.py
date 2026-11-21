@@ -87,6 +87,25 @@ def repo_card_to_shared(conn: sqlite3.Connection, card_id: str, *,
         raise ConflictError("only approved repo cards can be harvested")
     content = (f"{card.get('title')}\n\n{card.get('tldr')}\n\n"
                f"{card.get('body_md') or ''}").strip()
+    fields = dict(card.get("fields") or {})
+    # 主题卡类型可能不是 insight；晋升为共享经验时补齐 insight 卡字段，
+    # 保证 experience 在提交（pending）前就是完整知识。
+    if not fields.get("observation"):
+        fields["observation"] = (fields.get("context") or card.get("tldr")
+                                 or card.get("title") or "")
+    if not fields.get("lesson"):
+        fields["lesson"] = (fields.get("lesson") or fields.get("rule")
+                            or fields.get("decision") or card.get("title") or "")
+    if not fields.get("applicability"):
+        fields["applicability"] = (fields.get("applicability") or fields.get("scope")
+                                   or fields.get("reuse_scope")
+                                   or fields.get("use_when") or "")
+    if not fields.get("counterexamples"):
+        fields["counterexamples"] = (fields.get("counterexamples")
+                                     or fields.get("exclusions")
+                                     or fields.get("exceptions")
+                                     or "暂无已知反例")
     return memory.create_lesson(
         conn, content, tags=card.get("tags") or [], repo="shared",
-        source_task=card.get("source_task_id"), source_role=actor)
+        source_task=card.get("source_task_id"), source_role=actor,
+        title=card.get("title"), tldr=card.get("tldr"), fields=fields)

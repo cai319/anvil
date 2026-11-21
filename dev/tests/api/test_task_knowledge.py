@@ -54,10 +54,29 @@ async def _knowledge(client, tid: str, headers: dict, title: str = "子任务发
                 "finding": "发现 A",
                 "verification": "已用测试验证",
                 "reuse_scope": "当前任务内的角色",
+                "use_when": "同类任务出现相同发现时",
+                "expected_effect": "减少重复排查",
+                "evidence": "当前任务的测试记录",
             },
         },
         headers=headers,
     )
+
+
+async def test_incomplete_task_knowledge_is_rejected(client, app):
+    """知识提交前必须条款：任务知识缺字段即 422。"""
+    await _seed(client)
+    await _task(client, "T-INCOMPLETE", assignees=["qa-role"])
+    r = await client.post(
+        f"{API}/tasks/T-INCOMPLETE/knowledge",
+        json={"title": "不完整", "tldr": "缺字段", "kind": "task_finding",
+              "fields": {"task_context": "当前任务", "finding": "发现"}},
+        headers=_agent_headers(app),
+    )
+    assert r.status_code == 422, r.text
+    detail = str(r.json()["detail"])
+    assert "知识格式不合法" in detail
+    assert "verification" in detail and "use_when" in detail
 
 
 async def test_subtask_knowledge_is_marked_and_aggregated(client, app):

@@ -138,6 +138,8 @@ async def test_task_shared_knowledge_marks_subtask(client, app, monkeypatch):
             "fields": {
                 "task_context": "子任务", "finding": "A 方案可行",
                 "verification": "测试通过", "reuse_scope": "当前任务",
+                "use_when": "同类子任务", "expected_effect": "减少返工",
+                "evidence": "测试记录",
             },
         },
         headers=auth_headers(),
