@@ -758,13 +758,14 @@ export function WorkflowTemplates() {
       )}
       {showDraftDiff && draftOrigin && (
         <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && setShowDraftDiff(false)}>
-          <div className="modal wft-version-modal" role="dialog" aria-modal="true">
+          <div className="modal wft-version-modal modal-flex" role="dialog" aria-modal="true">
             <div className="modal-head">
               <h2>草案 · 原稿与当前修改</h2>
               <button className="modal-close" onClick={() => setShowDraftDiff(false)} aria-label="关闭">
                 <Icon name="x" size={12} />
               </button>
             </div>
+            <div className="modal-flex-body">
             <div className="wft-diff">
               {diffTemplate(draftOrigin, definition).length === 0
                 ? <p className="muted">尚未修改原稿。</p>
@@ -775,6 +776,7 @@ export function WorkflowTemplates() {
                     ))}
                   </ul>
                 )}
+            </div>
             </div>
           </div>
         </div>
@@ -1306,11 +1308,12 @@ function VersionDialog({ template, onClose, onRollback }: {
 
   return (
     <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal wft-version-modal" role="dialog" aria-modal="true">
+      <div className="modal wft-version-modal modal-flex" role="dialog" aria-modal="true">
         <div className="modal-head">
           <h2>版本与差异</h2>
           <button className="modal-close" onClick={onClose} aria-label="关闭"><Icon name="x" size={12} /></button>
         </div>
+        <div className="modal-flex-body">
         {error && <p className="error">{error}</p>}
         <div className="wft-version-actions">
           <button className="small" onClick={showOrigin} disabled={!origin || !current}>
@@ -1352,6 +1355,7 @@ function VersionDialog({ template, onClose, onRollback }: {
             ))}
           </div>
         )}
+        </div>
       </div>
     </div>
   );
@@ -1380,10 +1384,11 @@ function ImportDialog({ onClose, onImported }: {
   };
   return (
     <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal wft-import-modal" role="dialog" aria-modal="true">
+      <div className="modal wft-import-modal modal-flex" role="dialog" aria-modal="true">
         <div className="modal-head"><h2>导入工作流</h2>
           <button className="modal-close" onClick={onClose} aria-label="关闭"><Icon name="x" size={12} /></button>
         </div>
+        <div className="modal-flex-body">
         {error && <p className="error">{error}</p>}
         {!sources && <p className="muted">加载中…</p>}
         {sources && (
@@ -1409,6 +1414,7 @@ function ImportDialog({ onClose, onImported }: {
             <p className="muted wft-import-note">旧 SOP：{sources.sops.map((sop) => sop.name).join(" / ")}（后续支持直接导入）</p>
           </>
         )}
+        </div>
       </div>
     </div>
   );

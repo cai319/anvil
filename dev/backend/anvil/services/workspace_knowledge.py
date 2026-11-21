@@ -394,6 +394,9 @@ def create(conn: sqlite3.Connection, workspace_id: str, *,
         status = "approved" if actor in (None, "human") else "proposed"
     if status not in ("draft", "proposed", "approved", "rejected", "deprecated", "expired"):
         raise ConflictError(f"invalid status: {status}")
+    # 知识提交前的必须条款：除 draft 外都必须完整。
+    if status != "draft":
+        knowledge_card.assert_submittable(kind, title, tldr, body_md, fields)
     from . import workspace as workspace_service
     ws = workspace_service.get_channel(conn, workspace_id)
     if ws is None:

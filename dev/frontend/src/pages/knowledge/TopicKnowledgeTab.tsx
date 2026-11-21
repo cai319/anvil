@@ -16,6 +16,7 @@ import {
 import { formatDateTime } from "../../time";
 import { useDebouncedValue } from "./useDebouncedValue";
 import { KnowledgeCardEditor } from "./KnowledgeCardEditor";
+import { KnowledgeFieldList } from "./KnowledgeDetail";
 import {
   KnowledgeCleanPreview,
   QualityBadge,
@@ -118,9 +119,14 @@ function RepoCardRow({ card, selected, busy, channels, llmEnabled,
           <QualityWarnings quality={card.quality} />
           <button type="button" className="knowledge-record-toggle"
             onClick={() => setOpen((v) => !v)}>
-            {open ? "收起知识卡" : "查看知识卡"}
+            {open ? "收起知识卡" : "查看完整知识卡"}
           </button>
-          {open && <pre className="knowledge-record-body">{card.body_md}</pre>}
+          {open && (
+            <div className="knowledge-record-body">
+              <KnowledgeFieldList kind={card.kind} fields={card.fields} />
+              <pre>{card.body_md}</pre>
+            </div>
+          )}
         </div>
         <span className="knowledge-record-actions">
           {card.status === "proposed" && (
@@ -217,9 +223,14 @@ function TaskQueueRow({ card, selected, busy, repos, promote, onToggle,
           <QualityWarnings quality={card.quality} />
           <button type="button" className="knowledge-record-toggle"
             onClick={() => setOpen((v) => !v)}>
-            {open ? "收起知识卡" : "查看知识卡"}
+            {open ? "收起知识卡" : "查看完整知识卡"}
           </button>
-          {open && <pre className="knowledge-record-body">{card.body_md}</pre>}
+          {open && (
+            <div className="knowledge-record-body">
+              <KnowledgeFieldList kind={card.kind} fields={card.fields} />
+              <pre>{card.body_md}</pre>
+            </div>
+          )}
         </div>
         <span className="knowledge-record-actions">
           <button type="button" className="small primary" disabled={busy}

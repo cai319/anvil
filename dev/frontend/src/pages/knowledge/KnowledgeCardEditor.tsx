@@ -102,7 +102,7 @@ export function KnowledgeCardEditor({
 
   return (
     <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal knowledge-editor" role="dialog" aria-modal="true"
+      <div className="modal knowledge-editor modal-flex" role="dialog" aria-modal="true"
         aria-label="编辑知识卡">
         <div className="modal-head">
           <h2>补全知识卡</h2>
@@ -110,7 +110,7 @@ export function KnowledgeCardEditor({
             <Icon name="x" size={12} />
           </button>
         </div>
-        <div className="knowledge-editor-body">
+        <div className="knowledge-editor-body modal-flex-body">
           <div className="knowledge-editor-quality">
             <QualityBadge quality={quality} />
             {quality && quality.blocking.length > 0 && (

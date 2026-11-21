@@ -21,7 +21,11 @@ export function QualityMissing({ quality }: { quality?: QualityReport | null }) 
   return (
     <span className="quality-missing">
       {quality.blocking.map((item) => (
-        <span className="review-reason" key={item}>缺{qualityFieldLabel(item)}</span>
+        <span className="review-reason" key={item}>
+          {item.endsWith("_length")
+            ? `${qualityFieldLabel(item)}超限`
+            : `缺${qualityFieldLabel(item)}`}
+        </span>
       ))}
     </span>
   );
@@ -52,7 +56,7 @@ export function KnowledgeCleanPreview({ card, preview, busy, onClose, onApply }:
   ));
   return (
     <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal knowledge-clean-modal" role="dialog" aria-modal="true"
+      <div className="modal knowledge-clean-modal modal-flex" role="dialog" aria-modal="true"
         aria-label="LLM 清洗预览">
         <div className="modal-head">
           <h2>LLM 清洗预览</h2>
@@ -60,7 +64,7 @@ export function KnowledgeCleanPreview({ card, preview, busy, onClose, onApply }:
             <Icon name="x" size={12} />
           </button>
         </div>
-        <div className="knowledge-clean-body">
+        <div className="knowledge-clean-body modal-flex-body">
           <p className="muted">
             仅填充 proposed 卡，不会自动批准。引用不成立的字段已在服务端丢弃。
           </p>

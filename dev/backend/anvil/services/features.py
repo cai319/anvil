@@ -41,6 +41,20 @@ FLAGS: tuple[FeatureFlag, ...] = (
         category="knowledge",
     ),
     FeatureFlag(
+        key="knowledge_harvest_reminder",
+        attr="KNOWLEDGE_HARVEST_REMINDER_ENABLED",
+        title="任务完成知识收割提醒",
+        summary="任务 done 后自动提醒 Cindy 收割任务/主题/频道知识。",
+        description=(
+            "开启后：Cindy 规划完成且 human 落板 workflow 时自动生成一条 when(task done) 提醒，"
+            "任务完成时触发 Cindy 用任务上下文整理任务知识、主题知识与频道知识；Cindy 只写 "
+            "proposed/待审草稿，不自动批准，人工/任务参与者批准后生效。取消/删除任务会移除"
+            "未触发提醒，重新打开已落板任务会补回。关闭后：不再自动生成提醒，已有提醒保留；"
+            "仍可手工创建 when 提醒。"
+        ),
+        category="knowledge",
+    ),
+    FeatureFlag(
         key="knowledge_llm_cleaning",
         attr="KNOWLEDGE_LLM_CLEANING_ENABLED",
         title="LLM 知识清洗",

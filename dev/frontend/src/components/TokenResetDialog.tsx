@@ -37,7 +37,7 @@ export function TokenResetDialog({
   return createPortal(
     <div className="modal-overlay"
       onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal token-reset-modal" role="dialog" aria-modal="true"
+      <div className="modal token-reset-modal modal-flex" role="dialog" aria-modal="true"
         aria-label="清零 Token 计数">
         <div className="modal-head">
           <h2>{step === 1 ? "清零 Token 计数？" : "再次确认"}</h2>
@@ -46,6 +46,7 @@ export function TokenResetDialog({
           </button>
         </div>
 
+        <div className="modal-flex-body">
         {error && <p className="error">{error}</p>}
 
         {step === 1 ? (
@@ -59,10 +60,6 @@ export function TokenResetDialog({
               任务 Token、执行 Token、性能统计和每日预算闸门不受影响。
             </p>
             <p className="muted">这是一个两步确认操作。</p>
-            <div className="modal-actions">
-              <button className="small" onClick={onClose}>取消</button>
-              <button className="primary" onClick={() => setStep(2)}>继续</button>
-            </div>
           </>
         ) : (
           <>
@@ -70,16 +67,27 @@ export function TokenResetDialog({
               再次确认：清零后右上角计数从 0 开始，历史用量仍保留在数据库中。
             </p>
             <p className="muted">本次操作会写入审计日志（tokens.reset）。</p>
-            <div className="modal-actions">
+          </>
+        )}
+        </div>
+
+        <div className="modal-actions">
+          {step === 1 ? (
+            <>
+              <button className="small" onClick={onClose}>取消</button>
+              <button className="primary" onClick={() => setStep(2)}>继续</button>
+            </>
+          ) : (
+            <>
               <button className="small" disabled={busy} onClick={() => setStep(1)}>
                 返回
               </button>
               <button className="danger" disabled={busy} onClick={confirm}>
                 {busy ? "清零中…" : "确认清零"}
               </button>
-            </div>
-          </>
-        )}
+            </>
+          )}
+        </div>
       </div>
     </div>,
     document.body,

@@ -136,6 +136,9 @@ def create(conn: sqlite3.Connection, repo: str, *,
     fields = knowledge_card.normalize_fields(fields)
     if not body_md:
         body_md = knowledge_card.render_markdown(title, tldr, kind, fields)
+    # 知识提交前的必须条款：proposed/approved 必须完整；draft 允许未完成。
+    if status != "draft":
+        knowledge_card.assert_submittable(kind, title, tldr, body_md, fields)
     repo_row = knowledge_repos.ensure(
         conn, repo, created_by=created_by, source_task_id=source_task_id,
         auto_created=auto_created, commit=False)

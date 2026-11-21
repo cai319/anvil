@@ -87,7 +87,12 @@ async def test_agent_proposes_and_cannot_approve(client, app):
             "title": "考虑使用批量提交",
             "tldr": "批量提交可能减少往返。",
             "kind": "decision",
-            "fields": {"context": "任务量大", "decision": "观察后决定"},
+            "fields": {
+                "context": "任务量大", "decision": "观察后决定",
+                "alternatives": "逐文件提交", "consequences": "失败回滚范围更大",
+                "use_when": "同类文件超过 20 个时", "expected_effect": "减少往返",
+                "evidence": "任务 T1 的评审记录",
+            },
         },
         headers=headers,
     )
@@ -104,28 +109,56 @@ async def test_agent_proposes_and_cannot_approve(client, app):
     assert denied.status_code == 403
 
 
-async def test_approve_requires_full_fields_and_version(client, app):
+async def test_incomplete_agent_submission_is_rejected(client, app):
+    """知识提交前必须条款：频道知识同样不能带缺失字段入库。"""
     await _seed(client)
     ws = await _workspace(client)
     headers = _agent_headers(app)
     r = await client.post(
         f"{API}/workspaces/{ws['id']}/knowledge",
         json={
-            "title": "不完整的约定",
-            "tldr": "缺少示例和验证。",
+            "title": "不完整的约定", "tldr": "缺少示例和验证。",
             "kind": "convention",
             "fields": {"rule": "必须这样", "scope": "当前频道"},
         },
         headers=headers,
     )
-    assert r.status_code == 201, r.text
-    card = r.json()
+    assert r.status_code == 422, r.text
+    detail = str(r.json()["detail"])
+    assert "知识格式不合法" in detail
+    assert "examples" in detail and "expected_effect" in detail
+    assert "evidence" in detail
+
+
+async def test_legacy_incomplete_card_blocked_at_approval(client, app):
+    """历史未完整卡仍由审批门拦截；返回 409 + quality.blocking。"""
+    import json
+
+    from anvil.db import open_conn
+
+    await _seed(client)
+    ws = await _workspace(client)
+    card = (await client.post(
+        f"{API}/workspaces/{ws['id']}/knowledge",
+        json={"title": "完整约定", "tldr": "完整摘要。", "kind": "convention",
+              "fields": FULL_CONVENTION},
+        headers=_agent_headers(app),
+    )).json()
+    conn = open_conn(app.state.db_path)
+    try:
+        conn.execute(
+            "UPDATE workspace_knowledge SET fields_json=?, body_md=? WHERE id=?",
+            (json.dumps({"rule": "必须这样", "scope": "当前频道"}), "正文", card["id"]))
+        conn.commit()
+    finally:
+        conn.close()
+
     bad = await client.post(
         f"{API}/workspaces/{ws['id']}/knowledge/{card['id']}/approve",
         json={"expected_version": card["version"]},
         headers=human_headers(),
     )
-    assert bad.status_code == 409
+    assert bad.status_code == 409, bad.text
     assert "missing required field" in bad.text
 
     stale = await client.post(

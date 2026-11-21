@@ -688,3 +688,23 @@ cd frontend && npm run build         # tsc + vite build
   critical 100%，`ok=true`。
 - 全量：**970 passed / 61 skipped**；前端 build 通过。
 - 发布说明：`docs/v1.45.2-release.md`。
+
+## 知识质量与任务完成收割（2026-11-21，v1.46.0）
+
+- **知识必须条款**：`knowledge_card.submission_errors/assert_submittable` 统一校验
+  标题/TLDR/正文/字段长度、通用质量字段与 kind 必填；lessons、角色 notes、任务知识、
+  频道/主题知识在提交/批准/收割时执行，不满足返回 422。
+- **共享经验/角色知识补全**：`knowledge_completion_jobs` 跟踪目标、角色、run/wake/状态；
+  收割角色/归属角色异步补全并优化长度；列表/详情显示排队/处理/完成/失败，处理中或已
+  达标时按钮灰化；历史达标但无 job 记录按 `inferred=true` 展示补全完成。
+- **任务完成收割提醒**：Cindy 规划 + human 落板 workflow 时创建
+  `when(task:<id>:done)` 提醒；任务完成后 Cindy 收割任务/主题/频道知识，只写 proposed；
+  取消/删除清理，重开已落板任务补回；启动只为已落板活动任务回填；
+  开关 `knowledge_harvest_reminder`。
+- **权限边界**：Cindy 对非参与任务只能写 proposed 任务知识，不能直接 active；审批仍需
+  human/任务参与者。
+- **UI**：共享经验/角色知识统一详情弹窗（50vw/80vh、固定头脚）；收件箱经验紧凑标题 +
+  质量/补全标记；列表行溢出与元信息对齐修复；长表单弹窗迁移 `.modal-flex`，上下栏真正
+  冻结，仅中间 body 滚动。
+- 全量：**1005 passed / 63 skipped**；前端 `npm run build` 通过。
+- 发布说明：`docs/v1.46.0-release.md`。

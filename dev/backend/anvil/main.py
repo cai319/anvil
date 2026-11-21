@@ -29,6 +29,7 @@ from .db import connect, open_conn
 from .deps import token_is_valid
 from .services import daemon as daemon_service
 from .services import features as features_service
+from .services import knowledge_harvest as knowledge_harvest_service
 from .services import ledger as ledger_service
 from .services import roles as roles_service
 from .services import runs as runs_service
@@ -207,6 +208,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     roles_service.repair_home_paths(_init)
     # 旧角色可能早于每日复盘功能创建；启动时为所有启用角色补齐/迁移 reminder。
     roles_service.ensure_daily_review_reminders(_init)
+    # 为尚未结束的顶层任务补齐知识收割提醒（历史 done 任务不追溯，避免自动消耗 token）。
+    knowledge_harvest_service.backfill(_init)
     _init.close()  # 建表后即关，之后每请求独立连接
 
     # 编排控制面：同步 LangGraph + SqliteSaver（长驻 app 生命周期）。

@@ -24,7 +24,7 @@ def env(tmp_path, monkeypatch):
         conn, "openssl-4.0.1", kind="insight", title="旧标题",
         tldr="旧摘要", body_md="旧正文",
         fields={"observation": "原始观察：先核对版本"},
-        status="proposed")
+        status="draft")
     yield conn, card
     conn.close()
 
@@ -69,12 +69,12 @@ def test_preview_drops_uncited_field(env, monkeypatch):
     assert any("counterexamples" in warning for warning in preview["warnings"])
 
 
-def test_apply_keeps_proposed_and_records_llm(env, monkeypatch):
+def test_apply_keeps_draft_and_records_llm(env, monkeypatch):
     conn, card = env
     monkeypatch.setattr(utility, "generate", lambda *a, **k: _llm_json())
     preview = knowledge_clean.build_preview(conn, card["id"])
     updated = knowledge_clean.apply_preview(conn, card["id"], preview)
-    assert updated["status"] == "proposed"
+    assert updated["status"] == "draft"
     assert updated["title"] == "先核对版本再下结论"
     assert updated["quality"]["llm"]["prompt_version"] == knowledge_clean.PROMPT_VERSION
 

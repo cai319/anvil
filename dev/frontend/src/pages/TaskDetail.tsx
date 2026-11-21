@@ -21,6 +21,7 @@ import { Icon } from "../components/Icon";
 import { confirmDialog, promptDialog } from "../components/dialogs";
 import { GateReviewDrawer } from "../components/GateReviewDrawer";
 import { TaskFindingBoard } from "./TaskFindingBoard";
+import { KnowledgeDetailModal } from "./knowledge/KnowledgeDetail";
 
 const stepAuthority = (st: WorkflowStep): "ai" | "human" | "joint" =>
   st.decision_authority
@@ -291,13 +292,14 @@ function WorkflowWeightDialog({ taskId, current, onClose, onApplied }: {
 
   return (
     <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal wf-weight-modal" role="dialog" aria-modal="true">
+      <div className="modal wf-weight-modal modal-flex" role="dialog" aria-modal="true">
         <div className="modal-head">
           <h2>调整流程强度</h2>
           <button className="modal-close" onClick={onClose} aria-label="关闭">
             <Icon name="x" size={14} />
           </button>
         </div>
+        <div className="modal-flex-body">
         {error && <p className="error">{error}</p>}
         <p className="muted">
           当前执行：{current?.weight ? WEIGHT_META[current.weight].label : "未设置"}
@@ -331,6 +333,7 @@ function WorkflowWeightDialog({ taskId, current, onClose, onApplied }: {
             </button>
           </div>
         )}
+        </div>
         <div className="modal-actions">
           {current?.weight_source === "human" && (
             <button className="small" disabled={busy} onClick={clear}>清除人工设置</button>
@@ -780,6 +783,7 @@ function ChannelKnowledgePanel({ task, onChanged }: { task: Task; onChanged: () 
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [detail, setDetail] = useState<WorkspaceKnowledge | null>(null);
   const workspaceId = task.workspace_id ?? null;
 
   const load = useCallback(() => {
@@ -836,6 +840,9 @@ function ChannelKnowledgePanel({ task, onChanged }: { task: Task; onChanged: () 
                 </span>
                 <span className="channel-knowledge-title">{k.title}</span>
                 <small className="muted">{KNOWLEDGE_KIND_LABEL[k.kind] ?? k.kind}</small>
+                <button type="button" className="small" onClick={() => setDetail(k)}>
+                  详情
+                </button>
               </li>
             ))}
           </ul>
@@ -846,6 +853,26 @@ function ChannelKnowledgePanel({ task, onChanged }: { task: Task; onChanged: () 
           )}
           {note && <p className="muted hint">{note}</p>}
           {error && <p className="error">{error}</p>}
+          {detail && (
+            <KnowledgeDetailModal
+              heading="频道知识详情"
+              title={detail.title}
+              kind={detail.kind}
+              tldr={detail.tldr}
+              fields={detail.fields}
+              body={detail.body_md}
+              quality={detail.quality}
+              meta={[
+                { label: "约束力", value: AUTHORITY_LABEL[detail.authority] ?? detail.authority },
+                { label: "类型", value: KNOWLEDGE_KIND_LABEL[detail.kind] ?? detail.kind },
+                { label: "版本", value: `v${detail.version}` },
+                { label: "标签", value: detail.tags.length ? detail.tags.join("、") : "无" },
+                { label: "来源任务", value: detail.source_task_id || "—" },
+                { label: "复核", value: detail.review_at || "—" },
+              ]}
+              onClose={() => setDetail(null)}
+            />
+          )}
         </div>
       )}
     </>
@@ -862,6 +889,7 @@ function TaskKnowledgePanel({ task }: { task: Task }) {
   const [fields, setFields] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [detail, setDetail] = useState<TaskKnowledge | null>(null);
 
   const load = useCallback(
     () => api.listTaskKnowledge(task.id, true).then(setCards).catch(() => setCards([])),
@@ -923,6 +951,9 @@ function TaskKnowledgePanel({ task }: { task: Task }) {
                 {k.source_subtask_id ? ` · 来自子任务 ${k.source_subtask_id}` : " · 任务共享"}
               </small>
               <span className="muted">{k.tldr}</span>
+              <button type="button" className="small" onClick={() => setDetail(k)}>
+                详情
+              </button>
               <button type="button" className="small danger" disabled={busy}
                 onClick={() => remove(k.id)}>删除</button>
             </li>
@@ -943,6 +974,10 @@ function TaskKnowledgePanel({ task }: { task: Task }) {
                 ))}
               </select>
             </label>
+            <p className="muted hint">
+              知识提交前必须条款：标题、TLDR 与该类型全部必填字段必须完整；
+              缺失会被服务端拒绝（422）。
+            </p>
             {[...KNOWLEDGE_QUALITY_FIELDS,
               ...KNOWLEDGE_CARD_FIELDS[kind]].map((f) => (
               <label key={f.key}>{f.label}
@@ -960,6 +995,26 @@ function TaskKnowledgePanel({ task }: { task: Task }) {
           <button type="button" className="small" onClick={() => setOpen(true)}>添加任务知识</button>
         )}
         {error && <p className="error">{error}</p>}
+        {detail && (
+          <KnowledgeDetailModal
+            heading="任务知识详情"
+            title={detail.title}
+            kind={detail.kind}
+            tldr={detail.tldr}
+            fields={detail.fields}
+            body={detail.body_md}
+            quality={detail.quality}
+            meta={[
+              { label: "类型", value: KNOWLEDGE_KIND_LABEL[detail.kind] ?? detail.kind },
+              { label: "状态", value: detail.status },
+              { label: "标签", value: detail.tags.length ? detail.tags.join("、") : "无" },
+              { label: "来源角色", value: detail.source_role || "—" },
+              { label: "子任务", value: detail.source_subtask_id || "—" },
+              { label: "命中", value: `${detail.hit_count ?? 0} 次` },
+            ]}
+            onClose={() => setDetail(null)}
+          />
+        )}
       </div>
     </>
   );

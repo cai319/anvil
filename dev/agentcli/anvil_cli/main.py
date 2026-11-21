@@ -245,7 +245,7 @@ STEP_EPILOG = """\b
 
 # 未知 action 提示与 -h 的动作用同一份清单，避免新增命令后只更新一处。
 KNOWLEDGE_ACTIONS = (
-    "search", "show", "index", "list", "reindex",
+    "search", "show", "index", "list", "reindex", "fill",
     "repo-list", "repo-show", "repo-suggest", "repo-create", "repo-cards",
     "card-create", "card-template", "card-validate", "card-approve", "card-reject",
     "quality", "clean", "feedback", "review", "explain",
@@ -257,6 +257,8 @@ KNOWLEDGE_EPILOG = """\b
   show --id <note-id>                   查看一条笔记/知识
   index | list                          角色知识计数与最近笔记
   reindex --dry-run                     文件变更后重建索引
+  fill --id <note-id> --title "..." --tldr "..." \
+       --content-file body.md --field use_when="..."   补全/精炼角色知识
   repo-list                             知识仓库列表
   repo-show --repo <name>               仓库详情
   repo-suggest "任务标题"               推荐知识仓库
@@ -321,10 +323,23 @@ REMINDER_EPILOG = """\b
 
 LESSON_EPILOG = """\b
 示例:
-  anvil lesson propose "评审前先复算证据哈希" --tags review,evidence
-  anvil lesson propose "跨角色交接只认 step submit 的冻结 hash" --repo shared
+  anvil lesson propose "正文：观察、证据、结论与执行方式" \\
+      --title "一句话结论" --tldr "摘要" --tags review,evidence \\
+      --field use_when="任务涉及 X509 时" \\
+      --field expected_effect="避免环境差异误判，减少返工" \\
+      --field evidence="任务/run/文件/评审记录" \\
+      --field observation="观察到的事实" --field lesson="提炼出的结论" \\
+      --field applicability="适用任务/仓库/条件" --field counterexamples="反例/不适用"
+  anvil lesson fill <lesson-id> --title "补全后的标题" --tldr "摘要" \\
+      --field use_when="..." --field expected_effect="..." --field evidence="..." \\
+      --field observation="..." --field lesson="..." --field applicability="..." \\
+      --field counterexamples="..."
 
 规则: 共享经验进入 human 审批队列；任务结论留在 task snapshot，不要写这里。
+title 必须由提交者概括（≤80 字），不要用正文首行代替；详细内容放正文/字段。
+知识提交前的必须条款：title/tldr/正文 + use_when/expected_effect/evidence +
+observation/lesson/applicability/counterexamples 必须完整；缺项返回 422。
+fill 只允许收割角色（source_role）或 human 调用，用于角色用来源任务上下文补全字段。
 """
 
 WORKSPACE_EPILOG = """\b
@@ -1080,6 +1095,16 @@ def knowledge_cmd(
                                rich_help_panel="索引 / 角色"),
     fields: str = typer.Option(None, "--fields", help="card-validate：字段 JSON",
                                rich_help_panel="知识卡"),
+    field: list[str] = typer.Option(
+        None, "--field", help="fill：结构化字段 key=value，可重复",
+        rich_help_panel="索引 / 角色"),
+    title: str = typer.Option(None, "--title", help="fill：精炼后的标题",
+                              rich_help_panel="索引 / 角色"),
+    tldr: str = typer.Option(None, "--tldr", help="fill：精炼后的 TLDR",
+                             rich_help_panel="索引 / 角色"),
+    content_file: str = typer.Option(
+        None, "--content-file", help="fill：精炼后的正文文件",
+        rich_help_panel="索引 / 角色"),
     file: str = typer.Option(None, "--file", help="card-validate：知识卡 JSON 文件",
                              rich_help_panel="知识卡"),
     for_approval: bool = typer.Option(False, "--for-approval",
@@ -1116,6 +1141,32 @@ def knowledge_cmd(
             if value:
                 params[key] = value
         _emit(_call("GET", "/api/v1/me/knowledge/search", params=params), json_out)
+    elif action == "fill":
+        if not note_id:
+            _usage_error(
+                "knowledge fill 需要 --id <note-id>",
+                "例如 `anvil knowledge fill K-1 --title \"...\" --tldr \"...\" "
+                "--content-file body.md --field use_when=\"...\"`。")
+        payload: dict = {"title": title, "tldr": tldr, "fields": {}}
+        for raw in field or []:
+            if "=" not in raw:
+                _usage_error(
+                    f"无效字段 {raw!r}",
+                    "使用 --field key=value，例如 --field use_when=\"同类任务\"。")
+            key, value = raw.split("=", 1)
+            if key.strip():
+                payload["fields"][key.strip()] = value.strip()
+        if content_file:
+            try:
+                payload["content"] = _read_text_file(content_file)
+            except OSError as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(2)
+        from urllib.parse import quote
+        params = {"role": role} if role else None
+        _emit(_call(
+            "POST", f"/api/v1/me/knowledge/{quote(note_id, safe='')}/fill",
+            payload, params=params), json_out)
     elif action == "repo-list":
         _emit(_call("GET", "/api/v1/knowledge/repos"), json_out)
     elif action == "repo-show":
@@ -1310,23 +1361,58 @@ def lesson_cmd(
     text: str = typer.Argument(None),
     tags: str = typer.Option(None, "--tags", help="逗号分隔标签"),
     repo: str = typer.Option(None, "--repo", help="归属共享仓库（默认 shared）"),
+    title: str = typer.Option(None, "--title", help="一句话结论（≤80 字）"),
+    tldr: str = typer.Option(None, "--tldr", help="摘要（≤200 字）"),
+    content_file: str = typer.Option(
+        None, "--content-file", help="fill 时更新正文（从文件读取）"),
+    field: list[str] = typer.Option(
+        None, "--field", help="结构化字段 key=value，可重复，如 --field use_when=..."),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    """anvil lesson propose <text> [--tags a,b] [--repo name]"""
+    """anvil lesson propose <text> ... | anvil lesson fill <id> ..."""
+    fields: dict[str, str] = {}
+    for raw in field or []:
+        if "=" not in raw:
+            _usage_error(
+                f"无效字段 {raw!r}",
+                "使用 --field key=value，例如 --field use_when=\"任务涉及 X509 时\"。")
+        key, value = raw.split("=", 1)
+        if key.strip():
+            fields[key.strip()] = value.strip()
     if action == "propose":
         if not text:
             _usage_error(
                 "lesson propose 需要经验正文",
                 "例如 `anvil lesson propose \"评审前先复算证据哈希\" --tags review`。")
+        if not title:
+            _usage_error(
+                "lesson propose 需要 --title（≤80 字，概括知识结论）",
+                "标题不能从正文首行代替；例如 --title \"先核对 OpenSSL 版本再判断漏洞\"。")
         _emit(_call("POST", "/api/v1/lessons/pending", {
             "content": text,
             "tags": [t.strip() for t in tags.split(",")] if tags else [],
-            "repo": repo,
+            "repo": repo, "title": title, "tldr": tldr, "fields": fields,
         }), json_out)
+    elif action == "fill":
+        if not text:
+            _usage_error(
+                "lesson fill 需要 lesson id",
+                "例如 `anvil lesson fill <id> --title \"...\" --field use_when=\"...\"`。")
+        payload = {"title": title, "tldr": tldr, "fields": fields}
+        if content_file:
+            try:
+                payload["content"] = _read_text_file(content_file)
+            except OSError as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(2)
+        from urllib.parse import quote
+        _emit(_call(
+            "POST", f"/api/v1/lessons/{quote(text, safe='')}/fill",
+            payload), json_out)
     else:
         _usage_error(
             f"unknown lesson action: {action}",
-            "只支持 propose；例如 `anvil lesson propose \"...\"`。")
+            "支持 propose/fill；例如 `anvil lesson fill <id> --field use_when=\"...\"`。")
 
 
 # ---- reminder / ws ------------------------------------------------------

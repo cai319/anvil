@@ -203,7 +203,7 @@ small,
 /* ── 大标题随视口增长 ───────────────────────────── */
 .session-title h1 { font-size: var(--fs-h1); }
 .role-detail-title h2,
-.modal-head h2 { font-size: var(--fs-h2); }
+.modal-head h2 { font-size: 15px; }
 .content > h2 { font-size: var(--fs-h2); }
 .brand { font-size: clamp(16px, 0.3vw + 11.7px, 22px); }
 .brand-name { font-size: clamp(17px, 0.36vw + 12px, 24px); }
@@ -542,17 +542,53 @@ select { height: var(--control-h); }
 .table-scroll .history-table { min-width: 840px; }
 
 .modal {
-  --modal-pad: clamp(14px, 1.1vw, 22px);
+  --modal-pad: clamp(12px, 0.9vw, 18px);
   width: min(clamp(620px, 50vw, 760px), 94vw);
   padding: var(--modal-pad);
 }
+/* sticky 头/脚贴住弹窗边框：负偏移抵消 modal padding，避免滚动时内容从
+   上下栏与边框之间的缝隙露出。 */
 .modal-head {
-  margin: calc(var(--modal-pad) * -1) calc(var(--modal-pad) * -1) clamp(12px, 0.9vw, 18px);
-  padding: clamp(12px, 0.9vw, 18px) var(--modal-pad);
+  top: calc(var(--modal-pad) * -1);
+  margin: calc(var(--modal-pad) * -1) calc(var(--modal-pad) * -1) 8px;
+  padding: 8px var(--modal-pad);
 }
 .modal-actions {
-  margin: clamp(12px, 0.9vw, 18px) calc(var(--modal-pad) * -1) calc(var(--modal-pad) * -1);
-  padding: clamp(12px, 0.9vw, 18px) var(--modal-pad);
+  bottom: calc(var(--modal-pad) * -1);
+  margin: 8px calc(var(--modal-pad) * -1) calc(var(--modal-pad) * -1);
+  padding: 8px var(--modal-pad);
+}
+
+/* 长表单弹窗：头/脚真正冻结，只有中间 body 滚动，避免 sticky 的拉动感。 */
+.modal.modal-flex {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+.modal.modal-flex > .modal-head,
+.modal.modal-flex > .modal-actions {
+  position: relative;
+  top: auto;
+  bottom: auto;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 8px var(--modal-pad);
+}
+.modal.modal-flex > .modal-head {
+  border-bottom: var(--stroke) solid var(--ink-900);
+  background: var(--paper-2);
+}
+.modal.modal-flex > .modal-actions {
+  border-top: var(--stroke) solid var(--ink-900);
+  background: var(--paper);
+}
+.modal-flex-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--modal-pad);
 }
 
 .roles-layout { gap: clamp(12px, 1vw, 20px); }

@@ -64,6 +64,12 @@ FIELD_LABELS: dict[str, str] = {
     "expected_effect": "作用效果",
     "effect_type": "效果类型",
     "exclusions": "不适用/反例",
+    "counterexamples": "不适用/反例",
+    "trigger": "触发条件",
+    "trigger_point": "触发点",
+    "trigger_logic": "触发逻辑",
+    "applicable_scenarios": "适用场景",
+    "scenario": "场景",
 }
 
 # 跨类型质量字段：审批硬门禁要求前三个；后两个是可选边界。
@@ -81,10 +87,77 @@ EFFECT_TYPES = (
     "quality", "other",
 )
 READABILITY_LIMITS = {"title": 80, "tldr": 200, "body": 4000}
+FIELD_VALUE_MAX_CHARS = 2000
 GENERIC_TITLES = ("经验", "记录", "总结", "审计问题", "注意事项", "发现")
 GENERIC_EFFECTS = ("提高效率", "提升效率", "有用", "更好", "有价值", "有帮助")
 
 VAGUE_WORDS = ("尽量", "适当", "合理", "大概", "也许", "可能应该")
+
+
+class IncompleteKnowledgeError(ValueError):
+    """知识提交/入库时缺少完整知识信息（格式不合法）。
+
+    这是“知识提交前的必须条款”：title/TLDR/正文、通用质量字段、类型必填字段
+    必须一次给全；draft 可作为未提交的工作草稿保留不完整状态。
+    """
+
+    def __init__(self, errors: list[str]):
+        self.errors = list(dict.fromkeys(str(e) for e in errors if str(e).strip()))
+        super().__init__("知识格式不合法：" + "；".join(self.errors))
+
+
+def submission_errors(kind: str, title: str, tldr: str, body_md: str,
+                      fields: dict | None, *,
+                      strict_kind: bool = True) -> list[str]:
+    """返回提交前必须补齐的完整知识信息；空列表表示合法。
+
+    `strict_kind=False` 用于角色 notes 的私有 kind（module_knowledge 等）：
+    仍检查通用质量字段和长度，但不要求 kind 属于知识卡模板类型。
+    """
+    fields = normalize_fields(fields)
+    errors: list[str] = []
+    if strict_kind and kind not in KINDS:
+        errors.append(f"未知知识类型 kind={kind!r}（必须是 {'/'.join(KINDS)}）")
+    for canonical in QUALITY_REQUIRED:
+        _key, value = resolve_quality_field(fields, canonical)
+        if not _has_value(value):
+            errors.append(
+                f"缺少通用质量字段 {canonical}（{FIELD_LABELS.get(canonical, canonical)}）")
+    for key in REQUIRED_FIELDS.get(kind, ()):
+        if not _has_value(fields.get(key)):
+            if key == "counterexamples" and _has_value(fields.get("exclusions")):
+                continue  # 洞察/经验的“反例”与通用“不适用/反例”同义
+            errors.append(f"缺少类型必填字段 {key}（{FIELD_LABELS.get(key, key)}）")
+    title = str(title or "").strip()
+    tldr = str(tldr or "").strip()
+    body_md = str(body_md or "").strip()
+    if not title:
+        errors.append("缺少标题 title")
+    elif len(title) > READABILITY_LIMITS["title"]:
+        errors.append(f"标题超过 {READABILITY_LIMITS['title']} 字")
+    if not tldr:
+        errors.append("缺少摘要 tldr")
+    elif len(tldr) > READABILITY_LIMITS["tldr"]:
+        errors.append(f"摘要超过 {READABILITY_LIMITS['tldr']} 字")
+    if not body_md:
+        errors.append("缺少正文 body")
+    elif len(body_md) > READABILITY_LIMITS["body"]:
+        errors.append(f"正文超过 {READABILITY_LIMITS['body']} 字")
+    for key, value in fields.items():
+        text = _quality_text(value)
+        if len(text) > FIELD_VALUE_MAX_CHARS:
+            errors.append(
+                f"字段 {key}（{FIELD_LABELS.get(key, key)}）超过 "
+                f"{FIELD_VALUE_MAX_CHARS} 字，请提炼结论、把原始日志移到正文/证据路径")
+    return list(dict.fromkeys(errors))
+
+
+def assert_submittable(kind: str, title: str, tldr: str, body_md: str,
+                       fields: dict | None) -> None:
+    """知识提交前的必须条款：不完整直接拒绝（API 映射为 422）。"""
+    errors = submission_errors(kind, title, tldr, body_md, fields)
+    if errors:
+        raise IncompleteKnowledgeError(errors)
 
 
 def _has_value(value) -> bool:
@@ -365,6 +438,9 @@ def template(kind: str | None = None) -> dict:
             "required_fields": required,
             "fields": fields,
             "limits": {"title_chars": 80, "tldr_chars": 200, "body_chars": 4000},
-            "note": "proposal 只需 title/tldr/正文；approve 时按 required_fields 完整校验。",
+            "note": (
+                "提交（proposed/active/approved）即要求 title/tldr/正文 + 通用质量字段 "
+                "+ required_fields 完整；缺任一字段为格式不合法（422）。draft 可暂存未完成草稿。"
+            ),
         }
     return {"template_version": 1, "kinds": out}

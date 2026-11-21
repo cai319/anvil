@@ -87,6 +87,8 @@ async def _task_card(client, tid: str, title: str) -> dict:
             "fields": {
                 "task_context": "测试任务", "finding": title,
                 "verification": "测试", "reuse_scope": "当前任务",
+                "use_when": "同类任务", "expected_effect": "减少返工",
+                "evidence": "测试证据",
             },
         },
         headers=human_headers(),
@@ -323,7 +325,17 @@ async def test_role_and_lesson_hit_recording(client, app):
 
     created = await client.post(
         f"{API}/lessons/pending",
-        json={"content": "lesson hit test", "tags": [], "repo": "shared"},
+        json={
+            "content": "lesson hit test",
+            "title": "lesson hit test", "tldr": "lesson hit test",
+            "fields": {
+                "use_when": "测试场景", "expected_effect": "减少返工",
+                "evidence": "测试证据", "observation": "测试观察",
+                "lesson": "测试经验", "applicability": "测试任务",
+                "counterexamples": "暂无",
+            },
+            "tags": [], "repo": "shared",
+        },
         headers=human_headers(),
     )
     assert created.status_code == 201, created.text

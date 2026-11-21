@@ -120,7 +120,7 @@ def test_rename_and_merge(env):
     knowledge_repos.ensure(conn, "openssl-x509")
     card = repo_knowledge.create(
         conn, "openssl", kind="insight", title="旧卡", tldr="t",
-        body_md="b", status="proposed")
+        body_md="b", status="draft")
     renamed = knowledge_repos.rename(conn, "openssl", "openssl-4.0.1")
     assert renamed["display_name"] == "openssl-4.0.1"
     assert knowledge_repos.get(conn, "openssl")["id"] == renamed["id"]

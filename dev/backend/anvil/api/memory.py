@@ -6,8 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..services import tokens as tokens_service
+from ..services import wake as wake_service
 from ..schemas import InstructionIn, LessonIn, MemoryAppendIn, NoteWriteIn, ProposalIn
-from ..util import ConflictError, jdumps, now_iso
+from ..util import ConflictError, jdumps, jloads, now_iso
 from . import events
 
 router = APIRouter()
@@ -236,7 +237,8 @@ def write_note(body: NoteWriteIn, conn=Depends(get_db), auth: Auth = Depends(get
             practice_run_id=body.practice_run_id or auth.run_id,
             outcome=body.outcome,
             source_knowledge=body.source_knowledge,
-            status=status)
+            status=status, title=body.title, tldr=body.tldr,
+            fields=body.fields)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -273,6 +275,88 @@ def _knowledge_task(conn, auth: Auth, role: str, task_id: str | None,
         if row is None:
             raise HTTPException(status_code=403, detail="role is not bound to this task")
     return task_id
+
+
+def _role_note_row(conn, role_slug: str, note_id: str):
+    return conn.execute(
+        "SELECT * FROM notes WHERE id=? AND role_slug=? AND scope='role'",
+        (note_id, role_slug)).fetchone()
+
+
+def _role_note_ready(row) -> tuple[bool | None, list[str]]:
+    kind = row["kind"] or "note"
+    if kind == "task_snapshot":
+        return None, []
+    errors = services.knowledge_card.submission_errors(
+        kind, row["title"] or "", row["tldr"] or "", row["content"] or "",
+        jloads(row["fields_json"], {}), strict_kind=False)
+    return not errors, errors
+
+
+def _role_queued(role_slug: str) -> bool:
+    mgr = services.daemon.get_manager()
+    st = mgr.status(role_slug) if mgr and getattr(mgr, "enabled", False) else {}
+    return bool(st.get("busy") or st.get("queue_len"))
+
+
+def _update_role_note(conn, role_slug: str, note_id: str, body: dict,
+                      *, source: str = "human") -> dict | None:
+    row = _role_note_row(conn, role_slug, note_id)
+    if row is None:
+        return None
+    current_fields = jloads(row["fields_json"], {})
+    fields = body.get("fields")
+    merged_fields = current_fields if fields is None else {
+        **current_fields, **(fields or {})}
+    content = body.get("content", row["content"])
+    services.memory.write_note(
+        conn, role_slug, row["path"], str(content or ""),
+        kind=row["kind"], scope="role",
+        task_id=row["task_id"], source_task=row["source_task"],
+        tags=body.get("tags", jloads(row["tags_json"], [])),
+        repo=row["repo"], module=row["module"],
+        slice_key=row["slice_key"] if "slice_key" in row.keys() else None,
+        confidence=row["confidence"] or 0.5, mode="replace", source=source,
+        practice_task_id=row["practice_task_id"],
+        practice_run_id=row["practice_run_id"], outcome=row["outcome"],
+        status=row["status"],
+        title=body.get("title", row["title"]),
+        tldr=body.get("tldr", row["tldr"]),
+        fields=merged_fields,
+    )
+    return services.knowledge.get_knowledge(conn, role_slug, note_id)
+
+
+def _role_note_completion_prompt(row) -> str:
+    kind = row["kind"] or "note"
+    fields = jloads(row["fields_json"], {})
+    required = list(services.knowledge_card.QUALITY_REQUIRED) + list(
+        services.knowledge_card.REQUIRED_FIELDS.get(kind, ()))
+    required = list(dict.fromkeys(required))
+    practice = []
+    if row["practice_task_id"]:
+        practice.append(f"task={row['practice_task_id']}")
+    if row["practice_run_id"]:
+        practice.append(f"run={row['practice_run_id']}")
+    if row["outcome"]:
+        practice.append(f"outcome={row['outcome']}")
+    practice_text = ("；实践证据：" + "，".join(practice)) if practice else ""
+    return (
+        f"请补全并精炼角色知识 note={row['id']}（role={row['role_slug']}，"
+        f"path={row['path']}，kind={kind}）。{practice_text}\n"
+        f"当前标题：{row['title'] or '（空）'}\n"
+        f"当前 TLDR：{row['tldr'] or '（空）'}\n"
+        f"当前正文：\n{row['content'] or '（空）'}\n"
+        f"当前字段：{jdumps(fields)}\n\n"
+        "目标：标题 ≤80 字且能概括结论；TLDR ≤200 字；正文 ≤4000 字；"
+        "去掉大段原始日志，保留结论、适用场景、证据路径与执行/验证方式。\n"
+        f"按 kind={kind} 补齐字段：{', '.join(required) or 'use_when, expected_effect, evidence'}；"
+        "通用 use_when / expected_effect / evidence 必须填写，单字段 ≤2000 字。\n"
+        f"完成后执行：anvil knowledge fill {row['id']} --title \"...\" --tldr \"...\" "
+        "--content-file <精炼后的正文文件> --field use_when=\"...\" "
+        "--field expected_effect=\"...\" --field evidence=\"...\" ...\n"
+        "请使用你对该知识产生过程的上下文与证据，不要编造；无法确认的边界写明确。"
+    )
 
 
 @router.get("/me/knowledge/search")
@@ -350,6 +434,117 @@ def get_knowledge(note_id: str, task_id: str | None = None,
     return item
 
 
+@router.delete("/me/knowledge/{note_id}", status_code=204)
+def delete_knowledge(note_id: str, role: str | None = None,
+                     conn=Depends(get_db), auth: Auth = Depends(require_human)):
+    role_slug = _knowledge_role(conn, auth, role)
+    if not services.knowledge.delete_note(conn, role_slug, note_id):
+        raise HTTPException(status_code=404, detail="knowledge not found")
+    return None
+
+
+@router.post("/me/knowledge/{note_id}/fill")
+def fill_role_knowledge(note_id: str, body: dict, role: str | None = None,
+                        conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    """角色补全/精炼自己的角色知识；human 也可代为调用。"""
+    role_slug = _knowledge_role(conn, auth, role)
+    actor = auth.role or "human"
+    if actor not in ("human", role_slug) and not auth.test_bypass:
+        raise HTTPException(
+            status_code=403, detail="only the owning role or human can fill this knowledge")
+    try:
+        updated = _update_role_note(conn, role_slug, note_id, body, source="agent")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail="knowledge not found")
+    services.knowledge_completion.complete(
+        conn, "role_note", note_id, role_slug=role_slug)
+    conn.commit()
+    return services.knowledge.get_knowledge(
+        conn, role_slug, note_id, include_task_scope=True)
+
+
+@router.post("/me/knowledge/{note_id}/request-completion")
+def request_role_knowledge_completion(
+    note_id: str, request: Request, role: str | None = None,
+    conn=Depends(get_db), auth: Auth = Depends(require_human),
+):
+    """让角色用自身上下文补全/精炼已有角色知识。"""
+    role_slug = _knowledge_role(conn, auth, role)
+    row = _role_note_row(conn, role_slug, note_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="knowledge not found")
+    if row["kind"] == "task_snapshot":
+        raise HTTPException(
+            status_code=422, detail="task snapshot is not a knowledge card")
+    role_row = services.roles.get(conn, role_slug)
+    if role_row is None or not role_row.get("enabled", True):
+        raise HTTPException(
+            status_code=422, detail=f"role is unavailable: {role_slug}")
+    ready, errors = _role_note_ready(row)
+    if ready:
+        return {
+            "status": "already_complete", "role": role_slug,
+            "completion": services.knowledge_completion.status_for(
+                conn, "role_note", note_id, ready=True),
+        }
+    active = services.knowledge_completion.status_for(
+        conn, "role_note", note_id, ready=False)
+    if active and active.get("active"):
+        return {"status": "already_queued", "role": role_slug, "completion": active}
+    prompt = _role_note_completion_prompt(row)
+    queued = _role_queued(role_slug)
+    context_task = row["task_id"] or row["source_task"]
+    task = services.tasks.get(conn, context_task) if context_task else None
+    role_bound = bool(task) and (
+        role_slug in (task.get("assignees") or [])
+        or task.get("assignee") == role_slug)
+    active = conn.execute(
+        "SELECT status FROM runs WHERE task_id=? AND role_slug=? "
+        "AND status IN ('created','projecting','running','submitted','reviewing','suspended') "
+        "ORDER BY started_at DESC LIMIT 1",
+        (context_task, role_slug)).fetchone() if task is not None else None
+    hitl_blocked = bool(active and active["status"] in ("submitted", "reviewing"))
+    if task is not None and services.tasks.waiting_for_human(
+            conn, context_task, role_slug, None):
+        hitl_blocked = True
+    if (task is not None and task.get("status") in ("todo", "in_progress")
+            and role_bound and not hitl_blocked):
+        services.tasks.mention(conn, context_task, "human", role_slug, prompt)
+        req_id = wake_service.enqueue(
+            conn, task_id=context_task, role_slug=role_slug,
+            reason=f"knowledge.complete.{note_id}", note=prompt)
+        services.knowledge_completion.create_job(
+            conn, target_type="role_note", target_id=note_id,
+            role_slug=role_slug, wake_request_id=req_id)
+        conn.commit()
+        return {
+            "status": "requested", "role": role_slug,
+            "task_id": context_task, "wake_request_id": req_id,
+            "queued": queued,
+            "completion": services.knowledge_completion.status_for(
+                conn, "role_note", note_id, ready=False),
+        }
+    run = services.runs.create_run(
+        conn, role_slug, None, prompt=prompt, origin="knowledge_complete")
+    services.knowledge_completion.create_job(
+        conn, target_type="role_note", target_id=note_id,
+        role_slug=role_slug, run_id=run["id"])
+    orch = getattr(request.app.state, "orchestrator", None)
+    if orch and not queued:
+        try:
+            orch.pump(request.app.state.db_path, run["id"], "wake", {})
+        except Exception:  # noqa: BLE001
+            pass
+    return {
+        "status": "requested", "role": role_slug, "run_id": run["id"],
+        "queued": queued,
+        "completion": services.knowledge_completion.status_for(
+            conn, "role_note", note_id, ready=False),
+    }
+
+
 @router.post("/knowledge/reindex")
 def reindex_all(body: dict | None = None, conn=Depends(get_db),
                 auth: Auth = Depends(require_human)):
@@ -417,10 +612,14 @@ def list_lessons(status: str | None = None, repo: str | None = None,
 @router.post("/lessons/pending", status_code=201)
 def propose_lesson(body: LessonIn, conn=Depends(get_db),
                    auth: Auth = Depends(get_auth)):
-    return services.memory.create_lesson(
-        conn, body.content, body.tags, repo=body.repo or "shared",
-        source_task=body.source_task, source_role=auth.role,
-    )
+    try:
+        return services.memory.create_lesson(
+            conn, body.content, body.tags, repo=body.repo or "shared",
+            source_task=body.source_task, source_role=auth.role,
+            title=body.title, tldr=body.tldr, fields=body.fields,
+        )
+    except services.knowledge_card.IncompleteKnowledgeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/lessons/pending")
@@ -428,11 +627,142 @@ def list_pending_lessons(conn=Depends(get_db)):
     return services.memory.list_lessons(conn, status="pending")
 
 
+@router.get("/lessons/{lid}")
+def get_lesson(lid: str, conn=Depends(get_db)):
+    lesson = services.memory.get_lesson(conn, lid)
+    if lesson is None:
+        raise HTTPException(status_code=404, detail="lesson not found")
+    return lesson
+
+
+@router.post("/lessons/{lid}/request-completion")
+def request_lesson_completion(lid: str, request: Request, conn=Depends(get_db),
+                              auth: Auth = Depends(require_human)):
+    """让收割角色（source_role）用来源任务上下文补全知识字段。"""
+    lesson = services.memory.get_lesson(conn, lid)
+    if lesson is None:
+        raise HTTPException(status_code=404, detail="lesson not found")
+    if lesson["status"] not in ("pending", "approved"):
+        raise HTTPException(
+            status_code=409, detail="only pending/approved lessons can be completed")
+    role = lesson.get("source_role")
+    if not role or role == "human":
+        raise HTTPException(status_code=422, detail="lesson has no harvesting role")
+    role_row = services.roles.get(conn, role)
+    if role_row is None or not role_row.get("enabled", True):
+        raise HTTPException(status_code=422, detail=f"harvesting role is unavailable: {role}")
+    missing = services.memory.lesson_missing_fields(lesson)
+    if not missing:
+        return {
+            "status": "already_complete", "role": role, "lesson": lesson,
+            "completion": services.knowledge_completion.status_for(
+                conn, "lesson", lid, ready=True),
+        }
+    active = services.knowledge_completion.status_for(
+        conn, "lesson", lid, ready=False)
+    if active and active.get("active"):
+        return {"status": "already_queued", "role": role, "completion": active}
+
+    def role_queued() -> bool:
+        mgr = services.daemon.get_manager()
+        st = mgr.status(role) if mgr and getattr(mgr, "enabled", False) else {}
+        return bool(st.get("busy") or st.get("queue_len"))
+
+    message = services.memory.lesson_completion_message(lesson)
+    source_task = lesson.get("source_task")
+    task = services.tasks.get(conn, source_task) if source_task else None
+    role_bound = bool(task) and (
+        role in (task.get("assignees") or [])
+        or task.get("assignee") == role)
+    active = conn.execute(
+        "SELECT status FROM runs WHERE task_id=? AND role_slug=? "
+        "AND status IN ('created','projecting','running','submitted','reviewing','suspended') "
+        "ORDER BY started_at DESC LIMIT 1",
+        (source_task, role)).fetchone() if (task is not None and role_bound) else None
+    hitl_blocked = bool(active and active["status"] in ("submitted", "reviewing"))
+    if task is not None and services.tasks.waiting_for_human(
+            conn, source_task, role, None):
+        hitl_blocked = True
+    if (task is not None and task.get("status") in ("todo", "in_progress")
+            and role_bound and not hitl_blocked):
+        services.tasks.mention(conn, source_task, "human", role, message)
+        req_id = wake_service.enqueue(
+            conn, task_id=source_task, role_slug=role,
+            reason=f"lesson.complete.{lid}", note=message)
+        services.knowledge_completion.create_job(
+            conn, target_type="lesson", target_id=lid, role_slug=role,
+            wake_request_id=req_id)
+        conn.commit()
+        return {
+            "status": "requested", "role": role, "task_id": source_task,
+            "wake_request_id": req_id, "missing": missing,
+            "queued": role_queued(),
+            "completion": services.knowledge_completion.status_for(
+                conn, "lesson", lid, ready=False),
+        }
+    queued = role_queued()
+    run = services.runs.create_run(
+        conn, role, None, prompt=message, origin="lesson_complete")
+    services.knowledge_completion.create_job(
+        conn, target_type="lesson", target_id=lid, role_slug=role,
+        run_id=run["id"])
+    orch = getattr(request.app.state, "orchestrator", None)
+    if orch and not queued:
+        try:
+            orch.pump(request.app.state.db_path, run["id"], "wake", {})
+        except Exception:  # noqa: BLE001
+            pass
+    # 角色忙/已有排队：run 保持 created，由 scheduler 的 pump_created 在角色空闲后投递。
+    return {
+        "status": "requested", "role": role, "run_id": run["id"],
+        "missing": missing, "queued": queued,
+        "completion": services.knowledge_completion.status_for(
+            conn, "lesson", lid, ready=False),
+    }
+
+
+@router.post("/lessons/{lid}/fill")
+def fill_lesson(lid: str, body: dict, conn=Depends(get_db),
+                auth: Auth = Depends(get_auth)):
+    """收割角色补全字段；必须一次满足知识提交前的必须条款。"""
+    lesson = services.memory.get_lesson(conn, lid)
+    if lesson is None:
+        raise HTTPException(status_code=404, detail="lesson not found")
+    actor = auth.role or "human"
+    if actor not in ("human", lesson.get("source_role")) and not auth.test_bypass:
+        raise HTTPException(
+            status_code=403, detail="only the harvesting role or human can fill this lesson")
+    if lesson["status"] not in ("pending", "approved"):
+        raise HTTPException(
+            status_code=409, detail="only pending/approved lessons can be filled")
+    title = str(body.get("title") or lesson["title"] or "")
+    tldr = str(body.get("tldr") or lesson["tldr"] or "")
+    content = str(body.get("content") or lesson["content"] or "")
+    fields = {
+        **(lesson.get("fields") or {}),
+        **(body.get("fields") or {}),
+    }
+    try:
+        services.knowledge_card.assert_submittable(
+            "insight", title, tldr, content, fields)
+    except services.knowledge_card.IncompleteKnowledgeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    services.memory.update_lesson(
+        conn, lid, title=title, tldr=tldr, content=content, fields=fields)
+    services.knowledge_completion.complete(
+        conn, "lesson", lid, role_slug=lesson.get("source_role"))
+    conn.commit()
+    events.publish("proposal", {"id": lid, "kind": "lesson", "status": "pending"})
+    return services.memory.get_lesson(conn, lid)
+
+
 @router.put("/lessons/{lid}")
 def update_lesson(lid: str, body: dict, conn=Depends(get_db),
                   auth: Auth = Depends(require_human)):
     lesson = services.memory.update_lesson(
-        conn, lid, content=body.get("content"), tags=body.get("tags"), repo=body.get("repo"),
+        conn, lid, content=body.get("content"), tags=body.get("tags"),
+        repo=body.get("repo"), title=body.get("title"), tldr=body.get("tldr"),
+        fields=body.get("fields"),
     )
     if lesson is None:
         raise HTTPException(status_code=404, detail="lesson not found")
@@ -443,6 +773,8 @@ def update_lesson(lid: str, body: dict, conn=Depends(get_db),
 def approve_lesson(lid: str, conn=Depends(get_db), auth: Auth = Depends(require_human)):
     try:
         lesson = services.memory.approve_lesson(conn, lid)
+    except services.knowledge_card.IncompleteKnowledgeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     if lesson is None:

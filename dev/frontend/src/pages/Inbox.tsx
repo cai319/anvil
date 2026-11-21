@@ -1,9 +1,20 @@
 import { useEffect, useState } from "react";
-import { api, subscribeEvents, type InboxItem } from "../api/client";
+import {
+  api,
+  subscribeEvents,
+  type InboxItem,
+  type Lesson,
+  type Role,
+} from "../api/client";
+import { completionLabel } from "../knowledgeCard";
 import { formatDateTime } from "../time";
 import { PageHeader } from "../components/ui";
 import { GateReviewDrawer } from "../components/GateReviewDrawer";
 import { confirmDialog, promptDialog } from "../components/dialogs";
+import {
+  LessonDetailModal,
+  normalizeLesson,
+} from "./knowledge/LessonDetail";
 
 /** Inbox（信息架构重构）：四类人机决策点统一入口，action card 式就地操作。 */
 
@@ -55,14 +66,66 @@ export function Inbox() {
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [reviewTarget, setReviewTarget] = useState<{ wid: string; sid: string } | null>(null);
+  const [lessonDetail, setLessonDetail] = useState<Lesson | null>(null);
+  const [roles, setRoles] = useState<Role[]>([]);
 
-  const refresh = () =>
-    api.getInbox().then((b) => setItems(b.items)).catch((e) => setError(String(e)));
+  const refresh = async () => {
+    try {
+      const [body, pendingLessons] = await Promise.all([
+        api.getInbox(),
+        api.listLessons("pending").catch(() => [] as Lesson[]),
+      ]);
+      const byId = new Map(pendingLessons.map((lesson) => [lesson.id, lesson]));
+      setItems(body.items.map((item) => {
+        if (item.kind !== "lesson") return item;
+        const lid = item.meta?.lesson_id || item.id.split(":", 2)[1];
+        const full = item.meta?.lesson || byId.get(lid);
+        if (!full) return item;
+        const lesson = normalizeLesson(full);
+        return {
+          ...item,
+          title: lesson.title || item.title,
+          detail: lesson.tldr || item.detail,
+          meta: { ...item.meta, lesson_id: lid, lesson },
+        };
+      }));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   useEffect(() => {
     refresh();
+    api.listRoles().then(setRoles).catch(() => setRoles([]));
     return subscribeEvents(() => refresh()); // 任何事件后重取（轻量只读端点）
   }, []);
+
+  const openLesson = async (item: InboxItem, lid: string) => {
+    setError(null);
+    // 优先使用收件箱已返回的完整 lesson，避免多一次请求/旧后端缺少详情路由。
+    if (item.meta?.lesson) {
+      setLessonDetail(item.meta.lesson);
+      return;
+    }
+    try {
+      setLessonDetail(await api.getLesson(lid));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const requestLessonCompletion = async () => {
+    if (!lessonDetail) return { status: "already_complete" as const };
+    try {
+      const result = await api.requestLessonCompletion(lessonDetail.id);
+      setLessonDetail({ ...lessonDetail, completion: result.completion });
+      await refresh();
+      return result;
+    } catch (e) {
+      setError(String(e));
+      throw e;
+    }
+  };
 
   const act = async (id: string, fn: () => Promise<unknown>) => {
     setBusyId(id);
@@ -204,15 +267,23 @@ export function Inbox() {
           </>
         );
       }
-      case "lesson":
+      case "lesson": {
+        const lessonReady = it.meta?.lesson?.ready;
         return (
           <>
-            <button className="primary small" disabled={disabled}
+            <button className="small" disabled={disabled}
+              onClick={() => { void openLesson(it, raw); }}>查看详情</button>
+            <button className="primary small"
+              disabled={disabled || lessonReady === false}
+              title={lessonReady === false
+                ? "未达到知识入库标准：请先补全字段/缩短标题"
+                : undefined}
               onClick={() => act(it.id, () => api.approveLesson(raw))}>批准</button>
             <button className="small danger" disabled={disabled}
               onClick={() => act(it.id, () => api.rejectLesson(raw))}>拒绝</button>
           </>
         );
+      }
       case "proposal":
         return (
           <>
@@ -290,10 +361,53 @@ export function Inbox() {
             <span className="badge" style={{ background: `${KIND_COLOR[it.kind]}22`, color: KIND_COLOR[it.kind] }}>
               {KIND_LABEL[it.kind]}
             </span>
-            <strong>{it.title}</strong>
+            <span className="inbox-title-wrap">
+              <strong className="inbox-title" title={it.title}>{it.title}</strong>
+              {it.kind === "lesson" && it.meta?.lesson?.ready === false && (
+                <span className="inbox-gate-flag"
+                  title={(it.meta.lesson.submission_errors || []).join("；")}>
+                  未达入库标准
+                </span>
+              )}
+              {it.kind === "lesson" && it.meta?.lesson?.ready === true
+                && !it.meta.lesson.completion && (
+                <span className="inbox-gate-flag is-ready">可入库</span>
+              )}
+              {it.kind === "lesson" && it.meta?.lesson?.completion && (
+                <span className={`inbox-gate-flag ${
+                  it.meta.lesson.completion.state === "failed"
+                    ? "is-error"
+                    : it.meta.lesson.completion.state === "completed"
+                      ? "is-ready" : "is-completion"
+                }`}>
+                  {completionLabel(it.meta.lesson.completion)}
+                </span>
+              )}
+            </span>
             <span className="muted mono">{formatDateTime(it.created_at)}</span>
           </div>
-          <div className="muted" style={{ margin: "4px 0 8px" }}>{it.detail}</div>
+          {it.kind !== "lesson" && (
+            <div className="muted inbox-detail" title={it.detail}>{it.detail}</div>
+          )}
+          {it.kind === "lesson" && (
+            <div className="inbox-lesson-meta">
+              {it.meta?.tags?.length ? (
+                it.meta.tags.map((tag) => (
+                  <span className="inbox-meta-chip" key={tag}>#{tag}</span>
+                ))
+              ) : (
+                <span className="inbox-meta-muted">无标签</span>
+              )}
+              <span className="inbox-meta-sep">·</span>
+              <span className="inbox-meta-muted">repo={it.meta?.repo || "shared"}</span>
+              {it.meta?.source_role && (
+                <>
+                  <span className="inbox-meta-sep">·</span>
+                  <span className="inbox-meta-muted">提供者 {it.meta.source_role}</span>
+                </>
+              )}
+            </div>
+          )}
           {it.meta?.draft_kind === "role_suggestion" && (it.meta.suggested_roles?.length ?? 0) > 0 && (
             <div className="muted" style={{ marginBottom: 8 }}>
               建议角色：
@@ -356,6 +470,28 @@ export function Inbox() {
           sid={reviewTarget.sid}
           onClose={() => setReviewTarget(null)}
           onDone={() => { setReviewTarget(null); refresh(); }}
+        />
+      )}
+      {lessonDetail && (
+        <LessonDetailModal
+          lesson={lessonDetail}
+          roles={roles}
+          error={error}
+          onClose={() => setLessonDetail(null)}
+          onApprove={() => {
+            void act(`lesson:${lessonDetail.id}`, async () => {
+              await api.approveLesson(lessonDetail.id);
+              setLessonDetail(null);
+            });
+          }}
+          onReject={() => {
+            void act(`lesson:${lessonDetail.id}`, async () => {
+              await api.rejectLesson(lessonDetail.id);
+              setLessonDetail(null);
+            });
+          }}
+          onDelete={() => setLessonDetail(null)}
+          onRequestCompletion={requestLessonCompletion}
         />
       )}
     </div>

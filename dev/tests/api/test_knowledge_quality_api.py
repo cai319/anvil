@@ -1,7 +1,19 @@
-"""知识质量门 API：409、补全、摘要、清洗开关、反馈/复核。"""
+"""知识质量门 API：提交必须条款、审批 409、补全、摘要、清洗开关、反馈/复核。"""
 from __future__ import annotations
 
+import json
+
 from tests.conftest import API, auth_headers, human_headers
+
+COMPLETE_INSIGHT = {
+    "use_when": "审计 X509 时",
+    "expected_effect": "避免漏报",
+    "evidence": "任务 T1 的评审记录",
+    "observation": "观察",
+    "lesson": "结论",
+    "applicability": "X509 审计",
+    "counterexamples": "无",
+}
 
 
 async def _repo(client, name="openssl"):
@@ -13,35 +25,77 @@ async def _repo(client, name="openssl"):
 async def _card(client, repo="openssl"):
     r = await client.post(
         f"{API}/knowledge/repos/{repo}/cards",
-        json={"kind": "insight", "title": "待补全", "tldr": "摘要",
-              "body_md": "正文", "fields": {"observation": "观察"}},
+        json={"kind": "insight", "title": "完整知识卡", "tldr": "摘要",
+              "body_md": "正文", "fields": COMPLETE_INSIGHT},
         headers=auth_headers())
     assert r.status_code == 201, r.text
     return r.json()
 
 
-async def test_quality_gate_blocks_then_allows_completed_card(client):
+async def test_incomplete_submission_is_rejected(client):
+    await _repo(client)
+    r = await client.post(
+        f"{API}/knowledge/repos/openssl/cards",
+        json={"kind": "insight", "title": "待补全", "tldr": "摘要",
+              "body_md": "正文", "fields": {"observation": "观察"}},
+        headers=auth_headers())
+    assert r.status_code == 422, r.text
+    detail = str(r.json()["detail"])
+    assert "知识格式不合法" in detail
+    assert "use_when" in detail and "evidence" in detail
+
+
+async def test_title_must_be_concise_for_cards(client):
+    await _repo(client)
+    r = await client.post(
+        f"{API}/knowledge/repos/openssl/cards",
+        json={"kind": "insight", "title": "长" * 81, "tldr": "摘要",
+              "body_md": "正文", "fields": COMPLETE_INSIGHT},
+        headers=auth_headers())
+    assert r.status_code == 422, r.text
+    assert "标题超过 80 字" in str(r.json()["detail"])
+
+
+async def test_draft_may_be_incomplete_but_not_enter_quality_gate(client):
+    """draft 是未提交的工作草稿，允许缺字段；审批时仍按完整知识门处理。"""
+    await _repo(client)
+    draft = await client.post(
+        f"{API}/knowledge/repos/openssl/cards",
+        json={"kind": "insight", "title": "草稿", "tldr": "摘要",
+              "body_md": "正文", "fields": {"observation": "观察"},
+              "status": "draft"},
+        headers=human_headers())
+    assert draft.status_code == 201, draft.text
+    assert draft.json()["status"] == "draft"
+
+
+async def test_quality_gate_blocks_legacy_incomplete_card_at_approval(client, app):
+    """历史/导入的未完整卡仍由审批门拦截（409 + blocking）。"""
+    from anvil.db import open_conn
+
     await _repo(client)
     card = await _card(client)
+    conn = open_conn(app.state.db_path)
+    try:
+        conn.execute(
+            "UPDATE repo_knowledge SET fields_json=?, body_md=? WHERE id=?",
+            (json.dumps({"observation": "观察"}), "正文", card["id"]))
+        conn.commit()
+    finally:
+        conn.close()
+
     blocked = await client.post(
         f"{API}/knowledge/repo-cards/{card['id']}/approve",
         headers=human_headers())
-    assert blocked.status_code == 409
+    assert blocked.status_code == 409, blocked.text
     detail = blocked.json()["detail"]
     assert "quality" in detail
     assert "use_when" in detail["quality"]["blocking"]
 
-    updated = await client.patch(
-        f"{API}/knowledge/repo-cards/{card['id']}",
-        json={"fields": {
-            "observation": "观察", "evidence": "任务 T1 的评审记录",
-            "lesson": "结论", "applicability": "X509 审计", "counterexamples": "无",
-            "use_when": "审计 X509 时", "expected_effect": "避免漏报",
-        }},
-        headers=human_headers())
-    assert updated.status_code == 200, updated.text
-    assert updated.json()["quality"]["blocking"] == []
 
+async def test_complete_card_can_be_approved_and_summarized(client):
+    await _repo(client)
+    card = await _card(client)
     approved = await client.post(
         f"{API}/knowledge/repo-cards/{card['id']}/approve",
         headers=human_headers())
