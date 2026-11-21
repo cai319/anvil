@@ -541,3 +541,30 @@ Select-String -Path .\log\anvil.log -Pattern 'tracker|http id=|ERROR|Traceback'
 可确认实际使用的代理变量。
 
 ---
+
+## 工作流步骤一直 running / 委派不唤醒 / subagent 显示中断
+
+**步骤 running 但 nudge_count 一直是 0**
+- v1.44.1 之前可能存在 `context_return` 死标记：回复 run 二次 arm 未复位
+  `context_returned_at`，resolver 看不到、看门狗又一直抑制 nudge。
+- 升级到 v1.44.1+ 后，检查 run 的 `context_return_after_turn/armed_at`；
+  人工 restart 会清入站标记。审计里出现 `context_return.expired` 表示已按 TTL 放行。
+
+**委派 submit 后父 step 没有醒**
+- 查 `wake_requests`：父 step 的请求应是 `pending/processing/done`；
+  `skipped` 的 detail 会说明原因（workflow 已非 running、step 已推进、task 终态、
+  run 处于 HITL、waiting_for_human）。
+- 父 run 当时在 running：note 会先持久化到 `runs.wake_note`，scheduler 重试到
+  suspended 后 resume；超过 `ANVIL_WAKE_REQUEST_MAX_ATTEMPTS` 则等下一次 nudge 消费。
+- 等待有上限：超过 `ANVIL_DELEGATION_WAIT_SECONDS` 后父 step 恢复 nudge；
+  持续无产出会走 step_stalled 自动恢复/失败路径，可 @human 介入。
+
+**dispatch 完成通知缺失**
+- `task_dispatches.result_notified_at` 为空表示通知未成功；
+  scheduler 的 `retry_dispatch_notifications` 会按 60s 退避补投。
+- 检查 requester 是否为空或与 target_role 相同（这类不产生 mention，属正常）。
+
+**运行时 subagent 显示 interrupted**
+- `run_subagents` 只是观测：turn 结束、进程退出、daemon 重启、上下文切换都会把仍
+  running 的子代理标 `interrupted`，这是预期语义；Anvil 不负责其跨 turn 存活。
+- 需要跨 turn 的结果应写入 step summary/evidence，或改用委派工单。

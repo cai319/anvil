@@ -297,3 +297,39 @@ def test_dispatch_reuses_existing_before_governance_freeze(env):
         message="同一个请求", requester="qa")
     assert second["reused"] is True
     assert second["task"]["id"] == first["task"]["id"]
+
+
+def test_dispatch_notification_failure_can_retry(env, monkeypatch):
+    """mention 失败不能写 result_notified_at；scheduler 可补投。"""
+    conn = env
+    source = tasks_service.create(
+        conn, title="来源任务", assignee="qa", assignees=["qa", "dev"])
+    result = dispatch.create_dispatch(
+        conn, source_task_id=source["id"], target_role="dev",
+        message="需要通知", requester="qa")
+    target = result["task"]
+    d = result["dispatch"]
+    conn.execute("UPDATE tasks SET status='done' WHERE id=?", (target["id"],))
+    conn.commit()
+
+    original = dispatch.tasks_service.mention
+    def boom(*args, **kwargs):
+        raise RuntimeError("mention failed")
+    monkeypatch.setattr(dispatch.tasks_service, "mention", boom)
+    try:
+        with pytest.raises(RuntimeError):
+            dispatch._notify_dispatch_completed(
+                conn, d, target["id"], "done", "no_return", None)
+    finally:
+        monkeypatch.setattr(dispatch.tasks_service, "mention", original)
+    row = conn.execute(
+        "SELECT result_notified_at FROM task_dispatches WHERE id=?",
+        (d["id"],)).fetchone()
+    assert row["result_notified_at"] is None
+
+    assert dispatch.retry_completed_notification(conn, d) is True
+    conn.commit()
+    row = conn.execute(
+        "SELECT result_notified_at FROM task_dispatches WHERE id=?",
+        (d["id"],)).fetchone()
+    assert row["result_notified_at"]

@@ -693,3 +693,23 @@ def test_hint_true_with_runtime_drift_audits_skip_once(tmp_path):
         "WHERE event_type='subagent_hint.skipped'").fetchone()["n"]
     assert count == 1
     conn.close()
+
+
+def test_replayed_tool_use_does_not_reenter_active_after_terminal(tmp_path):
+    """DB 已是终态时，重复/重放 tool_use 不能再塞回内存 active。"""
+    conn, mgr = _manager(tmp_path)
+    _seed_run(conn)
+    role = mgr._role("dev")
+    role.current_run_id = "R1"
+    role.current_task_id = "T1"
+    mgr._track_subagent(role, _tool_use())  # noqa: SLF001
+    mgr._track_subagent(role, _tool_result())  # noqa: SLF001
+    role.active_subagents.clear()  # 模拟内存丢失/重放
+
+    mgr._track_subagent(role, _tool_use())  # noqa: SLF001
+
+    assert "tu-1" not in role.active_subagents
+    row = conn.execute(
+        "SELECT status FROM run_subagents WHERE run_id='R1'").fetchone()
+    assert row["status"] == "completed"
+    conn.close()

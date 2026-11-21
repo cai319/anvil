@@ -491,3 +491,28 @@ async def test_old_execution_delegation_does_not_block_task_submit(client, app):
         f"{API}/tasks/T-SCOPE/submit", json={"summary": "完成"},
         headers=_agent_headers(app, "pm", "tok-scope-pm"))
     assert submitted.status_code == 200, submitted.text
+
+
+async def test_delete_role_closes_open_delegations(client, app):
+    """删除被委派角色：open 委派按人工取消关闭，并唤醒父 step。"""
+    from anvil.db import open_conn
+    from anvil.services import roles as roles_service
+
+    await _seed(client)
+    wid = await _workflow(client, app)
+    child = (await _delegation(client, app)).json()
+
+    conn = open_conn(app.state.db_path)
+    try:
+        assert roles_service.delete(conn, "developer") is True
+        conn.commit()
+        status = conn.execute(
+            "SELECT status FROM tasks WHERE id=?", (child["id"],)).fetchone()["status"]
+        assert status == "closed"
+        row = conn.execute(
+            "SELECT reason FROM wake_requests WHERE task_id='T-WF' "
+            "AND workflow_id=? AND step_id='S1' ORDER BY id DESC LIMIT 1",
+            (wid,)).fetchone()
+        assert row is not None and row["reason"] == "delegation.cancelled"
+    finally:
+        conn.close()

@@ -91,6 +91,8 @@ class Scheduler:
             ("finalize_ready_tasks", lambda: self._finalize_ready_tasks(conn)),
             ("resolve_dispatch_returns", lambda: dispatch_service.resolve_dispatch_returns(
                 conn, lambda rid, ev: self._pump(rid, ev))),
+            ("retry_dispatch_notifications",
+             lambda: self._retry_dispatch_notifications(conn)),
             ("resolve_context_returns", lambda: dispatch_service.resolve_context_returns(
                 conn, lambda rid, ev: self._pump(rid, ev))),
             ("recover_failed_runs", lambda: self._recover_failed_runs(conn)),
@@ -426,6 +428,26 @@ class Scheduler:
             return
         wake_service.mark(conn, req_id, "done", f"created run {created['id']}")
         conn.commit()
+
+    def _retry_dispatch_notifications(self, conn) -> None:
+        """补投派遣完成通知：target task done 但 result_notified_at 仍为空。"""
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+        rows = conn.execute(
+            "SELECT d.* FROM task_dispatches d JOIN tasks t ON t.id=d.target_task_id "
+            "WHERE d.result_notified_at IS NULL AND t.status='done' "
+            "AND COALESCE(d.updated_at, d.created_at) < ? "
+            "ORDER BY COALESCE(d.updated_at, d.created_at) LIMIT 20",
+            (cutoff,)).fetchall()
+        for row in rows:
+            try:
+                dispatch_service.retry_completed_notification(conn, dict(row))
+                conn.commit()
+            except Exception:  # noqa: BLE001 —— 单条通知失败下次重试
+                logger.exception("dispatch notification retry failed id=%s", row["id"])
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
 
     def _finalize_ready_tasks(self, conn) -> None:
         """兜底：workflow 已 done 但 task 仍在 in_progress 时重试进入最终评审。"""

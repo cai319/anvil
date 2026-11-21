@@ -292,15 +292,14 @@ def _notify_dispatch_completed(conn: sqlite3.Connection, d: dict,
         return
     requester = str(d.get("requested_by") or "")
     if requester and requester != str(d.get("target_role") or ""):
-        try:
-            tasks_service.mention(
-                conn, d["source_task_id"], "system",
-                requester if requester != "human" else "human",
-                f"派遣任务 {target_task_id}「{_task_title(conn, target_task_id)}」"
-                f"已完成，结果：{summary}",
-                slice_key=d.get("source_slice_key"))
-        except Exception:  # noqa: BLE001 —— 通知失败不阻断回切状态
-            pass
+        # 失败必须向上抛：result_notified_at 只能在 mention + ledger 都成功后写，
+        # 否则 scheduler 的 retry_dispatch_notifications 无法补投。
+        tasks_service.mention(
+            conn, d["source_task_id"], "system",
+            requester if requester != "human" else "human",
+            f"派遣任务 {target_task_id}「{_task_title(conn, target_task_id)}」"
+            f"已完成，结果：{summary}",
+            slice_key=d.get("source_slice_key"))
     ledger.emit(
         conn, "dispatch.completed", task_id=d["source_task_id"],
         slice_key=d.get("source_slice_key"), step_id=d.get("source_step_id"),
@@ -314,6 +313,18 @@ def _notify_dispatch_completed(conn: sqlite3.Connection, d: dict,
     conn.execute(
         "UPDATE task_dispatches SET result_notified_at=? WHERE id=?",
         (now_iso(), d["id"]))
+
+
+def retry_completed_notification(conn: sqlite3.Connection, d: dict) -> bool:
+    """scheduler 补投：target task done 但 result_notified_at 仍为空。"""
+    target_task_id = str(d.get("target_task_id") or "")
+    if not target_task_id or d.get("result_notified_at"):
+        return False
+    summary = _result_summary(conn, target_task_id)
+    _notify_dispatch_completed(
+        conn, d, target_task_id, summary,
+        str(d.get("status") or "open"), None)
+    return True
 
 
 def _return_state(conn: sqlite3.Connection, row: dict) -> tuple[bool | None, str | None]:

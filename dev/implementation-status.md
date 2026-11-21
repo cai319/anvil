@@ -646,3 +646,30 @@ cd frontend && npm run build         # tsc + vite build
 - 测试：`tests/test_auto_return.py`、`tests/test_step_watchdog.py`、
   `tests/test_daemon.py`、`tests/api/test_m4_completion.py`；全量
   **896 passed / 60 skipped**。
+
+## 协作方式判断、角色一致性与 D1–D4（2026-11-21，v1.45.0 / v1.45.1）
+
+- **协作方式判断**：新增 `COLLABORATION_PROTOCOL`，统一 subagent / mention / 委派 / 派遣
+  的 Q1–Q5 判断；workflow 已排定分支按对应步骤是否已执行/执行中区分 mention、workflow
+  缺口上报或 `context_note`；同角色委派与 blocking dispatch 被禁止。
+- **context_note**：`tasks.context_note` + `POST /tasks/{id}/note` +
+  `anvil task note --for-step`；task-wide、system 作者活动，未来 slice/步骤可见且不唤醒。
+- **角色一致性**：`preview_participant_sync` / `GET /board/drafts/{id}/participants`；
+  审批 auto-add workflow 角色、阻止 human 指定但未安排的角色；修订新增角色同步；
+  `set_assignees` 拒绝移除 running workflow 引用角色。
+- **委派/派遣**：同角色委派 409；step 失败/execution 终止/父任务 cancel 关闭 open 委派；
+  任务级 submit/review 按最新 execution 作用域；派遣先幂等去重再治理，治理失败不退化 reply。
+- **wake 队列**：running note 持久化+重试、pump 失败回 pending、HITL/终态门禁、
+  run-missing 释放 lease、pending 唯一/新 note 覆盖、on_render 缺失时消费 note。
+- **运行时 subagent**：`schema.subagents_v2` 完整归属；turn 结束 interrupted；晚到结果
+  CAS、重复事件不重置终态、daemon 重启自愈、scheduler 孤儿 reaper、任务删除清理；
+  只读 API/CLI 与 RoleSessions 历史。
+- **subagent_hint**：所有载体能力感知降级 + `subagent_hint.downgraded` 审计；执行侧漂移
+  `subagent_hint.skipped`；Roster 展示能力；协议拆通用/审计；前端 badge 与编辑器。
+- **收尾（v1.45.1）**：角色删除关闭其 open 委派并唤醒父 step；dispatch 完成通知失败
+  scheduler 补投；重复 tool_use 不再把 DB 终态 subagent 塞回内存 active。
+- **SDD/TDD 评测**：`docs/superpowers/specs/2026-11-21-collaboration-routing-design.md`、
+  15 场景 fixtures、`scripts/collaboration_eval.py`（offline / 模型评测）。
+- 全量：**967 passed / 61 skipped**；前端 `npm run build` 通过。
+- 发布说明：`docs/v1.44.0-release.md`、`v1.44.1-release.md`、`v1.45.0-release.md`、
+  `v1.45.1-release.md`。
