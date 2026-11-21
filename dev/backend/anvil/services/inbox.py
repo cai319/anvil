@@ -16,6 +16,7 @@ def collect(conn: sqlite3.Connection) -> dict:
     """聚合待人类处理条目：review / mention / draft / lesson / proposal，created_at 倒序。"""
     items: list[dict] = []
     items.extend(_reviews(conn))
+    items.extend(_delegations(conn))
     items.extend(_mentions(conn))
     items.extend(_drafts(conn))
     items.extend(_lessons(conn))
@@ -47,6 +48,37 @@ def _reviews(conn: sqlite3.Connection) -> list[dict]:
         out.append({
             "id": f"review:{r['id']}", "kind": "review", "title": r["title"],
             "detail": detail, "task_id": r["id"], "created_at": r["updated_at"],
+        })
+    return out
+
+
+def _delegations(conn: sqlite3.Connection) -> list[dict]:
+    """委派待验收：子任务 in_review、父任务仍活跃。"""
+    out = []
+    rows = conn.execute(
+        """SELECT t.id, t.title, t.updated_at, t.parent_id, t.parent_step_id,
+                  t.created_by, t.assignee, ws.title AS step_title
+             FROM tasks t
+             JOIN tasks p ON p.id=t.parent_id
+             LEFT JOIN workflow_steps ws ON ws.workflow_id=t.parent_workflow_id
+                  AND ws.step_id=t.parent_step_id
+            WHERE t.type='delegation' AND t.status='in_review'
+              AND p.status NOT IN ('done','closed')
+            ORDER BY t.updated_at"""
+    ).fetchall()
+    for r in rows:
+        step = r["step_title"] or r["parent_step_id"] or "-"
+        owner = r["assignee"] or "负责人"
+        out.append({
+            "id": f"delegation:{r['id']}", "kind": "delegation",
+            "title": f"委派待验收：{r['title']}",
+            "detail": f"父步骤 {step} · {owner} 已提交 · 等你通过或打回",
+            "task_id": r["id"], "created_at": r["updated_at"],
+            "meta": {"parent_id": r["parent_id"],
+                     "parent_step_id": r["parent_step_id"],
+                     "step_title": r["step_title"],
+                     "assignee": r["assignee"],
+                     "created_by": r["created_by"]},
         })
     return out
 

@@ -673,3 +673,18 @@ cd frontend && npm run build         # tsc + vite build
 - 全量：**967 passed / 61 skipped**；前端 `npm run build` 通过。
 - 发布说明：`docs/v1.44.0-release.md`、`v1.44.1-release.md`、`v1.45.0-release.md`、
   `v1.45.1-release.md`。
+
+## 协作体验收尾（2026-11-21，v1.45.2）
+
+- human 收件箱新增「委派验收」：聚合 `delegation in_review`、父任务活跃的工单，
+  可直接 accept/reject；验收后条目消失。
+- 任务详情草案卡显示审批参与者预览（将新增/未安排的 human 角色），数据来自
+  `GET /board/drafts/{id}/participants`。
+- 晚到 subagent tool_result 增加 `proc_generation + native_session_id` CAS，
+  旧会话/旧进程事件不再污染新记录。
+- dispatch API 显式拒绝 `repo/workspace_id/base_branch` 覆盖（422），与 CLI 警告一致。
+- flat/static step 的 `subagent_hint.downgraded` 审计补 `task_id`。
+- 协作评测支持 `--ids`；`claude -p` 实跑 15 场景：mode accuracy 100%，
+  critical 100%，`ok=true`。
+- 全量：**970 passed / 61 skipped**；前端 build 通过。
+- 发布说明：`docs/v1.45.2-release.md`。

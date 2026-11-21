@@ -355,7 +355,9 @@ def normalize_definition(conn: sqlite3.Connection, definition: dict) -> dict:
     return definition
 
 
-def _plan_steps(conn: sqlite3.Connection, steps: list[dict]):
+def _plan_steps(conn: sqlite3.Connection, steps: list[dict], *,
+                task_id: str | None = None,
+                workflow_id: str | None = None):
     """预校验 id/依赖/环/decision 元数据，返回 raw 与落库计划。"""
     from . import roles as roles_service
 
@@ -451,7 +453,8 @@ def _plan_steps(conn: sqlite3.Connection, steps: list[dict]):
             "evidence_required": 1 if s.get("evidence_required") else 0,
             "scope_paths": [str(x) for x in scope_paths],
             "subagent_hint": _effective_hint(
-                conn, role, s.get("subagent_hint"), where=f"step {sid}"),
+                conn, role, s.get("subagent_hint"), where=f"step {sid}",
+                task_id=task_id, workflow_id=workflow_id),
         }
         on_reject: list[str] = []
         max_rework = 0
@@ -1417,7 +1420,7 @@ def validate_definition(conn: sqlite3.Connection, definition: dict, *,
         loop = definition.get("loop")
         if isinstance(loop, dict):
             _require_loop_subagent_decisions(loop)
-    raw, _plan = _plan_steps(conn, steps)
+    raw, _plan = _plan_steps(conn, steps, task_id=task_id)
     _validate_loop(conn, definition, raw, task_id=task_id)
 
 
@@ -1563,7 +1566,7 @@ def _create_workflow_locked(conn: sqlite3.Connection, task_id: str, definition: 
                 f"add={preview['add']} missing={preview['missing']}")
 
     # ---- 预校验：id/依赖/环/decision 元数据 ----
-    raw, plan = _plan_steps(conn, steps)
+    raw, plan = _plan_steps(conn, steps, task_id=task_id)
     _validate_loop(conn, definition, raw, task_id=task_id)
     _validate_issue_board(conn, task_id, definition)
     if enforce_role_coverage:

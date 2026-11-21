@@ -1444,6 +1444,11 @@ def create_dispatch(tid: str, body: dict, request: Request, conn=Depends(get_db)
     工作，来源 task 只保留软关联，不阻塞、不共享对话。
     """
     _assert_session_task(conn, auth, tid)
+    if body.get("repo") or body.get("workspace_id") or body.get("base_branch"):
+        raise HTTPException(
+            status_code=422,
+            detail=("dispatch inherits the source task's repo/workspace/base_branch; "
+                    "remove repo/workspace_id/base_branch from the request"))
     target_role = str(body.get("target_role") or "").strip()
     message = str(body.get("message") or "").strip()
     if not target_role or not message:

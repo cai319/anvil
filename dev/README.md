@@ -76,7 +76,7 @@ Cindy 在规划时从已选角色中指定 reviewer，并保证 workflow 覆盖�
 ## 当前实现状态
 
 详见 `implementation-status.md`（各里程碑的已实现 / 未实现清单）。当前自动化测试：
-**967 passed + 61 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；模型评测需要
+**970 passed + 61 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；模型评测需要
 `ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。
 
 切片上下文与派遣子任务默认已启用显式入口（`anvil task dispatch` /
@@ -101,8 +101,9 @@ slice/step 角色的协作方式由 `COLLABORATION_PROTOCOL` 统一判断：先�
 则 @cindy。同角色委派、把 blocking 工作 dispatch 都会被协议禁止。未来步骤的上下文用
 `anvil task note --for-step` 写入 task-wide 系统备注（不唤醒），后续 slice/step 启动时带入。
 最终 workflow 审批会自动把 workflow 中未绑定的现有角色加入任务参与者，并阻止 human 指定
-但未安排的角色；审批前可用 `GET /board/drafts/{id}/participants` 预览。设计见
-`../docs/superpowers/specs/2026-11-21-collaboration-routing-design.md`。
+但未安排的角色；审批前可用 `GET /board/drafts/{id}/participants` 预览，任务详情草案卡会
+显示将新增/缺失的角色。human 收件箱新增「委派验收」页签，可直接通过或打回委派工单。
+设计见 `../docs/superpowers/specs/2026-11-21-collaboration-routing-design.md`。
 
 运行时原生 subagent 只做观测：`run_subagents` 记录父运行时归属（role/run/task、
 proc_generation、native_session_id、parent_tool_use_id、slice/step），turn 结束或进程
@@ -118,6 +119,7 @@ runtime 是否支持 subagent。设计见
 
 ## 最近版本
 
+- `../docs/v1.45.2-release.md` — 收件箱委派验收、审批参与者预览、评测实跑
 - `../docs/v1.45.1-release.md` — 角色删除关闭委派、dispatch 通知补投、subagent 幽灵收尾
 - `../docs/v1.45.0-release.md` — 协作方式判断、角色一致性、D1–D4 收尾
 - `../docs/v1.44.1-release.md` — context_return 死标记修复与看门狗有界等待

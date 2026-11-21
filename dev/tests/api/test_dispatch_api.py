@@ -207,3 +207,25 @@ async def test_agent_auto_dispatch_respects_flag_but_explicit_mode_bypasses(clie
             conn.close()
     finally:
         config.DISPATCH_AUTO_FROM_MENTION = old
+
+
+async def test_dispatch_rejects_repo_workspace_overrides(client, app):
+    await _seed(client)
+    task = await client.post(
+        f"{API}/tasks",
+        json={"title": "来源任务", "assignee": "qa-role",
+              "assignees": ["qa-role", "dev-role"]},
+        headers=human_headers(),
+    )
+    assert task.status_code == 201, task.text
+    tid = task.json()["id"]
+    headers = _agent_session(app, "qa-role", tid)
+    for field, value in (("repo", "other"), ("workspace_id", "W-OTHER"),
+                         ("base_branch", "dev")):
+        resp = await client.post(
+            f"{API}/tasks/{tid}/dispatches",
+            json={"target_role": "dev-role", "message": "独立工作", field: value},
+            headers=headers,
+        )
+        assert resp.status_code == 422, (field, resp.text)
+        assert "inherits" in resp.text

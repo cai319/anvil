@@ -894,6 +894,10 @@ export const api = {
     req("POST", "/board/drafts/reject", { draft_id: id }).then((r) => json(r)),
   getDraft: (id: string): Promise<BoardDraft> =>
     authFetch(`${BASE}/board/drafts/${id}`).then((r) => json<BoardDraft>(r)),
+  getDraftParticipants: (id: string): Promise<{
+    add: string[]; missing: string[]; invalid: string[];
+    roles: string[]; participants: string[];
+  }> => authFetch(`${BASE}/board/drafts/${id}/participants`).then((r) => json(r)),
   updateDraft: (id: string, body: Record<string, unknown>): Promise<BoardDraft> =>
     req("PATCH", `/board/drafts/${id}`, body).then((r) => json<BoardDraft>(r)),
 
@@ -1607,7 +1611,7 @@ export interface InboxDraftMeta {
 
 export interface InboxItem {
   id: string;
-  kind: "review" | "mention" | "draft" | "lesson" | "proposal" | "gate" | "decision" | "action" | "finding";
+  kind: "review" | "delegation" | "mention" | "draft" | "lesson" | "proposal" | "gate" | "decision" | "action" | "finding";
   title: string;
   detail: string;
   task_id: string | null;

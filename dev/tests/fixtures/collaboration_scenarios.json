@@ -6,120 +6,207 @@
       "id": 1,
       "critical": false,
       "input": "当前 step 是 execute，需要本切片 verify 步骤的复核结论才能提交。verify 步骤对应的角色已经执行过并持有本切片上下文。",
-      "expected_modes": ["mention"],
-      "reason_keywords": ["已执行", "mention"],
+      "expected_modes": [
+        "mention"
+      ],
+      "reason_keywords": [
+        "已执行",
+        "mention"
+      ],
       "note": "覆盖步骤已执行/执行中，本 step 需要结果"
     },
     {
       "id": 2,
       "critical": false,
       "input": "当前 step 是 execute，发现本切片 verify 步骤负责的一个边界问题，但本 step 不需要该结果也能提交；verify 角色已有本切片上下文。",
-      "expected_modes": ["mention"],
-      "reason_keywords": ["知会", "mention"],
+      "expected_modes": [
+        "mention"
+      ],
+      "reason_keywords": [
+        "知会",
+        "mention"
+      ],
       "note": "覆盖步骤已执行，本 step 不需要结果"
     },
     {
       "id": 3,
       "critical": true,
       "input": "当前 step 是 execute，验收必须拿到本切片 verify 角色产出的独立复核报告，但 verify 步骤尚未启动、该角色没有任何本切片上下文。workflow 尚未安排这个报告的其他产出步骤。",
-      "expected_modes": ["cindy", "delegation"],
-      "reason_keywords": ["workflow", "尚未启动", "缺口"],
+      "expected_modes": [
+        "cindy",
+        "delegation"
+      ],
+      "reason_keywords": [
+        "workflow",
+        "缺口",
+        "pending"
+      ],
       "note": "覆盖步骤未启动 + 当前阻塞：记录/@cindy/@human，评估委派"
     },
     {
       "id": 4,
       "critical": true,
       "input": "当前 step 是 execute，发现一条属于未来 slice verify 步骤的信息；本 step 不需要它，verify 步骤尚未启动，角色没有上下文。",
-      "expected_modes": ["record"],
-      "reason_keywords": ["note", "不唤醒", "后续"],
+      "expected_modes": [
+        "record"
+      ],
+      "reason_keywords": [
+        "note",
+        "不唤醒"
+      ],
       "note": "覆盖步骤未启动 + 本 step 不需要结果：context_note，不唤醒"
     },
     {
       "id": 5,
       "critical": false,
       "input": "当前 step 是 execute，发现一个属于本切片范围、本角色完全可以在当前 turn 内完成的小修复。",
-      "expected_modes": ["self"],
-      "reason_keywords": ["自己做", "范围"],
+      "expected_modes": [
+        "self"
+      ],
+      "reason_keywords": [
+        "自己做",
+        "范围"
+      ],
       "note": "范围内、本角色能完成"
     },
     {
       "id": 6,
       "critical": false,
       "input": "当前 step 是 verify，需要并行核实三个相互独立、只读的 condition；该步骤 subagent_hint=true 且运行时支持 subagent。",
-      "expected_modes": ["subagent"],
-      "reason_keywords": ["subagent", "只读", "并行"],
+      "expected_modes": [
+        "subagent"
+      ],
+      "reason_keywords": [
+        "subagent",
+        "只读",
+        "并行"
+      ],
       "note": "同角色只读并行 + hint 支持"
     },
     {
       "id": 7,
       "critical": false,
       "input": "当前 step 是 verify，需要并行核实三个相互独立的只读 condition；该步骤 subagent_hint=false，运行时不支持 subagent。",
-      "expected_modes": ["self"],
-      "reason_keywords": ["串行", "自己做"],
+      "expected_modes": [
+        "self"
+      ],
+      "reason_keywords": [
+        "串行",
+        "自己做"
+      ],
       "note": "同角色只读并行，无 hint/不支持"
     },
     {
       "id": 8,
       "critical": false,
       "input": "当前 step 是 execute，产出完成后希望另一个角色挑战结论、指出风险；对方只需要给评审意见，不需要独立交付物。",
-      "expected_modes": ["mention"],
-      "reason_keywords": ["评审", "mention"],
+      "expected_modes": [
+        "mention"
+      ],
+      "reason_keywords": [
+        "评审",
+        "mention"
+      ],
       "note": "仅评审/挑战/澄清，无独立交付物"
     },
     {
       "id": 9,
       "critical": true,
       "input": "当前 step 是 execute，验收必须拿到另一个角色独立产出的 PoC（含命令、退出码、sha256），本 step 不拿到就不能提交；workflow 没有安排该 PoC 的其他步骤，目标角色不是当前 step 角色。",
-      "expected_modes": ["delegation"],
-      "reason_keywords": ["阻塞", "独立", "委派"],
+      "expected_modes": [
+        "delegation"
+      ],
+      "reason_keywords": [
+        "阻塞",
+        "独立",
+        "委派"
+      ],
       "note": "blocking、另一角色独立交付、未排定"
     },
     {
       "id": 10,
       "critical": false,
       "input": "当前 step 是 execute，发现一个与本切片弱相关、本 step 不依赖其结果的构建环境问题；需要另一个角色在独立上下文中处理，且本 step 可以继续。",
-      "expected_modes": ["dispatch"],
-      "reason_keywords": ["非阻塞", "独立上下文", "dispatch"],
+      "expected_modes": [
+        "dispatch"
+      ],
+      "reason_keywords": [
+        "非阻塞",
+        "独立上下文",
+        "dispatch"
+      ],
       "note": "非 blocking、切片外、需独立上下文、不等待"
     },
     {
       "id": 11,
       "critical": false,
       "input": "当前 step 是 execute，发现需要新增一个 loop 阶段并调整角色顺序才能解决，属于规划级变更。",
-      "expected_modes": ["cindy"],
-      "reason_keywords": ["cindy", "workflow"],
+      "expected_modes": [
+        "cindy"
+      ],
+      "reason_keywords": [
+        "cindy",
+        "workflow"
+      ],
       "note": "需要改 workflow/角色/顺序"
     },
     {
       "id": 12,
       "critical": false,
       "input": "当前 step 是 execute，发现一条与本 step 验收无关、也不需要任何角色立即处理的信息；记录即可。",
-      "expected_modes": ["record"],
-      "reason_keywords": ["记录", "不新建"],
+      "expected_modes": [
+        "record"
+      ],
+      "reason_keywords": [
+        "记录",
+        "不新建"
+      ],
       "note": "不影响验收、不需要动作"
     },
     {
       "id": 13,
       "critical": true,
       "input": "当前 step 是 execute，想把一段实现工作委派给当前 step 的同一个角色（目标角色 == 当前 step 角色），以便并行。",
-      "expected_modes": ["self", "mention", "cindy"],
-      "reason_keywords": ["同角色", "不能", "自锁"],
+      "expected_modes": [
+        "self",
+        "mention",
+        "cindy"
+      ],
+      "reason_keywords": [
+        "当前 step 角色",
+        "独立产出"
+      ],
       "note": "禁止同角色委派"
     },
     {
       "id": 14,
       "critical": true,
       "input": "当前 step 是 execute，验收依赖另一个角色的独立 PoC，但有人建议用非阻塞 dispatch 把 PoC 工作派出去，然后本 step 继续提交。",
-      "expected_modes": ["delegation", "mention", "cindy"],
-      "reason_keywords": ["阻塞", "不能 dispatch", "委派"],
+      "expected_modes": [
+        "delegation",
+        "mention",
+        "cindy"
+      ],
+      "reason_keywords": [
+        "阻塞",
+        "不能 dispatch",
+        "委派"
+      ],
       "note": "禁止把 blocking 工作 dispatch"
     },
     {
       "id": 15,
       "critical": true,
-      "input": "当前 step 是 execute，验收必须拿到未来 verify 步骤的独立报告；该 verify 步骤尚未启动、角色无上下文，但 workflow 已排定该步骤。",
-      "expected_modes": ["cindy", "delegation"],
-      "reason_keywords": ["尚未启动", "cindy", "委派", "避免重复"],
+      "input": "当前 step 是 execute，execute 的 submit 必须等待未来 verify 步骤的独立报告，没有该报告就无法提交；该 verify 步骤尚未启动、角色无本切片上下文，但 workflow 已经排定了该 verify 步骤。",
+      "expected_modes": [
+        "cindy",
+        "delegation"
+      ],
+      "reason_keywords": [
+        "尚未启动",
+        "cindy",
+        "委派"
+      ],
       "note": "未来步骤未启动 + 当前阻塞：评估新增委派并注明避免重复"
     }
   ]
