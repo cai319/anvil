@@ -196,7 +196,7 @@ TASK_EPILOG = """\b
           [--slice S] [--context-mode dispatch] [--acceptance "a;b"]
   archive | unarchive <id>              归档/取消归档（human）
   knowledge-list <id>                   任务共享知识
-  knowledge-write <id> --title --tldr --kind
+  knowledge-write <id> --title --tldr --kind   写任务知识（知识收割者仅 proposed）
   knowledge-delete <id> --id <kid>      删除任务知识（human）
 
 示例:
@@ -314,11 +314,14 @@ REMINDER_EPILOG = """\b
 示例:
   anvil reminder add --in 30m --prompt "检查构建结果"
   anvil reminder add --cron "0 9 * * *" --prompt "每日站会"
+  anvil reminder add --when <task-id> --prompt "任务完成后复盘"
   anvil reminder list
   anvil reminder remove <id>
   anvil reminder fire-now <id>
 
 规则: 定时提醒 run 没有任务（task=None），不要 claim/submit；按提示维护知识库后退出。
+系统会在 Cindy 规划、human 落板 workflow 后自动创建 when(task done) 知识收割提醒，
+无需手工添加；--when 用于额外提醒。
 """
 
 LESSON_EPILOG = """\b
@@ -1053,9 +1056,9 @@ def note_cmd(
         raise typer.Exit(2)
 
 
-@app.command("knowledge", help="知识检索、索引、知识卡与质量审批。",
+@app.command("knowledge", help="知识检索、索引、补全、知识卡与质量审批。",
               epilog=KNOWLEDGE_EPILOG,
-              short_help="知识：检索/索引/仓库/质量/审批")
+              short_help="知识：检索/索引/补全/仓库/质量/审批")
 def knowledge_cmd(
     action: str = typer.Argument("search"),
     query: str = typer.Argument(None),
@@ -1354,8 +1357,8 @@ def knowledge_cmd(
             "。运行 `anvil knowledge -h` 查看示例。")
 
 
-@app.command("lesson", help="提议一条共享经验（human 审批）。", epilog=LESSON_EPILOG,
-              short_help="共享经验：propose")
+@app.command("lesson", help="提议/补全共享经验（human 审批）。", epilog=LESSON_EPILOG,
+              short_help="共享经验：propose/fill")
 def lesson_cmd(
     action: str = typer.Argument("propose"),
     text: str = typer.Argument(None),

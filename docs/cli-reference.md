@@ -82,7 +82,7 @@ pip install --force-reinstall <anvil-cli-wheel-or-sdist>
 | `anvil role ...` | 角色：list/expand |
 | `anvil workspace ...` | 频道与频道知识卡 |
 | `anvil lesson propose/fill` | 提议共享经验 / 收割角色补全字段（human 审批） |
-| `anvil reminder ...` | 定时提醒 |
+| `anvil reminder ...` | 定时提醒（含任务完成知识收割提醒） |
 | `anvil self ...` / `anvil whoami` | 当前身份、会话、自我维护 |
 | `anvil inbox ...` | Agent 收件箱（拉模式） |
 | `anvil lease ...` | 执行租约与路径预留 |
@@ -173,6 +173,8 @@ anvil task knowledge-delete <id> --id <knowledge-id>   # human
   并立即唤醒挂起/空闲的步骤 run，**不重新规划**；workflow 已 `done` → `in_review`；
   无 workflow 或 workflow `terminated/failed` → `todo`，再决定是否重新派发/规划。
 - `knowledge-write` 的 `--kind` 例如 `task_finding`；`--fields` 必须是 JSON 对象。
+  任务参与角色默认可写 `active`；知识收割者（Cindy）对非参与任务只能写 `proposed`，
+  不能直接写 `active`，仍需任务参与者/human 批准。
 - `submit` 涉及具体交付件时，摘要必须逐项列出交付件的**性质、内容简介与绝对路径**；
   绝对路径须真实存在，不能只写文件名/相对路径。无交付件时明确写「本次提交无具体交付件」。
 
@@ -451,6 +453,7 @@ anvil lesson fill <lesson-id> [--title "..."] [--tldr "..."] \
   [--field use_when="..."] [--field observation="..."]
 
 anvil reminder add --in 30m --prompt "检查构建结果"   # 或 --cron / --when
+anvil reminder add --when <task-id> --prompt "任务完成后复盘"
 anvil reminder list
 anvil reminder remove <id>
 anvil reminder fire-now <id>
@@ -483,6 +486,8 @@ anvil action list
   后续 slice/step 启动时会进入其未读/上下文；用于“本 step 不需要结果但未来步骤需要”的信息。
 - `subagent list` 只读观测运行时子代理（状态 running/completed/interrupted 与
   result_summary）；Anvil 不创建、不终止、不唤醒子代理。
+- 任务落板后系统自动创建 `when(task:<id>:done)` 知识收割提醒（归属 Cindy），
+  任务完成时触发 Cindy 收割任务/主题/频道知识，只写 proposed；无需手工添加。
 - `knowledge fill` 只允许该知识的归属角色或 human 调用；用于角色用自身上下文
   补全/精炼已有 role notes（标题 ≤80、TLDR ≤200、正文 ≤4000、单字段 ≤2000），
   来源任务存在且角色绑定时通过 mention/wake 排队，否则创建补全 run；角色 busy 时排队。
