@@ -182,6 +182,16 @@ DISPATCH_RETURN_MAX_ATTEMPTS = int(
     _env("ANVIL_DISPATCH_RETURN_MAX_ATTEMPTS", "5"))
 DISPATCH_RETURN_WAIT_SECONDS = float(
     _env("ANVIL_DISPATCH_RETURN_WAIT_SECONDS", "900"))
+# 父 step 等待委派负责人干活时，看门狗最多静默多久（秒）；超时后恢复 nudge，
+# 由父 step 明确上报/等待人工处理，避免无限期静默。
+DELEGATION_WAIT_SECONDS = float(
+    _env("ANVIL_DELEGATION_WAIT_SECONDS", "21600"))
+# 唤醒队列在 processing 状态的租约：调度器崩溃后超过该时长重新排队。
+WAKE_REQUEST_LEASE_SECONDS = float(
+    _env("ANVIL_WAKE_REQUEST_LEASE_SECONDS", "120"))
+# 目标仍 running/pump 失败时的最大重试次数；超过后保留 wake_note 并放弃本次请求。
+WAKE_REQUEST_MAX_ATTEMPTS = int(
+    _env("ANVIL_WAKE_REQUEST_MAX_ATTEMPTS", "24"))
 CONTEXT_RETURN_MAX_ATTEMPTS = int(
     _env("ANVIL_CONTEXT_RETURN_MAX_ATTEMPTS", "5"))
 CONTEXT_RETURN_BACKOFF_SECONDS = float(

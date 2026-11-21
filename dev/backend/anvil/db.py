@@ -1338,12 +1338,16 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_slice_context_v2(conn)
     _migrate_run_recovery_v1(conn)
     _migrate_dispatch_child_v1(conn)
+    _migrate_delegation_scope_v1(conn)
+    _migrate_wake_requests_v1(conn)
+    _migrate_wake_requests_v2(conn)
     _migrate_dispatch_notify_v1(conn)
     _migrate_context_return_v1(conn)
     _migrate_context_return_v2(conn)
     _migrate_context_return_v3(conn)
     _migrate_claim_release_v1(conn)
     _migrate_subagents_v1(conn)
+    _migrate_subagents_v2(conn)
     _migrate_subagent_hint_v1(conn)
     _migrate_knowledge_repos_v1(conn)
     _migrate_notes_repo_ids_v2(conn)
@@ -1877,6 +1881,45 @@ def _migrate_subagents_v1(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_subagents_v2(conn: sqlite3.Connection) -> None:
+    """运行时 subagent 完整归属：父进程代次/会话/sidechain/上下文 + 中断原因。"""
+    if _setting(conn, "schema.subagents_v2"):
+        return
+    for spec in (
+        "subagent_type TEXT",
+        "proc_generation INTEGER",
+        "native_session_id TEXT",
+        "parent_tool_use_id TEXT",
+        "slice_key TEXT",
+        "step_id TEXT",
+        "interrupt_reason TEXT",
+    ):
+        try:
+            conn.execute(f"ALTER TABLE run_subagents ADD COLUMN {spec}")
+        except sqlite3.OperationalError:
+            pass
+    conn.execute(
+        "UPDATE run_subagents SET "
+        "native_session_id=COALESCE(native_session_id, ("
+        "  SELECT r.native_session_id FROM runs r WHERE r.id=run_subagents.run_id)), "
+        "slice_key=COALESCE(slice_key, ("
+        "  SELECT r.slice_key FROM runs r WHERE r.id=run_subagents.run_id)), "
+        "step_id=COALESCE(step_id, ("
+        "  SELECT r.step_id FROM runs r WHERE r.id=run_subagents.run_id))")
+    for stmt in (
+        "CREATE INDEX IF NOT EXISTS idx_run_subagents_task_time "
+        "ON run_subagents(task_id, started_at)",
+        "CREATE INDEX IF NOT EXISTS idx_run_subagents_role_time "
+        "ON run_subagents(role_slug, started_at)",
+    ):
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+    _set_setting(conn, "schema.subagents_v2", "1")
+    conn.commit()
+
+
 def _migrate_subagent_hint_v1(conn: sqlite3.Connection) -> None:
     """workflow step 是否注入只读 subagent 调查提示。"""
     if _setting(conn, "schema.subagent_hint_v1"):
@@ -1926,6 +1969,73 @@ def _migrate_context_return_v2(conn: sqlite3.Connection) -> None:
         "UPDATE runs SET context_returned_at=NULL "
         "WHERE context_return_after_turn=1 AND context_returned_at IS NOT NULL")
     _set_setting(conn, "schema.context_return_v2", "1")
+    conn.commit()
+
+
+def _migrate_wake_requests_v1(conn: sqlite3.Connection) -> None:
+    """持久化唤醒队列：delegation 等事件由 scheduler 统一解析目标并投递。"""
+    if _setting(conn, "schema.wake_requests_v1"):
+        return
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS wake_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            role_slug TEXT NOT NULL,
+            workflow_id TEXT,
+            step_id TEXT,
+            slice_key TEXT,
+            reason TEXT NOT NULL,
+            note TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            claimed_at TEXT,
+            detail TEXT,
+            created_at TEXT NOT NULL
+        )
+        """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wake_requests_pending "
+        "ON wake_requests(status, id)")
+    _set_setting(conn, "schema.wake_requests_v1", "1")
+    conn.commit()
+
+
+def _migrate_wake_requests_v2(conn: sqlite3.Connection) -> None:
+    """唤醒请求重试计数 + 同目标 pending 唯一（并发 enqueue 去重）。"""
+    if _setting(conn, "schema.wake_requests_v2"):
+        return
+    try:
+        conn.execute(
+            "ALTER TABLE wake_requests ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_wake_requests_pending "
+            "ON wake_requests(task_id, role_slug, COALESCE(workflow_id,''), "
+            "COALESCE(step_id,''), reason) WHERE status='pending'")
+    except sqlite3.OperationalError:
+        # 旧 SQLite 不支持表达式索引时退化为普通索引（enqueue 仍有 check-then-insert）。
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_wake_requests_target "
+                "ON wake_requests(task_id, role_slug, reason, status)")
+        except sqlite3.OperationalError:
+            pass
+    _set_setting(conn, "schema.wake_requests_v2", "1")
+    conn.commit()
+
+
+def _migrate_delegation_scope_v1(conn: sqlite3.Connection) -> None:
+    """委派工单绑定创建时的 workflow/execution，避免旧 execution 的委派卡住新执行。"""
+    if _setting(conn, "schema.delegation_scope_v1"):
+        return
+    for spec in ("parent_workflow_id TEXT", "parent_execution_no INTEGER"):
+        try:
+            conn.execute(f"ALTER TABLE tasks ADD COLUMN {spec}")
+        except sqlite3.OperationalError:
+            pass
+    _set_setting(conn, "schema.delegation_scope_v1", "1")
     conn.commit()
 
 

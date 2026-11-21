@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
   api, subscribeEvents,
-  type ContextManifest, type Role, type RoleRuntimeStatus, type Run, type Task,
-  type TaskDispatch, type TimelineEvent, type Workflow,
+  type ContextManifest, type Role, type RoleRuntimeStatus, type Run, type SubagentRecord,
+  type Task, type TaskDispatch, type TimelineEvent, type Workflow,
 } from "../api/client";
 import { taskRoleState } from "../roleStatus";
 import { formatClock, formatShort } from "../time";
@@ -50,6 +50,8 @@ export function RoleSessions({ task, roles, workflow, dispatches = [], relatedTa
   const [logs, setLogs] = useState<Record<string, string>>({});
   const [timelines, setTimelines] = useState<Record<string, TimelineEvent[]>>({});
   const [manifests, setManifests] = useState<Record<string, ContextManifest[]>>({});
+  const [subagentHistory, setSubagentHistory] =
+    useState<Record<string, SubagentRecord[]>>({});
   const [runtimes, setRuntimes] = useState<Record<string, RoleRuntimeStatus>>({});
   // 参与角色 + planner（通常是 Cindy）：planner 也可能同时服务多个任务。
   const slugs = Array.from(new Set([
@@ -75,6 +77,11 @@ export function RoleSessions({ task, roles, workflow, dispatches = [], relatedTa
         lastLogAt = Date.now();
         api.getRunLog(expanded)
           .then((r) => setLogs((prev) => ({ ...prev, [expanded]: r.exists ? r.content : "（该会话暂无日志）" })))
+          .catch(() => {});
+      }
+      if (expanded) {
+        api.listRunSubagents(expanded)
+          .then((rows) => setSubagentHistory((prev) => ({ ...prev, [expanded]: rows })))
           .catch(() => {});
       }
       api.listTaskRuns(task.id)
@@ -354,6 +361,34 @@ export function RoleSessions({ task, roles, workflow, dispatches = [], relatedTa
                     <p className="muted">
                       子代理由运行时管理；Anvil 只展示可观测到的状态和结果，不保证完整子上下文。
                     </p>
+                  </div>
+                )}
+                {(subagentHistory[run.id]?.length ?? 0) > 0 && (
+                  <div className="rs-subagents">
+                    <strong>子代理历史</strong>
+                    <span className="muted"> · 运行时管理，Anvil 只观测</span>
+                    <ul>
+                      {(subagentHistory[run.id] ?? []).map((sub) => (
+                        <li key={sub.id}>
+                          <span className={`status status-${sub.status}`}>
+                            {sub.status === "running" ? "运行中"
+                              : sub.status === "completed" ? "已完成"
+                                : sub.status === "interrupted" ? "已中断" : sub.status}
+                          </span>{" "}
+                          <span className="mono">
+                            {sub.subagent_type || sub.tool_name || "subagent"}
+                          </span>
+                          {sub.description ? ` · ${sub.description}` : ""}
+                          {sub.step_id ? <span className="muted"> · {sub.step_id}</span> : null}
+                          {sub.interrupt_reason ? (
+                            <span className="muted"> · {sub.interrupt_reason}</span>
+                          ) : null}
+                          {sub.result_summary ? (
+                            <div className="muted">{sub.result_summary}</div>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
                   </div>
                 )}
                 <div className="rs-tabs">

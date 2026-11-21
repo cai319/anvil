@@ -114,7 +114,7 @@ def create_draft(conn: sqlite3.Connection, goal: str, tree: dict,
         from . import workflow as workflow_service
         tree = workflow_service.normalize_definition(conn, tree)
         workflow_service.validate_definition(
-            conn, tree,
+            conn, tree, task_id=source_task,
             require_subagent_decisions=not str(created_by).startswith("human"))
         if enforce_role_coverage:
             workflow_service.validate_role_coverage(conn, source_task, tree)
@@ -285,7 +285,7 @@ def update_draft(conn: sqlite3.Connection, did: str, tree: dict,
         raise ConflictError("workflow draft missing source_task")
     from . import workflow as workflow_service
     tree = workflow_service.normalize_definition(conn, tree)
-    workflow_service.validate_definition(conn, tree)
+    workflow_service.validate_definition(conn, tree, task_id=source_task)
     workflow_service.validate_role_coverage(conn, source_task, tree)
     conn.execute(
         "UPDATE board_drafts SET goal=COALESCE(?, goal), workspace_id=COALESCE(?, workspace_id), "
@@ -605,6 +605,7 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
     landed: list[str] = []
     replans: list[dict] = []
     warnings: list[str] = []
+    participants_added: dict[str, list[str]] = {}
     # 批量审批先 preflight：任一 draft 已失效就整批拒绝，避免部分落地后
     # 后面的 draft 再报 409。
     drafts: list[dict] = []
@@ -666,7 +667,8 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
             if str(draft.get("created_by") or "").startswith("agent:"):
                 try:
                     workflow_service.validate_definition(
-                        conn, draft["tree"], require_subagent_decisions=True)
+                        conn, draft["tree"], task_id=draft.get("source_task"),
+                        require_subagent_decisions=True)
                 except ConflictError as exc:
                     raise ConflictError(
                         f"workflow draft {did} 不能批准：{exc}。"
@@ -676,13 +678,19 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
                 knowledge_binding.apply_cindy_draft(conn, draft["source_task"], draft["tree"])
             except Exception as exc:  # noqa: BLE001 —— 绑定失败不阻断审批
                 warnings.append(f"{did}: knowledge repos not applied ({exc})")
+            # 最终审批 = 参与者与 workflow 角色一致的确认点：workflow 中出现但尚未
+            # 绑定的现有角色自动加入任务参与者；human 指定但未安排的角色会阻止审批。
+            added = workflow_service.sync_workflow_participants(
+                conn, draft["source_task"], draft["tree"])
+            if added:
+                participants_added[did] = added
             # create_workflow 会申请 task 生命周期 lease（需要 commit），先提交本批
             # 已有的 DML，避免被锁内部提交带出意外的半状态。
             conn.commit()
             workflow_service.create_workflow(
                 conn, draft["source_task"], draft["tree"], created_by=draft["created_by"],
                 restart_running=restart_running, restart_reason=restart_reason,
-                restart_note=restart_note, draft_id=did)
+                restart_note=restart_note, draft_id=did, sync_participants=True)
             n = len((draft.get("tree") or {}).get("steps") or []) or 1
             action = "终止旧执行并重新开始" if running else "开始执行"
             conn.execute(
@@ -734,7 +742,8 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
         repo_catalog.invalidate_catalog()
     except Exception:  # noqa: BLE001
         pass
-    return {"landed": landed, "replans": replans, "warnings": warnings}
+    return {"landed": landed, "replans": replans, "warnings": warnings,
+            "participants_added": participants_added}
 
 
 def reject(conn: sqlite3.Connection, draft_id: str, by: str = "human",

@@ -97,7 +97,7 @@ def test_step_prompt_uses_agent_inbox_and_stays_small(conn):
                                   workflow_id="wf-1")
     prompt = nodes._prompt_for_run(conn, run, {"title": "跳棋", "description": "实现"})
     assert "## 未读会话" in prompt and "anvil inbox check" in prompt
-    assert len(prompt) < 6000  # 不把全量历史 push 进上下文
+    assert len(prompt) < 8500  # 不把全量历史 push 进上下文（含协作/委派/派遣协议头）
 
 
 def test_projected_protocol_matches_run_kind(conn):
@@ -211,3 +211,89 @@ def test_project_instruction_uses_given_protocol(tmp_path):
     text = target.read_text(encoding="utf-8")
     assert "anvil step submit" in text
     assert "第一步必须执行 `anvil task claim" not in text
+
+
+def test_step_continuation_header_reports_delegation_wait(conn):
+    """续跑头必须显式告诉父 step：在等谁、该验收还是继续等待。"""
+    from anvil.services import workflow as workflow_service
+
+    wf = workflow_service.create_workflow(conn, "T1", {
+        "steps": [{"id": "S1", "title": "执行", "role": "developer"}]})
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO tasks (id,title,status,type,parent_id,parent_step_id,"
+        "parent_workflow_id,parent_execution_no,created_at,updated_at) "
+        "VALUES ('C1','构造 PoC','in_progress','delegation','T1','S1',?,1,?,?)",
+        (wf["id"], now, now))
+    run = runs_service.create_run(
+        conn, "developer", "T1", prompt="步骤说明", step_id="S1",
+        workflow_id=wf["id"])
+    conn.execute(
+        "UPDATE workflow_steps SET status='running', run_id=? "
+        "WHERE workflow_id=? AND step_id='S1'", (run["id"], wf["id"]))
+    conn.commit()
+
+    prompt = nodes._prompt_for_run(
+        conn, {**run, "wake_note": "step-nudge S1 #1"},
+        tasks_service.get(conn, "T1"))
+    assert "等待中的委派" in prompt
+    assert "C1" in prompt
+    assert "不要重复创建同一委派" in prompt
+
+    conn.execute("UPDATE tasks SET status='in_review' WHERE id='C1'")
+    conn.commit()
+    prompt = nodes._prompt_for_run(
+        conn, {**run, "wake_note": "wake-request"}, tasks_service.get(conn, "T1"))
+    assert "待验收的委派" in prompt
+    assert "delegation-accept" in prompt
+
+
+def test_prompt_for_run_by_path_renders_latest_wake_note(tmp_path):
+    """daemon 写 stdin 前重算提示词：排队期间追加的 wake_note 必须可见。"""
+    from anvil.db import connect
+    from anvil.services import dispatch as dispatch_service
+
+    db_path = str(tmp_path / "render.db")
+    conn = connect(db_path)
+    now = now_iso()
+    conn.execute("INSERT INTO tasks (id,title,description,status,created_at,updated_at) "
+                 "VALUES ('T1','跳棋','实现跳棋','in_progress',?,?)", (now, now))
+    conn.commit()
+    run = runs_service.create_run(conn, "developer", "T1", prompt="步骤说明",
+                                  step_id="S1", workflow_id="wf-1")
+    dispatch_service.append_wake_note(
+        conn, run["id"], "[委派待验收] 子任务 C1 已提交，请验收")
+    conn.commit()
+    conn.close()
+
+    text = nodes.prompt_for_run_by_path(db_path, run["id"])
+    assert text is not None
+    assert "委派待验收" in text
+
+
+def test_collaboration_protocol_defines_modes_and_q1_branches():
+    """SDD：四种协作方式与 workflow 已排定分支必须完整写给 LLM。"""
+    from anvil.graph import render
+
+    text = render.COLLABORATION_PROTOCOL
+    for needle in (
+        "协作方式选择", "先查 workflow", "已执行", "执行中", "尚未启动",
+        "没有该 slice 的 run/上下文", "mention", "subagent", "委派", "派遣", "cindy",
+        "blocking", "anvil task note", "不要唤醒", "同角色", "独立产出并被验收",
+    ):
+        assert needle in text, needle
+    # 旧绝对句必须消失，避免 mention 永远挤掉委派。
+    assert "能用当前 step 或 `anvil task mention` 解决的，不建子任务" not in (
+        render.DELEGATION_PROTOCOL)
+    assert "能用当前 step 或 mention 解决的" not in render.DELEGATION_PROTOCOL
+    # 委派禁止同角色自锁。
+    assert "目标角色 ≠ 当前 step 角色" in render.DELEGATION_PROTOCOL
+    # 派遣必须说清非阻塞/不等待/回切条件。
+    for needle in ("非阻塞", "不阻塞本 step", "不要等待", "回切仅在原切片仍 running"):
+        assert needle in render.DISPATCH_PROTOCOL, needle
+    # STEP_PROTOCOL 组合顺序：协作判断在委派/派遣之前。
+    step = render.STEP_PROTOCOL
+    start = step.index(render.COLLABORATION_PROTOCOL)
+    assert start < step.index(render.DELEGATION_PROTOCOL, start)
+    assert step.index(render.DELEGATION_PROTOCOL, start) < step.index(
+        render.DISPATCH_PROTOCOL, start)

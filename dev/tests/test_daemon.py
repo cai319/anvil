@@ -1387,3 +1387,118 @@ def test_context_switch_marks_old_running_run_suspended(env, monkeypatch):
 
     assert mgr._switch_context_inner(conn, r, item, "__global__") is True
     assert _run_status(mgr.db_path, run["id"]) == "suspended"
+
+
+def test_delivery_refresh_drops_committed_unread_block(tmp_path):
+    """排队期间角色已 inbox commit：投递前重算未读，去掉过期“## 未读会话”。"""
+    from types import SimpleNamespace
+    from anvil.util import now_iso
+    from anvil.services import agent_inbox
+
+    conn = connect(str(tmp_path / "refresh.db"))
+    now = now_iso()
+    conn.execute("INSERT INTO tasks (id,title,status,created_at,updated_at) "
+                 "VALUES ('T1','t','in_progress',?,?)", (now, now))
+    conn.commit()
+    tasks_service.mention(conn, "T1", "pm", "dev", "请复核接口")
+    aid = conn.execute("SELECT MAX(id) AS n FROM activities").fetchone()["n"]
+    agent_inbox.commit(conn, "dev", "T1", aid)
+
+    text = ("## 步骤续跑\n继续 S1\n\n"
+            "<!-- ANVIL:UNREAD_START -->\n"
+            "## 未读会话（1 条，最近 3 条）\n- [pm] 请复核接口\n\n"
+            "处理完执行 commit。\n"
+            "<!-- ANVIL:UNREAD_END -->\n\n"
+            "## 完成方式\nanvil step submit ...\n\n## 协作与挑战\nXXX")
+    item = _Queued(text=text, run_id=None, task_id="T1", spec=None)
+    out = DaemonManager._refresh_unread_block(
+        conn, SimpleNamespace(role="dev"), item, text)
+    assert "## 未读会话" not in out
+    assert "请复核接口" not in out
+    assert "## 步骤续跑" in out and "## 协作与挑战" in out
+    # 关键：不能把未读块之后的 STEP_PROTOCOL 核心（完成方式/submit 指令）截掉。
+    assert "## 完成方式" in out and "anvil step submit" in out
+    conn.close()
+
+
+def test_delivery_refresh_leaves_legacy_text_without_markers_unchanged(tmp_path):
+    """没有精确边界标记的旧文本不能被宽松探测截断。"""
+    from types import SimpleNamespace
+
+    conn = connect(str(tmp_path / "legacy.db"))
+    text = "## 未读会话（1 条）\n- [pm] x\n\n## 完成方式\nanvil step submit ..."
+    item = _Queued(text=text, run_id=None, task_id=None, spec=None)
+    out = DaemonManager._refresh_unread_block(
+        conn, SimpleNamespace(role="dev"), item, text)
+    assert out == text
+    conn.close()
+
+
+def test_step_wake_is_stale_when_step_not_running_or_rebound(tmp_path):
+    """步骤已推进/重绑后，排队中的旧 step 唤醒必须丢弃。"""
+    from anvil.services import workflow as wf_service
+    from anvil.util import now_iso
+
+    conn = connect(str(tmp_path / "stale.db"))
+    now = now_iso()
+    conn.execute("INSERT INTO tasks (id,title,status,created_at,updated_at) "
+                 "VALUES ('T1','t','in_progress',?,?)", (now, now))
+    conn.commit()
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,workflow_id,step_id,started_at) "
+        "VALUES ('R1','dev','T1','suspended',?,'S1',?)", (wf["id"], now))
+    conn.execute(
+        "UPDATE workflow_steps SET status='running', run_id='R1' "
+        "WHERE workflow_id=? AND step_id='S1'", (wf["id"],))
+    conn.commit()
+    item = _Queued(text="x", run_id="R1", task_id="T1", spec=None)
+    assert DaemonManager._step_wake_is_stale(None, conn, item) is False
+
+    conn.execute("UPDATE workflow_steps SET status='approved' WHERE workflow_id=?",
+                 (wf["id"],))
+    conn.commit()
+    assert DaemonManager._step_wake_is_stale(None, conn, item) is True
+
+    conn.execute("UPDATE workflow_steps SET status='running', run_id='R2' "
+                 "WHERE workflow_id=?", (wf["id"],))
+    conn.commit()
+    assert DaemonManager._step_wake_is_stale(None, conn, item) is True
+    conn.close()
+
+
+def test_delivery_without_on_render_clears_wake_note(env):
+    """无重渲染回调时快照视为权威：写 stdin 成功后照常消费 wake_note。"""
+    conn, mgr, fake, log = env
+    task = tasks_service.create(conn, title="t")
+    run = runs_service.create_run(conn, "qa-role", task_id=task["id"])
+    conn.execute("UPDATE runs SET wake_note='[一次性] note' WHERE id=?",
+                 (run["id"],))
+    conn.commit()
+
+    _deliver(mgr, conn, fake, log, run["id"], "work", task_id=task["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    row = conn.execute("SELECT wake_note FROM runs WHERE id=?",
+                       (run["id"],)).fetchone()
+    assert row["wake_note"] is None
+
+
+def test_delivery_render_failure_preserves_wake_note(env):
+    """渲染失败退回快照且不消费 wake_note，并写 delivery.render_failed 审计。"""
+    conn, mgr, fake, log = env
+    mgr.on_render = lambda run_id: (_ for _ in ()).throw(RuntimeError("boom"))
+    task = tasks_service.create(conn, title="t")
+    run = runs_service.create_run(conn, "qa-role", task_id=task["id"])
+    conn.execute("UPDATE runs SET wake_note='[一次性] note' WHERE id=?",
+                 (run["id"],))
+    conn.commit()
+
+    _deliver(mgr, conn, fake, log, run["id"], "work", task_id=task["id"])
+    assert _wait(lambda: _run_status(mgr.db_path, run["id"]) == "suspended")
+    row = conn.execute("SELECT wake_note FROM runs WHERE id=?",
+                       (run["id"],)).fetchone()
+    assert row["wake_note"] == "[一次性] note"
+    assert conn.execute(
+        "SELECT 1 FROM audit WHERE action='delivery.render_failed' LIMIT 1"
+    ).fetchone() is not None

@@ -261,3 +261,39 @@ def test_migration_reparents_legacy_top_level_dispatch(env):
         "SELECT parent_id, type FROM tasks WHERE id='T-OLD'").fetchone()
     assert row["parent_id"] == source["id"]
     assert row["type"] == "dispatch"
+
+
+def test_dispatch_blocked_by_governance_gate(env):
+    """派遣创建 run 前必须过治理闸门（冻结 / 并发 / token 预算）。"""
+    from anvil.services import governance
+
+    conn = env
+    source = tasks_service.create(
+        conn, title="来源任务", assignee="qa", assignees=["qa", "dev"])
+    governance.set_freeze(conn, True)
+    with pytest.raises(dispatch.DispatchError, match="governance"):
+        dispatch.create_dispatch(
+            conn, source_task_id=source["id"], target_role="dev",
+            message="冻结期间不应创建派遣", requester="qa")
+    assert conn.execute(
+        "SELECT 1 FROM tasks WHERE parent_id=? AND type='dispatch'",
+        (source["id"],)).fetchone() is None
+
+
+def test_dispatch_reuses_existing_before_governance_freeze(env):
+    """幂等优先：frozen 时重复 dispatch 应返回已有记录，而不是治理错误。"""
+    from anvil.services import governance
+
+    conn = env
+    source = tasks_service.create(
+        conn, title="来源任务", assignee="qa", assignees=["qa", "dev"])
+    first = dispatch.create_dispatch(
+        conn, source_task_id=source["id"], target_role="dev",
+        message="同一个请求", requester="qa")
+    governance.set_freeze(conn, True)
+
+    second = dispatch.create_dispatch(
+        conn, source_task_id=source["id"], target_role="dev",
+        message="同一个请求", requester="qa")
+    assert second["reused"] is True
+    assert second["task"]["id"] == first["task"]["id"]

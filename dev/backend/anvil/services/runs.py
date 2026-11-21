@@ -142,6 +142,32 @@ def find_active_run(conn: sqlite3.Connection, task_id: str,
     return dict(r) if r else None
 
 
+def find_running_step_run(conn: sqlite3.Connection, task_id: str,
+                          role_slug: str, slice_key=_ANY_SLICE) -> dict | None:
+    """该角色当前 running workflow step 的 run（步骤仍 running 且 run 可投递）。
+
+    mention 路由优先落在步骤 run，而不是新建/复用 reply run；步骤 run 若在
+    created/projecting/running，调用方仍可把它作为 context_return 目标。
+    """
+    q = ("SELECT r.* FROM runs r "
+         "JOIN workflow_steps ws ON ws.workflow_id=r.workflow_id "
+         "AND ws.step_id=r.step_id "
+         "JOIN workflows w ON w.id=ws.workflow_id "
+         "WHERE w.task_id=? AND ws.status='running' AND ws.run_id=r.id "
+         "AND r.role_slug=? "
+         "AND r.status IN ('created','projecting','running','suspended')")
+    params: list = [task_id, role_slug]
+    if slice_key is not _ANY_SLICE:
+        if slice_key is None:
+            q += " AND r.slice_key IS NULL"
+        else:
+            q += " AND r.slice_key=?"
+            params.append(slice_key)
+    q += " ORDER BY r.started_at DESC LIMIT 1"
+    r = conn.execute(q, params).fetchone()
+    return dict(r) if r else None
+
+
 def set_status(conn: sqlite3.Connection, run_id: str, status: str, ended_at: str | None = None,
                failure_class: str | None = None,
                from_statuses: tuple[str, ...] | list[str] | None = None) -> bool:
@@ -520,3 +546,26 @@ def _create_worktree(conn: sqlite3.Connection, run_id: str, role_slug: str, task
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+def list_subagents(conn: sqlite3.Connection, *, run_id: str | None = None,
+                   role_slug: str | None = None, task_id: str | None = None,
+                   status: str | None = None,
+                   limit: int = 100) -> list[dict]:
+    """运行时 subagent 的只读历史（观测语义；不参与调度）。"""
+    clauses: list[str] = []
+    params: list = []
+    if run_id:
+        clauses.append("run_id=?"); params.append(run_id)
+    if role_slug:
+        clauses.append("role_slug=?"); params.append(role_slug)
+    if task_id:
+        clauses.append("task_id=?"); params.append(task_id)
+    if status:
+        clauses.append("status=?"); params.append(status)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = conn.execute(
+        f"SELECT * FROM run_subagents{where} "
+        "ORDER BY started_at DESC, rowid DESC LIMIT ?",
+        (*params, max(1, min(int(limit or 100), 500)))).fetchall()
+    return [dict(r) for r in rows]

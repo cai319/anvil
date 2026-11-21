@@ -12,7 +12,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from .. import config
-from ..util import jdumps, new_id, now_iso
+from ..util import ConflictError, jdumps, new_id, now_iso
 from . import context_router, ledger, roles as roles_service
 from . import runs as runs_service
 from . import tasks as tasks_service
@@ -94,8 +94,6 @@ def create_dispatch(conn: sqlite3.Connection, *, source_task_id: str,
                     source_slice_key: str | None = None,
                     source_step_id: str | None = None,
                     source_run_id: str | None = None,
-                    repo: str | None = None, workspace_id: str | None = None,
-                    base_branch: str | None = None,
                     force: bool = False,
                     reason_code: str = "explicit",
                     reason_json: dict | None = None) -> dict:
@@ -125,9 +123,10 @@ def create_dispatch(conn: sqlite3.Connection, *, source_task_id: str,
     if _dispatch_depth(conn, source_task_id) >= max(0, int(config.DISPATCH_MAX_DEPTH)):
         raise DispatchError(
             f"dispatch depth limit reached ({config.DISPATCH_MAX_DEPTH})")
-
     request_hash = _request_hash(source_task_id, source_slice_key, target_role, message)
     if not force:
+        # 幂等优先：已有活跃 dispatch 时必须直接复用，不能因为此刻 frozen/满载
+        # 把重复 mention 变成治理错误。
         existing = _active_dispatch(
             conn, request_hash, source_task_id, source_slice_key, target_role)
         if existing is not None:
@@ -137,6 +136,14 @@ def create_dispatch(conn: sqlite3.Connection, *, source_task_id: str,
             return {"task": task, "run": run, "dispatch": existing, "reused": True}
     else:
         request_hash = f"{request_hash}:force:{new_id()}"
+
+    # 新建 dispatch 会立即为该角色创建 run，必须与 claim 走同一套治理闸门
+    # （冻结 / 每日 token 预算 / 角色、运行时、系统并发）。
+    from . import governance  # 惰性导入，避免 dispatch↔governance 的初始化环
+    try:
+        governance.check_claim_allowed(conn, source, target_role)
+    except ConflictError as exc:
+        raise DispatchError(f"dispatch blocked by governance: {exc}") from exc
 
     source_workflow_id = None
     if source_run_id:
@@ -558,7 +565,7 @@ def record_context_return(conn: sqlite3.Connection, *, switched_run_id: str,
     """
     if not switched_run_id or not return_context_key:
         return
-    if return_context_key == _context_for_run(conn, switched_run_id):
+    if not return_run_id and return_context_key == _context_for_run(conn, switched_run_id):
         return
     switched = conn.execute(
         "SELECT role_slug FROM runs WHERE id=?", (switched_run_id,)).fetchone()

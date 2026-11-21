@@ -1109,6 +1109,10 @@ function TemplateInspector({ definition, selectedStep, selectedEdge, selectedLoo
           )}
           <label className="wft-check"><input type="checkbox" checked={Boolean(selectedStep.gate)}
             onChange={(e) => updateStep({ gate: e.target.checked })} /> 人工审核门</label>
+          <label className="wft-check"><input type="checkbox"
+            checked={Boolean(selectedStep.subagent_hint)}
+            onChange={(e) => updateStep({ subagent_hint: e.target.checked })} />
+            {" "}允许运行时只读子代理（hint；运行时不支持时服务端自动降级）</label>
           {selectedStep.gate && (
             <div className="field"><span>审核人 Meeple</span>
               <select value={selectedStep.reviewer_slot || ""} onChange={(e) => updateStep({ reviewer_slot: e.target.value || null })}>
@@ -1231,6 +1235,10 @@ function TemplateInspector({ definition, selectedStep, selectedEdge, selectedLoo
                   <textarea rows={3} value={spec.instructions || ""}
                     onChange={(e) => updateLoopPhase(phase, { instructions: e.target.value })} />
                 </div>
+                <label className="wft-check"><input type="checkbox"
+                  checked={Boolean(spec.subagent_hint)}
+                  onChange={(e) => updateLoopPhase(phase, { subagent_hint: e.target.checked })} />
+                  {" "}允许运行时只读子代理（运行时不支持时服务端自动降级）</label>
                 {phase === "decide" && (
                   <div className="field"><span>最大重做次数</span>
                     <input type="number" min={0} value={spec.max_rework ?? 2}

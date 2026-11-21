@@ -42,6 +42,65 @@ def _hint_flag(value, where: str) -> int:
     raise ConflictError(f"{where}.subagent_hint must be a JSON boolean (true|false)")
 
 
+def _role_runtime_id(conn: sqlite3.Connection, role_slug: str | None) -> str | None:
+    """角色绑定的 runtime id；未绑定时回退系统默认 runtime。"""
+    if role_slug:
+        row = conn.execute(
+            "SELECT definition_json FROM roles WHERE slug=?", (role_slug,)).fetchone()
+        if row is not None:
+            definition = jloads(row["definition_json"], {})
+            runtime = definition.get("runtime")
+            if isinstance(runtime, dict):
+                runtime = runtime.get("id")
+            if runtime:
+                return str(runtime)
+    return config.DEFAULT_RUNTIME
+
+
+def _runtime_supports_subagents(conn: sqlite3.Connection,
+                                role_slug: str | None) -> bool:
+    """与 `graph.nodes._supports_subagents` 同口径：DB capabilities → YAML 定义。"""
+    from . import runtime as runtime_service
+
+    runtime_id = _role_runtime_id(conn, role_slug)
+    if not runtime_id:
+        return False
+    row = runtime_service.get(conn, runtime_id) or {}
+    caps = row.get("capabilities") or {}
+    if isinstance(caps, str):
+        caps = jloads(caps, {})
+    if isinstance(caps, dict) and "supports_subagents" in caps:
+        return bool(caps["supports_subagents"])
+    definition = runtime_service.load_definitions().get(runtime_id) or {}
+    return bool((definition.get("capabilities") or {}).get("supports_subagents"))
+
+
+def _effective_hint(conn: sqlite3.Connection, role_slug: str | None, value,
+                    *, where: str, task_id: str | None = None,
+                    workflow_id: str | None = None) -> int:
+    """能力感知的 hint：角色 runtime 不支持时一律降为 false 并审计（不拒绝草案）。"""
+    requested = _hint_flag(value, where)
+    if not requested:
+        return 0
+    if _runtime_supports_subagents(conn, role_slug):
+        return 1
+    runtime_id = _role_runtime_id(conn, role_slug)
+    try:
+        ledger.emit(
+            conn, "subagent_hint.downgraded", task_id=task_id,
+            workflow_id=workflow_id, actor_type="system", actor="validator",
+            payload={
+                "where": where, "role": role_slug or None,
+                "runtime": runtime_id, "requested": True, "effective": False,
+                "reason": "runtime does not support subagents",
+            })
+    except Exception:  # noqa: BLE001 —— 审计失败不阻断降级
+        pass
+    logger.info(
+        "subagent_hint downgraded: %s role=%s runtime=%s", where, role_slug, runtime_id)
+    return 0
+
+
 def _expand_slices(definition: dict) -> dict:
     """把 Cindy 的 slices 定义展开成每个切片的固定闭环。
 
@@ -73,6 +132,7 @@ def _expand_slices(definition: dict) -> dict:
         if current_slice is not None:
             # 静态切片同样按 slice 隔离上下文；source_step_id 只属于运行期动态切片。
             step.setdefault("slice_key", current_slice)
+        step["instructions"] = _append_collab_rule(step.get("instructions"))
         steps.append(step)
         return sid
 
@@ -390,7 +450,8 @@ def _plan_steps(conn: sqlite3.Connection, steps: list[dict]):
             "decision_options": options,
             "evidence_required": 1 if s.get("evidence_required") else 0,
             "scope_paths": [str(x) for x in scope_paths],
-            "subagent_hint": _hint_flag(s.get("subagent_hint"), f"step {sid}"),
+            "subagent_hint": _effective_hint(
+                conn, role, s.get("subagent_hint"), where=f"step {sid}"),
         }
         on_reject: list[str] = []
         max_rework = 0
@@ -494,7 +555,8 @@ def _require_loop_subagent_decisions(loop: dict) -> None:
 
 
 def _validate_loop(conn: sqlite3.Connection, definition: dict,
-                   raw: dict[str, dict]) -> None:
+                   raw: dict[str, dict], *, task_id: str | None = None,
+                   workflow_id: str | None = None) -> None:
     """校验 plan_slices + loop 模板；切片由运行期角色产出，模板由 Cindy 定义。"""
     from . import roles as roles_service
 
@@ -537,7 +599,7 @@ def _validate_loop(conn: sqlite3.Connection, definition: dict,
     execute_role = role_of("execute")
     verify_role = role_of("verify")
     fix_role = role_of("fix", execute_role)
-    role_of("verify2", verify_role)
+    verify2_role = role_of("verify2", verify_role)
     decision_role = role_of("decide")
     if execute_role == verify_role:
         raise ConflictError("workflow loop: verify.role must differ from execute.role")
@@ -547,6 +609,7 @@ def _validate_loop(conn: sqlite3.Connection, definition: dict,
         raise ConflictError(
             "workflow loop: decide.role must differ from execute/fix roles")
     scope = loop.get("scope")
+    scope_role = decision_role
     if scope is not None:
         if not isinstance(scope, dict):
             raise ConflictError("workflow loop.scope must be an object")
@@ -565,10 +628,22 @@ def _validate_loop(conn: sqlite3.Connection, definition: dict,
         raise ConflictError("workflow loop.decide.max_rework must be an integer")
     if max_rework < 0:
         raise ConflictError("workflow loop.decide.max_rework must be >= 0")
+    # 能力感知：角色 runtime 不支持 subagent 时，hint 一律降为 false 并审计。
+    # 这里就地改写 definition；create_workflow 随后会把它写入 definition_json，
+    # 运行期切片展开读取的就是降级后的值。
+    phase_roles = {
+        "scope": scope_role, "execute": execute_role, "verify": verify_role,
+        "fix": fix_role, "verify2": verify2_role, "decide": decision_role,
+    }
     for phase in LOOP_HINT_PHASES:
         spec = loop.get(phase)
         if isinstance(spec, dict) and "subagent_hint" in spec:
-            _hint_flag(spec["subagent_hint"], f"workflow loop.{phase}")
+            effective = _effective_hint(
+                conn, phase_roles.get(phase), spec["subagent_hint"],
+                where=f"workflow loop.{phase}", task_id=task_id,
+                workflow_id=workflow_id)
+            if not effective:
+                spec["subagent_hint"] = False
 
 
 SLICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -585,6 +660,21 @@ def _merge_unique(*groups) -> list[str]:
                 seen.add(text)
                 out.append(text)
     return out
+
+
+SLICE_COLLAB_RULE = (
+    "协作路由（先判断再行动）：先查 workflow 是否已排定该产出（有则别重复建单；顺序不对 @cindy）；"
+    "本 step 验收依赖的结果：自己做 / 同角色只读用 subagent / 仅评审用 mention / "
+    "另一角色独立验收用委派；本 step 不依赖、切片外且需独立上下文的工作用 dispatch；"
+    "都不适用就记录，不新建工作。"
+)
+
+
+def _append_collab_rule(text: str) -> str:
+    text = str(text or "").strip()
+    if SLICE_COLLAB_RULE in text:
+        return text
+    return (text + "\n\n" + SLICE_COLLAB_RULE) if text else SLICE_COLLAB_RULE
 
 
 def _slice_context(slice: dict) -> str:
@@ -611,7 +701,7 @@ def _join_instructions(spec: dict, context: str, extra: str = "") -> str:
         parts.append(extra.strip())
     if context.strip():
         parts.append(context.strip())
-    return "\n\n".join(parts)
+    return _append_collab_rule("\n\n".join(parts))
 
 
 def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict,
@@ -913,16 +1003,76 @@ def _assert_current_run(step: dict, run_id: str | None) -> None:
         raise ConflictError(f"stale_run: step {step.get('step_id')} has no active run")
 
 
+def open_delegations(conn: sqlite3.Connection, wf: dict, step_id: str,
+                     limit: int | None = None) -> list[dict]:
+    """当前 step 仍未解除的委派工单（done/closed 视为已解除）。
+
+    只检查当前 workflow/execution 的委派；旧 execution 的残留委派不阻塞新执行。
+    """
+    clauses = [
+        "parent_id=?", "parent_step_id=?",
+        "COALESCE(type,'') NOT IN ('dispatch','dispatched')",
+        "status NOT IN ('done','closed')",
+    ]
+    params: list = [wf["task_id"], step_id]
+    if wf.get("id"):
+        clauses.append("(parent_workflow_id IS NULL OR parent_workflow_id=?)")
+        params.append(wf["id"])
+    if wf.get("execution_no") is not None:
+        clauses.append("(parent_execution_no IS NULL OR parent_execution_no=?)")
+        params.append(int(wf["execution_no"]))
+    sql = ("SELECT id, title, status, assignee, created_at FROM tasks WHERE "
+           + " AND ".join(clauses) + " ORDER BY created_at, id")
+    if limit is not None:
+        sql += f" LIMIT {max(1, int(limit))}"
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def child_task_wait_state(conn: sqlite3.Connection, wf: dict, step_id: str,
+                          run_id: str | None = None) -> dict:
+    """父 step 的显式 child-task 等待状态，供看门狗/续跑提示共用。
+
+    state:
+    - none：没有可识别的等待；
+    - delegation：委派负责人在 todo/in_progress，父 step 应休眠等待；
+    - delegation_review：委派已提交 in_review，等父 step 角色验收（应唤醒父 step）；
+    - dispatch：派遣回切已就绪/投递中；
+    - context_return：临时切片等待回切。
+    """
+    children = open_delegations(conn, wf, step_id)
+    if children:
+        review = [c for c in children if c["status"] == "in_review"]
+        state = "delegation_review" if review else "delegation"
+        return {"state": state, "waiting": not review,
+                "review_pending": bool(review), "children": children}
+    if wf.get("id"):
+        row = conn.execute(
+            "SELECT id, target_task_id, target_role, status FROM task_dispatches "
+            "WHERE source_task_id=? AND COALESCE(source_workflow_id,'')=? "
+            "AND COALESCE(source_step_id,'')=? "
+            "AND status IN ('return_ready','returning') LIMIT 1",
+            (wf["task_id"], wf["id"], step_id)).fetchone()
+        if row is not None:
+            return {"state": "dispatch", "waiting": True, "review_pending": False,
+                    "children": [dict(row)]}
+    if run_id:
+        from . import dispatch as dispatch_service
+        if dispatch_service.context_return_is_blocking(conn, run_id):
+            return {"state": "context_return", "waiting": True,
+                    "review_pending": False, "children": []}
+    return {"state": "none", "waiting": False, "review_pending": False,
+            "children": []}
+
+
 def _assert_delegations_done(conn: sqlite3.Connection, wf: dict, step_id: str) -> None:
-    """委派工单未完成前，父 step 不能收口。"""
-    pending = conn.execute(
-        "SELECT id FROM tasks WHERE parent_id=? AND parent_step_id=? "
-        "AND COALESCE(type,'') NOT IN ('dispatch','dispatched') "
-        "AND status != 'done' LIMIT 1",
-        (wf["task_id"], step_id)).fetchone()
-    if pending is not None:
+    """委派工单未完成前，父 step 不能收口。
+
+    closed/cancelled 视为已解除（human 明确终止），不再永久阻塞父 step。
+    """
+    pending = open_delegations(conn, wf, step_id, limit=1)
+    if pending:
         raise ConflictError(
-            f"delegations not all done: {pending['id']} is still open")
+            f"delegations not all done: {pending[0]['id']} is still open")
 
 
 def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
@@ -1149,6 +1299,74 @@ def _validate_issue_board(conn: sqlite3.Connection, task_id: str | None,
             "missing: " + ", ".join(missing))
 
 
+def _participant_roles(conn: sqlite3.Connection, task_id: str) -> set[str]:
+    participants = {
+        row["role_slug"] for row in conn.execute(
+            "SELECT role_slug FROM task_assignees WHERE task_id=?", (task_id,)
+        ).fetchall()
+    }
+    task = conn.execute("SELECT assignee FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if task is not None and task["assignee"]:
+        participants.add(task["assignee"])
+    return participants
+
+
+def _definition_roles(definition: dict) -> set[str]:
+    roles = set(_workflow_roles(definition))
+    for node in definition.get("external_nodes") or []:
+        if isinstance(node, dict):
+            role = str(node.get("role") or "").strip()
+            if role:
+                roles.add(role)
+    return roles
+
+
+def preview_participant_sync(conn: sqlite3.Connection, task_id: str,
+                             definition: dict) -> dict:
+    """最终审批前预览：workflow 角色 vs 任务参与者。"""
+    from . import roles as roles_service
+
+    roles = _definition_roles(definition)
+    participants = _participant_roles(conn, task_id)
+    invalid: list[str] = []
+    for role in roles:
+        row = roles_service.get(conn, role)
+        if row is None or not row.get("enabled", True):
+            invalid.append(role)
+    return {
+        "roles": sorted(roles),
+        "participants": sorted(participants),
+        "add": sorted(roles - participants),
+        "missing": sorted(participants - roles),
+        "invalid": invalid,
+    }
+
+
+def sync_workflow_participants(conn: sqlite3.Connection, task_id: str,
+                               definition: dict) -> list[str]:
+    """最终审批时同步参与者：加 workflow 角色、阻止缺 must-participate。"""
+    preview = preview_participant_sync(conn, task_id, definition)
+    if preview["invalid"]:
+        raise ConflictError(
+            "workflow references unknown or disabled roles: "
+            + ", ".join(preview["invalid"]))
+    if preview["missing"]:
+        raise ConflictError(
+            "workflow does not assign every task participant to a step/phase; "
+            "missing: " + ", ".join(preview["missing"])
+            + ". Add them to the workflow or remove them from the task first.")
+    if not preview["add"]:
+        return []
+    from . import tasks as tasks_service
+    tasks_service.add_assignees(conn, task_id, preview["add"])
+    ledger.emit(
+        conn, "workflow.participants_synced", task_id=task_id,
+        actor_type="system", actor="approval",
+        payload={"added": preview["add"], "roles": preview["roles"]})
+    conn.commit()
+    return preview["add"]
+
+
 def validate_role_coverage(conn: sqlite3.Connection, task_id: str | None,
                            definition: dict) -> None:
     """切片类 workflow 必须让任务绑定的每个角色都参与。
@@ -1181,7 +1399,8 @@ def validate_role_coverage(conn: sqlite3.Connection, task_id: str | None,
 
 
 def validate_definition(conn: sqlite3.Connection, definition: dict, *,
-                        require_subagent_decisions: bool = False) -> None:
+                        require_subagent_decisions: bool = False,
+                        task_id: str | None = None) -> None:
     """落板/草案提交前的结构校验。
 
     关键约束：大型多角色工作流不能是一条没有决策点的串行长链。Cindy 必须按
@@ -1199,7 +1418,7 @@ def validate_definition(conn: sqlite3.Connection, definition: dict, *,
         if isinstance(loop, dict):
             _require_loop_subagent_decisions(loop)
     raw, _plan = _plan_steps(conn, steps)
-    _validate_loop(conn, definition, raw)
+    _validate_loop(conn, definition, raw, task_id=task_id)
 
 
 def terminate_running_workflows(conn: sqlite3.Connection, task_id: str,
@@ -1243,6 +1462,10 @@ def _terminate_running_workflow(conn: sqlite3.Connection, wid: str, reason: str,
         "ended_at=?, updated_at=? WHERE workflow_id=? AND status IN ('pending','rejected')",
         (now, now, wid),
     )
+    for row in conn.execute(
+            "SELECT step_id FROM workflow_steps WHERE workflow_id=?", (wid,)).fetchall():
+        close_step_delegations(
+            conn, wid, row["step_id"], reason="execution_terminated")
     wf = conn.execute(
         "SELECT task_id, execution_no FROM workflows WHERE id=?", (wid,)).fetchone()
     conn.execute(
@@ -1285,7 +1508,8 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
                     restart_running: bool = False,
                     restart_reason: str | None = None,
                     restart_note: str | None = None,
-                    draft_id: str | None = None) -> dict:
+                    draft_id: str | None = None,
+                    sync_participants: bool = False) -> dict:
     with workflow_lifecycle_lock(
             conn, task_id, required=True, wait_seconds=2.0):
         return _create_workflow_locked(
@@ -1294,7 +1518,8 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
             restart_running=restart_running,
             restart_reason=restart_reason,
             restart_note=restart_note,
-            draft_id=draft_id)
+            draft_id=draft_id,
+            sync_participants=sync_participants)
 
 
 def _create_workflow_locked(conn: sqlite3.Connection, task_id: str, definition: dict,
@@ -1303,7 +1528,8 @@ def _create_workflow_locked(conn: sqlite3.Connection, task_id: str, definition: 
                             restart_running: bool = False,
                             restart_reason: str | None = None,
                             restart_note: str | None = None,
-                            draft_id: str | None = None) -> dict:
+                            draft_id: str | None = None,
+                            sync_participants: bool = False) -> dict:
     """落板 workflow（Cindy 草案批准后调用）：创建步骤并把任务置为进行中。
 
     decision 步骤（kind=decision）由决策角色评审后 approve/reject；reject 时把
@@ -1326,9 +1552,19 @@ def _create_workflow_locked(conn: sqlite3.Connection, task_id: str, definition: 
     if not steps:
         raise ConflictError("workflow has no steps")
 
+    # 最终审批路径：workflow 角色与任务参与者双向一致。
+    # 先补齐 workflow 中的现有角色，再校验 no missing（human 指定角色必须参与）。
+    if sync_participants:
+        sync_workflow_participants(conn, task_id, definition)
+        preview = preview_participant_sync(conn, task_id, definition)
+        if preview["add"] or preview["missing"]:
+            raise ConflictError(
+                "workflow participants are inconsistent: "
+                f"add={preview['add']} missing={preview['missing']}")
+
     # ---- 预校验：id/依赖/环/decision 元数据 ----
     raw, plan = _plan_steps(conn, steps)
-    _validate_loop(conn, definition, raw)
+    _validate_loop(conn, definition, raw, task_id=task_id)
     _validate_issue_board(conn, task_id, definition)
     if enforce_role_coverage:
         validate_role_coverage(conn, task_id, definition)
@@ -2092,7 +2328,10 @@ def _external_revision_context(conn: sqlite3.Connection, wf: dict,
         if not isinstance(acceptance_raw, list):
             return invalid(f"external node {slug}: acceptance must be an array")
         try:
-            hint = _hint_flag(raw.get("subagent_hint"), f"external node {slug}")
+            hint = _effective_hint(
+                conn, role, raw.get("subagent_hint"),
+                where=f"external node {slug}", task_id=task_id,
+                workflow_id=wf.get("id"))
         except ConflictError as exc:
             return invalid(str(exc))
 
@@ -2666,7 +2905,14 @@ def _validate_runtime_graph(conn: sqlite3.Connection, wid: str) -> None:
 
 def _insert_revision_steps(conn: sqlite3.Connection, wid: str,
                            generated: list[dict], now: str) -> None:
+    task_row = conn.execute(
+        "SELECT task_id FROM workflows WHERE id=?", (wid,)).fetchone()
+    task_id = task_row["task_id"] if task_row else None
     for raw_step in generated:
+        hint = _effective_hint(
+            conn, raw_step.get("role"), raw_step.get("subagent_hint"),
+            where=f"revision step {raw_step['id']}", task_id=task_id,
+            workflow_id=wid)
         conn.execute(
             "INSERT INTO workflow_steps (workflow_id, step_id, title, role_slug, "
             "instructions, depends_on_json, acceptance_json, gate, reviewer, contract, "
@@ -2684,7 +2930,7 @@ def _insert_revision_steps(conn: sqlite3.Connection, wid: str,
              int(raw_step.get("max_rework") or 0), 0,
              raw_step.get("source_step_id"), raw_step.get("slice_key"),
              1 if raw_step.get("evidence_required") else 0,
-             1 if raw_step.get("subagent_hint") else 0,
+             hint,
              "pending", now),
         )
 
@@ -2823,6 +3069,47 @@ def apply_revision(conn: sqlite3.Connection, wid: str, intent: dict,
         return _apply_revision_locked(conn, wid, intent, actor, draft_id)
 
 
+def _revision_introduced_roles(state: dict) -> set[str]:
+    roles: set[str] = set()
+    for generated in state.get("generated") or []:
+        if isinstance(generated, dict) and generated.get("role"):
+            roles.add(str(generated["role"]).strip())
+    for fields in (state.get("patched") or {}).values():
+        if isinstance(fields, dict) and fields.get("role_slug"):
+            roles.add(str(fields["role_slug"]).strip())
+    for node in state.get("nodes") or []:
+        if isinstance(node, dict) and node.get("role"):
+            roles.add(str(node["role"]).strip())
+    return {role for role in roles if role}
+
+
+def _sync_revision_participants(conn: sqlite3.Connection, wf: dict,
+                                state: dict) -> list[str]:
+    """修订新增角色必须在应用前成为任务参与者，否则后续委派会 403。"""
+    from . import roles as roles_service
+    from . import tasks as tasks_service
+
+    roles = _revision_introduced_roles(state)
+    participants = _participant_roles(conn, wf["task_id"])
+    # 无参与者的旧数据/测试工作流不做参与者同步（没有 human 指定角色可对齐）。
+    if not participants:
+        return []
+    add = sorted(roles - participants)
+    if not add:
+        return []
+    for role in add:
+        row = roles_service.get(conn, role)
+        if row is None or not row.get("enabled", True):
+            raise ConflictError(
+                f"revision references unknown or disabled role: {role}")
+    tasks_service.add_assignees(conn, wf["task_id"], add)
+    ledger.emit(
+        conn, "workflow.participants_synced", task_id=wf["task_id"],
+        workflow_id=wf["id"], actor_type="system", actor="revision",
+        payload={"added": add, "source": "revision"})
+    return add
+
+
 def _apply_revision_locked(conn: sqlite3.Connection, wid: str, intent: dict,
                            actor: str, draft_id: str | None) -> dict:
     conn.execute("BEGIN IMMEDIATE")
@@ -2849,6 +3136,8 @@ def _apply_revision_locked(conn: sqlite3.Connection, wid: str, intent: dict,
                            + str(impact.get("summary") or ""),
             }
             raise RevisionConflict(impact)
+
+        _sync_revision_participants(conn, wf, state)
 
         if state.get("mode") == "external":
             return _apply_external_revision(
@@ -2917,7 +3206,13 @@ def _apply_revision_locked(conn: sqlite3.Connection, wid: str, intent: dict,
             if "evidence_required" in fields:
                 db_fields["evidence_required"] = 1 if fields["evidence_required"] else 0
             if "subagent_hint" in fields:
-                db_fields["subagent_hint"] = 1 if fields["subagent_hint"] else 0
+                hint_role = str(
+                    fields.get("role_slug")
+                    or (def_by_id.get(sid) or {}).get("role") or "")
+                db_fields["subagent_hint"] = _effective_hint(
+                    conn, hint_role, fields["subagent_hint"],
+                    where=f"revision patch {sid}", task_id=wf.get("task_id"),
+                    workflow_id=wid)
             if db_fields:
                 sets = ", ".join(f"{k}=?" for k in db_fields)
                 conn.execute(
@@ -2943,7 +3238,8 @@ def _apply_revision_locked(conn: sqlite3.Connection, wid: str, intent: dict,
                     if "evidence_required" in fields:
                         dstep["evidence_required"] = bool(fields["evidence_required"])
                     if "subagent_hint" in fields:
-                        dstep["subagent_hint"] = bool(fields["subagent_hint"])
+                        dstep["subagent_hint"] = bool(
+                            db_fields.get("subagent_hint"))
 
         _validate_runtime_graph(conn, wid)
         plan = dict(state["plan"] or {})
@@ -3869,6 +4165,46 @@ def _end_run_for_step(conn: sqlite3.Connection, wf: dict, step: dict, *,
     )
 
 
+def _close_child_task_rows(conn: sqlite3.Connection, ids: list[str], now: str) -> None:
+    for tid in ids:
+        conn.execute(
+            "UPDATE tasks SET status='closed', lease_expires_at=NULL, updated_at=? "
+            "WHERE id=? AND status NOT IN ('done','closed')", (now, tid))
+        conn.execute(
+            "UPDATE task_role_claims SET status='released', lease_expires_at=NULL, "
+            "updated_at=? WHERE task_id=? AND status IN ('pending','working')",
+            (now, tid))
+        conn.execute(
+            "UPDATE runs SET status='abandoned', ended_at=? WHERE task_id=? "
+            "AND status IN ('created','projecting','running','suspended',"
+            "'submitted','reviewing')", (now, tid))
+
+
+def close_step_delegations(conn: sqlite3.Connection, wid: str, step_id: str,
+                           *, reason: str) -> list[str]:
+    """step failed/execution terminated 时关闭其 open 委派，避免永久阻塞。"""
+    wf = conn.execute(
+        "SELECT task_id FROM workflows WHERE id=?", (wid,)).fetchone()
+    if wf is None:
+        return []
+    rows = conn.execute(
+        "SELECT id FROM tasks WHERE parent_id=? AND parent_step_id=? "
+        "AND COALESCE(type,'') NOT IN ('dispatch','dispatched') "
+        "AND status NOT IN ('done','closed')",
+        (wf["task_id"], step_id)).fetchall()
+    ids = [r["id"] for r in rows]
+    if not ids:
+        return []
+    now = now_iso()
+    _close_child_task_rows(conn, ids, now)
+    ledger.emit(
+        conn, "delegation.closed_by_workflow", task_id=wf["task_id"],
+        workflow_id=wid, step_id=step_id, actor_type="system", actor="workflow",
+        payload={"children": ids, "reason": reason},
+        mirror_activity=True, activity_kind="comment", activity_role="workflow")
+    return ids
+
+
 def fail_step(conn: sqlite3.Connection, wid: str, step_id: str, reason: str,
               category: str = "agent_error",
               failure_class: str | None = None) -> None:
@@ -3926,6 +4262,8 @@ def fail_step(conn: sqlite3.Connection, wid: str, step_id: str, reason: str,
                  "auto_recovered": recovery - 1}),
          now),
     )
+    # 最终失败：关闭该 step 的 open 委派，避免自动恢复/后续评审被永久阻塞。
+    close_step_delegations(conn, wid, step_id, reason="step_failed")
     leases.release(conn, step.get("lease_id"), commit=False)
     conn.commit()
     try:
@@ -3961,21 +4299,25 @@ def task_review_blocker(conn: sqlite3.Connection, task_id: str) -> str | None:
         return "task_missing"
     if task["status"] not in ("in_progress", "todo"):
         return "task_not_in_progress"
+    latest = conn.execute(
+        "SELECT id, status FROM workflows WHERE task_id=? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1", (task_id,)
+    ).fetchone()
     # 委派工单未完成时，父任务不能进入最终评审；closed 视为终止，不永久阻塞。
-    pending_child = conn.execute(
-        "SELECT 1 FROM tasks WHERE parent_id=? "
-        "AND status NOT IN ('done','closed') LIMIT 1",
-        (task_id,)).fetchone()
-    if pending_child is not None:
+    # 只检查当前 execution；旧 execution 的残留委派不阻塞新执行。
+    child_sql = ("SELECT 1 FROM tasks WHERE parent_id=? "
+                 "AND COALESCE(type,'') NOT IN ('dispatch','dispatched') "
+                 "AND status NOT IN ('done','closed')")
+    child_params: list = [task_id]
+    if latest is not None and latest["id"]:
+        child_sql += " AND (parent_workflow_id IS NULL OR parent_workflow_id=?)"
+        child_params.append(latest["id"])
+    if conn.execute(child_sql + " LIMIT 1", child_params).fetchone() is not None:
         return "pending_child"
     if task["issue_board_enabled"]:
         from . import findings as findings_service
         if findings_service.board_status(conn, task_id) != "completed":
             return "issue_board"
-    latest = conn.execute(
-        "SELECT status FROM workflows WHERE task_id=? "
-        "ORDER BY created_at DESC, rowid DESC LIMIT 1", (task_id,)
-    ).fetchone()
     if latest is not None and latest["status"] != "done":
         return "workflow_not_done"
     return None

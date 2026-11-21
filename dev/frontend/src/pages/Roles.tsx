@@ -870,7 +870,7 @@ export function Roles() {
 
                   <h3 style={{ marginTop: 16 }}>会话上下文</h3>
                   <p className="muted">
-                    执行失败/挂起后，如果怀疑上下文已污染，先重置会话再重新派发；
+                    执行失败/挂起后，如果怀疑上下文已污染，先重置会话再重新启动；
                     MEMORY.md 与 notes 会保留。
                   </p>
                   <div className="toolbar">

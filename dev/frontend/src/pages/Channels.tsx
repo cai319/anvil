@@ -459,7 +459,7 @@ export function Channels() {
                       </div>
                       <div className="channel-stat">
                         <span>参与角色</span><strong>{participants.length}</strong>
-                        <small>仅派发偏好</small>
+                        <small>仅自动分配偏好</small>
                       </div>
                     </div>
 
@@ -658,7 +658,7 @@ export function Channels() {
                 {tab === "participants" && (
                   <>
                     <h3>参与角色</h3>
-                    <p className="muted">仅作自动派发偏好与展示，不是权限；Cindy/claim 不受此限制。</p>
+                    <p className="muted">仅作自动分配偏好与展示，不是权限；Cindy/claim 不受此限制。</p>
                     <div className="toolbar">
                       <select value={roleSlug} onChange={(e) => setRoleSlug(e.target.value)}>
                         <option value="">选择角色</option>
