@@ -10,7 +10,7 @@ from pathlib import Path
 import yaml  # type: ignore
 
 from .. import config
-from ..util import ConflictError, jdumps, jloads, now_iso
+from ..util import ConflictError, jdumps, jloads, now_iso, read_text_file
 
 logger = logging.getLogger("anvil.roles")
 
@@ -477,7 +477,7 @@ def read_home_file(conn: sqlite3.Connection, slug: str, rel_path: str) -> dict |
     if not target.is_file():
         return None
     try:
-        content = target.read_text(encoding="utf-8", errors="replace")
+        content = read_text_file(target)
     except OSError:
         return None
     return {"slug": slug, "path": rel_path, "content": content}

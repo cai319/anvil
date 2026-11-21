@@ -18,7 +18,7 @@ from pathlib import Path
 import yaml  # type: ignore
 
 from .. import config
-from ..util import ConflictError, jdumps, jloads, now_iso
+from ..util import ConflictError, jdumps, jloads, now_iso, read_text_file
 
 
 # ---- 定义加载（存储分层） -------------------------------------------------
@@ -31,7 +31,7 @@ def load_definitions() -> dict[str, dict]:
         if not d.exists():
             continue
         for p in sorted(d.glob("*.yaml")):
-            raw = p.read_text(encoding="utf-8")
+            raw = read_text_file(p)
             definition = yaml.safe_load(raw) or {}
             rid = definition.get("id") or p.stem
             definition["_raw"] = raw
@@ -372,7 +372,7 @@ def register_definition(conn: sqlite3.Connection, definition: dict,
              last_probe_at=excluded.last_probe_at, last_probe_log=excluded.last_probe_log""",
         (rid, definition.get("display_name", rid), executable or "", version, status,
          jdumps(definition.get("capabilities", {})),
-         _definition_hash(yaml_path.read_text(encoding="utf-8")), now_iso(), log),
+         _definition_hash(read_text_file(yaml_path)), now_iso(), log),
     )
     conn.commit()
     return get(conn, rid)  # type: ignore[return-value]
@@ -503,7 +503,7 @@ def _skill_description(skill_dir: Path) -> str:
     md = skill_dir / "SKILL.md"
     if md.is_file():
         try:
-            for line in md.read_text(encoding="utf-8", errors="replace").splitlines()[:20]:
+            for line in read_text_file(md).splitlines()[:20]:
                 if line.startswith("description:"):
                     return line.split(":", 1)[1].strip()
         except Exception:  # noqa: BLE001
@@ -576,8 +576,7 @@ def catalog(conn: sqlite3.Connection, rid: str) -> dict:
         descriptions = {}
     if mcp_config and os.path.isfile(mcp_config):
         try:
-            with open(mcp_config, encoding="utf-8") as f:
-                data = json.load(f)
+            data = json.loads(read_text_file(mcp_config))
             servers = data.get(mcp_pointer) or {}
             if isinstance(servers, dict):
                 for name, cfg in sorted(servers.items(), key=lambda item: str(item[0])):

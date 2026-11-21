@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
 from anvil.db import connect
+from anvil.services import board as board_service
+from anvil.services import leases as leases_service
 from anvil.services import workflow as wf_service
 from anvil.util import ConflictError, now_iso
 
@@ -407,3 +410,405 @@ def test_revision_cannot_remove_all_slices(revision_env):
     conn.commit()
     impact = wf_service.preview_revision(conn, wid, {"remove_slices": ["auth", "pay"]})
     assert impact["classification"] == "invalid"
+
+
+def _add_role(conn, slug="fuzzer"):
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO roles (slug, display_name, home_path, definition_json, "
+        "created_at, updated_at, enabled) VALUES (?,?,?,?,?,?,1)",
+        (slug, slug.title(), "", "{}", now, now))
+    conn.commit()
+
+
+def _external_intent(**overrides):
+    node = {
+        "id": "dtfuzz",
+        "title": "DT-Fuzz 验证",
+        "role": "fuzzer",
+        "instructions": "对已发现问题做定向 fuzz",
+        "acceptance": ["每个问题有复现或无法复现说明"],
+        "depends_on": ["P1"],
+        "target_slice_id": "pay",
+    }
+    node.update(overrides)
+    return {"external_nodes": [node]}
+
+
+def test_external_node_targets_pending_slice(revision_env):
+    conn, wid = revision_env
+    _add_role(conn)
+    intent = _external_intent()
+    impact = wf_service.preview_revision(conn, wid, intent)
+    assert impact["safe"] is True, impact
+    assert impact["classification"] == "safe_external"
+    assert impact["diff"]["restart_steps"] == []
+
+    before_updated = wf_service.get_workflow(conn, wid)["updated_at"]
+    draft = board_service.create_revision_draft(conn, wid, intent, "补 fuzz", "cindy")
+    board_service.approve(conn, [draft["id"]], by="human")
+    steps = _steps(conn, wid)
+    assert steps["EXT.dtfuzz"]["status"] == "pending"
+    assert steps["EXT.dtfuzz"]["kind"] == "external"
+    assert "EXT.dtfuzz" in steps["P1.pay.static"]["depends_on"]
+    # pay 还没执行，不需要重置。
+    assert steps["P1.pay.static"]["status"] == "pending"
+    wf = wf_service.get_workflow(conn, wid)
+    assert wf["status"] == "running"
+    assert wf["updated_at"] != before_updated
+    ext = next(s for s in wf["steps"] if s["step_id"] == "EXT.dtfuzz")
+    prompt = wf_service.step_prompt(wf, ext, {"title": "t", "description": "d"})
+    assert "所属切片" not in prompt
+
+
+def test_external_node_reopens_done_workflow(revision_env):
+    conn, wid = revision_env
+    _add_role(conn)
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' WHERE workflow_id=?", (wid,))
+    conn.commit()
+    wf_service.advance(conn, wid)
+    assert wf_service.get_workflow(conn, wid)["status"] == "done"
+    assert conn.execute(
+        "SELECT status FROM tasks WHERE id='T1'").fetchone()["status"] == "in_review"
+
+    intent = _external_intent(
+        target_slice_id=None, target_step_id="F1", restart_scope="target")
+    impact = wf_service.preview_revision(conn, wid, intent)
+    assert impact["safe"] is True, impact
+    assert impact["classification"] == "safe_external"
+    assert impact["diff"]["restart_steps"] == ["F1"]
+
+    draft = board_service.create_revision_draft(conn, wid, intent, "补 fuzz", "cindy")
+    board_service.approve(conn, [draft["id"]], by="human")
+    wf = wf_service.get_workflow(conn, wid)
+    steps = {s["step_id"]: s for s in wf["steps"]}
+    assert wf["status"] == "running"
+    assert steps["EXT.dtfuzz"]["status"] == "pending"
+    assert steps["F1"]["status"] == "pending"
+    assert "EXT.dtfuzz" in steps["F1"]["depends_on"]
+    assert conn.execute(
+        "SELECT status FROM tasks WHERE id='T1'").fetchone()["status"] == "in_progress"
+    # 收口必须重新检查步骤：旁路节点 pending 时不能被重新标记 done。
+    wf_service._finalize_if_done(conn, wid)
+    assert wf_service.get_workflow(conn, wid)["status"] == "running"
+
+    started: list[str] = []
+    wf_service.advance(
+        conn, wid,
+        starter=lambda r, t, p, s: started.append(s["step_id"]) or {"id": "run-ext"})
+    assert started == ["EXT.dtfuzz"]
+    wf_service.submit_step(
+        conn, wid, "EXT.dtfuzz", "fuzzer", "fuzz 完成：2 个问题可复现")
+    wf = wf_service.get_workflow(conn, wid)
+    f1 = next(s for s in wf["steps"] if s["step_id"] == "F1")
+    prompt = wf_service.step_prompt(wf, f1, {"title": "t", "description": "d"})
+    assert "上游结果" in prompt and "fuzz 完成" in prompt
+
+    started.clear()
+    wf_service.advance(
+        conn, wid,
+        starter=lambda r, t, p, s: started.append(s["step_id"]) or {"id": "run-f1"})
+    assert started == ["F1"]
+    wf_service.submit_step(conn, wid, "F1", "lead", "最终报告已更新")
+    assert wf_service.get_workflow(conn, wid)["status"] == "done"
+    assert conn.execute(
+        "SELECT status FROM tasks WHERE id='T1'").fetchone()["status"] == "in_review"
+
+
+def test_external_node_restart_downstream_resets_dependents(revision_env):
+    conn, wid = revision_env
+    _add_role(conn)
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' WHERE workflow_id=?", (wid,))
+    conn.execute(
+        "UPDATE workflow_steps SET rework_count=2 "
+        "WHERE workflow_id=? AND step_id='P1.auth.decide'", (wid,))
+    conn.commit()
+    intent = _external_intent(
+        target_slice_id="auth", restart_scope="downstream")
+    impact = wf_service.preview_revision(conn, wid, intent)
+    assert impact["safe"] is True, impact
+    restart = set(impact["diff"]["restart_steps"])
+    assert "P1.auth.static" in restart
+    assert "P1.pay.static" in restart
+    assert "F1" in restart
+
+    draft = board_service.create_revision_draft(conn, wid, intent, "补 fuzz", "cindy")
+    board_service.approve(conn, [draft["id"]], by="human")
+    steps = _steps(conn, wid)
+    assert steps["P1.auth.static"]["status"] == "pending"
+    assert steps["P1.pay.static"]["status"] == "pending"
+    assert steps["F1"]["status"] == "pending"
+    assert "EXT.dtfuzz" in steps["P1.auth.static"]["depends_on"]
+    # 重跑 decision 时预算归零，避免第一次 reject 就再次耗尽。
+    assert steps["P1.auth.decide"]["rework_count"] == 0
+
+
+def test_external_node_restart_scope_target_keeps_downstream(revision_env):
+    conn, wid = revision_env
+    _add_role(conn)
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' WHERE workflow_id=?", (wid,))
+    conn.commit()
+    intent = _external_intent(target_slice_id="auth", restart_scope="target")
+    impact = wf_service.preview_revision(conn, wid, intent)
+    assert impact["safe"] is True, impact
+    restart = set(impact["diff"]["restart_steps"])
+    assert "P1.auth.static" in restart
+    assert "P1.pay.static" not in restart
+    assert "F1" not in restart
+
+    draft = board_service.create_revision_draft(conn, wid, intent, "补 fuzz", "cindy")
+    board_service.approve(conn, [draft["id"]], by="human")
+    steps = _steps(conn, wid)
+    assert steps["P1.auth.static"]["status"] == "pending"
+    assert steps["P1.pay.static"]["status"] == "approved"
+    assert steps["F1"]["status"] == "approved"
+
+
+def test_external_node_rejects_running_target(revision_env):
+    conn, wid = revision_env
+    _add_role(conn)
+    conn.execute(
+        "UPDATE workflow_steps SET status='running' "
+        "WHERE workflow_id=? AND step_id='P1.pay.static'", (wid,))
+    conn.commit()
+    impact = wf_service.preview_revision(conn, wid, _external_intent())
+    assert impact["safe"] is False
+    assert impact["classification"] == "requires_restart"
+    assert any(b["step_id"] == "P1.pay.static" for b in impact["blocked_by"])
+    with pytest.raises(wf_service.RevisionConflict):
+        board_service.create_revision_draft(
+            conn, wid, _external_intent(), "x", "cindy")
+    assert "EXT.dtfuzz" not in _steps(conn, wid)
+
+
+def test_external_node_rejects_done_task(revision_env):
+    conn, wid = revision_env
+    _add_role(conn)
+    conn.execute("UPDATE tasks SET status='done' WHERE id='T1'")
+    conn.commit()
+    impact = wf_service.preview_revision(conn, wid, _external_intent())
+    assert impact["classification"] == "invalid"
+
+
+def test_external_node_requires_valid_role(revision_env):
+    conn, wid = revision_env
+    impact = wf_service.preview_revision(
+        conn, wid, _external_intent(role="no-such-role"))
+    assert impact["classification"] == "invalid"
+
+
+def test_external_nodes_cannot_combine_with_slice_changes(revision_env):
+    conn, wid = revision_env
+    _add_role(conn)
+    intent = _external_intent()
+    intent["add_slices"] = [
+        {"id": "extra", "title": "extra", "execute_steps": [{"id": "static"}]}]
+    impact = wf_service.preview_revision(conn, wid, intent)
+    assert impact["classification"] == "invalid"
+
+
+def test_external_deps_cannot_be_set_directly(revision_env):
+    conn, wid = revision_env
+    _add_role(conn)
+    impact = wf_service.preview_revision(conn, wid, {
+        "update_slices": [{"id": "pay", "patch": {
+            "external_deps": ["EXT.evil"]}}]})
+    assert impact["classification"] == "invalid"
+    impact = wf_service.preview_revision(conn, wid, {
+        "add_slices": [{"id": "extra", "title": "extra",
+                        "external_deps": ["EXT.evil"],
+                        "execute_steps": [{"id": "static"}]}]})
+    assert impact["classification"] == "invalid"
+
+
+def test_slice_linked_to_external_node_cannot_be_removed(revision_env):
+    conn, wid = revision_env
+    _add_role(conn)
+    draft = board_service.create_revision_draft(
+        conn, wid, _external_intent(), "补 fuzz", "cindy")
+    board_service.approve(conn, [draft["id"]], by="human")
+    impact = wf_service.preview_revision(
+        conn, wid, {"remove_slices": ["pay"]})
+    assert impact["classification"] == "invalid"
+    assert "external" in impact["summary"]
+
+
+def test_revision_reaper_rejects_drafts_for_terminated_workflow(revision_env):
+    conn, wid = revision_env
+    _add_role(conn)
+    draft = board_service.create_revision_draft(
+        conn, wid, _external_intent(), "补 fuzz", "cindy")
+    conn.execute("UPDATE workflows SET status='terminated' WHERE id=?", (wid,))
+    conn.commit()
+    assert board_service.reap_stale_revision_drafts(conn, task_id="T1") == 1
+    row = conn.execute(
+        "SELECT status FROM board_drafts WHERE id=?", (draft["id"],)).fetchone()
+    assert row["status"] == "rejected"
+
+
+def test_revision_reaper_rejects_draft_for_terminal_task(revision_env):
+    conn, wid = revision_env
+    _add_role(conn)
+    draft = board_service.create_revision_draft(
+        conn, wid, _external_intent(), "x", "cindy")
+    conn.execute("UPDATE tasks SET status='done' WHERE id='T1'")
+    conn.commit()
+    assert board_service.reap_stale_revision_drafts(conn, task_id="T1") == 1
+    row = conn.execute(
+        "SELECT status FROM board_drafts WHERE id=?", (draft["id"],)).fetchone()
+    assert row["status"] == "rejected"
+
+
+def test_revision_reaper_keeps_external_draft_for_done_workflow(revision_env):
+    conn, wid = revision_env
+    _add_role(conn)
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' WHERE workflow_id=?", (wid,))
+    conn.execute("UPDATE workflows SET status='done' WHERE id=?", (wid,))
+    conn.commit()
+    draft = board_service.create_revision_draft(
+        conn, wid,
+        _external_intent(target_slice_id="auth", restart_scope="target"),
+        "补 fuzz", "cindy")
+    assert board_service.reap_stale_revision_drafts(conn, task_id="T1") == 0
+    row = conn.execute(
+        "SELECT status FROM board_drafts WHERE id=?", (draft["id"],)).fetchone()
+    assert row["status"] == "pending"
+
+
+def test_create_revision_draft_rejects_when_lifecycle_busy(revision_env):
+    conn, wid = revision_env
+    _add_role(conn)
+    lease = leases_service.acquire(
+        conn, "workflow", "lifecycle:T1", holder_type="system",
+        holder="workflow", commit=True)
+    try:
+        with pytest.raises(ConflictError) as exc:
+            board_service.create_revision_draft(
+                conn, wid, _external_intent(), "x", "cindy")
+        assert "workflow_busy" in str(exc.value)
+    finally:
+        leases_service.release(conn, lease["id"])
+
+
+def test_revision_reaper_expires_old_draft(revision_env):
+    conn, wid = revision_env
+    _add_role(conn)
+    draft = board_service.create_revision_draft(
+        conn, wid, _external_intent(), "x", "cindy")
+    conn.execute(
+        "UPDATE board_drafts SET created_at='2000-01-01T00:00:00+00:00' "
+        "WHERE id=?", (draft["id"],))
+    conn.commit()
+    assert board_service.reap_stale_revision_drafts(conn, task_id="T1") == 1
+    row = conn.execute(
+        "SELECT status FROM board_drafts WHERE id=?", (draft["id"],)).fetchone()
+    assert row["status"] == "rejected"
+
+
+def test_patch_steps_preserves_external_dependency(revision_env):
+    conn, wid = revision_env
+    _add_role(conn)
+    ext = _external_intent(
+        target_slice_id=None, target_step_id="F1", restart_scope="target")
+    draft = board_service.create_revision_draft(conn, wid, ext, "x", "cindy")
+    board_service.approve(conn, [draft["id"]], by="human")
+    assert "EXT.dtfuzz" in _steps(conn, wid)["F1"]["depends_on"]
+
+    patch = {"patch_steps": [{
+        "step_id": "F1", "fields": {"depends_on": ["P1.pay.decide"]}}]}
+    impact = wf_service.preview_revision(conn, wid, patch)
+    assert impact["safe"] is True, impact
+    wf_service.apply_revision(conn, wid, patch, actor="human")
+    deps = _steps(conn, wid)["F1"]["depends_on"]
+    assert "EXT.dtfuzz" in deps
+    assert "P1.pay.decide" in deps
+
+
+def test_external_node_rejects_dispatched_target(revision_env):
+    conn, wid = revision_env
+    _add_role(conn)
+    conn.execute(
+        "UPDATE workflow_steps SET status='pending', run_id='r-pending' "
+        "WHERE workflow_id=? AND step_id='P1.pay.static'", (wid,))
+    conn.commit()
+    impact = wf_service.preview_revision(conn, wid, _external_intent())
+    assert impact["safe"] is False
+    assert impact["classification"] == "requires_restart"
+    assert any(
+        b["step_id"] == "P1.pay.static" for b in impact["blocked_by"])
+
+
+def test_finalize_and_external_apply_do_not_interleave_badly(
+        revision_env, monkeypatch):
+    """A 已进入 BEGIN IMMEDIATE 时启动 B 的 external apply；B 必须等 A 收口后
+    再重开，最终不能出现 done + pending external step。"""
+    conn, wid = revision_env
+    _add_role(conn)
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' WHERE workflow_id=?", (wid,))
+    conn.commit()
+    db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
+    intent = _external_intent(
+        target_slice_id=None, target_step_id="F1", restart_scope="target")
+
+    original_get = wf_service.get_workflow
+    main_calls = 0
+    thread_result: dict = {}
+
+    def worker():
+        other = connect(db_path)
+        try:
+            wf_service.apply_revision(other, wid, intent, actor="human")
+        except BaseException as exc:  # noqa: BLE001
+            thread_result["error"] = exc
+        finally:
+            other.close()
+
+    thread = threading.Thread(target=worker, name="ext-apply")
+
+    def hooked(c, w):
+        nonlocal main_calls
+        result = original_get(c, w)
+        if threading.current_thread() is threading.main_thread():
+            main_calls += 1
+            if main_calls == 2:
+                # A 已持锁和 BEGIN IMMEDIATE；此时启动 B。
+                thread.start()
+        return result
+
+    monkeypatch.setattr(wf_service, "get_workflow", hooked)
+    wf_service._finalize_if_done(conn, wid)
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+    assert "error" not in thread_result, thread_result.get("error")
+
+    wf = wf_service.get_workflow(conn, wid)
+    steps = {s["step_id"]: s for s in wf["steps"]}
+    assert wf["status"] == "running"
+    assert steps["EXT.dtfuzz"]["status"] == "pending"
+    assert conn.execute(
+        "SELECT status FROM tasks WHERE id='T1'").fetchone()["status"] == "in_progress"
+
+
+def test_external_dep_survives_slice_rebuild(revision_env):
+    """后续普通修订重建目标切片时，external_deps 不能丢。"""
+    conn, wid = revision_env
+    _add_role(conn)
+    ext_intent = _external_intent()
+    draft = board_service.create_revision_draft(
+        conn, wid, ext_intent, "补 fuzz", "cindy")
+    board_service.approve(conn, [draft["id"]], by="human")
+    assert "EXT.dtfuzz" in _steps(conn, wid)["P1.pay.static"]["depends_on"]
+
+    update = {"update_slices": [
+        {"id": "pay", "patch": {"title": "支付补强"}}]}
+    impact = wf_service.preview_revision(conn, wid, update)
+    assert impact["safe"] is True, impact
+    wf_service.apply_revision(conn, wid, update, actor="human")
+    steps = _steps(conn, wid)
+    assert "EXT.dtfuzz" in steps["P1.pay.static"]["depends_on"]
+    assert steps["EXT.dtfuzz"]["status"] == "pending"

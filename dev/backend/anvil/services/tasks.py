@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .. import config
-from ..util import ConflictError, jdumps, jloads, new_id, now_iso
+from ..util import ConflictError, jdumps, jloads, new_id, now_iso, read_text_file
 from . import (governance, knowledge, knowledge_binding, ledger, repo_catalog,
                task_workspace, workspace)
 
@@ -753,11 +753,38 @@ def heartbeat(conn: sqlite3.Connection, tid: str, role: str | None = None) -> di
 
 def submit(conn: sqlite3.Connection, tid: str, *, summary: str | None = None,
            branch: str | None = None, changed_paths: list[str] | None = None,
-           role: str | None = None) -> dict:
+           role: str | None = None,
+           force_terminate_workflow: bool = False) -> dict:
+    from . import workflow as workflow_service
+    # 与 create_workflow/finalize 共用 task 生命周期锁：人工强制收口后，新的
+    # workflow 不能在“已终止旧 workflow、尚未写 in_review”的窗口里启动。
+    with workflow_service.workflow_lifecycle_lock(
+            conn, tid, required=True, wait_seconds=2.0):
+        return _submit_locked(
+            conn, tid, summary=summary, branch=branch,
+            changed_paths=changed_paths, role=role,
+            force_terminate_workflow=force_terminate_workflow)
+
+
+def _submit_locked(conn: sqlite3.Connection, tid: str, *, summary: str | None = None,
+                   branch: str | None = None, changed_paths: list[str] | None = None,
+                   role: str | None = None,
+                   force_terminate_workflow: bool = False) -> dict:
     t = get(conn, tid)
     if t is None:
         raise LookupError(tid)
     _assert_submittable(conn, t)
+    running_workflow = conn.execute(
+        "SELECT id FROM workflows WHERE task_id=? AND status='running' "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1", (tid,)).fetchone()
+    if running_workflow is not None:
+        if not force_terminate_workflow or role not in (None, "human"):
+            raise ConflictError(
+                f"task {tid} has a running workflow {running_workflow['id']}; "
+                "use workflow step submit, or terminate the workflow first")
+        from . import workflow as workflow_service
+        workflow_service.terminate_running_workflows(
+            conn, tid, "人工强制收口并提交任务评审")
     # 三交集之一：角色对 repo 无写权限 → 拒（scope ∩ role access ∩ .anvilignore）
     if not governance.role_can_write(conn, role, t["repo"]):
         raise ConflictError(f"role {role} has no write access to repo {t['repo']}")
@@ -785,9 +812,12 @@ def submit(conn: sqlite3.Connection, tid: str, *, summary: str | None = None,
                     "submitted_at=COALESCE(submitted_at, ?), lease_expires_at=NULL, "
                     "updated_at=? WHERE task_id=? AND role_slug=?",
                     (summary, now, now, tid, role))
-        conn.execute(
-            "UPDATE tasks SET status='done', lease_expires_at=NULL, updated_at=? WHERE id=?",
-            (now, tid))
+        cur = conn.execute(
+            "UPDATE tasks SET status='done', lease_expires_at=NULL, updated_at=? "
+            "WHERE id=? AND status='in_progress'", (now, tid))
+        if cur.rowcount != 1:
+            raise ConflictError(
+                f"task {tid} state changed; refresh before submitting")
         _complete_runs(conn, tid, role)
         _audit(conn, role, tid, "submit", {
             "summary": summary, "branch": branch, "changed_paths": changed,
@@ -830,10 +860,12 @@ def submit(conn: sqlite3.Connection, tid: str, *, summary: str | None = None,
             return get(conn, tid)  # type: ignore[return-value]
 
         # 全部提交（或人工收口）→ 任务进入评审
-        conn.execute(
-            "UPDATE tasks SET status='in_review', lease_expires_at=NULL, updated_at=? WHERE id=?",
-            (now, tid),
-        )
+        cur = conn.execute(
+            "UPDATE tasks SET status='in_review', lease_expires_at=NULL, updated_at=? "
+            "WHERE id=? AND status='in_progress'", (now, tid))
+        if cur.rowcount != 1:
+            raise ConflictError(
+                f"task {tid} state changed; refresh before submitting")
         _complete_runs(conn, tid)
         if not _notify_delegator(conn, t, role):
             mention(conn, tid, role or "system", "human",
@@ -845,7 +877,12 @@ def submit(conn: sqlite3.Connection, tid: str, *, summary: str | None = None,
         conn.commit()
         return get(conn, tid)  # type: ignore[return-value]
 
-    conn.execute("UPDATE tasks SET status='in_review', updated_at=? WHERE id=?", (now, tid))
+    cur = conn.execute(
+        "UPDATE tasks SET status='in_review', updated_at=? "
+        "WHERE id=? AND status='in_progress'", (now, tid))
+    if cur.rowcount != 1:
+        raise ConflictError(
+            f"task {tid} state changed; refresh before submitting")
     conn.execute(
         "UPDATE task_role_claims SET status='submitted', summary=?, submitted_at=?, "
         "lease_expires_at=NULL, updated_at=? WHERE task_id=? AND status IN ('pending','working')",
@@ -864,28 +901,50 @@ def review(conn: sqlite3.Connection, tid: str, approve: bool, role: str | None =
         raise LookupError(tid)
     if t["status"] != "in_review":
         raise ConflictError(f"task {tid} is {t['status']}, expected in_review")
+    if approve:
+        with_workflow = conn.execute(
+            "SELECT id FROM workflows WHERE task_id=? AND status='running' "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1", (tid,)).fetchone()
+        if with_workflow is not None:
+            raise ConflictError(
+                f"task {tid} still has a running workflow {with_workflow['id']}; "
+                "terminate it before final review")
+        pending_child = conn.execute(
+            "SELECT id FROM tasks WHERE parent_id=? "
+            "AND status NOT IN ('done','closed') LIMIT 1", (tid,)).fetchone()
+        if pending_child is not None:
+            raise ConflictError(
+                f"task {tid} still has open child task {pending_child['id']}; "
+                "finish or close it before final review")
     if approve and t.get("issue_board_enabled"):
         from . import findings as findings_service
         findings_service.assert_ready_for_task_review(conn, tid)
     new_status = "done" if approve else "in_progress"
     lease = None if approve else t.get("lease_expires_at")
-    conn.execute(
-        "UPDATE tasks SET status=?, lease_expires_at=?, updated_at=? WHERE id=?",
-        (new_status, lease, now_iso(), tid),
-    )
-    if approve:
-        conn.execute(
-            "UPDATE task_role_claims SET status='approved', updated_at=? WHERE task_id=?",
-            (now_iso(), tid),
-        )
-    else:
-        # 驳回：已提交的角色回到 working，可重新派发/继续修改
-        conn.execute(
-            "UPDATE task_role_claims SET status='working', submitted_at=NULL, updated_at=? "
-            "WHERE task_id=? AND status='submitted'", (now_iso(), tid)
-        )
-    _audit(conn, role, tid, "review", {"approve": approve})
-    conn.commit()
+    now = now_iso()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        cur = conn.execute(
+            "UPDATE tasks SET status=?, lease_expires_at=?, updated_at=? "
+            "WHERE id=? AND status='in_review'",
+            (new_status, lease, now, tid))
+        if cur.rowcount != 1:
+            raise ConflictError(
+                f"task {tid} state changed; refresh before reviewing")
+        if approve:
+            conn.execute(
+                "UPDATE task_role_claims SET status='approved', updated_at=? "
+                "WHERE task_id=?", (now, tid))
+        else:
+            # 驳回：已提交的角色回到 working，可重新派发/继续修改
+            conn.execute(
+                "UPDATE task_role_claims SET status='working', submitted_at=NULL, "
+                "updated_at=? WHERE task_id=? AND status='submitted'", (now, tid))
+        _audit(conn, role, tid, "review", {"approve": approve})
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     if approve:
         try:
             from . import dispatch as dispatch_service
@@ -965,10 +1024,11 @@ def cancel(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
         raise LookupError(tid)
     _assert_can_terminate(t)
     now = now_iso()
-    conn.execute(
-        "UPDATE tasks SET status='closed', lease_expires_at=NULL, updated_at=? WHERE id=?",
-        (now, tid),
-    )
+    cur = conn.execute(
+        "UPDATE tasks SET status='closed', lease_expires_at=NULL, updated_at=? "
+        "WHERE id=? AND status NOT IN ('done','closed')", (now, tid))
+    if cur.rowcount != 1:
+        raise ConflictError(f"task {tid} state changed; refresh before cancelling")
     _release_or_defer_claims(conn, tid, role, bool(t["assignees"]), now)
     # 父任务终止：派遣子任务随父任务终止；先关闭子任务，再由下面按 source 标记 cancelled。
     child_ids = [r["id"] for r in conn.execute(
@@ -1034,11 +1094,12 @@ def reopen(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
         status = "in_progress"
     elif latest and latest["status"] == "done":
         status = "in_review"
-    conn.execute(
+    cur = conn.execute(
         "UPDATE tasks SET status=?, assignee=NULL, claimed_at=NULL, "
-        "lease_expires_at=NULL, archived_at=NULL, updated_at=? WHERE id=?",
-        (status, now_iso(), tid),
-    )
+        "lease_expires_at=NULL, archived_at=NULL, updated_at=? "
+        "WHERE id=? AND status='closed'", (status, now_iso(), tid))
+    if cur.rowcount != 1:
+        raise ConflictError(f"task {tid} state changed; refresh before reopening")
     conn.execute(
         "UPDATE task_role_claims SET status='pending', summary=NULL, run_id=NULL, "
         "claimed_at=NULL, lease_expires_at=NULL, submitted_at=NULL, updated_at=? WHERE task_id=?",
@@ -1059,10 +1120,12 @@ def archive(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict
             f"task {tid} is {t['status']}; only done/closed tasks can be archived"
         )
     now = now_iso()
-    conn.execute(
-        "UPDATE tasks SET archived_at=?, updated_at=? WHERE id=?",
-        (now, now, tid),
-    )
+    cur = conn.execute(
+        "UPDATE tasks SET archived_at=?, updated_at=? "
+        "WHERE id=? AND status IN ('done','closed') AND archived_at IS NULL",
+        (now, now, tid))
+    if cur.rowcount != 1:
+        raise ConflictError(f"task {tid} state changed; refresh before archiving")
     _audit(conn, role, tid, "archive")
     conn.commit()
     return get(conn, tid)  # type: ignore[return-value]
@@ -1524,7 +1587,7 @@ def _ignore_patterns(t: dict) -> list[str]:
     for base in bases:
         p = base / ".anvilignore"
         try:
-            lines = p.read_text(encoding="utf-8").splitlines()
+            lines = read_text_file(p).splitlines()
         except OSError:
             continue
         for line in lines:

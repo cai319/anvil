@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from .. import config
 from ..util import ConflictError, jdumps, new_id, now_iso
 
-RESOURCE_TYPES = ("step", "slice", "path", "task")
+RESOURCE_TYPES = ("step", "slice", "path", "task", "workflow")
 
 
 def _ttl(ttl_seconds: float | None) -> int:

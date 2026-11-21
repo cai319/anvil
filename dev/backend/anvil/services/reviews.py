@@ -122,7 +122,25 @@ def evidence_digest(evidence: list[dict]) -> str:
 
 
 def packet_has_stale_evidence(packet: dict | None) -> bool:
-    return any(not e.get("fresh", True) for e in (packet or {}).get("evidence") or [])
+    """按当前时间重新判断证据新鲜度，不能只依赖建包时冻结的 fresh 标记。"""
+    now = datetime.now(timezone.utc)
+    for entry in (packet or {}).get("evidence") or []:
+        if not isinstance(entry, dict):
+            continue
+        if not entry.get("fresh", True):
+            return True
+        captured = entry.get("captured_at")
+        if not captured:
+            continue
+        try:
+            captured_dt = datetime.fromisoformat(str(captured))
+            if captured_dt.tzinfo is None:
+                captured_dt = captured_dt.replace(tzinfo=timezone.utc)
+            if now - captured_dt > timedelta(hours=EVIDENCE_TTL_HOURS):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def escalation_triggers(step: dict, packet: dict | None) -> list[str]:

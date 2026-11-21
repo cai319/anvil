@@ -235,7 +235,7 @@ CREATE TABLE IF NOT EXISTS workflows (
     id              TEXT PRIMARY KEY,
     task_id         TEXT NOT NULL,
     definition_json TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'running',  -- running|done|failed|terminated
+    status          TEXT NOT NULL DEFAULT 'running',  -- running|done|terminated
     created_by      TEXT,
     created_at      TEXT NOT NULL,
     approved_at     TEXT,
@@ -267,7 +267,7 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     nudge_count      INTEGER NOT NULL DEFAULT 0,    -- 停滞唤醒次数（超过上限交给自动恢复）
     recovery_count   INTEGER NOT NULL DEFAULT 0,    -- 自动恢复重试次数（跨 run 累计）
     next_retry_at    TEXT,                          -- 自动恢复的下次可调度时间（指数退避）
-    kind             TEXT NOT NULL DEFAULT 'task',   -- task | decision | plan_slices
+    kind             TEXT NOT NULL DEFAULT 'task',   -- task | decision | plan_slices | external
     on_reject_json   TEXT NOT NULL DEFAULT '[]',     -- decision 驳回时需重做的步骤
     max_rework       INTEGER NOT NULL DEFAULT 2,
     rework_count     INTEGER NOT NULL DEFAULT 0,
@@ -290,7 +290,7 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     lease_id         TEXT,
     fence_token      INTEGER NOT NULL DEFAULT 0,
     status           TEXT NOT NULL DEFAULT 'pending',
-    -- pending|running|submitted|approved|rejected|failed|skipped
+    -- pending|running|submitted|approved|rejected(legacy)|failed|skipped
     run_id           TEXT,
     summary          TEXT,
     started_at       TEXT,
@@ -1263,6 +1263,30 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_workflows_template "
             "ON workflows(template_id, template_version)")
+    except sqlite3.OperationalError:
+        pass
+    # 迁移：一个 task 同时最多一条 running workflow。先清理历史重复，
+    # 保留最新一条，其余标记 terminated；再加 partial unique index。
+    try:
+        dup_rows = conn.execute(
+            "SELECT task_id FROM workflows WHERE status='running' "
+            "GROUP BY task_id HAVING COUNT(*) > 1").fetchall()
+        stamp = datetime.now(timezone.utc).isoformat()
+        for row in dup_rows:
+            running_ids = conn.execute(
+                "SELECT id FROM workflows WHERE task_id=? AND status='running' "
+                "ORDER BY created_at DESC, rowid DESC", (row["task_id"],)
+            ).fetchall()
+            for stale in running_ids[1:]:
+                conn.execute(
+                    "UPDATE workflows SET status='terminated', "
+                    "termination_reason='duplicate_running_migration', "
+                    "terminated_at=?, finished_at=?, updated_at=? WHERE id=?",
+                    (stamp, stamp, stamp, stale["id"]))
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_workflows_running "
+            "ON workflows(task_id) WHERE status='running'")
+        conn.commit()
     except sqlite3.OperationalError:
         pass
     # 迁移：知识库元数据（scope/task/kind/tags/repo/confidence/updated_at/source/hash）

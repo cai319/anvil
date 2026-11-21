@@ -4,7 +4,9 @@ Exit codes (design §7.3): 0 ok · 1 generic · 2 usage · 3 conflict · 4 forbi
 """
 from __future__ import annotations
 
+import codecs
 import json
+import locale
 import os
 import sys
 from typing import Any
@@ -23,6 +25,123 @@ try:  # Typer 0.27+ 内置 click；旧版本仍用外部 click
 except ImportError:  # pragma: no cover - 兼容 typer<0.27
     from click.exceptions import Exit as ClickExit
     from click.exceptions import UsageError as ClickUsageError
+
+# Windows 管道/重定向输出统一 UTF-8：agent 工具结果与日志按 UTF-8 读取，
+# 若 CLI 按系统代码页（中文 Windows cp936）输出就会变成乱码。
+_CJK_CODECS = {
+    "gbk", "gb2312", "gb18030", "hz",
+    "big5", "cp950", "cp932", "shift_jis",
+    "cp949", "euc_kr", "johab",
+}
+
+
+def _force_utf8_stdio() -> None:
+    if os.name != "nt" or "pytest" in sys.modules:
+        return
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if (stream is not None and hasattr(stream, "reconfigure")
+                    and not stream.isatty()):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
+def _try_decode(raw: bytes, encoding: str) -> str | None:
+    try:
+        return raw.decode(encoding)
+    except (UnicodeDecodeError, LookupError):
+        return None
+
+
+def _is_cjk_char(ch: str) -> bool:
+    return (
+        "㐀" <= ch <= "䶿"      # CJK 扩展 A
+        or "一" <= ch <= "鿿"   # CJK 基本区
+        or "　" <= ch <= "〿"   # CJK 标点
+        or "＀" <= ch <= "￯"   # 全角字符
+        or "぀" <= ch <= "ヿ"   # 日文假名
+        or "가" <= ch <= "힯"   # 谚文
+        or "𠀀" <= ch <= "𿿿"   # CJK 扩展 B+
+    )
+
+
+def _cjk_stats(text: str) -> tuple[int, int]:
+    """返回 (CJK 字符数, 最长连续 CJK 串长度)。"""
+    count = 0
+    run = 0
+    best = 0
+    for ch in text:
+        if _is_cjk_char(ch):
+            count += 1
+            run += 1
+            best = max(best, run)
+        else:
+            run = 0
+    return count, best
+
+
+def _fallback_encoding() -> str:
+    """系统 ANSI 代码页（规范化 codec 名，忽略 UTF-8 mode）。"""
+    try:
+        getter = getattr(locale, "getencoding", None)
+        encoding = getter() if getter is not None else locale.getpreferredencoding(False)
+    except Exception:  # noqa: BLE001
+        return "utf-8"
+    try:
+        return codecs.lookup(encoding or "utf-8").name
+    except LookupError:
+        return encoding or "utf-8"
+
+
+def _decode_file_bytes(data: bytes) -> str:
+    """文件解码：UTF-8/UTF-16/UTF-32（含 BOM）、无 BOM UTF-16、GBK。"""
+    if data.startswith(codecs.BOM_UTF8):
+        return data.decode("utf-8-sig", errors="replace")
+    if data.startswith(codecs.BOM_UTF32_LE) or data.startswith(codecs.BOM_UTF32_BE):
+        return data.decode("utf-32", errors="replace")
+    if data.startswith(codecs.BOM_UTF16_LE) or data.startswith(codecs.BOM_UTF16_BE):
+        return data.decode("utf-16", errors="replace")
+    if len(data) >= 4 and data.count(0) > len(data) // 4:
+        even_nuls = data[0::2].count(0)
+        odd_nuls = data[1::2].count(0)
+        if odd_nuls > even_nuls * 4:
+            return data.decode("utf-16-le", errors="replace")
+        if even_nuls > odd_nuls * 4:
+            return data.decode("utf-16-be", errors="replace")
+    text = _try_decode(data, "utf-8")
+    if text is not None:
+        return text
+    pref = _fallback_encoding()
+    if pref in _CJK_CODECS:
+        text = _try_decode(data, pref)
+        if text is not None:
+            return text
+    high = sum(1 for byte in data if byte >= 0x80)
+    if high >= 4:
+        text = _try_decode(data, "gb18030")
+        if text is not None:
+            cjk, run = _cjk_stats(text)
+            if cjk >= 2 and run >= 2 and high == 2 * cjk:
+                return text
+    for enc in (pref, "gb18030", "cp1252"):
+        text = _try_decode(data, enc)
+        if text is not None:
+            return text
+    return data.decode("utf-8", errors="replace")
+
+
+def _read_text_file(path: str) -> str:
+    """读文本文件（兼容 UTF-8/UTF-16/GBK）；不可读时抛 OSError。
+
+    与 Path.read_text 一致：\r\n / \r 归一为 \n，避免 Windows 读改写出现 \r\r\n。
+    """
+    with open(path, "rb") as fh:
+        text = _decode_file_bytes(fh.read())
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+_force_utf8_stdio()
 
 HELP_CTX = {"help_option_names": ["-h", "--help"], "max_content_width": 100}
 
@@ -413,7 +532,7 @@ def self_cmd(
                 "self edit-instruction 需要 --file",
                 "传入本地文件路径；例如 `anvil self edit-instruction --file instruction.md`。")
         try:
-            content = open(file, encoding="utf-8").read()
+            content = _read_text_file(file)
         except OSError as exc:
             _usage_error(f"无法读取 --file: {exc}", "检查文件路径与读权限。")
         _emit(_call("POST", "/api/v1/me/instruction", {"content": content}), json_out)
@@ -424,7 +543,7 @@ def self_cmd(
                 "例如 `anvil self propose --field responsibilities --file proposal.json`；"
                 "文件内容必须是 JSON。")
         try:
-            proposed = json.loads(open(file, encoding="utf-8").read())
+            proposed = json.loads(_read_text_file(file))
         except (OSError, json.JSONDecodeError) as exc:
             _usage_error(f"无法读取提案 JSON: {exc}", "检查 --file 路径与 JSON 语法。")
         _emit(_call("POST", "/api/v1/proposals", {
@@ -869,8 +988,7 @@ def note_cmd(
         content = ""
         if content_file:
             try:
-                with open(content_file, encoding="utf-8") as fh:
-                    content = fh.read()
+                content = _read_text_file(content_file)
             except OSError as exc:
                 typer.echo(f"error: {exc}", err=True)
                 raise typer.Exit(2)
@@ -1028,8 +1146,7 @@ def knowledge_cmd(
             _usage_error("knowledge card-create 需要主题名和 --file",
                          "例如 `anvil knowledge card-create openssl --file card.json`。")
         try:
-            with open(file, encoding="utf-8") as fh:
-                payload = json.load(fh)
+            payload = json.loads(_read_text_file(file))
         except (OSError, json.JSONDecodeError) as exc:
             _usage_error(f"无法读取知识卡文件: {exc}", "检查 --file 路径与 JSON 语法。")
         _emit(_call("POST", f"/api/v1/knowledge/repos/{quote(name, safe='')}/cards",
@@ -1145,8 +1262,7 @@ def knowledge_cmd(
         payload: dict = {}
         if file:
             try:
-                with open(file, encoding="utf-8") as fh:
-                    payload = json.load(fh)
+                payload = json.loads(_read_text_file(file))
             except (OSError, json.JSONDecodeError) as exc:
                 _usage_error(f"无法读取知识卡文件: {exc}",
                              "检查 --file 路径与 JSON 语法；模板用 "
@@ -1443,8 +1559,7 @@ def role_propose(
         _usage_error("role propose 需要任务 id",
                      "传 --task <id> 或设置 ANVIL_TASK_ID。")
     try:
-        with open(file, encoding="utf-8") as fh:
-            payload = json.load(fh)
+        payload = json.loads(_read_text_file(file))
     except (OSError, json.JSONDecodeError) as exc:
         _usage_error(f"无法读取角色提案: {exc}",
                      "检查 --file 路径与 JSON 语法；格式见 `anvil role propose -h`。")
@@ -1658,8 +1773,7 @@ def workflow_revise(
 ):
     """提交或预览运行中 workflow 的增量修订。"""
     try:
-        with open(file, encoding="utf-8") as fh:
-            payload = json.load(fh)
+        payload = json.loads(_read_text_file(file))
     except (OSError, json.JSONDecodeError) as exc:
         _usage_error(f"无法读取修订文件: {exc}",
                      "检查 --file 路径与 JSON 语法；示例见 `anvil workflow revise -h`。")
@@ -1721,8 +1835,7 @@ def step_submit(
     body: dict = {"summary": summary, "changed_paths": _csv(changed_paths)}
     if evidence_file:
         try:
-            with open(evidence_file, encoding="utf-8") as fh:
-                body["evidence"] = json.load(fh)
+            body["evidence"] = json.loads(_read_text_file(evidence_file))
         except (OSError, json.JSONDecodeError) as exc:
             _usage_error(f"无法读取 --evidence-file: {exc}",
                          "传 JSON 数组文件；例如 "
@@ -1867,8 +1980,7 @@ def step_plan(
 ):
     """提交切片计划（plan_slices 步骤）：服务端按 loop 模板生成每片小闭环。"""
     try:
-        with open(file, encoding="utf-8") as f:
-            plan = json.load(f)
+        plan = json.loads(_read_text_file(file))
     except (OSError, json.JSONDecodeError) as exc:
         _usage_error(f"无法读取切片计划: {exc}",
                      "检查 --file 路径与 JSON 语法；最小结构见 `anvil step plan -h`。")
@@ -2014,8 +2126,7 @@ def board_draft(
     json_out: bool = typer.Option(False, "--json"),
 ):
     """planner 提交工作流草案（步骤/分工/依赖/审核门/反馈路径）。"""
-    with open(tree_file, encoding="utf-8") as f:
-        tree = json.load(f)
+    tree = json.loads(_read_text_file(tree_file))
     created_by = f"agent:{AGENT_SLUG}" if AGENT_SLUG else "human"
     out = _call("POST", "/api/v1/board/drafts", {
         "goal": goal, "tree": tree, "source_task": task, "created_by": created_by,
@@ -2132,8 +2243,7 @@ def _finding_task(task: str | None) -> str:
 
 def _read_json_file(path: str) -> dict:
     try:
-        with open(path, encoding="utf-8") as f:
-            payload = json.load(f)
+        payload = json.loads(_read_text_file(path))
     except (OSError, json.JSONDecodeError) as exc:
         _usage_error(f"无法读取 finding JSON: {exc}",
                      "检查 --file 路径与 JSON 语法；模板见 `anvil finding template`。")

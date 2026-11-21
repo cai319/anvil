@@ -1890,8 +1890,24 @@ export function TaskDetail({ id }: { id: string }) {
             {task.status === "in_progress" && (
               <>
                 <button onClick={() => act(() => api.unclaimTask(id))} disabled={busy}>放弃</button>
-                <button className="primary" onClick={() => act(() => api.submitTask(id))} disabled={busy}>
-                  {task.assignees?.length > 0 ? "人工收口并提交评审" : "提交评审"}
+                <button className="primary" disabled={busy} onClick={() => act(async () => {
+                  if (workflow?.status === "running") {
+                    const ok = await confirmDialog({
+                      title: "终止当前 workflow 并提交评审？",
+                      message: "当前工作流仍在执行。提交评审会先终止它，"
+                        + "正在跑的步骤和 run 会被放弃。",
+                      confirmLabel: "终止并提交",
+                      danger: true,
+                    });
+                    if (!ok) return;
+                    await api.submitTask(id, { force_terminate_workflow: true });
+                    return;
+                  }
+                  await api.submitTask(id);
+                })}>
+                  {workflow?.status === "running"
+                    ? "终止 workflow 并提交评审"
+                    : task.assignees?.length > 0 ? "人工收口并提交评审" : "提交评审"}
                 </button>
               </>
             )}
@@ -1973,10 +1989,14 @@ export function TaskDetail({ id }: { id: string }) {
                       disabled={busy}
                       onClick={() => act(async () => {
                         if (d.kind === "workflow_revision") {
+                          const rerunNote = d.tree?.impact?.classification === "safe_external"
+                            ? "\n旁路节点完成后，目标步骤会等待其结果再继续或重跑。"
+                            : "";
                           const ok = await confirmDialog({
                             title: "应用工作流增量修订？",
                             message: `${d.tree?.impact?.summary || ""}\n`
-                              + "当前执行会继续，不会终止或从头重跑。",
+                              + "当前执行会继续，不会终止或从头重跑。"
+                              + rerunNote,
                             confirmLabel: "应用修订",
                           });
                           if (!ok) return;

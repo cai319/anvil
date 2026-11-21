@@ -67,6 +67,13 @@ RUN_TIMEOUT_SECONDS = float(_env("ANVIL_RUN_TIMEOUT", "600"))
 # 资源租约：默认与 run 超时对齐；持有者需在到期前续租。
 LEASE_TTL_SECONDS = float(_env("ANVIL_LEASE_TTL", str(RUN_TIMEOUT_SECONDS)))
 
+# workflow 生命周期锁：task 级互斥，覆盖 advance/apply/finalize/create 等跨进程写路径。
+WORKFLOW_LOCK_TTL_SECONDS = float(
+    _env("ANVIL_WORKFLOW_LOCK_TTL", "120"))
+# 修订草案无主/过期清理（小时）；0 表示只清理 base workflow 失效的草案。
+REVISION_DRAFT_TTL_HOURS = float(
+    _env("ANVIL_REVISION_DRAFT_TTL_HOURS", "168"))
+
 # Utility LLM 调用（AI 生成画像/角色）经默认 CLI 运行时执行；同步请求的超时（秒）。
 UTILITY_TIMEOUT_SECONDS = float(_env("ANVIL_UTILITY_TIMEOUT", "120"))
 

@@ -260,13 +260,38 @@
 
 ### Windows 子进程输出编码（2026-10-22）
 - **one-shot spawn**：Windows 下给子进程注入 `PYTHONIOENCODING=utf-8`、
-  `PYTHONUTF8=1`、`PYTHONLEGACYWINDOWSSTDIO=0`，减少 Python 工具按 GBK 输出。
+  `PYTHONUTF8=1`，减少 Python 工具按 GBK 输出。
+  （注意：`PYTHONLEGACYWINDOWSSTDIO` 任意非空值都会**启用** legacy 控制台 I/O，
+  原写法 `=0` 是反的；2026-11-21 起改为移除该变量。）
 - **常驻会话**：stdin 以 UTF-8 字节帧写入（LF 换行）；stdout/stderr 改为二进制管道，
   reader 用 `decode_child_output` 逐行按 UTF-8 → 本地编码 → GB18030/GBK 回退解码，
   避免中文 Windows 的 GBK 输出被 UTF-8 解码成乱码。
 - **运行日志读取**：`get_run_log` 同样使用 `decode_child_output`，兼容 UTF-8 与 GBK
   行混排的历史日志。
 - 测试：`tests/test_log_encoding.py`、`tests/test_daemon.py`。
+
+### Windows 会话内容编码加固（2026-11-21）
+- **解码回退顺序**：`_decode_line` 不再让 locale（西文 Windows 的 cp1252）抢在
+  GB18030 前；用 `locale.getencoding()` 取真实 ANSI 代码页（忽略 UTF-8 mode）。
+  GB18030 仅在“高字节数 == 2×CJK 字符数、至少 2 个且存在连续 CJK 串”时接受，
+  避免把 `Grüße`/`Ölöl` 等西文误判成中文。
+- **文件换行**：`read_text_file` 保持 `Path.read_text` 的 universal-newline 语义
+  （`\r\n`/`\r` → `\n`），避免 Windows 读改写产生 `\r\r\n`。
+- **UTF-16/32 BOM**：`decode_child_output` 用 `utf-16`/`utf-32` 解码并剥离 BOM；
+  新增 `decode_text_file` 处理无 BOM UTF-16（NUL 启发式）与 UTF-8 BOM。
+- **run 日志读取**：`get_run_log` 改用 seek 只读末尾 200KB，截断点跳到完整行/完整字符；
+  并发追加导致的末尾半字符会被丢弃；截断提示先解码再拼接。
+- **子进程环境**：`force_utf8_stdio` 在 Windows 上覆盖 `PYTHONIOENCODING`/`PYTHONUTF8`，
+  并移除语义易错的 `PYTHONLEGACYWINDOWSSTDIO`；daemon / one-shot / utility / MCP 探测统一使用。
+- **文件读取**：角色 `MEMORY/PRINCIPLES/instruction/notes/知识卡/.anvilignore/runtime YAML/
+  tools.yaml/settings.json` 等改用 `read_text_file`（UTF-8/UTF-16/GBK），避免
+  `UnicodeDecodeError` 或 `�`；写入仍统一 UTF-8。`/roles/{slug}/home/file` 同步受益。
+- **CLI**：Windows 非 TTY stdout/stderr 固定 UTF-8；`--content-file/--file` 使用
+  自动编码识别，支持 UTF-8（含 BOM）/UTF-16/GBK。
+- 测试：`tests/test_log_encoding.py` 新增 cp1252 locale、200KB 截断、UTF-16/32 BOM、
+  GBK/UTF-16 文件、CLI content-file 读取；`tests/test_daemon.py` 覆盖 env 强制覆盖。
+- **已知上游限制**：Claude Code/Node 在生成 `tool_result` 前已按 UTF-8 解码 Windows
+  原生命令输出，GBK/OEM 字节会先变成 `�`，Anvil 无法逆向恢复。
 
 ### 主页「实时活动」重构（2026-10-19，owner 反馈）
 - 右栏改为两块：**实时会话**（仅活跃 run，含挂起等待；卡片可点击进 `/runs/{id}`）

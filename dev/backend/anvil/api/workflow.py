@@ -287,7 +287,8 @@ def get_packet(wid: str, sid: str, conn=Depends(get_db)):
         step["status"] in ("running", "submitted")
         and (step.get("gate") or step.get("kind") == "decision")
     )
-    packet = review_service.ensure_packet(conn, wf, step, created_by="api") if active else None
+    # 读接口保持只读：packet 在提交/推进时创建；没有则由人点击「刷新证据」创建。
+    packet = review_service.latest_packet(conn, wid, sid) if active else None
     return {
         "step": step,
         "packet": packet,
@@ -407,7 +408,7 @@ def review_step(wid: str, sid: str, body: dict, conn=Depends(get_db),
         wf = services.workflow.review_step(
             conn, wid, sid, bool(body.get("approve")), body.get("feedback"),
             body.get("reasons"), body.get("rework_targets"), body.get("packet_id"),
-            body.get("override_reason"))
+            body.get("override_reason"), bool(body.get("acknowledge_stale")))
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ConflictError as exc:

@@ -150,6 +150,18 @@ def test_command_maps_to_endpoint(name, mock_backend):
 
 
 @pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
+@pytest.mark.parametrize("encoding", ["gbk", "utf-16"])
+def test_content_file_accepts_windows_encodings(mock_backend, tmp_path, encoding):
+    """Content-file 兼容 GBK（记事本 ANSI）与 UTF-16（PowerShell Out-File）。"""
+    path = tmp_path / "note.md"
+    path.write_bytes("中文内容：权限不足\n".encode(encoding))
+    r = _run(["note", "write", "notes/x.md", "--content-file", str(path)],
+             mock_backend)
+    assert r.returncode == EXIT["ok"], r.stderr
+    assert _Handler.bodies[-1]["content"] == "中文内容：权限不足\n"
+
+
+@pytest.mark.skipif(not os.environ.get("ANVIL_BIN"), reason="设 ANVIL_BIN 后跑 L3")
 def test_version_option_prints_package_version():
     """--version 不依赖后端，直接输出版本号。"""
     from pathlib import Path

@@ -17,7 +17,8 @@ import sqlite3
 from pathlib import Path
 
 from .. import config
-from ..util import ConflictError, jdumps, jloads, new_id, now_iso
+from ..util import (ConflictError, jdumps, jloads, new_id, now_iso,
+                    read_text_file)
 from . import knowledge, knowledge_card, knowledge_quality, knowledge_repos
 
 
@@ -394,7 +395,7 @@ def reindex(conn: sqlite3.Connection, repo_id: str | None = None) -> dict:
         for folder in ("cards", "proposed"):
             for path in (root / folder).glob("*.md"):
                 scanned += 1
-                raw = path.read_text(encoding="utf-8")
+                raw = read_text_file(path)
                 meta = _parse_meta(raw)
                 if not meta.get("id"):
                     continue

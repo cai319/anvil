@@ -81,9 +81,12 @@ export function Inbox() {
     const meta = it.meta;
     if (meta?.draft_kind === "workflow_revision") {
       const impact = meta.workflow_revision?.impact;
+      const rerunNote = impact?.classification === "safe_external"
+        ? "\n旁路节点完成后，目标步骤会等待其结果再继续或重跑。"
+        : "";
       void confirmDialog({
         title: "应用工作流增量修订？",
-        message: `${impact?.summary || ""}\n当前执行会继续，不会终止或从头重跑。`,
+        message: `${impact?.summary || ""}\n当前执行会继续，不会终止或从头重跑。${rerunNote}`,
         confirmLabel: "应用修订",
       }).then((ok) => {
         if (ok) void act(it.id, () => api.approveDraft([raw]));

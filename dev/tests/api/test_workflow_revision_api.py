@@ -245,3 +245,55 @@ async def test_revision_reject_feedback_wakes_planner(client, app):
     assert any("请先说明影响范围" in i["text"] for i in inbox["items"])
 
 
+async def test_task_force_submit_terminates_running_workflow(client, app):
+    wid = await _seed(client, app, "T-FORCE")
+    r = await client.post(
+        f"{API}/tasks/T-FORCE/submit", headers=human_headers(),
+        json={"summary": "人工强制收口", "force_terminate_workflow": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "in_review"
+    wf = (await client.get(f"{API}/workflows/{wid}", headers=auth_headers())).json()
+    assert wf["status"] == "terminated"
+
+
+async def test_external_node_revision_api_roundtrip(client, app):
+    wid = await _seed(client, app, "T-EXT")
+    conn = open_conn(app.state.db_path)
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO roles (slug, display_name, home_path, definition_json, "
+        "created_at, updated_at, enabled) VALUES (?,?,?,?,?,?,1)",
+        ("fuzzer", "Fuzzer", "", "{}", now, now))
+    conn.commit()
+    conn.close()
+
+    intent = {"external_nodes": [{
+        "id": "dtfuzz", "title": "DT-Fuzz 验证", "role": "fuzzer",
+        "depends_on": ["P1"], "target_slice_id": "pay",
+        "acceptance": ["每个问题有复现或无法复现说明"],
+    }]}
+    r = await client.post(
+        f"{API}/workflows/{wid}/revisions/preview", headers=auth_headers(),
+        json={"intent": intent})
+    assert r.status_code == 200, r.text
+    assert r.json()["classification"] == "safe_external"
+
+    r = await client.post(
+        f"{API}/workflows/{wid}/revisions", headers=auth_headers(),
+        json={"intent": intent, "rationale": "补 DT-Fuzz 验证"})
+    assert r.status_code == 201, r.text
+    draft = r.json()
+    assert draft["tree"]["impact"]["classification"] == "safe_external"
+
+    r = await client.post(
+        f"{API}/board/drafts/approve", headers=human_headers(),
+        json={"draft_ids": [draft["id"]]})
+    assert r.status_code == 200, r.text
+
+    wf = (await client.get(f"{API}/workflows/{wid}", headers=auth_headers())).json()
+    steps = {s["step_id"]: s for s in wf["steps"]}
+    assert steps["EXT.dtfuzz"]["kind"] == "external"
+    assert steps["EXT.dtfuzz"]["status"] == "pending"
+    assert "EXT.dtfuzz" in steps["P1.pay.static"]["depends_on"]
+
+

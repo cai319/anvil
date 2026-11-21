@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 import threading
 import time
@@ -13,6 +14,7 @@ from anvil import config
 from anvil.db import connect
 from anvil.services import board as board_service
 from anvil.services import findings as findings_service
+from anvil.services import leases as leases_service
 from anvil.services import tasks as tasks_service
 from anvil.services import workflow as wf_service
 from anvil.util import ConflictError, now_iso
@@ -878,3 +880,382 @@ def test_static_slice_steps_persist_slice_key(conn):
     for step in wf["steps"]:
         assert step["slice_key"] == "A"
         assert not step.get("source_step_id")
+
+
+def test_advance_skips_when_task_lifecycle_lease_held(conn):
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    lease = leases_service.acquire(
+        conn, "workflow", "lifecycle:T1", holder_type="system",
+        holder="workflow", commit=True)
+    started: list = []
+    result = wf_service.advance(
+        conn, wf["id"],
+        starter=lambda *a: started.append(a) or {"id": "r1"})
+    assert result["busy"] is True
+    assert started == []
+    leases_service.release(conn, lease["id"])
+    result = wf_service.advance(
+        conn, wf["id"],
+        starter=lambda *a: started.append(a) or {"id": "r1"})
+    assert result["busy"] is False
+    assert started
+
+
+def test_advance_busy_across_connections(conn):
+    """另一个连接持有 task 生命周期 lease 时，advance 必须跳过。"""
+    path = conn.execute("PRAGMA database_list").fetchone()["file"]
+    other = connect(path)
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    lease = leases_service.acquire(
+        other, "workflow", "lifecycle:T1", holder_type="system",
+        holder="workflow", commit=True)
+    try:
+        started: list = []
+        result = wf_service.advance(
+            conn, wf["id"],
+            starter=lambda *a: started.append(a) or {"id": "r1"})
+        assert result["busy"] is True
+        assert started == []
+    finally:
+        leases_service.release(other, lease["id"], commit=True)
+        other.close()
+    result = wf_service.advance(
+        conn, wf["id"], starter=lambda *a: {"id": "r1"})
+    assert result["busy"] is False
+
+
+def test_create_workflow_reopens_in_review_task(conn):
+    now = now_iso()
+    conn.execute("UPDATE tasks SET status='in_review' WHERE id='T1'")
+    conn.execute(
+        "INSERT INTO task_role_claims (task_id, role_slug, status, updated_at) "
+        "VALUES ('T1','dev','submitted',?)", (now,))
+    conn.commit()
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    assert wf["status"] == "running"
+    assert conn.execute(
+        "SELECT status FROM tasks WHERE id='T1'").fetchone()["status"] == "in_progress"
+    claim = conn.execute(
+        "SELECT status FROM task_role_claims WHERE task_id='T1' AND role_slug='dev'"
+    ).fetchone()
+    assert claim["status"] == "working"
+
+
+def test_task_submit_requires_force_to_terminate_running_workflow(conn):
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    wf_service.advance(conn, wf["id"], starter=lambda *a: {"id": "r1"})
+    with pytest.raises(ConflictError):
+        tasks_service.submit(conn, "T1", summary="x", role=None)
+    task = tasks_service.submit(
+        conn, "T1", summary="x", role=None, force_terminate_workflow=True)
+    assert task["status"] == "in_review"
+    assert wf_service.get_workflow(conn, wf["id"])["status"] == "terminated"
+
+
+def test_task_review_rejects_running_workflow(conn):
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    wf_service.advance(conn, wf["id"], starter=lambda *a: {"id": "r1"})
+    conn.execute("UPDATE tasks SET status='in_review' WHERE id='T1'")
+    conn.commit()
+    with pytest.raises(ConflictError):
+        tasks_service.review(conn, "T1", True)
+
+
+def test_rework_exhausted_retry_resets_on_reject_targets(conn):
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "实现", "role": "dev"},
+        {"id": "D1", "title": "决策", "role": "lead", "kind": "decision",
+         "depends_on": ["S1"], "on_reject": ["S1"], "max_rework": 1},
+    ]})
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' WHERE workflow_id=? AND step_id='S1'",
+        (wf["id"],))
+    conn.execute(
+        "UPDATE workflow_steps SET status='running', rework_count=1 "
+        "WHERE workflow_id=? AND step_id='D1'", (wf["id"],))
+    conn.commit()
+    wf_service.decide_step(conn, wf["id"], "D1", "lead", False, "打回")
+    steps = _steps_by_id(conn, wf["id"])
+    assert steps["D1"]["status"] == "failed"
+    assert steps["D1"]["failure_reason"] == "rework_exhausted"
+    assert steps["S1"]["status"] == "approved"
+    wf_service.retry_step(conn, wf["id"], "D1")
+    steps = _steps_by_id(conn, wf["id"])
+    assert steps["D1"]["status"] == "pending"
+    assert steps["S1"]["status"] == "pending"
+    assert steps["D1"]["rework_count"] == 0
+
+
+def test_review_step_rejects_plan_slice_as_rework_target(conn):
+    wf = wf_service.create_workflow(conn, "T1", {
+        "steps": [
+            {"id": "P1", "title": "计划", "role": "dev",
+             "kind": "plan_slices"},
+            {"id": "S2", "title": "审核", "role": "qa", "gate": True,
+             "depends_on": ["P1"]},
+        ],
+        "loop": {
+            "from": "P1",
+            "execute": {"role": "dev"},
+            "verify": {"role": "qa"},
+            "fix": {"role": "dev"},
+            "verify2": {"role": "qa"},
+            "decide": {"role": "lead"},
+        },
+    })
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' WHERE workflow_id=? AND step_id='P1'",
+        (wf["id"],))
+    conn.execute(
+        "UPDATE workflow_steps SET status='submitted' WHERE workflow_id=? AND step_id='S2'",
+        (wf["id"],))
+    conn.commit()
+    with pytest.raises(ConflictError) as exc:
+        wf_service.review_step(
+            conn, wf["id"], "S2", False, "返工", rework_targets=["P1"])
+    assert "plan_slices" in str(exc.value)
+
+
+def test_review_step_rejects_running_rework_target(conn):
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "实现", "role": "dev"},
+        {"id": "S2", "title": "审核", "role": "qa", "gate": True,
+         "depends_on": ["S1"]},
+    ]})
+    conn.execute(
+        "UPDATE workflow_steps SET status='running' WHERE workflow_id=? AND step_id='S1'",
+        (wf["id"],))
+    conn.execute(
+        "UPDATE workflow_steps SET status='submitted' WHERE workflow_id=? AND step_id='S2'",
+        (wf["id"],))
+    conn.commit()
+    with pytest.raises(ConflictError) as exc:
+        wf_service.review_step(
+            conn, wf["id"], "S2", False, "返工", rework_targets=["S1"])
+    assert "running" in str(exc.value)
+
+
+def test_review_step_resets_downstream_closure(conn):
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "实现", "role": "dev"},
+        {"id": "S2", "title": "审核", "role": "qa", "gate": True,
+         "depends_on": ["S1"]},
+        {"id": "S3", "title": "收口", "role": "lead", "depends_on": ["S2"]},
+    ]})
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' WHERE workflow_id=? AND step_id='S1'",
+        (wf["id"],))
+    conn.execute(
+        "UPDATE workflow_steps SET status='submitted' WHERE workflow_id=? AND step_id='S2'",
+        (wf["id"],))
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' WHERE workflow_id=? AND step_id='S3'",
+        (wf["id"],))
+    conn.commit()
+    wf_service.review_step(
+        conn, wf["id"], "S2", False, "返工", rework_targets=["S1"])
+    steps = _steps_by_id(conn, wf["id"])
+    assert steps["S1"]["status"] == "pending"
+    assert steps["S2"]["status"] == "pending"
+    assert steps["S3"]["status"] == "pending"
+
+
+def _steps_by_id(conn, wid):
+    return {s["step_id"]: s for s in wf_service.get_workflow(conn, wid)["steps"]}
+
+
+def test_review_step_rolls_back_when_decision_record_fails(conn, monkeypatch):
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "实现", "role": "dev"},
+        {"id": "S2", "title": "审核", "role": "qa", "gate": True,
+         "depends_on": ["S1"]},
+    ]})
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' "
+        "WHERE workflow_id=? AND step_id='S1'", (wf["id"],))
+    conn.execute(
+        "UPDATE workflow_steps SET status='submitted' "
+        "WHERE workflow_id=? AND step_id='S2'", (wf["id"],))
+    conn.commit()
+
+    def boom(*args, **kwargs):
+        raise ConflictError("packet_superseded")
+
+    monkeypatch.setattr(wf_service.reviews, "record_decision", boom)
+    with pytest.raises(ConflictError):
+        wf_service.review_step(
+            conn, wf["id"], "S2", False, "返工", rework_targets=["S1"])
+    steps = _steps_by_id(conn, wf["id"])
+    assert steps["S1"]["status"] == "approved"
+    assert steps["S2"]["status"] == "submitted"
+
+
+def test_finalize_skips_when_lifecycle_lease_held(conn):
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' WHERE workflow_id=?", (wf["id"],))
+    conn.commit()
+    lease = leases_service.acquire(
+        conn, "workflow", "lifecycle:T1", holder_type="system",
+        holder="workflow", commit=True)
+    try:
+        wf_service._finalize_if_done(conn, wf["id"])
+        assert wf_service.get_workflow(conn, wf["id"])["status"] == "running"
+    finally:
+        leases_service.release(conn, lease["id"])
+    wf_service._finalize_if_done(conn, wf["id"])
+    assert wf_service.get_workflow(conn, wf["id"])["status"] == "done"
+
+
+def test_finalize_does_not_overwrite_terminated_workflow(conn):
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' WHERE workflow_id=?", (wf["id"],))
+    conn.execute("UPDATE workflows SET status='terminated' WHERE id=?", (wf["id"],))
+    conn.commit()
+    wf_service._finalize_if_done(conn, wf["id"])
+    assert wf_service.get_workflow(conn, wf["id"])["status"] == "terminated"
+
+
+def test_finalize_task_review_ignores_closed_child(conn):
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO tasks (id,title,status,created_at,updated_at,parent_id) "
+        "VALUES ('C1','child','closed',?,?,'T1')", (now, now))
+    conn.commit()
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' WHERE workflow_id=?", (wf["id"],))
+    conn.commit()
+    wf_service._finalize_if_done(conn, wf["id"])
+    assert conn.execute(
+        "SELECT status FROM tasks WHERE id='T1'").fetchone()["status"] == "in_review"
+
+
+def test_task_review_rejects_open_child(conn):
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO tasks (id,title,status,created_at,updated_at,parent_id) "
+        "VALUES ('C1','child','in_progress',?,?,'T1')", (now, now))
+    conn.execute("UPDATE tasks SET status='in_review' WHERE id='T1'")
+    conn.commit()
+    with pytest.raises(ConflictError):
+        tasks_service.review(conn, "T1", True)
+
+
+def test_board_approve_rejects_non_pending_draft(conn):
+    draft = board_service.create_draft(
+        conn, "x", {"children": [{"id": "C1", "title": "c", "role": "dev"}]},
+        created_by="human")
+    board_service.approve(conn, [draft["id"]])
+    with pytest.raises(ConflictError):
+        board_service.approve(conn, [draft["id"]])
+
+
+def test_board_concurrent_approve_and_reject_only_one_wins(conn):
+    db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
+    draft = board_service.create_draft(
+        conn, "concurrent", {"children": [
+            {"id": "C1", "title": "c", "role": "dev"}]},
+        created_by="human")
+    barrier = threading.Barrier(2)
+    results: list[str] = []
+
+    def run(action: str):
+        c = connect(db_path)
+        try:
+            barrier.wait(timeout=5)
+            try:
+                if action == "approve":
+                    board_service.approve(c, [draft["id"]])
+                else:
+                    board_service.reject(c, draft["id"])
+                results.append(action)
+            except ConflictError:
+                results.append(f"{action}_conflict")
+        finally:
+            c.close()
+
+    threads = [
+        threading.Thread(target=run, args=("approve",)),
+        threading.Thread(target=run, args=("reject",)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    assert not any(t.is_alive() for t in threads)
+    assert set(results) in (
+        {"approve", "reject_conflict"},
+        {"reject", "approve_conflict"},
+    ), results
+    status = conn.execute(
+        "SELECT status FROM board_drafts WHERE id=?", (draft["id"],)).fetchone()["status"]
+    assert status in ("approved", "rejected")
+
+
+def test_decision_reject_clears_target_leases(conn):
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "实现", "role": "dev"},
+        {"id": "D1", "title": "决策", "role": "lead", "kind": "decision",
+         "depends_on": ["S1"], "on_reject": ["S1"], "max_rework": 2},
+    ]})
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved', lease_id='lease-s1', "
+        "fence_token=2 WHERE workflow_id=? AND step_id='S1'", (wf["id"],))
+    conn.execute(
+        "UPDATE workflow_steps SET status='submitted', lease_id='lease-d1', "
+        "fence_token=3 WHERE workflow_id=? AND step_id='D1'", (wf["id"],))
+    conn.commit()
+    wf_service.decide_step(
+        conn, wf["id"], "D1", "human", False, "打回", override_reason="test")
+    steps = _steps_by_id(conn, wf["id"])
+    assert steps["S1"]["status"] == "pending" and steps["S1"]["lease_id"] is None
+    assert steps["D1"]["status"] == "pending" and steps["D1"]["lease_id"] is None
+
+
+def test_advance_fails_disabled_role_step(conn):
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO roles (slug, display_name, home_path, definition_json, "
+        "created_at, updated_at, enabled) VALUES ('dev','Dev','','{}',?,?,0)",
+        (now, now))
+    conn.commit()
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    started: list = []
+    wf_service.advance(
+        conn, wf["id"],
+        starter=lambda *a: started.append(a) or {"id": "r1"})
+    step = _steps_by_id(conn, wf["id"])["S1"]
+    assert step["status"] == "failed"
+    assert step["failure_reason"] == "role_unavailable"
+    assert started == []
+
+
+def test_archive_rejects_already_archived(conn):
+    conn.execute("UPDATE tasks SET status='done' WHERE id='T1'")
+    conn.commit()
+    tasks_service.archive(conn, "T1")
+    with pytest.raises(ConflictError):
+        tasks_service.archive(conn, "T1")
+
+
+def test_one_running_workflow_per_task_constraint(conn):
+    wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    now = now_iso()
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO workflows (id, task_id, definition_json, status, "
+            "created_at, updated_at) VALUES ('wf-dup','T1','{}','running',?,?)",
+            (now, now))
+    conn.rollback()

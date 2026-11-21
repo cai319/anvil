@@ -123,6 +123,7 @@ export function GateReviewDrawer({
             rework_targets: body.rework_targets,
             packet_id: body.packet_id,
             override_reason: body.override_reason,
+            acknowledge_stale: body.acknowledge_stale,
           });
       onDone(wf);
       onClose();

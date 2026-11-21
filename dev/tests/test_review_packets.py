@@ -1,6 +1,7 @@
 """Review packets and immutable decision records."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -201,6 +202,86 @@ def test_joint_authority_ai_recommends_then_human_approves(tmp_path):
     wf = wf_service.decide_step(
         conn, wf["id"], "D1", "human", True, "同意 AI 建议")
     assert next(s for s in wf["steps"] if s["step_id"] == "D1")["status"] == "approved"
+
+
+def test_gate_review_rejects_superseded_packet_id(tmp_path):
+    conn = connect(str(tmp_path / "p.db"))
+    _task(conn)
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "审核", "role": "dev", "gate": True}]})
+    conn.execute(
+        "UPDATE workflow_steps SET status='submitted' "
+        "WHERE workflow_id=? AND step_id='S1'", (wf["id"],))
+    conn.commit()
+    step = next(s for s in wf_service.get_workflow(conn, wf["id"])["steps"]
+                if s["step_id"] == "S1")
+    reviews.ensure_packet(conn, wf, step, created_by="test", commit=True)
+    with pytest.raises(ConflictError) as exc:
+        wf_service.review_step(
+            conn, wf["id"], "S1", True, "ok", packet_id="bogus")
+    assert "packet_superseded" in str(exc.value)
+
+
+def test_gate_review_requires_ack_for_stale_evidence(tmp_path):
+    conn = connect(str(tmp_path / "p2.db"))
+    _task(conn)
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "审核", "role": "dev", "gate": True}]})
+    old = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    conn.execute(
+        "UPDATE workflow_steps SET status='submitted', evidence_json=? "
+        "WHERE workflow_id=? AND step_id='S1'",
+        (json.dumps([{"kind": "test", "ref": "pytest",
+                      "captured_at": old}]), wf["id"]))
+    conn.commit()
+    with pytest.raises(ConflictError) as exc:
+        wf_service.review_step(conn, wf["id"], "S1", True, "ok")
+    assert "evidence_stale" in str(exc.value)
+    wf_service.review_step(
+        conn, wf["id"], "S1", True, "ok", acknowledge_stale=True)
+    step = next(s for s in wf_service.get_workflow(conn, wf["id"])["steps"]
+                if s["step_id"] == "S1")
+    assert step["status"] == "approved"
+
+
+def test_human_decision_requires_ack_for_stale_evidence(tmp_path):
+    conn = connect(str(tmp_path / "p3.db"))
+    _task(conn)
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "实现", "role": "dev"},
+        {"id": "D1", "title": "人工验收", "role": "lead", "kind": "decision",
+         "decision_authority": "human", "depends_on": ["S1"],
+         "on_reject": ["S1"]},
+    ]})
+    old = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved', evidence_json=? "
+        "WHERE workflow_id=? AND step_id='S1'",
+        (json.dumps([{"kind": "test", "ref": "pytest",
+                      "captured_at": old}]), wf["id"]))
+    conn.execute(
+        "UPDATE workflow_steps SET status='submitted' "
+        "WHERE workflow_id=? AND step_id='D1'", (wf["id"],))
+    conn.commit()
+    with pytest.raises(ConflictError) as exc:
+        wf_service.decide_step(conn, wf["id"], "D1", "human", True)
+    assert "evidence_stale" in str(exc.value)
+    wf_service.decide_step(
+        conn, wf["id"], "D1", "human", True, acknowledge_stale=True)
+    step = next(s for s in wf_service.get_workflow(conn, wf["id"])["steps"]
+                if s["step_id"] == "D1")
+    assert step["status"] == "approved"
+
+
+def test_packet_staleness_is_recomputed_from_captured_at():
+    old = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    packet = {"evidence": [{"kind": "test", "ref": "pytest",
+                            "fresh": True, "captured_at": old}]}
+    assert reviews.packet_has_stale_evidence(packet) is True
+    fresh = {"evidence": [{"kind": "test", "ref": "pytest",
+                           "fresh": False,
+                           "captured_at": now_iso()}]}
+    assert reviews.packet_has_stale_evidence(fresh) is True
 
 
 def test_stale_evidence_blocks_ai_approve_and_escalates(tmp_path):

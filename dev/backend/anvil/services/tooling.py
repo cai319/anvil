@@ -17,7 +17,8 @@ from pathlib import Path
 import yaml  # type: ignore
 
 from .. import config
-from ..util import ConflictError, jdumps, jloads, new_id, now_iso
+from ..util import (ConflictError, force_utf8_stdio, jdumps, jloads, new_id, now_iso,
+                    read_text_file)
 from ..version import VERSION
 
 
@@ -211,7 +212,8 @@ def probe_mcp_server(conn: sqlite3.Connection, mid: str, timeout: float = 8.0) -
     if not server["command"]:
         return {"id": server["id"], "ok": False, "detail": "缺少 command", "tools": []}
 
-    merged_env = {**os.environ, **{str(k): str(v) for k, v in (server["env"] or {}).items()}}
+    merged_env = force_utf8_stdio(
+        {**os.environ, **{str(k): str(v) for k, v in (server["env"] or {}).items()}})
     try:
         proc = subprocess.Popen(
             [server["command"], *[str(a) for a in server["args"]]],
@@ -332,7 +334,7 @@ def load_presets() -> dict:
     paths = [config.DATA_DIR / "tools.yaml", Path(__file__).resolve().parent.parent / "tools.yaml"]
     for p in paths:
         try:
-            data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            data = yaml.safe_load(read_text_file(p)) or {}
         except (OSError, yaml.YAMLError):
             continue
         merged.update(data.get("presets") or {})

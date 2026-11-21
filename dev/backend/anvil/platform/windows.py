@@ -14,6 +14,7 @@ import win32con
 import win32cred
 import win32job
 
+from ..util import force_utf8_stdio
 from .base import CredentialStore, ProbeResult, ProcessManager, SpawnResult
 
 # 会话 id → Job Object 句柄 / Popen 句柄（后端单进程长驻，模块级即可）。
@@ -27,11 +28,9 @@ class WindowsProcessManager(ProcessManager):
         # 用 subprocess.Popen 以便复用 Python 的 stdout/stderr 重定向；
         # 进程随后挂到 Job Object 上（kill-on-close，整棵进程树）。
         merged_env = {**os.environ, **env}
-        # 中文 Windows 默认按 GBK/CP936 输出；强制 Python 子进程用 UTF-8，
-        # 避免 one-shot 运行日志出现乱码。
-        merged_env.setdefault("PYTHONIOENCODING", "utf-8")
-        merged_env.setdefault("PYTHONUTF8", "1")
-        merged_env.setdefault("PYTHONLEGACYWINDOWSSTDIO", "0")
+        # 中文 Windows 默认按 GBK/CP936 输出；强制 Python 子进程用 UTF-8
+        # （覆盖父环境/runtime env 里的旧值），避免 one-shot 运行日志乱码。
+        force_utf8_stdio(merged_env)
         flags = 0
         if hasattr(subprocess, "CREATE_NO_WINDOW"):
             flags |= subprocess.CREATE_NO_WINDOW

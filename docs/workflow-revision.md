@@ -103,6 +103,52 @@ Cindy 的 `claimed_impact` 只作提示，最终以服务端分类为准。
 scheduler 下一 tick 自动派发新生成的 pending 步骤；当前 running 步骤继续执行，
 其 lease/run 不受影响。
 
+## 旁路验证节点（external_nodes）
+
+当 workflow 已经接近或已经完成，但需要基于已有发现补一个验证/复测节点时，
+不要把验证塞进 loop。用 `external_nodes` 把节点挂在 workflow 旁边：
+
+```json
+{
+  "external_nodes": [{
+    "id": "dtfuzz",
+    "title": "对已发现问题做 DT-Fuzz 验证",
+    "role": "fuzzer",
+    "instructions": "基于本次审计发现的问题做定向 fuzz，输出可复现证据",
+    "acceptance": ["每个问题有 fuzz 输入或无法复现的原因"],
+    "depends_on": ["P1"],
+    "target_slice_id": "auth",
+    "restart_scope": "downstream"
+  }]
+}
+```
+
+- 节点以 `kind=external` 步骤插入，不写入 `plan_json.slices`，不属于 loop；
+  没有链接到它的其它 slice 不受影响。
+- 默认依赖切片计划步骤（已 approved），因此可以和当前切片并行；也可用
+  `depends_on` 指定依赖其它已完成步骤。
+- `target_slice_id` / `target_step_id` 指定结果交给谁；节点完成后目标步骤依赖它，
+  提示词会带上节点的摘要与证据。
+- 目标已 `submitted/approved` 时退回 `pending` 重跑；`restart_scope=downstream`
+  连同所有依赖它的下游一起重跑（默认），`target` 只重跑目标。
+- 目标或重跑范围内有 `running` 步骤时拒绝，等 run 结束再提交。
+- workflow 已 `done`、任务在 `in_review` 时允许：workflow 回到 `running`、
+  任务回到 `in_progress`；task 已 `done` 时拒绝，需新建后续任务。
+- 应用 external_nodes 时，若 task 在 `in_review`，会把 task 拉回 `in_progress`
+  并把已提交/通过的角色 claim 置为 `working`；旧的最终评审自动失效。
+- `classification=safe_external`，与切片修订互斥，不能同时提交。
+
+### 待审草案的生命周期
+
+scheduler 每轮会清理失效的 `workflow_revision` 草案并通知创建者：
+
+- base workflow 不存在或已 `terminated`；
+- task 已 `done`/`closed`/archived；
+- workflow 已 `done`，且草案不是 `external_nodes`（普通修订已无法原地应用）；
+- 超过 `ANVIL_REVISION_DRAFT_TTL_HOURS`（默认 168 小时）。
+
+失效草案会被置为 `rejected`，不再阻塞新的 workflow/修订草案。
+
 ## API
 
 | 方法 | 路径 | 说明 |
@@ -126,8 +172,10 @@ anvil step show <wf> --json                                # 查看 pending_revi
 分类处理：
 
 - `safe_loop` / `safe_future`：提交修订草案并 @human，说明「不重启、只改未来步骤」。
+- `safe_external`：新增旁路验证节点；目标/下游已完成的步骤会重跑，workflow/task 会回到进行中。
 - `requires_restart`：不要提交修订草案；改为完整 workflow 草案，并在 @human 消息中列出
-  受影响步骤与原因，由 human 决定重启或放弃。
+  受影响步骤与原因，由 human 决定重启或放弃。如果只是想在接近/完成后补一个验证节点，
+  优先用 `external_nodes`，不要用 `add_slices` 硬插到已开始的最终步骤前。
 - `stale` / `invalid`：重新 `step show` 后再判断，不盲目重试。
 
 ## UI
@@ -139,7 +187,8 @@ anvil step show <wf> --json                                # 查看 pending_revi
 
 ## v1 不做
 
-- 局部回滚重做（把已 approved 步骤及其下游 reset 后重跑）。
+- 普通切片修订的局部回滚重做（把已 approved 切片及其下游 reset 后重跑）；
+  `external_nodes` 是受控例外：只允许为了纳入旁路节点结果而重跑目标/下游。
 - 切片重排、修改 loop 阶段/角色模板、增删静态步骤。
 - 修改 running/submitted/approved 步骤的 title/instructions/acceptance/contract/role。
 

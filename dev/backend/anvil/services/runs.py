@@ -8,16 +8,20 @@
 """
 from __future__ import annotations
 
+import codecs
 import hashlib
 import sqlite3
 import subprocess
 from pathlib import Path
 
 from .. import config
-from ..util import decode_child_output, jdumps, jloads, new_id, now_iso
+from ..util import decode_text_file, jdumps, jloads, new_id, now_iso
 from . import ledger
 from . import roles as roles_service
 from . import tasks as tasks_service
+
+# run 日志展示上限：只读文件末尾这么多字节，避免大日志撑爆内存/响应。
+RUN_LOG_TAIL_BYTES = 200_000
 
 
 def create_run(conn: sqlite3.Connection, role_slug: str, task_id: str | None = None,
@@ -399,6 +403,61 @@ def run_timeline(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     return out
 
 
+def _drop_incomplete_utf8_tail(data: bytes) -> bytes:
+    """只在整个数据是合法 UTF-8、且末尾缺续字节时丢弃残片。
+
+    日志可能正被并发追加（末尾半个字符）。GBK/混合编码日志保持原样交给
+    逐行回退，避免把完整的 GBK 末字符误当 UTF-8 残片删掉。
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        decoder.decode(data, final=False)
+    except UnicodeDecodeError:
+        return data
+    try:
+        decoder.decode(b"", final=True)
+    except UnicodeDecodeError as exc:
+        # 增量解码器缓冲的就是末尾残片；exc.start 是相对缓冲区的偏移。
+        tail_len = len(exc.object or b"")
+        return data[:-tail_len] if 0 < tail_len <= 3 else data
+    return data
+
+
+def _read_log_tail(path: Path, limit: int = RUN_LOG_TAIL_BYTES) -> tuple[bytes, bool]:
+    """读取日志末尾 limit 字节；返回 (data, truncated)。
+
+    截断点必须落在完整字符/整行边界，否则首条残行会被解码回退成乱码
+    （UTF-8 多字节被切成两半，或在 GBK 行中间起头）。
+    """
+    with open(path, "rb") as fh:
+        fh.seek(0, 2)
+        size = fh.tell()
+        if size <= limit:
+            fh.seek(0)
+            return _drop_incomplete_utf8_tail(fh.read()), False
+        start = size - limit
+        # 切点前一字节是换行 → 尾部正好从一行开头开始，保留首行。
+        fh.seek(start - 1)
+        at_line_start = fh.read(1) == b"\n"
+        fh.seek(start)
+        data = fh.read()
+    if not at_line_start:
+        # 丢掉截断点处的 UTF-8 续字节（最多 3 个）。
+        skip = 0
+        while skip < len(data) and skip < 3 and 0x80 <= data[skip] <= 0xBF:
+            skip += 1
+        if skip:
+            data = data[skip:]
+        # 从下一条完整行开始，避免展示半行。
+        newline = data.find(b"\n")
+        if newline != -1:
+            data = data[newline + 1:]
+    # 正在追加时末尾可能是半个字符：先丢掉不完整序列再解码。
+    if data and not data.endswith(b"\n"):
+        data = _drop_incomplete_utf8_tail(data)
+    return data, True
+
+
 def get_run_log(conn: sqlite3.Connection, run_id: str) -> dict:
     """读该 run 的 stdout/stderr 日志文件（末尾最多 200KB，避免大文件撑爆响应）。"""
     run = get_run(conn, run_id)
@@ -407,13 +466,16 @@ def get_run_log(conn: sqlite3.Connection, run_id: str) -> dict:
     p = Path(run["log_path"]) if run.get("log_path") else None
     if not p or not p.exists():
         return {"run_id": run_id, "content": "", "exists": False}
-    data = p.read_bytes()
-    if len(data) > 200_000:
-        data = data[-200_000:]
-        prefix = f"... (truncated, showing last {len(data)} bytes)\n".encode()
-        data = prefix + data
+    try:
+        data, truncated = _read_log_tail(p)
+    except OSError:
+        return {"run_id": run_id, "content": "", "exists": False}
+    content = decode_text_file(data)
+    if truncated:
+        # 先解码再拼提示：ASCII 提示与残字节混在同一行会触发 locale 回退。
+        content = f"... (truncated, showing last {len(data)} bytes)\n" + content
     return {"run_id": run_id, "log_path": str(p), "exists": True,
-            "content": decode_child_output(data)}
+            "content": content}
 
 
 def get_snapshot(conn: sqlite3.Connection, run_id: str) -> dict | None:

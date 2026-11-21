@@ -136,6 +136,8 @@ anvil task knowledge-delete <id> --id <knowledge-id>   # human
 - `--slice` 标记来源切片；跨 task/跨切片的请求会通过一次性 wake_note 带入目标
   上下文，避免只 resume 旧 prompt 而看不到新消息。
 - **工作流步骤不要调用 `task claim` / `task submit`**；用 `anvil step`。
+- 工作流任务仍有 running workflow 时，`task submit` 默认 409；人类强制收口会在 Web 二次确认后
+  先终止 workflow（abandon 正在跑的 run），再让 task 进入最终评审。
 - 规划期间（`plan_first`、planner run 活跃或存在待审草案）不接受 human
   `task assign` 或手动 `POST /runs`；先等草案批准/驳回，或改走 `task dispatch`。
 - **委派工单（子任务）默认不建**：只有能换取独立上下文、只读并行、不同角色权限、
@@ -184,6 +186,9 @@ anvil step packet <wf> <step> [--json]
 
 推荐顺序：`step show` → `step plan`（仅 plan_slices）→ `step submit` →
 `step decide`（仅 decision）→ `step escalate`（证据/风险需要人工）。
+
+`step packet` 是只读查询；没有 packet 时用 Web「刷新证据」创建/刷新。
+人工通过时若证据已过期，必须显式确认 `acknowledge_stale`（Web 勾选；API 同名字段）。
 
 `plan.json` 最小结构：
 
@@ -246,15 +251,38 @@ anvil workflow revise <wf> --file revision.json             # 创建修订草案
 }
 ```
 
+接近/已经完成的 workflow 想补一个验证节点（如 DT-Fuzz）时，用 `external_nodes`
+把节点挂在 loop 外，结果回链到目标 slice/步骤：
+
+```json
+{
+  "rationale": "对已发现问题补 DT-Fuzz 验证",
+  "intent": {
+    "external_nodes": [{
+      "id": "dtfuzz",
+      "title": "DT-Fuzz 验证",
+      "role": "fuzzer",
+      "instructions": "...",
+      "acceptance": ["..."],
+      "depends_on": ["P1"],
+      "target_slice_id": "auth",
+      "restart_scope": "downstream"
+    }]
+  }
+}
+```
+
 规则：
 
 - 只有 task planner / Cindy 与 human 能调用；执行角色只能 `task mention --to cindy` 反馈。
 - 后端重新计算影响，**不要自行判断 safe**：
   `safe_loop`/`safe_future` → 提交修订草案，human 批准后原地应用、不重启；
+  `safe_external` → 新增旁路节点；目标/下游已完成的步骤会重跑，workflow/task 会回到进行中；
   `requires_restart` → 不要提交修订草案，改为完整 workflow 草案 + @human 说明受影响步骤；
   `stale`/`invalid` → 重新 `step show` 后再判断。
-- v1 只能改未来（pending）切片和 pending 静态步骤；改 loop 阶段/角色、增删静态步骤、
+- 普通修订只能改未来（pending）切片和 pending 静态步骤；改 loop 阶段/角色、增删静态步骤、
   重排切片、修改 running/submitted/approved 步骤都会 `requires_restart`。
+- `external_nodes` 与切片修订互斥；目标或重跑范围内有 running 步骤时先等待。
 - 同一 workflow 同时只允许一个待审修订；有待审完整 workflow 草案时也会 409。
 - 详细设计见 `docs/workflow-revision.md`。
 

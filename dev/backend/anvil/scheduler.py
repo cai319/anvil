@@ -20,6 +20,7 @@ from . import config
 from .api.events import publish
 from .db import open_conn
 from .platform import factory
+from .services import board as board_service
 from .services import daemon as daemon_service
 from .services import dispatch as dispatch_service
 from .services import governance, leases, runs as runs_service, tasks as tasks_service
@@ -83,6 +84,9 @@ class Scheduler:
         phases = (
             ("governance", lambda: governance.tick(conn, dispatch=True, plans_only=True)),
             ("advance_workflows", lambda: self._advance_workflows(conn)),
+            ("reap_revision_drafts",
+             lambda: board_service.reap_stale_revision_drafts(conn)),
+            ("finalize_ready_tasks", lambda: self._finalize_ready_tasks(conn)),
             ("resolve_dispatch_returns", lambda: dispatch_service.resolve_dispatch_returns(
                 conn, lambda rid, ev: self._pump(rid, ev))),
             ("resolve_context_returns", lambda: dispatch_service.resolve_context_returns(
@@ -186,7 +190,8 @@ class Scheduler:
                 "lease_expired", "environment", failure_class="lease_expired")
         for wf in conn.execute(
                 "SELECT w.id FROM workflows w JOIN tasks t ON t.id=w.task_id "
-                "WHERE w.status='running' AND t.status NOT IN ('done','closed') "
+                "WHERE w.status='running' "
+                "AND t.status NOT IN ('done','closed','in_review') "
                 "AND t.archived_at IS NULL").fetchall():
             wid = wf["id"]
 
@@ -196,7 +201,14 @@ class Scheduler:
                     step_id=step["step_id"], workflow_id=_wid,
                     slice_key=step.get("slice_key"), origin="step")
 
-            workflow_service.advance(conn, wid, starter=starter)
+            try:
+                workflow_service.advance(conn, wid, starter=starter)
+            except Exception:  # noqa: BLE001 —— 单个 workflow 异常不阻断其它 workflow
+                logger.exception("advance workflow failed workflow=%s", wid)
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
         # run 失败/失联 → 步骤进入自动恢复队列（指数退避重试，不 @human）
         rows = conn.execute(
             """SELECT s.workflow_id, s.step_id, r.status AS rs, r.failure_class
@@ -209,6 +221,25 @@ class Scheduler:
             workflow_service.fail_step(conn, r["workflow_id"], r["step_id"], fc, category,
                                        failure_class=fc)
         self._nudge_stalled(conn)
+
+    def _finalize_ready_tasks(self, conn) -> None:
+        """兜底：workflow 已 done 但 task 仍在 in_progress 时重试进入最终评审。"""
+        rows = conn.execute(
+            "SELECT DISTINCT w.task_id FROM workflows w "
+            "JOIN tasks t ON t.id=w.task_id "
+            "WHERE w.status='done' AND t.status IN ('in_progress','todo')"
+        ).fetchall()
+        for row in rows:
+            try:
+                workflow_service.finalize_task_review_if_ready(
+                    conn, row["task_id"])
+            except Exception:  # noqa: BLE001 —— 单个 task 异常不阻断
+                logger.exception(
+                    "finalize ready task failed task=%s", row["task_id"])
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
 
     @staticmethod
     def _in_slice_scope(entry: dict, slice_key: str | None) -> bool:
@@ -329,13 +360,16 @@ class Scheduler:
                 step_row = conn.execute(
                     "SELECT lease_id FROM workflow_steps WHERE workflow_id=? AND step_id=?",
                     (r["workflow_id"], r["step_id"])).fetchone()
-                conn.execute(
-                    "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, "
-                    "next_retry_at=NULL, lease_id=NULL, fence_token=0, updated_at=? "
-                    "WHERE workflow_id=? AND step_id=?",
+                cur = conn.execute(
+                    "UPDATE workflow_steps SET status='pending', run_id=NULL, "
+                    "started_at=NULL, next_retry_at=NULL, lease_id=NULL, "
+                    "fence_token=0, updated_at=? "
+                    "WHERE workflow_id=? AND step_id=? AND status='running'",
                     (now.isoformat(), r["workflow_id"], r["step_id"]))
-                leases.release(conn, step_row["lease_id"] if step_row else None,
-                               commit=False)
+                if cur.rowcount == 1:
+                    leases.release(
+                        conn, step_row["lease_id"] if step_row else None,
+                        commit=False)
                 conn.commit()
                 continue
             if rs != "suspended":

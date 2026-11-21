@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import config
-from ..util import jdumps, jloads, now_iso
+from ..util import jdumps, jloads, now_iso, read_text_file
 
 NOTE_KINDS = {
     "task_snapshot", "vulnerability_pattern", "failure_scenario",
@@ -1010,7 +1010,7 @@ def reindex_notes(conn: sqlite3.Connection, role_slug: str, *,
             if file.stat().st_size > 200_000:
                 skipped += 1
                 continue
-            raw = file.read_text(encoding="utf-8")
+            raw = read_text_file(file)
         except OSError:
             skipped += 1
             continue

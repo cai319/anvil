@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
 from . import access
-from ..util import now_iso
+from ..util import now_iso, read_text_file
 
 router = APIRouter()
 
@@ -379,7 +379,7 @@ def merge_workspace(ws_id: str, body: dict, conn=Depends(get_db),
     ignore = root / ".anvilignore"
     if ignore.is_file():
         patterns.extend(
-            ln.strip() for ln in ignore.read_text(encoding="utf-8").splitlines()
+            ln.strip() for ln in read_text_file(ignore).splitlines()
             if ln.strip() and not ln.strip().startswith("#")
         )
     violations = [
