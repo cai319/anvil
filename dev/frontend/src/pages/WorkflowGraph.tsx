@@ -63,11 +63,21 @@ function buildVisualModel(workflow: Workflow): VisualNode[] {
     nodes.push({ id, kind: "step", step, deps });
   }
   for (const loop of summarizeLoops(workflow.steps)) {
+    const deps = new Set<string>([`step:${loop.sourceStepId}`]);
+    // 旁路验证节点回链到某个切片时，把它作为循环节点的上游画出来。
+    for (const step of workflow.steps) {
+      if (step.source_step_id !== loop.sourceStepId) continue;
+      for (const depId of step.depends_on) {
+        if (stepById.get(depId)?.kind === "external") {
+          deps.add(`step:${depId}`);
+        }
+      }
+    }
     nodes.push({
       id: `loop:${loop.sourceStepId}`,
       kind: "loop",
       loop,
-      deps: [`step:${loop.sourceStepId}`],
+      deps: [...deps],
     });
   }
   return nodes;
@@ -345,7 +355,7 @@ export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenR
                   borderColor: meta.color, background: meta.bg }}
                 onClick={() => setSelected(selected === node.id ? null : node.id)}
                 aria-label={`${s.step_id} ${s.title} · ${meta.label}`}
-                title={`${s.step_id} ${s.title} · ${meta.label}${s.gate ? " · 审核门" : ""}${s.kind === "decision" ? " · 决策" : ""}`}
+                title={`${s.step_id} ${s.title} · ${meta.label}${s.gate ? " · 审核门" : ""}${s.kind === "decision" ? " · 决策" : ""}${s.kind === "external" ? " · 旁路验证" : ""}`}
               >
                 <span className="wf-node-top">
                   <span className="wf-node-id mono">{s.step_id}</span>

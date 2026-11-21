@@ -8,15 +8,20 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatch
 
 from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
 from . import dossier, leases, ledger, reviews, weights
+
+logger = logging.getLogger(__name__)
 
 RUN_ACTIVE = ("created", "projecting", "running")
 STEP_DONE = ("approved", "skipped")
@@ -704,19 +709,23 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
                 f"slice {slice_id}: decision role must differ from execute/fix roles")
 
         first_dep = previous_decide or plan_step_id
+        external_deps = [
+            str(x) for x in (raw_slice.get("external_deps") or [])]
+        external_added = False
         cursor = first_dep
         if scope_spec:
             scope_id = add({
                 "id": f"{plan_step_id}.{slice_id}.scope",
                 "title": f"{title} · {scope_spec.get('title') or '切片范围确认'}",
                 "role": lead_role,
-                "depends_on": [first_dep],
+                "depends_on": _merge_unique([first_dep, *external_deps]),
                 "instructions": _join_instructions(scope_spec, context),
                 "acceptance": _merge_unique(scope_spec.get("acceptance")),
                 "source_step_id": plan_step_id,
                 "slice_key": slice_id,
                 "subagent_hint": phase_hint(scope_spec),
             })
+            external_added = True
             cursor = scope_id
 
         execute_specs = raw_slice.get("execute_steps")
@@ -750,6 +759,8 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
                     else f"{plan_step_id}.{slice_id}.{d}"
                     for d in _as_list(deps)
                 ]
+            if offset == 0 and external_deps and not external_added:
+                deps = _merge_unique([*deps, *external_deps])
             execute_spec = _loop_spec(loop, "execute")
             execute_acceptance = _merge_unique(
                 slice_acceptance, raw_execute.get("acceptance"),
@@ -916,6 +927,17 @@ def _assert_delegations_done(conn: sqlite3.Connection, wf: dict, step_id: str) -
 
 def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
                      role: str | None, plan: dict, run_id: str | None = None) -> dict:
+    wf = get_workflow(conn, wid)
+    task_id = wf["task_id"] if wf else None
+    with workflow_lifecycle_lock(
+            conn, task_id, required=True, wait_seconds=2.0):
+        return _apply_slice_plan_locked(
+            conn, wid, step_id, role, plan, run_id)
+
+
+def _apply_slice_plan_locked(conn: sqlite3.Connection, wid: str, step_id: str,
+                             role: str | None, plan: dict,
+                             run_id: str | None = None) -> dict:
     """运行期角色提交切片计划：校验后按 loop 模板生成每片小闭环。
 
     切片由执行角色基于对项目的实际理解产出；Cindy 只定义工作流骨架与 loop 模板。
@@ -929,6 +951,11 @@ def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
         raise ConflictError("slice plan must contain a `slices` list")
     if len(slices) > 100:
         raise ConflictError("too many slices (max 100)")
+    for raw in slices:
+        if isinstance(raw, dict) and "external_deps" in raw:
+            raise ConflictError(
+                "external_deps is controlled by external_nodes; "
+                "runtime slice plans must not set it")
 
     now = now_iso()
     conn.execute("BEGIN IMMEDIATE")
@@ -1003,7 +1030,8 @@ def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
         # 依赖 plan 步骤的静态下游步骤：改挂到最后一片 decide；没有切片则解除依赖。
         for row in conn.execute(
             "SELECT step_id, depends_on_json FROM workflow_steps WHERE workflow_id=? "
-            "AND COALESCE(source_step_id,'')='' AND step_id<>?",
+            "AND COALESCE(source_step_id,'')='' AND step_id<>? "
+            "AND COALESCE(kind,'task')<>'external'",
             (wid, step_id),
         ).fetchall():
             deps = jloads(row["depends_on_json"], [])
@@ -1174,6 +1202,21 @@ def validate_definition(conn: sqlite3.Connection, definition: dict, *,
     _validate_loop(conn, definition, raw)
 
 
+def terminate_running_workflows(conn: sqlite3.Connection, task_id: str,
+                                reason: str) -> int:
+    """人类强制收口时终止该 task 所有 running workflow（保留历史）。"""
+    with workflow_lifecycle_lock(
+            conn, task_id, required=True, wait_seconds=2.0):
+        rows = conn.execute(
+            "SELECT id FROM workflows WHERE task_id=? AND status='running'",
+            (task_id,)).fetchall()
+        now = now_iso()
+        for row in rows:
+            _terminate_running_workflow(conn, row["id"], reason, now)
+        conn.commit()
+        return len(rows)
+
+
 def _terminate_running_workflow(conn: sqlite3.Connection, wid: str, reason: str,
                                 now: str) -> None:
     """终止一次执行但保留其 workflow/step/run 历史。"""
@@ -1241,7 +1284,26 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
                     *, enforce_role_coverage: bool = True,
                     restart_running: bool = False,
                     restart_reason: str | None = None,
-                    restart_note: str | None = None) -> dict:
+                    restart_note: str | None = None,
+                    draft_id: str | None = None) -> dict:
+    with workflow_lifecycle_lock(
+            conn, task_id, required=True, wait_seconds=2.0):
+        return _create_workflow_locked(
+            conn, task_id, definition, created_by,
+            enforce_role_coverage=enforce_role_coverage,
+            restart_running=restart_running,
+            restart_reason=restart_reason,
+            restart_note=restart_note,
+            draft_id=draft_id)
+
+
+def _create_workflow_locked(conn: sqlite3.Connection, task_id: str, definition: dict,
+                            created_by: str = "agent:cindy",
+                            *, enforce_role_coverage: bool = True,
+                            restart_running: bool = False,
+                            restart_reason: str | None = None,
+                            restart_note: str | None = None,
+                            draft_id: str | None = None) -> dict:
     """落板 workflow（Cindy 草案批准后调用）：创建步骤并把任务置为进行中。
 
     decision 步骤（kind=decision）由决策角色评审后 approve/reject；reject 时把
@@ -1345,9 +1407,20 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
              jdumps(meta["scope_paths"]), meta["subagent_hint"], s.get("slice_key"),
              s.get("source_step_id"), "pending", now),
         )
-    conn.execute(
+    task_cur = conn.execute(
         "UPDATE tasks SET status='in_progress', assignee=NULL, lease_expires_at=NULL, "
-        "claimed_at=NULL, updated_at=? WHERE id=? AND status IN ('todo','in_progress')",
+        "claimed_at=NULL, updated_at=? "
+        "WHERE id=? AND status IN ('todo','in_progress','in_review')",
+        (now, task_id))
+    if task_cur.rowcount != 1:
+        conn.rollback()
+        raise ConflictError(
+            "task is no longer active; refresh before starting a workflow")
+    # 在 in_review 上启动新 workflow 时，旧最终评审失效：已提交/通过的角色
+    # 回到 working，让新执行的步骤能正常认领。
+    conn.execute(
+        "UPDATE task_role_claims SET status='working', submitted_at=NULL, updated_at=? "
+        "WHERE task_id=? AND status IN ('submitted','approved')",
         (now, task_id))
     if running:
         note = (restart_note or "").strip()
@@ -1371,6 +1444,14 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
                 "previous_execution_no": running[0]["execution_no"],
             }), now),
         )
+    if draft_id:
+        cur = conn.execute(
+            "UPDATE board_drafts SET status='approved', decided_at=? "
+            "WHERE id=? AND status='pending'", (now, draft_id))
+        if cur.rowcount != 1:
+            conn.rollback()
+            raise ConflictError(
+                "draft state changed; refresh before approving")
     conn.commit()
     if previous_workflow_id:
         _clear_restarted_slice_contexts(conn, task_id)
@@ -1455,11 +1536,27 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
     acceptance = "\n".join(f"- {a}" for a in step["acceptance"]) or "-（无）"
     contract = (step.get("contract") or "").strip()
     dep_contracts = []
+    dep_results: list[str] = []
     by_id = {x["step_id"]: x for x in workflow.get("steps", [])}
     for d in step["depends_on"]:
         up = by_id.get(d) or {}
         if (up.get("contract") or "").strip():
             dep_contracts.append(f"[{d} {up.get('title','')}] {up['contract'].strip()}")
+        if (up.get("summary") or "").strip():
+            dep_results.append(
+                f"- {d} {up.get('title','')}：{up['summary'].strip()}")
+        for ev in up.get("evidence") or []:
+            if not isinstance(ev, dict):
+                continue
+            ref = ev.get("ref") or ev.get("label")
+            if ref:
+                dep_results.append(
+                    f"  · 证据 [{ev.get('kind', 'note')}] {ref}")
+    dep_results_block = ""
+    if dep_results:
+        dep_results_block = (
+            "\n## 上游结果（必须纳入本次处理）\n"
+            + "\n".join(dep_results) + "\n")
     contracts_block = ""
     if contract or dep_contracts:
         contracts_block = "\n契约（必须遵守，违反即视为失败）：\n"
@@ -1518,7 +1615,7 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
             source = ".".join(step["step_id"].split(".")[:-2])
         slice_prefix = f"{source}.{slice_key}" if source else slice_key
         slice_label = slice_key
-    elif "." in step["step_id"]:
+    elif step.get("kind") != "external" and "." in step["step_id"]:
         slice_prefix = step["step_id"].split(".", 1)[0]
         slice_label = slice_prefix
     else:
@@ -1646,6 +1743,7 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
         base
         + loop_block
         + evidence_block
+        + dep_results_block
         + feedback_block
         + recovery_block
         + f"\n完成后必须执行：`{submit_cmd}`。\n"
@@ -1682,7 +1780,80 @@ def _step_activity(conn: sqlite3.Connection, task_id: str, role: str | None,
     )
 
 
-_ADVANCE_LOCK = threading.Lock()
+_ADVANCE_LOCK = threading.RLock()
+_LIFECYCLE_HELD = threading.local()
+
+
+def _held_lifecycles() -> set[str]:
+    held = getattr(_LIFECYCLE_HELD, "keys", None)
+    if held is None:
+        held = set()
+        _LIFECYCLE_HELD.keys = held
+    return held
+
+
+@contextmanager
+def workflow_lifecycle_lock(conn: sqlite3.Connection, task_id: str | None, *,
+                            required: bool = True, wait_seconds: float = 0.0):
+    """task 级 workflow 生命周期锁：进程内 RLock + 跨进程 DB lease。
+
+    必须在 BEGIN IMMEDIATE / 任何写操作之前进入。嵌套调用（advance → finalize、
+    review_step → finalize）通过线程本地集合重入，不会重复申请 DB lease。
+    required=False 时抢不到锁返回 False，由调用方跳过本轮。
+    """
+    key = str(task_id or "").strip()
+    if not key:
+        yield True
+        return
+    held = _held_lifecycles()
+    if key in held:
+        yield True
+        return
+
+    # 进程内先互斥，避免同进程线程空转 DB lease。
+    deadline = time.monotonic() + max(0.0, float(wait_seconds))
+    while True:
+        if _ADVANCE_LOCK.acquire(blocking=False):
+            break
+        if time.monotonic() >= deadline:
+            if required:
+                raise ConflictError(
+                    "workflow_busy: another lifecycle operation is running")
+            yield False
+            return
+        time.sleep(0.05)
+
+    lease = None
+    try:
+        while True:
+            try:
+                lease = leases.acquire(
+                    conn, "workflow", f"lifecycle:{key}",
+                    holder_type="system", holder="workflow",
+                    ttl_seconds=config.WORKFLOW_LOCK_TTL_SECONDS,
+                    commit=True)
+                break
+            except ConflictError:
+                if time.monotonic() >= deadline:
+                    if required:
+                        raise ConflictError(
+                            "workflow_busy: another process is operating on this task")
+                    yield False
+                    return
+                time.sleep(0.05)
+        held.add(key)
+        try:
+            yield True
+        finally:
+            held.discard(key)
+            try:
+                if conn.in_transaction:
+                    conn.rollback()
+                leases.release(conn, lease["id"] if lease else None, commit=True)
+            except sqlite3.Error:
+                pass
+    finally:
+        _ADVANCE_LOCK.release()
 
 
 def explain_dispatch(conn: sqlite3.Connection, wf: dict) -> dict:
@@ -1785,6 +1956,246 @@ def _step_fields_from_patch(fields: dict) -> dict:
     return fields
 
 
+def _transitive_downstream(steps: list[dict], roots: set[str]) -> set[str]:
+    """返回依赖 roots（传递）的步骤，不含 roots 本身。"""
+    dependents: dict[str, list[str]] = {}
+    for step in steps:
+        for dep in step.get("depends_on") or []:
+            dependents.setdefault(str(dep), []).append(step["step_id"])
+    out: set[str] = set()
+    stack = list(roots)
+    while stack:
+        cur = stack.pop()
+        for nxt in dependents.get(cur, []):
+            if nxt in roots or nxt in out:
+                continue
+            out.add(nxt)
+            stack.append(nxt)
+    return out
+
+
+def _external_revision_context(conn: sqlite3.Connection, wf: dict,
+                               plan_step: dict, plan: dict, slices: list,
+                               by_slice: dict[str, list[dict]], loop: dict,
+                               external_nodes: list) -> tuple[dict, dict]:
+    """分析「旁路验证节点」修订：节点不进入 loop，结果回链到 target slice/step。
+
+    目标已经 submitted/approved 时退回 pending；restart_scope=downstream 会
+    一并重跑其下游。目标或其下游正在 running 时拒绝，等 run 结束再提交。
+    """
+    from . import roles as roles_service
+
+    def invalid(summary: str) -> tuple[dict, dict]:
+        return {}, {"classification": "invalid", "safe": False,
+                    "summary": summary, "blocked_by": [], "affected_steps": []}
+
+    by_id = {s["step_id"]: s for s in wf["steps"]}
+    slice_ids = [str(s.get("id") or "") for s in slices]
+    plan_step_id = plan_step["step_id"]
+    task_id = wf["task_id"]
+    task_row = conn.execute(
+        "SELECT assignee, status FROM tasks WHERE id=?", (task_id,)).fetchone()
+    bound = {row["role_slug"] for row in conn.execute(
+        "SELECT role_slug FROM task_assignees WHERE task_id=?", (task_id,))}
+    if task_row and task_row["assignee"]:
+        bound.add(task_row["assignee"])
+    participating = {str(s.get("role_slug") or "") for s in wf["steps"]}
+    participating.update(
+        str(spec.get("role") or "") for spec in (loop or {}).values()
+        if isinstance(spec, dict))
+
+    node_specs: list[dict] = []
+    for raw in external_nodes:
+        if not isinstance(raw, dict):
+            return invalid("external node must be an object")
+        slug = str(raw.get("id") or "").strip()
+        if not slug or not SLICE_ID_RE.match(slug):
+            return invalid(
+                f"external node id {slug or '?'} must match {SLICE_ID_RE.pattern}")
+        step_id = f"EXT.{slug}"
+        if step_id in by_id or any(s["step_id"] == step_id for s in node_specs):
+            return invalid(f"external node {slug} already exists")
+        node_specs.append({"raw": raw, "slug": slug, "step_id": step_id})
+    node_ids = {s["step_id"] for s in node_specs}
+
+    blocked: list[dict] = []
+    nodes: list[dict] = []
+    restart: set[str] = set()
+    target_entries: dict[str, list[str]] = {}
+
+    for spec in node_specs:
+        raw = spec["raw"]
+        slug = spec["slug"]
+        step_id = spec["step_id"]
+        title = str(raw.get("title") or slug).strip() or slug
+        role = str(raw.get("role") or "").strip()
+        if not role:
+            return invalid(f"external node {slug}: role is required")
+        role_row = roles_service.get(conn, role)
+        if role_row is None or not role_row.get("enabled", True) \
+                or roles_service.is_onboarding(conn, role):
+            return invalid(f"external node {slug}: invalid role {role}")
+        if bound and role not in bound and role not in participating:
+            return invalid(
+                f"external node {slug}: role {role} is not bound to the task "
+                "or current workflow")
+        target_slice = str(raw.get("target_slice_id") or "").strip()
+        target_step = str(raw.get("target_step_id") or "").strip()
+        if bool(target_slice) == bool(target_step):
+            return invalid(
+                f"external node {slug}: set exactly one of target_slice_id "
+                "or target_step_id")
+        if target_slice:
+            if target_slice not in slice_ids:
+                return invalid(
+                    f"external node {slug}: slice {target_slice} does not exist")
+            target_steps = by_slice.get(target_slice, [])
+            if not target_steps:
+                return invalid(
+                    f"external node {slug}: slice {target_slice} has no generated steps")
+            entry = target_steps[0]["step_id"]
+            target_ref = {"slice_id": target_slice}
+        else:
+            target_row = by_id.get(target_step)
+            if target_row is None:
+                return invalid(
+                    f"external node {slug}: step {target_step} does not exist")
+            if target_row.get("source_step_id") \
+                    or target_step == plan_step_id \
+                    or target_row.get("kind") == "external":
+                return invalid(
+                    f"external node {slug}: target_step_id must be a static step; "
+                    "use target_slice_id for slice steps")
+            target_steps = [target_row]
+            entry = target_step
+            target_ref = {"step_id": target_step}
+        deps_raw = raw.get("depends_on")
+        if deps_raw is None:
+            deps = [plan_step_id]
+        elif isinstance(deps_raw, list):
+            deps = [str(x) for x in deps_raw]
+        else:
+            return invalid(f"external node {slug}: depends_on must be an array")
+        if not deps:
+            deps = [plan_step_id]
+        for dep in deps:
+            if dep not in by_id and dep not in node_ids:
+                return invalid(
+                    f"external node {slug}: depends_on missing step {dep}")
+        if step_id in deps:
+            return invalid(f"external node {slug}: cannot depend on itself")
+        scope = str(raw.get("restart_scope") or "downstream").strip().lower()
+        if scope not in ("target", "downstream"):
+            return invalid(
+                f"external node {slug}: restart_scope must be target|downstream")
+        acceptance_raw = raw.get("acceptance") or []
+        if not isinstance(acceptance_raw, list):
+            return invalid(f"external node {slug}: acceptance must be an array")
+        try:
+            hint = _hint_flag(raw.get("subagent_hint"), f"external node {slug}")
+        except ConflictError as exc:
+            return invalid(str(exc))
+
+        reset_for_node: set[str] = set()
+
+        def mark(step: dict) -> None:
+            status = step.get("status") or "unknown"
+            if status == "running":
+                blocked.append({
+                    "step_id": step["step_id"], "status": status,
+                    "reason": "target or downstream step is running; "
+                              "wait for it to finish",
+                })
+            elif status == "pending" and (
+                    step.get("run_id") or step.get("lease_id")):
+                blocked.append({
+                    "step_id": step["step_id"], "status": status,
+                    "reason": "target or downstream step is being dispatched; "
+                              "wait for it to settle",
+                })
+            elif status in ("submitted", "approved"):
+                reset_for_node.add(step["step_id"])
+
+        for target_row in target_steps:
+            mark(target_row)
+        if scope == "downstream":
+            roots = {s["step_id"] for s in target_steps}
+            for sid in _transitive_downstream(wf["steps"], roots):
+                step = by_id.get(sid) or {}
+                if step.get("kind") == "external":
+                    continue
+                mark(step)
+        restart |= reset_for_node
+        target_entries.setdefault(entry, []).append(step_id)
+        nodes.append({
+            "step_id": step_id, "slug": slug, "title": title, "role": role,
+            "instructions": str(raw.get("instructions") or ""),
+            "acceptance": [str(x) for x in acceptance_raw],
+            "contract": str(raw.get("contract") or "").strip() or None,
+            "evidence_required": bool(raw.get("evidence_required")),
+            "subagent_hint": hint,
+            "depends_on": deps,
+            "target_entry": entry,
+            "target": target_ref,
+            "restart_scope": scope,
+        })
+
+    if blocked:
+        return {}, {
+            "classification": "requires_restart", "safe": False,
+            "summary": "目标或下游步骤正在运行，请等它们完成后再提交旁路验证节点",
+            "blocked_by": blocked,
+            "affected_steps": sorted(
+                {x["step_id"] for x in blocked if x.get("step_id")}),
+        }
+
+    final_ids = set(by_id) | node_ids
+    final_deps: dict[str, list[str]] = {}
+    for step in wf["steps"]:
+        deps = [str(d) for d in (step.get("depends_on") or [])]
+        for ext_id in target_entries.get(step["step_id"], []):
+            if ext_id not in deps:
+                deps.append(ext_id)
+        final_deps[step["step_id"]] = deps
+    for node in nodes:
+        final_deps[node["step_id"]] = list(node["depends_on"])
+    final_on_reject = {
+        step["step_id"]: [str(t) for t in (step.get("on_reject") or [])]
+        for step in wf["steps"]}
+    for node in nodes:
+        final_on_reject[node["step_id"]] = []
+    try:
+        _validate_dep_graph(final_ids, final_deps, final_on_reject)
+    except ConflictError as exc:
+        return invalid(str(exc))
+
+    restart_ids = sorted(restart)
+    summary = f"新增 {len(nodes)} 个旁路验证节点"
+    if restart_ids:
+        summary += f"；将重跑 {len(restart_ids)} 个步骤"
+    else:
+        summary += "；目标无需重置"
+    impact = {
+        "classification": "safe_external", "safe": True,
+        "summary": summary, "blocked_by": [],
+        "affected_steps": sorted(node_ids | restart | set(target_entries)),
+        "diff": {
+            "external_nodes": [node["step_id"] for node in nodes],
+            "restart_steps": restart_ids,
+            "targets": sorted(target_entries),
+        },
+    }
+    state = {
+        "mode": "external", "nodes": nodes, "restart_steps": restart_ids,
+        "target_entries": target_entries, "plan_step": plan_step,
+        "plan": plan, "slices": slices, "task_id": task_id,
+        "workflow_was_done": wf.get("status") == "done",
+        "task_was_in_review": bool(
+            task_row and task_row["status"] == "in_review"),
+    }
+    return state, impact
+
+
 def _revision_context(conn: sqlite3.Connection, wf: dict, intent: dict) -> tuple[dict, dict]:
     """计算修订后的切片/步骤结构；返回 (state, impact)。
 
@@ -1794,7 +2205,14 @@ def _revision_context(conn: sqlite3.Connection, wf: dict, intent: dict) -> tuple
         return {}, {"classification": "invalid", "safe": False,
                     "summary": "revision intent must be an object",
                     "blocked_by": [], "affected_steps": []}
-    if wf.get("status") != "running":
+    external_nodes = intent.get("external_nodes")
+    if external_nodes is not None and not isinstance(external_nodes, list):
+        return {}, {"classification": "invalid", "safe": False,
+                    "summary": "external_nodes must be an array",
+                    "blocked_by": [], "affected_steps": []}
+    external_only = bool(external_nodes)
+    if wf.get("status") != "running" and not (
+            external_only and wf.get("status") == "done"):
         return {}, {"classification": "invalid", "safe": False,
                     "summary": f"workflow is {wf.get('status')}, not running",
                     "blocked_by": [], "affected_steps": []}
@@ -1878,6 +2296,11 @@ def _revision_context(conn: sqlite3.Connection, wf: dict, intent: dict) -> tuple
                         "summary": f"slice {raw.get('id') or '?'} execute_steps "
                                    "must be an array or object",
                         "blocked_by": [], "affected_steps": []}
+        if "external_deps" in raw:
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": "external_deps is controlled by external_nodes; "
+                                   "use an external node instead",
+                        "blocked_by": [], "affected_steps": []}
     for item in updates:
         patch = item.get("patch") or {}
         if not isinstance(patch, dict):
@@ -1890,6 +2313,14 @@ def _revision_context(conn: sqlite3.Connection, wf: dict, intent: dict) -> tuple
                         "summary": f"slice {item.get('id') or '?'} execute_steps "
                                    "must be an array or object",
                         "blocked_by": [], "affected_steps": []}
+    if external_only:
+        if add_slices or raw_remove or updates or patch_steps:
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": "external_nodes cannot be combined with "
+                                   "slice or step changes",
+                        "blocked_by": [], "affected_steps": []}
+        return _external_revision_context(
+            conn, wf, plan_step, plan, slices, by_slice, loop, external_nodes)
     if not add_slices and not raw_remove and not updates and not patch_steps:
         return {}, {"classification": "invalid", "safe": False,
                     "summary": "revision intent has no changes",
@@ -1898,11 +2329,20 @@ def _revision_context(conn: sqlite3.Connection, wf: dict, intent: dict) -> tuple
     has_slices = bool(add_slices or remove_ids or updates)
 
     old_ids = [str(raw.get("id")) for raw in slices]
+    external_slice_targets = {
+        str((entry.get("target") or {}).get("slice_id") or "")
+        for entry in (plan.get("external") or []) if isinstance(entry, dict)
+    }
     for sid in remove_ids + [str((u or {}).get("id") or "") for u in updates
                              if isinstance(u, dict)]:
         if sid not in old_ids:
             return {}, {"classification": "invalid", "safe": False,
                         "summary": f"slice {sid} does not exist",
+                        "blocked_by": [], "affected_steps": []}
+        if sid in remove_ids and sid in external_slice_targets:
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": f"slice {sid} is linked to an external "
+                                   "verification node and cannot be removed",
                         "blocked_by": [], "affected_steps": []}
         idx = old_ids.index(sid)
         if idx < mutable_from:
@@ -1948,6 +2388,11 @@ def _revision_context(conn: sqlite3.Connection, wf: dict, intent: dict) -> tuple
                             "summary": "update_slices cannot change slice id; "
                                        "remove and add a new slice instead",
                             "blocked_by": [], "affected_steps": []}
+            if "external_deps" in patch:
+                return {}, {"classification": "invalid", "safe": False,
+                            "summary": "external_deps is controlled by external_nodes; "
+                                       "use an external node instead",
+                            "blocked_by": [], "affected_steps": []}
             for raw in tail:
                 if str(raw.get("id")) == sid:
                     raw.update(patch)
@@ -1975,7 +2420,8 @@ def _revision_context(conn: sqlite3.Connection, wf: dict, intent: dict) -> tuple
 
     # 静态下游：切片变更时只能改 pending；active/settled 说明最终步骤已经开跑。
     static_steps = [s for s in wf["steps"]
-                    if not s.get("source_step_id") and s["step_id"] != plan_step["step_id"]]
+                    if not s.get("source_step_id") and s["step_id"] != plan_step["step_id"]
+                    and s.get("kind") != "external"]
     old_tail_decide = old_last_decide
     if has_slices and old_tail_decide:
         for st in static_steps:
@@ -2000,6 +2446,10 @@ def _revision_context(conn: sqlite3.Connection, wf: dict, intent: dict) -> tuple
         if step.get("source_step_id"):
             return {}, {"classification": "invalid", "safe": False,
                         "summary": f"step {sid} belongs to a slice; use update_slices",
+                        "blocked_by": [], "affected_steps": []}
+        if step.get("kind") == "external":
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": f"step {sid} is an external node; use external_nodes",
                         "blocked_by": [], "affected_steps": []}
         if not _step_is_mutable(step):
             block(sid, step.get("status") or "unknown",
@@ -2070,7 +2520,8 @@ def _revision_context(conn: sqlite3.Connection, wf: dict, intent: dict) -> tuple
 
     if blocked:
         return {}, {"classification": "requires_restart", "safe": False,
-                    "summary": "修订影响已开始/已完成的步骤，需重启或放弃",
+                    "summary": "修订影响已开始/已完成的步骤，需重启或放弃；"
+                               "如只是想补验证节点，可改用 external_nodes",
                     "blocked_by": blocked,
                     "affected_steps": sorted({x["step_id"] for x in blocked if x["step_id"]})}
 
@@ -2087,6 +2538,12 @@ def _revision_context(conn: sqlite3.Connection, wf: dict, intent: dict) -> tuple
     final_on_reject: dict[str, list[str]] = {}
     for s in wf["steps"]:
         if s["step_id"] in old_mutable:
+            continue
+        if s.get("kind") == "external":
+            final_deps[s["step_id"]] = [
+                str(d) for d in (s.get("depends_on") or [])]
+            final_on_reject[s["step_id"]] = [
+                str(t) for t in s.get("on_reject") or []]
             continue
         fields = patched.get(s["step_id"]) or {}
         deps = (fields["depends_on"] if "depends_on" in fields
@@ -2232,11 +2689,137 @@ def _insert_revision_steps(conn: sqlite3.Connection, wid: str,
         )
 
 
+def _apply_external_revision(conn: sqlite3.Connection, wf: dict, state: dict,
+                             impact: dict, actor: str, draft_id: str | None,
+                             now: str) -> dict:
+    """应用旁路验证节点：插入节点、回链目标、重置需要重跑的目标/下游。"""
+    wid = wf["id"]
+    nodes = state["nodes"]
+    for node in nodes:
+        conn.execute(
+            "INSERT INTO workflow_steps (workflow_id, step_id, title, role_slug, "
+            "instructions, depends_on_json, acceptance_json, gate, reviewer, contract, "
+            "kind, on_reject_json, max_rework, rework_count, source_step_id, slice_key, "
+            "evidence_required, subagent_hint, status, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (wid, node["step_id"], node["title"], node["role"],
+             node["instructions"], jdumps(node["depends_on"]),
+             jdumps(node["acceptance"]), 0, None, node["contract"],
+             "external", jdumps([]), 0, 0, None, None,
+             1 if node["evidence_required"] else 0, node["subagent_hint"],
+             "pending", now),
+        )
+    for entry, ext_ids in state["target_entries"].items():
+        row = conn.execute(
+            "SELECT depends_on_json FROM workflow_steps "
+            "WHERE workflow_id=? AND step_id=?", (wid, entry)).fetchone()
+        deps = jloads(row["depends_on_json"], []) if row else []
+        for ext_id in ext_ids:
+            if ext_id not in deps:
+                deps.append(ext_id)
+        conn.execute(
+            "UPDATE workflow_steps SET depends_on_json=?, updated_at=? "
+            "WHERE workflow_id=? AND step_id=?",
+            (jdumps(deps), now, wid, entry))
+    for sid in state["restart_steps"]:
+        conn.execute(
+            "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, "
+            "ended_at=NULL, summary=NULL, recovery_count=0, next_retry_at=NULL, "
+            "nudge_count=0, last_nudge_at=NULL, lease_id=NULL, fence_token=0, "
+            "updated_at=? WHERE workflow_id=? AND step_id=?",
+            (now, wid, sid))
+        conn.execute(
+            "UPDATE gate_packets SET status='superseded' "
+            "WHERE workflow_id=? AND step_id=? "
+            "AND status IN ('pending_human','pending_ai')",
+            (wid, sid))
+        conn.execute(
+            "UPDATE workflow_steps SET rework_count=0 "
+            "WHERE workflow_id=? AND step_id=? AND kind='decision'", (wid, sid))
+    if state.get("workflow_was_done"):
+        conn.execute(
+            "UPDATE workflows SET status='running', finished_at=NULL, updated_at=? "
+            "WHERE id=?", (now, wid))
+    else:
+        conn.execute(
+            "UPDATE workflows SET updated_at=? WHERE id=?", (now, wid))
+    if state.get("task_was_in_review"):
+        conn.execute(
+            "UPDATE tasks SET status='in_progress', lease_expires_at=NULL, updated_at=? "
+            "WHERE id=? AND status='in_review'", (now, state["task_id"]))
+        conn.execute(
+            "UPDATE task_role_claims SET status='working', submitted_at=NULL, updated_at=? "
+            "WHERE task_id=? AND status IN ('submitted','approved')",
+            (now, state["task_id"]))
+    plan = dict(state["plan"] or {})
+    external = plan.get("external") if isinstance(plan.get("external"), list) else []
+    external.extend({
+        "id": node["slug"], "step_id": node["step_id"], "title": node["title"],
+        "role": node["role"], "target": node["target"],
+        "restart_scope": node["restart_scope"],
+    } for node in nodes)
+    plan["external"] = external
+    # 把切片目标的 external_deps 写进 plan，后续普通修订重建该切片时仍然保留链接。
+    plan_slices = plan.get("slices") if isinstance(plan.get("slices"), list) else []
+    new_slices: list = []
+    for raw in plan_slices:
+        if isinstance(raw, dict):
+            raw = dict(raw)
+            sid = str(raw.get("id") or "")
+            for node in nodes:
+                if str((node.get("target") or {}).get("slice_id") or "") != sid:
+                    continue
+                deps = [str(x) for x in (raw.get("external_deps") or [])]
+                if node["step_id"] not in deps:
+                    deps.append(node["step_id"])
+                raw["external_deps"] = deps
+        new_slices.append(raw)
+    plan["slices"] = new_slices
+    old_summary = str(state["plan_step"].get("summary") or "").strip()
+    summary = (old_summary + "；" if old_summary else "") + \
+        "外挂节点：" + "、".join(node["title"] for node in nodes)
+    conn.execute(
+        "UPDATE workflow_steps SET plan_json=?, summary=?, updated_at=? "
+        "WHERE workflow_id=? AND step_id=?",
+        (jdumps(plan), summary, now, wid, state["plan_step"]["step_id"]))
+    _validate_runtime_graph(conn, wid)
+    if draft_id:
+        cur = conn.execute(
+            "UPDATE board_drafts SET status='approved', decided_at=? "
+            "WHERE id=? AND status='pending'", (now, draft_id))
+        if cur.rowcount != 1:
+            raise ConflictError("draft state changed; refresh before approving")
+    conn.execute(
+        "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (state["task_id"], actor, "comment",
+         jdumps({"body": f"应用工作流修订：{impact['summary']}。"
+                         "旁路节点完成后，目标步骤会等待其结果并继续执行。",
+                 "event": "workflow_revised", "workflow_id": wid,
+                 "draft_id": draft_id,
+                 "external_nodes": [node["step_id"] for node in nodes],
+                 "restart_steps": state["restart_steps"]}), now))
+    ledger.emit(
+        conn, "workflow.revised", task_id=state["task_id"], workflow_id=wid,
+        execution_no=wf.get("execution_no"),
+        actor_type="human" if actor == "human" else "role", actor=actor,
+        payload={"draft_id": draft_id, "impact": impact,
+                 "definition_hash": wf.get("definition_hash"),
+                 "external_nodes": [node["step_id"] for node in nodes],
+                 "restart_steps": state["restart_steps"]})
+    dossier.persist(conn, wid, commit=False)
+    conn.commit()
+    return get_workflow(conn, wid)  # type: ignore[return-value]
+
+
 def apply_revision(conn: sqlite3.Connection, wid: str, intent: dict,
                    actor: str = "human", draft_id: str | None = None) -> dict:
     """在运行中的 execution 内应用安全修订；不新建 execution、不终止 run。"""
-    # 与 advance 共用进程内锁：避免 scheduler 读到旧步骤后又在修订删改后写回。
-    with _ADVANCE_LOCK:
+    wf = get_workflow(conn, wid)
+    task_id = wf["task_id"] if wf else None
+    # task 级生命周期锁：避免 scheduler 读到旧步骤后又在修订删改后写回。
+    with workflow_lifecycle_lock(
+            conn, task_id, required=True, wait_seconds=2.0):
         return _apply_revision_locked(conn, wid, intent, actor, draft_id)
 
 
@@ -2244,6 +2827,12 @@ def _apply_revision_locked(conn: sqlite3.Connection, wid: str, intent: dict,
                            actor: str, draft_id: str | None) -> dict:
     conn.execute("BEGIN IMMEDIATE")
     try:
+        if draft_id:
+            draft_row = conn.execute(
+                "SELECT status FROM board_drafts WHERE id=?", (draft_id,)).fetchone()
+            if draft_row is None or draft_row["status"] != "pending":
+                raise ConflictError(
+                    "draft state changed; refresh before approving")
         wf = get_workflow(conn, wid)
         if wf is None:
             raise LookupError(wid)
@@ -2260,6 +2849,10 @@ def _apply_revision_locked(conn: sqlite3.Connection, wid: str, intent: dict,
                            + str(impact.get("summary") or ""),
             }
             raise RevisionConflict(impact)
+
+        if state.get("mode") == "external":
+            return _apply_external_revision(
+                conn, wf, state, impact, actor, draft_id, now_iso())
 
         plan_step = state["plan_step"]
         old_ids = state["old_mutable_ids"]
@@ -2308,7 +2901,17 @@ def _apply_revision_locked(conn: sqlite3.Connection, wid: str, intent: dict,
             if "role_slug" in fields:
                 db_fields["role_slug"] = str(fields["role_slug"])
             if "depends_on" in fields:
-                db_fields["depends_on_json"] = jdumps(fields["depends_on"] or [])
+                runtime_deps = [str(x) for x in (fields["depends_on"] or [])]
+                for entry in (state.get("plan") or {}).get("external") or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    target = entry.get("target") or {}
+                    if str(target.get("step_id") or "") != sid:
+                        continue
+                    ext_id = str(entry.get("step_id") or "")
+                    if ext_id and ext_id not in runtime_deps:
+                        runtime_deps.append(ext_id)
+                db_fields["depends_on_json"] = jdumps(runtime_deps)
             if "scope_paths" in fields:
                 db_fields["scope_paths_json"] = jdumps(fields["scope_paths"] or [])
             if "evidence_required" in fields:
@@ -2357,9 +2960,11 @@ def _apply_revision_locked(conn: sqlite3.Connection, wid: str, intent: dict,
             "WHERE id=?",
             (jdumps(definition), new_hash, now, wid))
         if draft_id:
-            conn.execute(
-                "UPDATE board_drafts SET status='approved', decided_at=? WHERE id=?",
-                (now, draft_id))
+            cur = conn.execute(
+                "UPDATE board_drafts SET status='approved', decided_at=? "
+                "WHERE id=? AND status='pending'", (now, draft_id))
+            if cur.rowcount != 1:
+                raise ConflictError("draft state changed; refresh before approving")
         task_id = wf["task_id"]
         conn.execute(
             "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
@@ -2385,9 +2990,19 @@ def _apply_revision_locked(conn: sqlite3.Connection, wid: str, intent: dict,
 
 
 def advance(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
-    """串行化工作流推进，避免 scheduler 与 API 同时通过“无活跃 run”检查。"""
-    with _ADVANCE_LOCK:
-        return _advance_locked(conn, wid, starter)
+    """串行化工作流推进；跨进程用 task 生命周期锁，抢不到锁则本轮跳过。"""
+    wf = get_workflow(conn, wid)
+    task_id = wf["task_id"] if wf else None
+    with workflow_lifecycle_lock(conn, task_id, required=False) as acquired:
+        if not acquired:
+            return {
+                "started": [], "waiting_human": [], "held": [], "busy": True,
+                "done": bool(wf and wf["status"] == "done"),
+            }
+        result = _advance_locked(conn, wid, starter)
+        if isinstance(result, dict):
+            result.setdefault("busy", False)
+        return result
 
 
 def _advance_locked(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
@@ -2437,6 +3052,27 @@ def _advance_locked(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
             continue
         role = s["role_slug"]
         if not role:
+            continue
+        from . import roles as roles_service
+        role_row = roles_service.get(conn, role)
+        if role_row is not None and not role_row.get("enabled", True):
+            fail_now = now_iso()
+            conn.execute(
+                "UPDATE workflow_steps SET status='failed', "
+                "failure_reason='role_unavailable', summary=?, ended_at=?, "
+                "updated_at=? WHERE workflow_id=? AND step_id=? AND status='pending'",
+                (f"角色 {role} 已禁用，无法派发", fail_now, fail_now, wid,
+                 s["step_id"]))
+            _step_activity(
+                conn, wf["task_id"], role, s, "failed",
+                f"角色 {role} 已禁用，无法派发；启用角色后人工重试该步骤。")
+            conn.execute(
+                "INSERT INTO activities (task_id, role_slug, kind, payload_json, "
+                "created_at) VALUES (?,?,?,?,?)",
+                (wf["task_id"], "workflow", "comment",
+                 jdumps({"body": f"步骤「{s.get('title') or s['step_id']}」的角色 "
+                                 f"{role} 已禁用，步骤已标记 failed；"
+                                 "请启用角色后在任务详情重试。"}), fail_now))
             continue
         if conn.execute(
             "SELECT 1 FROM workflow_steps WHERE workflow_id=? AND role_slug=? "
@@ -2632,6 +3268,24 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
                 reasons: list[str] | None = None,
                 override_reason: str | None = None,
                 acknowledge_stale: bool = False) -> dict:
+    wf = get_workflow(conn, wid)
+    task_id = wf["task_id"] if wf else None
+    with workflow_lifecycle_lock(
+            conn, task_id, required=True, wait_seconds=2.0):
+        return _decide_step_locked(
+            conn, wid, step_id, role, approve, feedback, run_id, packet_id,
+            rework_targets, reasons, override_reason, acknowledge_stale)
+
+
+def _decide_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
+                        role: str | None,
+                        approve: bool, feedback: str | None = None,
+                        run_id: str | None = None,
+                        packet_id: str | None = None,
+                        rework_targets: list[str] | None = None,
+                        reasons: list[str] | None = None,
+                        override_reason: str | None = None,
+                        acknowledge_stale: bool = False) -> dict:
     """决策角色 approve/reject 一个 decision 步骤。
 
     reject 时把 on_reject 闭包内的步骤重置为 pending，并把 decision 自身重置为 pending；
@@ -2670,6 +3324,10 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
         packet = reviews.ensure_packet(
             conn, wf, step, created_by=role or "system", commit=False)
         approval_triggers = reviews.escalation_triggers(step, packet)
+        if approve and reviews.packet_has_stale_evidence(packet) \
+                and not acknowledge_stale and not override_reason:
+            raise ConflictError(
+                "evidence_stale: acknowledge stale evidence or refresh the packet")
         if approve and not is_human and approval_triggers:
             raise ConflictError(
                 f"escalation_required: {', '.join(approval_triggers)}; "
@@ -2786,8 +3444,10 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
                 "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, "
                 "ended_at=NULL, summary=NULL, failure_reason=NULL, feedback=?, "
                 "recovery_count=0, next_retry_at=NULL, nudge_count=0, last_nudge_at=NULL, "
-                "updated_at=? WHERE workflow_id=? AND step_id=?",
+                "lease_id=NULL, fence_token=0, updated_at=? "
+                "WHERE workflow_id=? AND step_id=?",
                 (note, now, wid, tid))
+            leases.release(conn, target.get("lease_id"), commit=False)
             target_role = target.get("role_slug") or ""
             if target_role:
                 conn.execute(
@@ -2799,8 +3459,8 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
                     }), now))
         conn.execute(
             "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, "
-            "ended_at=NULL, summary=NULL, feedback=?, rework_count=?, updated_at=? "
-            "WHERE workflow_id=? AND step_id=?",
+            "ended_at=NULL, summary=NULL, feedback=?, rework_count=?, updated_at=?, "
+            "lease_id=NULL, fence_token=0 WHERE workflow_id=? AND step_id=?",
             (note, count, now, wid, step_id))
         _step_activity(conn, wf["task_id"], step["role_slug"], step, "rework", note,
                        extra={"rework_count": count})
@@ -2878,75 +3538,145 @@ def review_step(conn: sqlite3.Connection, wid: str, step_id: str, approve: bool,
                 reasons: list[str] | None = None,
                 rework_targets: list[str] | None = None,
                 packet_id: str | None = None,
-                override_reason: str | None = None) -> dict:
+                override_reason: str | None = None,
+                acknowledge_stale: bool = False) -> dict:
     """人工审核 gate 步骤：通过则解锁下游；驳回则回到 pending 等待角色重做。
 
     驳回时可指定返工范围（当前步骤或任意上游祖先）；默认只重做当前步骤。
+    返工范围会扩展到下游闭包，避免 approved 步骤依赖 pending 步骤。
     """
     wf = get_workflow(conn, wid)
-    if wf is None:
-        raise LookupError(wid)
-    step = next((s for s in wf["steps"] if s["step_id"] == step_id), None)
-    if step is None:
-        raise LookupError(step_id)
-    if step.get("kind") == "decision":
-        raise ConflictError("decision steps are decided by their role, not a human gate")
-    if step["status"] != "submitted":
-        raise ConflictError(f"step {step_id} is {step['status']}, expected submitted")
-    targets = sorted({step_id, *[str(x) for x in (rework_targets or [])]})
-    by_id = {s["step_id"]: s for s in wf["steps"]}
-    if not approve:
-        ancestors: set[str] = set()
-        stack = [str(x) for x in step.get("depends_on") or []]
-        while stack:
-            cur = stack.pop()
-            if cur in ancestors:
-                continue
-            ancestors.add(cur)
-            stack.extend(str(x) for x in (by_id.get(cur, {}).get("depends_on") or []))
-        allowed = ancestors | {step_id}
-        for target in targets:
-            if target not in allowed:
+    task_id = wf["task_id"] if wf else None
+    with workflow_lifecycle_lock(
+            conn, task_id, required=True, wait_seconds=2.0):
+        return _review_step_locked(
+            conn, wid, step_id, approve, feedback, reasons, rework_targets,
+            packet_id, override_reason, acknowledge_stale)
+
+
+def _review_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
+                        approve: bool,
+                        feedback: str | None = None,
+                        reasons: list[str] | None = None,
+                        rework_targets: list[str] | None = None,
+                        packet_id: str | None = None,
+                        override_reason: str | None = None,
+                        acknowledge_stale: bool = False) -> dict:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        wf = get_workflow(conn, wid)
+        if wf is None:
+            raise LookupError(wid)
+        step = next((s for s in wf["steps"] if s["step_id"] == step_id), None)
+        if step is None:
+            raise LookupError(step_id)
+        if step.get("kind") == "decision":
+            raise ConflictError(
+                "decision steps are decided by their role, not a human gate")
+        if step["status"] != "submitted":
+            raise ConflictError(
+                f"step {step_id} is {step['status']}, expected submitted")
+        targets = sorted({step_id, *[str(x) for x in (rework_targets or [])]})
+        by_id = {s["step_id"]: s for s in wf["steps"]}
+        if not approve:
+            ancestors: set[str] = set()
+            stack = [str(x) for x in step.get("depends_on") or []]
+            while stack:
+                cur = stack.pop()
+                if cur in ancestors:
+                    continue
+                ancestors.add(cur)
+                stack.extend(
+                    str(x) for x in (by_id.get(cur, {}).get("depends_on") or []))
+            allowed = ancestors | {step_id}
+            for target in targets:
+                if target not in allowed:
+                    raise ConflictError(
+                        f"rework target {target} is not an ancestor of step {step_id}")
+                if (by_id.get(target) or {}).get("kind") == "plan_slices":
+                    raise ConflictError(
+                        f"rework target {target} is a plan_slices step and "
+                        "cannot be reset")
+
+        packet = reviews.ensure_packet(
+            conn, wf, step, created_by="human", commit=False)
+        latest = reviews.latest_packet(conn, wid, step_id)
+        if packet_id and (latest is None or latest["id"] != packet_id):
+            raise ConflictError("packet_superseded: refresh the review packet")
+        if approve and reviews.packet_has_stale_evidence(packet) \
+                and not acknowledge_stale and not override_reason:
+            raise ConflictError(
+                "evidence_stale: acknowledge stale evidence or refresh the packet")
+
+        now = now_iso()
+        reset_ids: set[str] = set()
+        if approve:
+            cur = conn.execute(
+                "UPDATE workflow_steps SET status='approved', ended_at=?, "
+                "feedback=COALESCE(?, feedback), updated_at=? "
+                "WHERE workflow_id=? AND step_id=? AND status='submitted'",
+                (now, feedback, now, wid, step_id))
+            if cur.rowcount != 1:
                 raise ConflictError(
-                    f"rework target {target} is not an ancestor of step {step_id}")
-    packet = reviews.ensure_packet(conn, wf, step, created_by="human")
-    now = now_iso()
-    if approve:
-        conn.execute(
-            "UPDATE workflow_steps SET status='approved', ended_at=?, "
-            "feedback=COALESCE(?, feedback), updated_at=? "
-            "WHERE workflow_id=? AND step_id=?", (now, feedback, now, wid, step_id))
-        _step_activity(conn, wf["task_id"], "human", step, "approved",
-                       feedback or step.get("summary"))
-    else:
+                    f"step {step_id} state changed; refresh before reviewing")
+            _step_activity(conn, wf["task_id"], "human", step, "approved",
+                           feedback or step.get("summary"))
+        else:
+            reset_ids = set(targets) | _transitive_downstream(
+                wf["steps"], set(targets))
+            for sid in reset_ids:
+                target_step = by_id.get(sid) or {}
+                status = target_step.get("status") or "unknown"
+                if status == "running" or (
+                        status == "pending" and (
+                            target_step.get("run_id") or target_step.get("lease_id"))):
+                    raise ConflictError(
+                        f"rework target {sid} is running or being dispatched; "
+                        "wait for it to finish")
+                if status not in ("pending", "submitted", "approved",
+                                  "failed", "rejected"):
+                    continue
+                if status == "pending":
+                    continue
+                conn.execute(
+                    "UPDATE workflow_steps SET status='pending', run_id=NULL, "
+                    "started_at=NULL, ended_at=NULL, summary=NULL, "
+                    "failure_reason=NULL, recovery_count=0, next_retry_at=NULL, "
+                    "nudge_count=0, last_nudge_at=NULL, lease_id=NULL, "
+                    "fence_token=0, feedback=COALESCE(?, feedback), updated_at=? "
+                    "WHERE workflow_id=? AND step_id=?",
+                    (feedback, now, wid, sid))
+                conn.execute(
+                    "UPDATE gate_packets SET status='superseded' "
+                    "WHERE workflow_id=? AND step_id=? "
+                    "AND status IN ('pending_human','pending_ai')",
+                    (wid, sid))
+            _step_activity(conn, wf["task_id"], "human", step, "rejected",
+                           feedback or "请按评审意见修改后重新提交")
+        reviews.record_decision(
+            conn, wf, step, actor_type="human", actor="human",
+            decision="approve" if approve else "reject",
+            feedback=feedback, reasons=reasons,
+            rework_targets=[] if approve else sorted(reset_ids),
+            packet_id=packet_id or (packet.get("id") if packet else None),
+            override_reason=override_reason, commit=False,
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+    if not approve:
         for target in targets:
-            conn.execute(
-                "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, "
-                "ended_at=NULL, summary=NULL, recovery_count=0, next_retry_at=NULL, "
-                "lease_id=NULL, fence_token=0, feedback=COALESCE(?, feedback), updated_at=? "
-                "WHERE workflow_id=? AND step_id=?",
-                (feedback, now, wid, target))
             target_step = by_id.get(target) or {}
             if target != step_id and target_step.get("role_slug"):
                 _mention(
                     conn, wf["task_id"], target_step["role_slug"],
                     f"评审驳回，需重做步骤「{target_step.get('title', target)}」："
                     f"{feedback or '请按评审意见修改后重新提交'}。")
-        _step_activity(conn, wf["task_id"], "human", step, "rejected",
-                       feedback or "请按评审意见修改后重新提交")
         _mention(
             conn, wf["task_id"], step["role_slug"],
             f"步骤「{step['title']}」被驳回：{feedback or '请按评审意见修改后重新提交'}。")
-    reviews.record_decision(
-        conn, wf, step, actor_type="human", actor="human",
-        decision="approve" if approve else "reject",
-        feedback=feedback, reasons=reasons,
-        rework_targets=[] if approve else targets,
-        packet_id=packet.get("id") if packet else packet_id,
-        override_reason=override_reason,
-    )
-    conn.commit()
-    if not approve:
         try:
             from . import experience_capture
             experience_capture.capture_rework(
@@ -2960,36 +3690,74 @@ def review_step(conn: sqlite3.Connection, wid: str, step_id: str, approve: bool,
 
 def retry_step(conn: sqlite3.Connection, wid: str, step_id: str) -> dict:
     """人工重试失败/驳回的步骤：重置为 pending，等待调度。"""
-    now = now_iso()
     wf = get_workflow(conn, wid)
-    if wf is None:
-        raise LookupError(wid)
-    step = next((s for s in wf.get("steps") or [] if s["step_id"] == step_id), None)
-    if step is None:
-        raise LookupError(step_id)
-    if step["status"] not in ("failed", "rejected"):
-        raise ConflictError(
-            f"step {step_id} is {step['status']}; only failed/rejected steps can be retried")
-    if step and step.get("kind") == "plan_slices":
-        expanded = conn.execute(
-            "SELECT 1 FROM workflow_steps WHERE workflow_id=? AND source_step_id=? LIMIT 1",
-            (wid, step_id)).fetchone()
-        if expanded:
+    task_id = wf["task_id"] if wf else None
+    with workflow_lifecycle_lock(
+            conn, task_id, required=True, wait_seconds=2.0):
+        return _retry_step_locked(conn, wid, step_id)
+
+
+def _retry_step_locked(conn: sqlite3.Connection, wid: str, step_id: str) -> dict:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        now = now_iso()
+        wf = get_workflow(conn, wid)
+        if wf is None:
+            raise LookupError(wid)
+        step = next((s for s in wf.get("steps") or [] if s["step_id"] == step_id), None)
+        if step is None:
+            raise LookupError(step_id)
+        if step["status"] not in ("failed", "rejected"):
             raise ConflictError(
-                "slice plan already expanded; create or re-dispatch the workflow to re-slice")
-    conn.execute(
-        "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, ended_at=NULL, "
-        "summary=NULL, recovery_count=0, next_retry_at=NULL, nudge_count=0, last_nudge_at=NULL, "
-        "lease_id=NULL, fence_token=0, updated_at=? "
-        "WHERE workflow_id=? AND step_id=?",
-        (now, wid, step_id))
-    if step and step.get("kind") == "decision":
+                f"step {step_id} is {step['status']}; "
+                "only failed/rejected steps can be retried")
+        if step and step.get("kind") == "plan_slices":
+            expanded = conn.execute(
+                "SELECT 1 FROM workflow_steps WHERE workflow_id=? AND source_step_id=? "
+                "LIMIT 1", (wid, step_id)).fetchone()
+            if expanded:
+                raise ConflictError(
+                    "slice plan already expanded; create or re-dispatch the workflow "
+                    "to re-slice")
+        # rework 耗尽后重试 decision：同时重置 on_reject 目标，否则会拿旧产出
+        # 再次决策、没有真正返工。
+        if step.get("kind") == "decision" \
+                and step.get("failure_reason") == "rework_exhausted":
+            by_id = {s["step_id"]: s for s in wf["steps"]}
+            for tid in step.get("on_reject") or []:
+                target = by_id.get(tid) or {}
+                if (target.get("status") or "") == "running":
+                    raise ConflictError(
+                        f"rework target {tid} is running; wait for it to finish")
+                conn.execute(
+                    "UPDATE workflow_steps SET status='pending', run_id=NULL, "
+                    "started_at=NULL, ended_at=NULL, summary=NULL, failure_reason=NULL, "
+                    "recovery_count=0, next_retry_at=NULL, nudge_count=0, "
+                    "last_nudge_at=NULL, lease_id=NULL, fence_token=0, updated_at=? "
+                    "WHERE workflow_id=? AND step_id=?",
+                    (now, wid, tid))
+                conn.execute(
+                    "UPDATE gate_packets SET status='superseded' "
+                    "WHERE workflow_id=? AND step_id=? "
+                    "AND status IN ('pending_human','pending_ai')",
+                    (wid, tid))
+                leases.release(conn, target.get("lease_id"), commit=False)
         conn.execute(
-            "UPDATE workflow_steps SET rework_count=0 WHERE workflow_id=? AND step_id=?",
-            (wid, step_id))
-    if step:
-        leases.release(conn, step.get("lease_id"), commit=False)
-    conn.commit()
+            "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, "
+            "ended_at=NULL, summary=NULL, recovery_count=0, next_retry_at=NULL, "
+            "nudge_count=0, last_nudge_at=NULL, lease_id=NULL, fence_token=0, "
+            "updated_at=? WHERE workflow_id=? AND step_id=?",
+            (now, wid, step_id))
+        if step and step.get("kind") == "decision":
+            conn.execute(
+                "UPDATE workflow_steps SET rework_count=0 "
+                "WHERE workflow_id=? AND step_id=?", (wid, step_id))
+        if step:
+            leases.release(conn, step.get("lease_id"), commit=False)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     return get_workflow(conn, wid)  # type: ignore[return-value]
 
 
@@ -3177,31 +3945,41 @@ def gates(conn: sqlite3.Connection) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def finalize_task_review_if_ready(conn: sqlite3.Connection, task_id: str) -> bool:
-    """把任务推进到最终人工评审；问题板未完成时保持 in_progress。
-
-    幂等：任务已 in_review/done 或最新 workflow 尚未 done 时不做任何事。
-    """
+def task_review_blocker(conn: sqlite3.Connection, task_id: str) -> str | None:
+    """返回 task 不能进入最终评审的原因；None 表示可以进入。"""
     task = conn.execute(
         "SELECT status, issue_board_enabled FROM tasks WHERE id=?", (task_id,)
     ).fetchone()
-    if task is None or task["status"] not in ("in_progress", "todo"):
-        return False
-    # 委派工单未完成时，父任务不能进入最终评审（普通任务 submit 守卫同理）。
+    if task is None:
+        return "task_missing"
+    if task["status"] not in ("in_progress", "todo"):
+        return "task_not_in_progress"
+    # 委派工单未完成时，父任务不能进入最终评审；closed 视为终止，不永久阻塞。
     pending_child = conn.execute(
-        "SELECT 1 FROM tasks WHERE parent_id=? AND status != 'done' LIMIT 1",
+        "SELECT 1 FROM tasks WHERE parent_id=? "
+        "AND status NOT IN ('done','closed') LIMIT 1",
         (task_id,)).fetchone()
     if pending_child is not None:
-        return False
+        return "pending_child"
     if task["issue_board_enabled"]:
         from . import findings as findings_service
         if findings_service.board_status(conn, task_id) != "completed":
-            return False
+            return "issue_board"
     latest = conn.execute(
         "SELECT status FROM workflows WHERE task_id=? "
         "ORDER BY created_at DESC, rowid DESC LIMIT 1", (task_id,)
     ).fetchone()
     if latest is not None and latest["status"] != "done":
+        return "workflow_not_done"
+    return None
+
+
+def finalize_task_review_if_ready(conn: sqlite3.Connection, task_id: str) -> bool:
+    """把任务推进到最终人工评审；问题板未完成时保持 in_progress。
+
+    幂等：任务已 in_review/done 或最新 workflow 尚未 done 时不做任何事。
+    """
+    if task_review_blocker(conn, task_id) is not None:
         return False
     now = now_iso()
     conn.execute(
@@ -3218,42 +3996,72 @@ def finalize_task_review_if_ready(conn: sqlite3.Connection, task_id: str) -> boo
 
 
 def _finalize_if_done(conn: sqlite3.Connection, wid: str) -> None:
-    """所有步骤完成 → workflow done；问题板完成后再进入最终人工评审。"""
+    """所有步骤完成 → workflow done；问题板完成后再进入最终人工评审。
+
+    读/写必须在同一把 task 生命周期锁和 BEGIN IMMEDIATE 内完成，并且 UPDATE
+    带 status='running' 条件，避免与 external_nodes/restart 的收口竞态。
+    """
     wf = get_workflow(conn, wid)
-    if wf is None or wf["status"] != "running":
-        return
-    if not all(s["status"] in STEP_DONE for s in wf["steps"]):
-        return
-    now = now_iso()
-    conn.execute(
-        "UPDATE workflows SET status='done', finished_at=?, updated_at=? WHERE id=?",
-        (now, now, wid))
-    ledger.emit(
-        conn, "execution.finished", task_id=wf["task_id"], workflow_id=wid,
-        execution_no=wf.get("execution_no"), actor_type="system", actor="workflow",
-        payload={"steps": len(wf.get("steps") or [])},
-    )
-    dossier.persist(conn, wid, commit=False)
-    conn.commit()
-    if not finalize_task_review_if_ready(conn, wf["task_id"]):
-        # 问题板未完成：保持 in_progress，给 reviewer 创建专用 findings run，
-        # 否则 workflow 已 done，调度器不会再为这个任务派步骤。
-        from . import findings as findings_service
-        from . import runs as runs_service
-        from . import tasks as tasks_service
-        reviewers = findings_service.reviewer_roles(conn, wf["task_id"])
-        for role in reviewers:
-            tasks_service.mention(
-                conn, wf["task_id"], "system", role,
-                "工作流已完成，但问题板尚未完成；请补齐 findings 并执行 "
-                "`anvil finding complete --task ... --summary ...`。")
-            runs_service.create_run(
-                conn, role, wf["task_id"],
-                prompt=("[anvil:findings] 工作流已完成，但问题板尚未完成。请补齐/复核 "
-                        "findings，冲突或遗漏要与其他角色确认；完成后执行 "
-                        "`anvil finding complete --task $ANVIL_TASK_ID --summary \"...\"`。"))
-        conn.commit()
-    conn.commit()
+    task_id = wf["task_id"] if wf else None
+    with workflow_lifecycle_lock(conn, task_id, required=False) as acquired:
+        if not acquired:
+            return
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            wf = get_workflow(conn, wid)
+            if wf is None or wf["status"] != "running":
+                conn.commit()
+                return
+            if not all(s["status"] in STEP_DONE for s in wf["steps"]):
+                conn.commit()
+                return
+            now = now_iso()
+            cur = conn.execute(
+                "UPDATE workflows SET status='done', finished_at=?, updated_at=? "
+                "WHERE id=? AND status='running'", (now, now, wid))
+            if cur.rowcount != 1:
+                conn.rollback()
+                return
+            ledger.emit(
+                conn, "execution.finished", task_id=wf["task_id"], workflow_id=wid,
+                execution_no=wf.get("execution_no"), actor_type="system",
+                actor="workflow",
+                payload={"steps": len(wf.get("steps") or [])},
+            )
+            dossier.persist(conn, wid, commit=False)
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        try:
+            if not finalize_task_review_if_ready(conn, wf["task_id"]):
+                blocker = task_review_blocker(conn, wf["task_id"])
+                if blocker == "issue_board":
+                    # 只有问题板未完成才给 reviewer 创建 findings run；其它原因
+                    # （task 已 in_review/done、子任务未完成等）不能误派活。
+                    from . import findings as findings_service
+                    from . import runs as runs_service
+                    from . import tasks as tasks_service
+                    reviewers = findings_service.reviewer_roles(conn, wf["task_id"])
+                    for role in reviewers:
+                        tasks_service.mention(
+                            conn, wf["task_id"], "system", role,
+                            "工作流已完成，但问题板尚未完成；请补齐 findings 并执行 "
+                            "`anvil finding complete --task ... --summary ...`。")
+                        runs_service.create_run(
+                            conn, role, wf["task_id"],
+                            prompt=("[anvil:findings] 工作流已完成，但问题板尚未完成。"
+                                    "请补齐/复核 findings，冲突或遗漏要与其他角色确认；"
+                                    "完成后执行 `anvil finding complete --task "
+                                    "$ANVIL_TASK_ID --summary \"...\"`。"))
+                    conn.commit()
+        except Exception:  # noqa: BLE001 —— 收口已完成，findings 派发失败不回滚 done
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            logger.exception(
+                "finalize findings reviewers failed workflow=%s", wid)
 
 
 def _mention(conn, task_id: str, target: str, message: str,

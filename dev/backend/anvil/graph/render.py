@@ -437,8 +437,12 @@ REVISION_PROTOCOL = (
     "5. classification=requires_restart：**不要**提交修订草案；按 PLANNING_PROTOCOL 的 A 提交完整 workflow 草案，"
     "并在 @human 消息中列出受影响步骤（running/submitted/approved）与重启原因，由人类决定重启或放弃。\n"
     "6. classification=stale/invalid：重新读取状态后再判断，不要盲目重试。\n"
+    "如果 human 要求在主流程接近/已经完成后再补一个验证或复测节点（例如对已有发现做 DT-Fuzz），"
+    "不要把它塞进 loop；用 intent.external_nodes 把节点挂在 loop 外，指定 role、"
+    "depends_on、target_slice_id 或 target_step_id，并用 restart_scope=downstream 让"
+    "最终分析/上报在节点完成后重跑。该类修订分类为 safe_external，目标已完成也允许。\n"
     "v1 只支持调整未来（pending）切片与 pending 静态步骤；改 loop 阶段/角色、增删静态步骤、"
-    "重排切片、修改 running/submitted/approved 步骤一律 requires_restart。"
+    "重排切片、修改 running/submitted/approved 步骤一律 requires_restart（external_nodes 除外）。"
     "修订被驳回时读取 human feedback，调整后重新提交，不要静默忽略。\n"
 )
 

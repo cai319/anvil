@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 
+from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
 
 DRAFT_KINDS = {"tasks", "workflow", "workflow_revision", "role_suggestion"}
@@ -148,38 +150,123 @@ def create_revision_draft(conn: sqlite3.Connection, wid: str, intent: dict,
     if wf is None:
         raise ConflictError(f"workflow {wid} not found")
     task_id = wf["task_id"]
-    pending = conn.execute(
-        "SELECT id, kind FROM board_drafts WHERE source_task=? AND status='pending' "
-        "AND kind IN ('workflow','workflow_revision') LIMIT 1", (task_id,)).fetchone()
-    if pending:
-        raise ConflictError(
-            f"a {pending['kind'] or 'workflow'} draft is already pending: {pending['id']}")
-    impact = workflow_service.preview_revision(conn, wid, intent)
-    if not impact.get("safe"):
-        raise workflow_service.RevisionConflict(impact)
-    reason = (rationale or "").strip() or "工作流增量修订"
-    tree = {
-        "schema_version": 1,
-        "base_workflow_id": wid,
-        "base_execution_no": wf.get("execution_no"),
-        "base_updated_at": wf.get("updated_at"),
-        "rationale": reason,
-        "intent": intent,
-        "impact": impact,
-    }
-    did = new_id()
-    conn.execute(
-        "INSERT INTO board_drafts (id, workspace_id, goal, tree_json, status, "
-        "created_by, created_at, source_task, kind) VALUES (?,?,?,?,?,?,?,?,?)",
-        (did, None, reason, jdumps(tree), "pending", f"agent:{agent}",
-         now_iso(), task_id, "workflow_revision"))
-    conn.commit()
+    # 预览和落库必须在同一把 task 生命周期锁内：否则 scheduler 可能在两步之间
+    # 启动目标步骤，草案一创建就已经 stale。
+    with workflow_service.workflow_lifecycle_lock(
+            conn, task_id, required=True, wait_seconds=2.0):
+        wf = workflow_service.get_workflow(conn, wid)
+        if wf is None:
+            raise ConflictError(f"workflow {wid} not found")
+        reap_stale_revision_drafts(conn, task_id=task_id)
+        pending = conn.execute(
+            "SELECT id, kind FROM board_drafts WHERE source_task=? AND status='pending' "
+            "AND kind IN ('workflow','workflow_revision') LIMIT 1",
+            (task_id,)).fetchone()
+        if pending:
+            raise ConflictError(
+                f"a {pending['kind'] or 'workflow'} draft is already pending: "
+                f"{pending['id']}")
+        impact = workflow_service.preview_revision(conn, wid, intent)
+        if not impact.get("safe"):
+            raise workflow_service.RevisionConflict(impact)
+        reason = (rationale or "").strip() or "工作流增量修订"
+        tree = {
+            "schema_version": 1,
+            "base_workflow_id": wid,
+            "base_execution_no": wf.get("execution_no"),
+            "base_updated_at": wf.get("updated_at"),
+            "rationale": reason,
+            "intent": intent,
+            "impact": impact,
+        }
+        did = new_id()
+        conn.execute(
+            "INSERT INTO board_drafts (id, workspace_id, goal, tree_json, status, "
+            "created_by, created_at, source_task, kind) VALUES (?,?,?,?,?,?,?,?,?)",
+            (did, None, reason, jdumps(tree), "pending", f"agent:{agent}",
+             now_iso(), task_id, "workflow_revision"))
+        conn.commit()
     sender = roles_service.notification_sender(conn, task_id, f"agent:{agent}")
     tasks_service.mention(
         conn, task_id, sender, "human",
         f"工作流增量修订待审批（workflow {wid}）：{impact.get('summary') or reason}。"
         "批准后原地应用，不会重启当前执行。")
     return get_draft(conn, did)  # type: ignore[return-value]
+
+
+def reap_stale_revision_drafts(conn: sqlite3.Connection,
+                               *, task_id: str | None = None) -> int:
+    """清理已失效的 pending workflow_revision 草案，释放 task 的草案互斥锁。
+
+    失效条件：base workflow 缺失/terminated、task done/closed/archived、
+    workflow 已 done 且不是 external_nodes 修订、超过 TTL。
+    """
+    from . import tasks as tasks_service
+
+    clauses = ["kind='workflow_revision'", "status='pending'"]
+    params: list = []
+    if task_id:
+        clauses.append("source_task=?")
+        params.append(task_id)
+    rows = conn.execute(
+        "SELECT id, source_task, tree_json, created_by, created_at "
+        "FROM board_drafts WHERE " + " AND ".join(clauses), params).fetchall()
+    now = now_iso()
+    now_dt = datetime.now(timezone.utc)
+    ttl_hours = float(config.REVISION_DRAFT_TTL_HOURS or 0)
+    reaped = 0
+    for row in rows:
+        tree = jloads(row["tree_json"], {})
+        if not isinstance(tree, dict):
+            tree = {}
+        intent = tree.get("intent") if isinstance(tree.get("intent"), dict) else {}
+        wid = str(tree.get("base_workflow_id") or "")
+        wf = (conn.execute(
+            "SELECT status FROM workflows WHERE id=?", (wid,)).fetchone()
+            if wid else None)
+        task = (conn.execute(
+            "SELECT status, archived_at FROM tasks WHERE id=?",
+            (row["source_task"],)).fetchone() if row["source_task"] else None)
+        reason = None
+        if wf is None:
+            reason = "base workflow missing"
+        elif wf["status"] == "terminated":
+            reason = "base workflow terminated"
+        elif task is None or task["status"] in ("done", "closed") \
+                or task["archived_at"]:
+            reason = "task is terminal"
+        elif wf["status"] == "done" and not intent.get("external_nodes"):
+            reason = "workflow is done; normal revision cannot be applied"
+        elif ttl_hours > 0:
+            try:
+                created = datetime.fromisoformat(str(row["created_at"]))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                if (now_dt - created).total_seconds() > ttl_hours * 3600:
+                    reason = "revision draft expired"
+            except (TypeError, ValueError):
+                pass
+        if not reason:
+            continue
+        cur = conn.execute(
+            "UPDATE board_drafts SET status='rejected', decided_at=? "
+            "WHERE id=? AND status='pending'", (now, row["id"]))
+        if cur.rowcount != 1:
+            continue
+        reaped += 1
+        creator = str(row["created_by"] or "").strip()
+        if creator.startswith("agent:"):
+            creator = creator[6:]
+        if creator and row["source_task"]:
+            try:
+                tasks_service.mention(
+                    conn, row["source_task"], "human", creator,
+                    f"修订草案 {row['id']} 已自动失效（{reason}）；"
+                    "请重新读取当前执行状态后再提交。")
+            except Exception:  # noqa: BLE001 —— 通知失败不影响失效
+                pass
+    conn.commit()
+    return reaped
 
 
 def update_draft(conn: sqlite3.Connection, did: str, tree: dict,
@@ -500,8 +587,12 @@ def _approve_role_suggestion(conn: sqlite3.Connection, draft: dict,
         (task_id, "human", "comment",
          jdumps({"body": f"已批准角色建议，创建/绑定：{summary}。"}), now),
     )
-    conn.execute("UPDATE board_drafts SET status='approved', decided_at=? WHERE id=?",
-                 (now, draft["id"]))
+    cur = conn.execute(
+        "UPDATE board_drafts SET status='approved', decided_at=? "
+        "WHERE id=? AND status='pending'", (now, draft["id"]))
+    if cur.rowcount != 1:
+        raise ConflictError(
+            f"draft {draft['id']} state changed; refresh before approving")
     # 批准本身只落角色，不替自然人 @ 任何角色、不启动重规划 run。
     # 自然人后续在任务会话里自己 @ 规划者/执行角色；mention 端点负责唤醒对应角色。
     warning = None if to_create else f"all suggested roles already exist; bound only: {summary}"
@@ -514,10 +605,17 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
     landed: list[str] = []
     replans: list[dict] = []
     warnings: list[str] = []
+    # 批量审批先 preflight：任一 draft 已失效就整批拒绝，避免部分落地后
+    # 后面的 draft 再报 409。
+    drafts: list[dict] = []
     for did in draft_ids:
         draft = get_draft(conn, did)
         if draft is None or draft["status"] != "pending":
-            continue
+            raise ConflictError(
+                f"draft {did} is missing or not pending; refresh before approving")
+        drafts.append(draft)
+    for draft in drafts:
+        did = draft["id"]
         kind = draft.get("kind") or "tasks"
         if kind == "workflow_revision":
             from . import roles as roles_service
@@ -578,10 +676,13 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
                 knowledge_binding.apply_cindy_draft(conn, draft["source_task"], draft["tree"])
             except Exception as exc:  # noqa: BLE001 —— 绑定失败不阻断审批
                 warnings.append(f"{did}: knowledge repos not applied ({exc})")
+            # create_workflow 会申请 task 生命周期 lease（需要 commit），先提交本批
+            # 已有的 DML，避免被锁内部提交带出意外的半状态。
+            conn.commit()
             workflow_service.create_workflow(
                 conn, draft["source_task"], draft["tree"], created_by=draft["created_by"],
                 restart_running=restart_running, restart_reason=restart_reason,
-                restart_note=restart_note)
+                restart_note=restart_note, draft_id=did)
             n = len((draft.get("tree") or {}).get("steps") or []) or 1
             action = "终止旧执行并重新开始" if running else "开始执行"
             conn.execute(
@@ -591,8 +692,6 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
                  jdumps({"body": f"已批准工作流（{n} 个步骤），{action}。"}),
                  now_iso()),
             )
-            conn.execute("UPDATE board_drafts SET status='approved', decided_at=? WHERE id=?",
-                         (now_iso(), did))
             landed.append(did)
             continue
         if kind == "role_suggestion":
@@ -622,8 +721,12 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
                  jdumps({"body": f"已批准工作流草案（{n} 个子任务），子任务已落板并按依赖自动执行。"}),
                  now_iso()),
             )
-        conn.execute("UPDATE board_drafts SET status='approved', decided_at=? WHERE id=?",
-                     (now_iso(), did))
+        cur = conn.execute(
+            "UPDATE board_drafts SET status='approved', decided_at=? "
+            "WHERE id=? AND status='pending'", (now_iso(), did))
+        if cur.rowcount != 1:
+            raise ConflictError(
+                f"draft {did} state changed; refresh before approving")
         landed.append(did)
     conn.commit()
     try:
@@ -642,8 +745,11 @@ def reject(conn: sqlite3.Connection, draft_id: str, by: str = "human",
     if draft["status"] != "pending":
         raise ConflictError(f"draft {draft_id} is {draft['status']}, expected pending")
     now = now_iso()
-    conn.execute("UPDATE board_drafts SET status='rejected', decided_at=? WHERE id=?",
-                 (now, draft_id))
+    cur = conn.execute(
+        "UPDATE board_drafts SET status='rejected', decided_at=? "
+        "WHERE id=? AND status='pending'", (now, draft_id))
+    if cur.rowcount != 1:
+        raise ConflictError(f"draft {draft_id} state changed; refresh before rejecting")
     replan = None
     blocked = None
     if draft.get("kind") == "role_suggestion" and draft.get("source_task"):

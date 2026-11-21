@@ -205,6 +205,7 @@ class SubmitIn(BaseModel):
     summary: str | None = None
     branch: str | None = None
     changed_paths: list[str] | None = None
+    force_terminate_workflow: bool = False
 
 
 class ReviewIn(BaseModel):

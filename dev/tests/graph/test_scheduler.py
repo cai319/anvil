@@ -67,6 +67,146 @@ def test_advance_skips_closed_task(tmp_path, monkeypatch):
     assert step["status"] == "pending"
 
 
+def test_advance_skips_in_review_task(tmp_path, monkeypatch):
+    """task 在最终评审时不再推进 workflow 步骤。"""
+    from anvil.services import workflow as wf_service
+
+    env = make_env(tmp_path, monkeypatch)
+    conn = open_conn(env["db_path"])
+    conn.execute(
+        "INSERT INTO tasks (id, title, status, scope_paths_json, acceptance_json, "
+        "created_at, updated_at) VALUES "
+        "('T-REVIEW','t','todo','[]','[]','2026-01-01T00:00:00','2026-01-01T00:00:00')")
+    conn.commit()
+    wf = wf_service.create_workflow(conn, "T-REVIEW", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    conn.execute("UPDATE tasks SET status='in_review' WHERE id='T-REVIEW'")
+    conn.commit()
+    conn.close()
+
+    Scheduler(env["db_path"], env["orch"]).tick_once()
+
+    runs = _runs(env)
+    assert not any(r["task_id"] == "T-REVIEW" for r in runs)
+    conn = open_conn(env["db_path"])
+    step = conn.execute(
+        "SELECT status FROM workflow_steps WHERE workflow_id=? AND step_id='S1'",
+        (wf["id"],)).fetchone()
+    conn.close()
+    assert step["status"] == "pending"
+
+
+def test_advance_isolates_workflow_failures(tmp_path, monkeypatch):
+    """一个 workflow 的 advance 异常不阻断同 tick 的其它 workflow。"""
+    from anvil.services import workflow as wf_service
+
+    env = make_env(tmp_path, monkeypatch)
+    conn = open_conn(env["db_path"])
+    for tid in ("T-A", "T-B"):
+        conn.execute(
+            "INSERT INTO tasks (id, title, status, scope_paths_json, "
+            "acceptance_json, created_at, updated_at) VALUES "
+            "(?,'t','todo','[]','[]','2026-01-01T00:00:00','2026-01-01T00:00:00')",
+            (tid,))
+        wf_service.create_workflow(conn, tid, {"steps": [
+            {"id": "S1", "title": "x", "role": "dev"}]})
+    conn.close()
+
+    calls: list[str] = []
+    orig = wf_service.advance
+
+    def flaky(conn, wid, starter=None):
+        calls.append(wid)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        return orig(conn, wid, starter=starter)
+
+    monkeypatch.setattr(wf_service, "advance", flaky)
+    Scheduler(env["db_path"], env["orch"]).tick_once()
+    assert len(calls) == 2
+
+
+def test_finalize_ready_tasks_moves_done_workflow_task_to_review(tmp_path, monkeypatch):
+    from anvil.services import workflow as wf_service
+
+    env = make_env(tmp_path, monkeypatch)
+    conn = open_conn(env["db_path"])
+    conn.execute(
+        "INSERT INTO tasks (id, title, status, scope_paths_json, acceptance_json, "
+        "created_at, updated_at) VALUES "
+        "('T-DONE','t','todo','[]','[]','2026-01-01T00:00:00','2026-01-01T00:00:00')")
+    conn.commit()
+    wf = wf_service.create_workflow(conn, "T-DONE", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    conn.execute(
+        "UPDATE workflow_steps SET status='approved' WHERE workflow_id=?", (wf["id"],))
+    conn.execute("UPDATE workflows SET status='done' WHERE id=?", (wf["id"],))
+    conn.execute("UPDATE tasks SET status='in_progress' WHERE id='T-DONE'")
+    conn.commit()
+    Scheduler(env["db_path"], env["orch"])._finalize_ready_tasks(conn)
+    task = conn.execute(
+        "SELECT status FROM tasks WHERE id='T-DONE'").fetchone()
+    conn.close()
+    assert task["status"] == "in_review"
+
+
+def test_nudge_does_not_overwrite_submitted_step(tmp_path, monkeypatch):
+    """nudge 读到 running 后、写 pending 前，若角色已 submit，CAS 必须放弃重置。"""
+    from anvil.services import workflow as wf_service
+
+    env = make_env(tmp_path, monkeypatch)
+    conn = open_conn(env["db_path"])
+    conn.execute(
+        "INSERT INTO tasks (id, title, status, scope_paths_json, acceptance_json, "
+        "created_at, updated_at) VALUES "
+        "('T-N','t','todo','[]','[]','2026-01-01T00:00:00','2026-01-01T00:00:00')")
+    conn.commit()
+    wf = wf_service.create_workflow(conn, "T-N", {"steps": [
+        {"id": "S1", "title": "a", "role": "dev"},
+        {"id": "S2", "title": "b", "role": "qa"},
+    ]})
+    now = now_iso()
+    conn.execute(
+        "UPDATE workflow_steps SET status='running', run_id='r1', started_at=? "
+        "WHERE workflow_id=? AND step_id='S1'", (now, wf["id"]))
+    conn.execute(
+        "INSERT INTO runs (id, role_slug, task_id, status, step_id, workflow_id, "
+        "started_at) VALUES ('r1','dev','T-N','completed','S1',?,?)",
+        (wf["id"], now))
+    conn.commit()
+
+    fired = {"v": False}
+    orig_execute = conn.execute
+
+    def hooked_execute(sql, *args, **kwargs):
+        if not fired["v"] and isinstance(sql, str) \
+                and "SET status='pending'" in sql \
+                and "status='running'" in sql:
+            fired["v"] = True
+            other = open_conn(env["db_path"])
+            try:
+                wf_service.submit_step(
+                    other, wf["id"], "S1", "dev", "完成")
+            finally:
+                other.close()
+        return orig_execute(sql, *args, **kwargs)
+
+    class HookConn:
+        def execute(self, sql, *args, **kwargs):
+            return hooked_execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(conn, name)
+
+    Scheduler(env["db_path"], env["orch"])._nudge_stalled(HookConn())
+    step = conn.execute(
+        "SELECT status FROM workflow_steps WHERE workflow_id=? AND step_id='S1'",
+        (wf["id"],)).fetchone()
+    conn.close()
+    assert fired["v"] is True
+    assert step["status"] == "approved"
+
+
 def test_monitor_detects_exit(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "AUTO_DISPATCH", True)  # 显式开启自动派发
     env = make_env(tmp_path, monkeypatch)

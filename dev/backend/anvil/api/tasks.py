@@ -755,8 +755,10 @@ def submit_task(tid: str, body: SubmitIn, request: Request, conn=Depends(get_db)
             )
     team = services.tasks.is_team_task(conn, tid)
     try:
-        result = services.tasks.submit(conn, tid, summary=body.summary, branch=body.branch,
-                                       changed_paths=body.changed_paths, role=auth.role)
+        result = services.tasks.submit(
+            conn, tid, summary=body.summary, branch=body.branch,
+            changed_paths=body.changed_paths, role=auth.role,
+            force_terminate_workflow=body.force_terminate_workflow)
     except LookupError:
         raise HTTPException(status_code=404, detail="task not found")
     except ConflictError as exc:

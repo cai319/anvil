@@ -43,8 +43,8 @@ async def test_gate_packet_api(client, app):
 
 
 @pytest.mark.asyncio
-async def test_packet_created_while_running_is_refreshed_on_submit(client, app):
-    """运行期 GET 创建的空包，必须被提交时的证据刷新，不能沿用到审核。"""
+async def test_packet_get_is_read_only_and_submit_creates_fresh_packet(client, app):
+    """GET packet 不再建包；提交时创建/刷新带最终证据的 packet。"""
     await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
     for slug in ("developer", "tester"):
         await client.post(f"{API}/roles", json=role_payload(slug), headers=auth_headers())
@@ -71,7 +71,7 @@ async def test_packet_created_while_running_is_refreshed_on_submit(client, app):
     early = await client.get(f"{API}/workflows/{wf['id']}/steps/S1/packet",
                              headers=human_headers())
     assert early.status_code == 200, early.text
-    assert early.json()["packet"]["evidence"] == []
+    assert early.json()["packet"] is None
 
     submitted = await client.post(
         f"{API}/workflows/{wf['id']}/steps/S1/submit",

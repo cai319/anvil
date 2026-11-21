@@ -588,7 +588,7 @@ export const api = {
   releaseTaskPaths: (taskId: string, paths: string[], holder?: string): Promise<{ released: number }> =>
     req("DELETE", `/tasks/${taskId}/reservations`, { paths, holder }).then((r) => json<{ released: number }>(r)),
   reviewWorkflowStep: (wid: string, sid: string, approve: boolean, feedback?: string,
-    opts?: { rework_targets?: string[]; reasons?: string[]; packet_id?: string; override_reason?: string }): Promise<Workflow> =>
+    opts?: { rework_targets?: string[]; reasons?: string[]; packet_id?: string; override_reason?: string; acknowledge_stale?: boolean }): Promise<Workflow> =>
     req("POST", `/workflows/${wid}/steps/${sid}/review`, {
       approve, feedback, ...opts,
     }).then((r) => json<Workflow>(r)),
@@ -646,8 +646,9 @@ export const api = {
     req("POST", `/tasks/${id}/claim`, {}, role).then((r) => json<Task>(r)),
   unclaimTask: (id: string): Promise<Task> =>
     req("POST", `/tasks/${id}/unclaim`, {}).then((r) => json<Task>(r)),
-  submitTask: (id: string): Promise<Task> =>
-    req("POST", `/tasks/${id}/submit`, { summary: "web submit" }).then((r) => json<Task>(r)),
+  submitTask: (id: string, opts?: { force_terminate_workflow?: boolean }): Promise<Task> =>
+    req("POST", `/tasks/${id}/submit`, { summary: "web submit", ...opts })
+      .then((r) => json<Task>(r)),
   reviewTask: (id: string, approve: boolean): Promise<Task> =>
     req("POST", `/tasks/${id}/review`, { approve }).then((r) => json<Task>(r)),
   getTaskTimeline: (id: string): Promise<TimelineEvent[]> =>
@@ -1529,7 +1530,7 @@ export function isOnboardingRole(r: Role): boolean {
 }
 
 export interface RevisionImpact {
-  classification: "safe_loop" | "safe_future" | "requires_restart" | "stale" | "invalid";
+  classification: "safe_loop" | "safe_future" | "safe_external" | "requires_restart" | "stale" | "invalid";
   safe: boolean;
   summary: string;
   affected_steps?: string[];
@@ -1680,7 +1681,7 @@ export interface WorkflowStep {
   gate: boolean;
   reviewer: string | null;
   contract: string | null;
-  kind?: "task" | "decision" | "plan_slices";
+  kind?: "task" | "decision" | "plan_slices" | "external";
   on_reject?: string[];
   max_rework?: number;
   rework_count?: number;
