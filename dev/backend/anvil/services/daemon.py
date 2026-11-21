@@ -704,8 +704,13 @@ class DaemonManager:
                 conn.close()
             return True
 
-    def restart_process(self, role: str) -> None:
-        """终止常驻进程但保留所有任务上下文槽；下一次唤醒恢复对应任务。"""
+    def restart_process(self, role: str, *, flush_queue: bool = True) -> None:
+        """终止常驻进程但保留所有任务上下文槽；下一次唤醒恢复对应任务。
+
+        `flush_queue=False` 时先保留队列：调用方（restart 端点）应先 pump 被
+        重启的目标 run，再调用 `flush_queue`，避免旧的 mention/reply 队列项
+        抢在目标步骤 run 之前投递。
+        """
         r = self._roles.get(role)
         if r is None:
             return
@@ -727,8 +732,22 @@ class DaemonManager:
             conn = open_conn(self.db_path)
             try:
                 self._db_upsert(conn, r, status="dead")
-                if r.queue:
+                if flush_queue and r.queue:
                     self._flush_next_locked(conn, r)
+            finally:
+                conn.close()
+
+    def flush_queue(self, role: str) -> None:
+        """重启后补投递角色队列（目标 run 已先 pump 时使用）。"""
+        r = self._roles.get(role)
+        if r is None:
+            return
+        with r.lock:
+            if r.busy or not r.queue:
+                return
+            conn = open_conn(self.db_path)
+            try:
+                self._flush_next_locked(conn, r)
             finally:
                 conn.close()
 
@@ -1388,10 +1407,17 @@ class DaemonManager:
     def _switch_context_inner(self, conn, r: _Role, item: _Queued,
                               target_key: str) -> bool:
         if r.proc is not None and r.proc.poll() is None:
+            old_run_id = r.current_run_id
             r.suppress_exit = True
             self._kill_locked(r, graceful=True)
             r.suppress_exit = False
             self._clear_current_locked(r)
+            # 计划内切走旧上下文：旧 run 不能永久停在 running，否则依赖它
+            # 结束的 resolver/看门狗会一直等一个已经不在执行的 turn。
+            if old_run_id:
+                from . import runs as runs_service
+                runs_service.set_status(
+                    conn, old_run_id, "suspended", from_statuses=("running",))
             # 旧槽只是释放进程，session 仍可恢复：槽状态回到 idle。
             if r.context_key:
                 self._slot_persist(r, status="idle", conn=conn)

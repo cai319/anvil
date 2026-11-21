@@ -154,6 +154,7 @@ def _reset(run_id: str, mode: str, request: Request, conn) -> dict:
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     from ..services import daemon as daemon_service
+    from ..services import dispatch as dispatch_service
     from ..services import workflow as workflow_service
 
     # workflow step 的 run 失败后，step 已被 fail_step 重置；单纯把 run 改回 created
@@ -165,6 +166,14 @@ def _reset(run_id: str, mode: str, request: Request, conn) -> dict:
                 conn, run["workflow_id"], run["step_id"], run_id)
         except ConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
+
+    # 人工 restart 的标记语义：
+    # - 重启回复 run → 重新武装它自己的回切（清 returned_at/attempts，重指向步骤 run）；
+    # - 重启步骤 run → 清掉所有指向它的入站回切标记，立即解除看门狗阻塞。
+    if int(run.get("context_return_after_turn") or 0):
+        dispatch_service.rearm_context_return(conn, run_id)
+    if run.get("workflow_id") and run.get("step_id"):
+        dispatch_service.clear_inbound_context_returns(conn, run_id)
     mgr = daemon_service.get_manager()
     _terminate(run)
     if mode == "session":
@@ -181,7 +190,9 @@ def _reset(run_id: str, mode: str, request: Request, conn) -> dict:
     # - session/full：杀进程并清空 session_id，下一次用 args_new 新建上下文。
     if mgr and mgr.enabled:
         if mode == "restart":
-            mgr.restart_process(run["role_slug"])
+            # 先保留队列：下面先 pump 被重启的目标 run，再补投其余队列，
+            # 避免遗留的 tester reply/mention 抢在目标步骤 run 前投递。
+            mgr.restart_process(run["role_slug"], flush_queue=False)
         elif mode == "session":
             # 只清该 run 所属的 context；角色在其它任务/切片上的会话保留。
             mgr.reset_session(
@@ -231,6 +242,11 @@ def _reset(run_id: str, mode: str, request: Request, conn) -> dict:
         try:
             orch.pump(request.app.state.db_path, run_id, "wake", {})
         except Exception:  # noqa: BLE001
+            pass
+    if mgr and mgr.enabled and mode == "restart":
+        try:
+            mgr.flush_queue(run["role_slug"])
+        except Exception:  # noqa: BLE001 —— 队列补投失败不阻断 reset 返回
             pass
     result = services.runs.get_run(conn, run_id) or {}
     return {**result, "reset": mode, "backup": backup}

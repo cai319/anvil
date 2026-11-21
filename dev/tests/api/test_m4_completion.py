@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 
 from anvil import config
+from anvil.db import open_conn
+from anvil.util import now_iso
 from tests.conftest import API, app_factory, auth_headers, role_payload, runtime_payload, human_headers  # noqa: E402
 
 
@@ -231,6 +233,45 @@ async def test_run_restart_full_reset_and_release(client):
     assert released.status_code == 204
     body = (await client.get(f"{API}/runs/{run['id']}", headers=auth_headers())).json()
     assert body["status"] == "abandoned"
+
+
+async def test_run_restart_rearms_context_return(client, app):
+    """重启回复 run 时重新武装回切：清 returned_at/attempts，resolver 仍可见。"""
+    await _seed(client)
+    run = (await client.post(f"{API}/runs", json={"role_slug": "qa-role"},
+                             headers=auth_headers())).json()
+    conn = open_conn(app.state.db_path)
+    try:
+        now = now_iso()
+        conn.execute(
+            "INSERT INTO runs (id,role_slug,status,started_at) "
+            "VALUES ('R-STEP','qa-role','suspended',?)", (now,))
+        conn.execute(
+            "UPDATE runs SET context_return_context_key='K', "
+            "context_return_run_id='R-STEP', context_return_after_turn=1, "
+            "context_returned_at=?, context_return_attempts=3, "
+            "context_return_last_attempt_at=? WHERE id=?",
+            (now, now, run["id"]))
+        conn.commit()
+    finally:
+        conn.close()
+
+    restarted = await client.post(f"{API}/runs/{run['id']}/restart",
+                                  headers=human_headers())
+    assert restarted.status_code == 200
+
+    conn = open_conn(app.state.db_path)
+    try:
+        row = conn.execute(
+            "SELECT context_return_run_id, context_return_after_turn, "
+            "context_returned_at, context_return_attempts FROM runs WHERE id=?",
+            (run["id"],)).fetchone()
+        assert row["context_return_run_id"] == "R-STEP"
+        assert row["context_return_after_turn"] == 1
+        assert row["context_returned_at"] is None
+        assert row["context_return_attempts"] == 0
+    finally:
+        conn.close()
 
 
 async def test_role_versions_and_rollback(client):

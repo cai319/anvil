@@ -1,6 +1,8 @@
 """独立派遣 / 跨切片临时处理后的自动回切。"""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from anvil import config
@@ -371,3 +373,240 @@ def test_dispatch_completion_notification_is_idempotent(env):
         "SELECT COUNT(*) AS n FROM activities WHERE task_id=? AND kind='mention'",
         (source["id"],)).fetchone()["n"]
     assert count2 == count
+
+
+def test_context_return_rearm_after_clear_resolves_again(env):
+    """二次 arm 必须复位 returned_at，否则 resolver 永久看不到这条标记。"""
+    conn = env
+    task = tasks_service.create(conn, title="B 片", assignee="qa")
+    _running_step(conn, task["id"], "B.execute", "R-b", "B")
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,step_id,slice_key,started_at) "
+        "VALUES ('R-a','dev',?,'suspended','A.execute','A',?)", (task["id"], now))
+    conn.commit()
+    key = f"{task['id']}::slice::B"
+
+    dispatch.record_context_return(
+        conn, switched_run_id="R-a", return_context_key=key, return_run_id="R-b")
+    row = conn.execute("SELECT * FROM runs WHERE id='R-a'").fetchone()
+    assert row["context_return_after_turn"] == 1
+    assert row["context_returned_at"] is None
+    assert row["context_return_armed_at"]
+
+    calls: list[str] = []
+    pump = lambda rid, ev: calls.append(rid) or True
+    assert dispatch.resolve_context_returns(conn, pump) == 1
+    assert calls == ["R-b"]
+
+    # 同一回复 run 再次被切走：复用并重新 arm。
+    dispatch.record_context_return(
+        conn, switched_run_id="R-a", return_context_key=key, return_run_id="R-b")
+    row = conn.execute("SELECT * FROM runs WHERE id='R-a'").fetchone()
+    assert row["context_return_after_turn"] == 1
+    assert row["context_returned_at"] is None
+    assert dispatch.resolve_context_returns(conn, pump) == 1
+    assert calls == ["R-b", "R-b"]
+
+
+def test_context_return_rearm_updates_target(env):
+    """已 armed 时再次 switch 应更新返回目标，而不是整条 no-op。"""
+    conn = env
+    task = tasks_service.create(conn, title="B 片", assignee="qa")
+    _running_step(conn, task["id"], "B.execute", "R-b", "B")
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,step_id,slice_key,started_at) "
+        "VALUES ('R-c','dev',?,'suspended','C.execute','C',?)", (task["id"], now))
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,step_id,slice_key,started_at) "
+        "VALUES ('R-a','dev',?,'suspended','A.execute','A',?)", (task["id"], now))
+    conn.commit()
+    key = f"{task['id']}::slice::B"
+
+    dispatch.record_context_return(
+        conn, switched_run_id="R-a", return_context_key=key, return_run_id="R-b")
+    dispatch.record_context_return(
+        conn, switched_run_id="R-a", return_context_key=key, return_run_id="R-c")
+    row = conn.execute(
+        "SELECT context_return_run_id FROM runs WHERE id='R-a'").fetchone()
+    assert row["context_return_run_id"] == "R-c"
+
+
+def test_context_return_same_target_rearm_keeps_ttl(env):
+    """同目标重复 arm 不能刷新 armed_at，否则高频 mention 可无限续命。"""
+    conn = env
+    task = tasks_service.create(conn, title="B 片", assignee="qa")
+    _running_step(conn, task["id"], "B.execute", "R-b", "B")
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,step_id,slice_key,started_at) "
+        "VALUES ('R-a','dev',?,'suspended','A.execute','A',?)", (task["id"], now))
+    conn.commit()
+    key = f"{task['id']}::slice::B"
+    dispatch.record_context_return(
+        conn, switched_run_id="R-a", return_context_key=key, return_run_id="R-b")
+
+    old = (datetime.now(timezone.utc) - timedelta(
+        seconds=int(config.CONTEXT_RETURN_MAX_WAIT_SECONDS) + 60)).isoformat()
+    conn.execute(
+        "UPDATE runs SET context_return_armed_at=? WHERE id='R-a'", (old,))
+    conn.commit()
+    dispatch.record_context_return(
+        conn, switched_run_id="R-a", return_context_key=key, return_run_id="R-b")
+    row = conn.execute(
+        "SELECT context_return_armed_at FROM runs WHERE id='R-a'").fetchone()
+    assert row["context_return_armed_at"] == old
+    assert dispatch.context_return_is_blocking(conn, "R-b") is False
+
+    calls: list[str] = []
+    assert dispatch.resolve_context_returns(
+        conn, lambda rid, ev: calls.append(rid) or True) == 0
+    assert calls == []
+    cleared = conn.execute(
+        "SELECT context_return_after_turn FROM runs WHERE id='R-a'").fetchone()
+    assert cleared["context_return_after_turn"] == 0
+
+
+def test_context_return_pump_rearm_does_not_clear_new_target(env):
+    """resolver pump 期间若被二次 arm 改了目标，旧 CAS clear 不能清掉新标记。"""
+    conn = env
+    task = tasks_service.create(conn, title="B 片", assignee="qa")
+    _running_step(conn, task["id"], "B.execute", "R-b", "B")
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,step_id,slice_key,started_at) "
+        "VALUES ('R-c','dev',?,'suspended','C.execute','C',?)", (task["id"], now))
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,step_id,slice_key,started_at) "
+        "VALUES ('R-a','dev',?,'suspended','A.execute','A',?)", (task["id"], now))
+    conn.commit()
+    key = f"{task['id']}::slice::B"
+    dispatch.record_context_return(
+        conn, switched_run_id="R-a", return_context_key=key, return_run_id="R-b")
+
+    def pump(_ret_id, _event):
+        dispatch.record_context_return(
+            conn, switched_run_id="R-a", return_context_key=key,
+            return_run_id="R-c")
+        return True
+
+    dispatch.resolve_context_returns(conn, pump)
+    row = conn.execute(
+        "SELECT context_return_run_id, context_return_after_turn, "
+        "context_return_armed_at FROM runs WHERE id='R-a'").fetchone()
+    assert row["context_return_run_id"] == "R-c"
+    assert row["context_return_after_turn"] == 1
+    assert row["context_return_armed_at"]
+
+
+def test_context_return_expires_when_target_stays_running(env):
+    """目标 run 长期非 suspended 时，有界等待到期后清标记并放行。"""
+    conn = env
+    task = tasks_service.create(conn, title="B 片", assignee="qa")
+    _running_step(conn, task["id"], "B.execute", "R-b", "B")
+    conn.execute("UPDATE runs SET status='running' WHERE id='R-b'")
+    old = (datetime.now(timezone.utc) - timedelta(
+        seconds=int(config.CONTEXT_RETURN_MAX_WAIT_SECONDS) + 60)).isoformat()
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,step_id,slice_key,started_at,"
+        "context_return_context_key,context_return_run_id,context_return_after_turn,"
+        "context_return_last_attempt_at) VALUES "
+        "('R-a','dev',?,'suspended','A.execute','A',?,?,?,1,?)",
+        (task["id"], old, f"{task['id']}::slice::B", "R-b", old))
+    conn.commit()
+
+    assert dispatch.context_return_is_blocking(conn, "R-b") is False
+    calls: list[str] = []
+    assert dispatch.resolve_context_returns(
+        conn, lambda rid, ev: calls.append(rid) or True) == 0
+    assert calls == []
+    row = conn.execute(
+        "SELECT context_return_after_turn, context_returned_at FROM runs WHERE id='R-a'"
+    ).fetchone()
+    assert row["context_return_after_turn"] == 0
+    assert row["context_returned_at"]
+
+
+def test_context_return_blocking_uses_ttl_and_attempts(env):
+    conn = env
+    task = tasks_service.create(conn, title="B 片", assignee="qa")
+    _running_step(conn, task["id"], "B.execute", "R-b", "B")
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,step_id,slice_key,started_at,"
+        "context_return_context_key,context_return_run_id,context_return_after_turn,"
+        "context_return_last_attempt_at) VALUES "
+        "('R-a','dev',?,'suspended','A.execute','A',?,?,?,1,?)",
+        (task["id"], now, f"{task['id']}::slice::B", "R-b", now))
+    conn.commit()
+    assert dispatch.context_return_is_blocking(conn, "R-b") is True
+    old = (datetime.now(timezone.utc) - timedelta(
+        seconds=int(config.CONTEXT_RETURN_MAX_WAIT_SECONDS) + 60)).isoformat()
+    conn.execute(
+        "UPDATE runs SET context_return_last_attempt_at=? WHERE id='R-a'", (old,))
+    conn.commit()
+    assert dispatch.context_return_is_blocking(conn, "R-b") is False
+
+
+def test_restart_clear_inbound_context_returns(env):
+    conn = env
+    task = tasks_service.create(conn, title="B 片", assignee="qa")
+    _running_step(conn, task["id"], "B.execute", "R-b", "B")
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,step_id,slice_key,started_at,"
+        "context_return_context_key,context_return_run_id,context_return_after_turn,"
+        "context_return_last_attempt_at) VALUES "
+        "('R-a','dev',?,'suspended','A.execute','A',?,?,?,1,?)",
+        (task["id"], now, f"{task['id']}::slice::B", "R-b", now))
+    conn.commit()
+    assert dispatch.context_return_is_blocking(conn, "R-b") is True
+    assert dispatch.clear_inbound_context_returns(conn, "R-b") == 1
+    assert dispatch.context_return_is_blocking(conn, "R-b") is False
+    row = conn.execute(
+        "SELECT context_return_after_turn, context_returned_at FROM runs WHERE id='R-a'"
+    ).fetchone()
+    assert row["context_return_after_turn"] == 0
+    assert row["context_returned_at"]
+
+
+def test_context_return_v2_migration_heals_dead_markers(tmp_path):
+    """二次 arm 死标记：armed + returned_at 非空的历史行在升级后重新可见。"""
+    from anvil.db import _migrate_context_return_v2
+
+    conn = connect(str(tmp_path / "t.db"))
+    try:
+        now = now_iso()
+        conn.execute(
+            "INSERT INTO runs (id,role_slug,status,started_at,"
+            "context_return_after_turn,context_returned_at) "
+            "VALUES ('R-a','dev','suspended',?,1,?)", (now, now))
+        conn.execute("DELETE FROM settings WHERE key='schema.context_return_v2'")
+        conn.commit()
+        _migrate_context_return_v2(conn)
+        row = conn.execute(
+            "SELECT context_returned_at FROM runs WHERE id='R-a'").fetchone()
+        assert row["context_returned_at"] is None
+    finally:
+        conn.close()
+
+
+def test_rearm_context_return_without_target_clears(env):
+    conn = env
+    task = tasks_service.create(conn, title="B 片", assignee="qa")
+    _running_step(conn, task["id"], "B.execute", "R-b", "B")
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO runs (id,role_slug,task_id,status,step_id,slice_key,started_at,"
+        "context_return_context_key,context_return_run_id,context_return_after_turn,"
+        "context_return_last_attempt_at) VALUES "
+        "('R-a','dev',?,'suspended','A.execute','A',?,?,?,1,?)",
+        (task["id"], now, f"{task['id']}::slice::B", "R-b", now))
+    conn.commit()
+    conn.execute("UPDATE runs SET status='completed' WHERE id='R-b'")
+    conn.commit()
+    assert dispatch.rearm_context_return(conn, "R-a") is False
+    row = conn.execute(
+        "SELECT context_return_after_turn FROM runs WHERE id='R-a'").fetchone()
+    assert row["context_return_after_turn"] == 0

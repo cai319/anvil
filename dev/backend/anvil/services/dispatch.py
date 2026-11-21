@@ -527,10 +527,35 @@ def resolve_dispatch_returns(conn: sqlite3.Connection, pump,
     return done
 
 
+def _find_suspended_run(conn: sqlite3.Connection, role_slug: str,
+                        context_key: str | None) -> str | None:
+    """按上下文 key 找最近 suspended run（idle release 后 current_run_id 可能为空）。"""
+    if not context_key:
+        return None
+    from . import daemon as daemon_service
+    task_id, slice_key = daemon_service.context_parts(context_key)
+    if not task_id:
+        return None
+    q = ("SELECT id FROM runs WHERE task_id=? AND role_slug=? "
+         "AND status='suspended'")
+    params: list = [task_id, role_slug]
+    if slice_key:
+        q += " AND slice_key=?"
+        params.append(slice_key)
+    else:
+        q += " AND slice_key IS NULL"
+    found = conn.execute(q + " ORDER BY started_at DESC LIMIT 1", params).fetchone()
+    return found["id"] if found else None
+
+
 def record_context_return(conn: sqlite3.Connection, *, switched_run_id: str,
                           return_context_key: str | None,
                           return_run_id: str | None) -> None:
-    """跨切片临时处理：在切过去的 run 上记录“本轮结束后回到 B”。"""
+    """临时上下文处理：在切过去的 run 上记录“本轮结束后回到 B”。
+
+    允许重复 arm（同一 run 再次切走）并重新指向最新返回目标；每次 arm 都
+    复位 returned_at/attempts，否则 resolver 的扫描会永久看不到这条标记。
+    """
     if not switched_run_id or not return_context_key:
         return
     if return_context_key == _context_for_run(conn, switched_run_id):
@@ -539,35 +564,180 @@ def record_context_return(conn: sqlite3.Connection, *, switched_run_id: str,
         "SELECT role_slug FROM runs WHERE id=?", (switched_run_id,)).fetchone()
     if switched is None:
         return
-    # idle release 后 current_run_id 可能为空：按 return context 找回最近 suspended run。
     if not return_run_id:
-        from . import daemon as daemon_service
-        task_id, slice_key = daemon_service.context_parts(return_context_key)
-        if task_id:
-            q = ("SELECT id FROM runs WHERE task_id=? AND role_slug=? "
-                 "AND status='suspended'")
-            params: list = [task_id, switched["role_slug"]]
-            if slice_key:
-                q += " AND slice_key=?"
-                params.append(slice_key)
-            else:
-                q += " AND slice_key IS NULL"
-            found = conn.execute(q + " ORDER BY started_at DESC LIMIT 1", params).fetchone()
-            return_run_id = found["id"] if found else None
-    if not return_run_id:
+        return_run_id = _find_suspended_run(
+            conn, switched["role_slug"], return_context_key)
+    if not return_run_id or return_run_id == switched_run_id:
         return
     ret = conn.execute(
         "SELECT status FROM runs WHERE id=?", (return_run_id,)).fetchone()
     if ret is None or ret["status"] in ("completed", "failed", "abandoned",
                                         "submitted", "reviewing"):
         return
-    conn.execute(
-        "UPDATE runs SET context_return_context_key=?, context_return_run_id=?, "
-        "context_return_after_turn=1, context_return_attempts=0, "
-        "context_return_last_attempt_at=NULL "
-        "WHERE id=? AND context_return_after_turn=0",
-        (return_context_key, return_run_id, switched_run_id))
+    current = conn.execute(
+        "SELECT context_return_after_turn, context_return_run_id, "
+        "context_return_context_key FROM runs WHERE id=?",
+        (switched_run_id,)).fetchone()
+    same_pending = bool(
+        current is not None
+        and int(current["context_return_after_turn"] or 0)
+        and str(current["context_return_run_id"] or "") == str(return_run_id)
+        and str(current["context_return_context_key"] or "") == str(return_context_key))
+    now = now_iso()
+    if same_pending:
+        # 同一目标重复 arm：只恢复可见性，不刷新 armed_at/attempts/backoff，
+        # 否则高频 mention 可以无限延长“有界等待”。
+        conn.execute(
+            "UPDATE runs SET context_return_after_turn=1, context_returned_at=NULL "
+            "WHERE id=?", (switched_run_id,))
+    else:
+        # 目标变化：重置 TTL/attempts，并记录新的 arm 时间。
+        conn.execute(
+            "UPDATE runs SET context_return_context_key=?, context_return_run_id=?, "
+            "context_return_after_turn=1, context_returned_at=NULL, "
+            "context_return_attempts=0, context_return_last_attempt_at=NULL, "
+            "context_return_armed_at=? WHERE id=?",
+            (return_context_key, return_run_id, now, switched_run_id))
     conn.commit()
+
+
+def _audit_context_return(conn: sqlite3.Connection, run: dict,
+                          action: str, reason: str) -> None:
+    try:
+        conn.execute(
+            "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
+            "VALUES (?,?,?,?,?)",
+            (run.get("role_slug"), run.get("task_id"), action,
+             jdumps({"run_id": run.get("id"),
+                     "target": run.get("context_return_run_id"),
+                     "reason": reason}), now_iso()))
+    except Exception:  # noqa: BLE001 —— 审计失败不阻断状态收敛
+        pass
+
+
+def _context_return_age_seconds(run: dict, now: datetime) -> float | None:
+    # armed_at 是 TTL/代际锚点：重试不延长它，同目标重复 arm 也不刷新它。
+    parsed = _parse_dt(run.get("context_return_armed_at")
+                       or run.get("context_return_last_attempt_at")
+                       or run.get("started_at"))
+    if parsed is None:
+        return None
+    return max(0.0, (now - parsed).total_seconds())
+
+
+def _context_return_deadline_exceeded(run: dict, now: datetime) -> bool:
+    max_wait = max(0, int(config.CONTEXT_RETURN_MAX_WAIT_SECONDS))
+    if max_wait <= 0:
+        return False
+    age = _context_return_age_seconds(run, now)
+    return age is not None and age > max_wait
+
+
+def _context_return_attempts_exhausted(run: dict) -> bool:
+    limit = max(0, int(config.CONTEXT_RETURN_MAX_ATTEMPTS))
+    return int(run.get("context_return_attempts") or 0) >= limit
+
+
+def context_return_is_blocking(conn: sqlite3.Connection, target_run_id: str | None,
+                               now: datetime | None = None) -> bool:
+    """看门狗判据：指向 target 的 armed 标记是否仍值得等待。
+
+    有界：attempts 耗尽或超过 CONTEXT_RETURN_MAX_WAIT_SECONDS 后不再阻塞。
+    """
+    if not target_run_id:
+        return False
+    now = now or datetime.now(timezone.utc)
+    rows = conn.execute(
+        "SELECT status, context_return_attempts, context_return_armed_at, "
+        "context_return_last_attempt_at, started_at FROM runs "
+        "WHERE context_return_run_id=? AND context_return_after_turn=1 "
+        "AND status IN ('suspended','completed','failed','abandoned')",
+        (target_run_id,)).fetchall()
+    for raw in rows:
+        run = dict(raw)
+        if _context_return_attempts_exhausted(run):
+            continue
+        if _context_return_deadline_exceeded(run, now):
+            continue
+        return True
+    return False
+
+
+def expire_stale_context_returns(conn: sqlite3.Connection, target_run_id: str | None,
+                                 now: datetime | None = None) -> int:
+    """清除指向 target 且已过期/attempts 耗尽的 armed 标记。"""
+    if not target_run_id:
+        return 0
+    now = now or datetime.now(timezone.utc)
+    rows = conn.execute(
+        "SELECT * FROM runs WHERE context_return_run_id=? "
+        "AND context_return_after_turn=1", (target_run_id,)).fetchall()
+    cleared = 0
+    for raw in rows:
+        run = dict(raw)
+        deadline = _context_return_deadline_exceeded(run, now)
+        exhausted = _context_return_attempts_exhausted(run)
+        if not (deadline or exhausted):
+            continue
+        _clear_context_return(conn, run["id"], now_iso())
+        _audit_context_return(conn, run, "context_return.expired",
+                              "deadline" if deadline else "attempts")
+        cleared += 1
+    if cleared:
+        conn.commit()
+    return cleared
+
+
+def clear_inbound_context_returns(conn: sqlite3.Connection,
+                                  target_run_id: str | None) -> int:
+    """人工 restart 步骤 run 时，清掉所有指向它的回切标记。"""
+    if not target_run_id:
+        return 0
+    rows = conn.execute(
+        "SELECT * FROM runs WHERE context_return_run_id=? "
+        "AND context_return_after_turn=1", (target_run_id,)).fetchall()
+    for raw in rows:
+        run = dict(raw)
+        _clear_context_return(conn, run["id"], now_iso())
+        _audit_context_return(conn, run, "context_return.cleared",
+                              "target restarted")
+    if rows:
+        conn.commit()
+    return len(rows)
+
+
+def rearm_context_return(conn: sqlite3.Connection, run_id: str) -> bool:
+    """人工 restart 回复 run：重新武装它自己的回切标记。
+
+    清 returned_at/attempts（重启 TTL），必要时按上下文重找当前步骤 run；
+    找不到目标则清标记。返回是否仍 armed。
+    """
+    raw = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+    if raw is None:
+        return False
+    run = dict(raw)
+    if not int(run.get("context_return_after_turn") or 0):
+        return False
+    target_id = run.get("context_return_run_id")
+    target = conn.execute("SELECT status FROM runs WHERE id=?",
+                          (target_id,)).fetchone() if target_id else None
+    if target is None or target["status"] in (
+            "completed", "failed", "abandoned", "submitted", "reviewing"):
+        target_id = _find_suspended_run(
+            conn, run.get("role_slug") or "", run.get("context_return_context_key"))
+    if not target_id or target_id == run_id:
+        _clear_context_return(conn, run_id, now_iso())
+        _audit_context_return(conn, run, "context_return.cleared",
+                              "rearm without target")
+        conn.commit()
+        return False
+    conn.execute(
+        "UPDATE runs SET context_return_run_id=?, context_return_after_turn=1, "
+        "context_returned_at=NULL, context_return_attempts=0, "
+        "context_return_last_attempt_at=NULL, context_return_armed_at=? WHERE id=?",
+        (target_id, now_iso(), run_id))
+    conn.commit()
+    return True
 
 
 def _context_for_run(conn: sqlite3.Connection, run_id: str) -> str | None:
@@ -651,6 +821,21 @@ def _clear_context_return(conn: sqlite3.Connection, run_id: str, now: str) -> No
         (now, run_id))
 
 
+def _context_return_arm_token(run: dict) -> str:
+    return str(run.get("context_return_armed_at") or "")
+
+
+def _clear_context_return_if_current(conn: sqlite3.Connection, run: dict,
+                                     now: str) -> bool:
+    """代际 CAS：只有 armed_at 仍是快照值时才清，避免清掉刚被重新 arm 的目标。"""
+    cur = conn.execute(
+        "UPDATE runs SET context_return_after_turn=0, context_returned_at=? "
+        "WHERE id=? AND context_return_after_turn=1 "
+        "AND IFNULL(context_return_armed_at,'')=?",
+        (now, run["id"], _context_return_arm_token(run)))
+    return cur.rowcount > 0
+
+
 def resolve_context_returns(conn: sqlite3.Connection, pump) -> int:
     """临时切换的 run 已结束/失败 → 自动 resume 原来的切片/任务 run 一次。
 
@@ -659,7 +844,7 @@ def resolve_context_returns(conn: sqlite3.Connection, pump) -> int:
     """
     rows = conn.execute(
         "SELECT * FROM runs WHERE context_return_after_turn=1 "
-        "AND context_returned_at IS NULL ORDER BY id").fetchall()
+        "ORDER BY id").fetchall()
     groups: dict[tuple[str, str], list[dict]] = {}
     for raw in rows:
         run = dict(raw)
@@ -673,21 +858,42 @@ def resolve_context_returns(conn: sqlite3.Connection, pump) -> int:
 
     done = 0
     for (ret_id, ret_key), entries in groups.items():
+        now_dt = datetime.now(timezone.utc)
+        # 有界等待：过期或 attempts 耗尽的条目先清掉，避免永久抑制步骤。
+        kept: list[dict] = []
+        for run in entries:
+            deadline = _context_return_deadline_exceeded(run, now_dt)
+            exhausted = _context_return_attempts_exhausted(run)
+            if deadline or exhausted:
+                if _clear_context_return_if_current(conn, run, now_iso()):
+                    _audit_context_return(conn, run, "context_return.expired",
+                                          "deadline" if deadline else "attempts")
+                else:
+                    # 并发二次 arm 改了代际：留给下一 tick 按新目标处理。
+                    kept.append(run)
+            else:
+                kept.append(run)
+        if len(kept) != len(entries):
+            conn.commit()
+        if not kept:
+            continue
+        entries = kept
+
         ret = conn.execute(
             "SELECT id, task_id, role_slug, slice_key, status, step_id, "
             "native_session_id FROM runs WHERE id=?", (ret_id,)).fetchone()
         if ret is None or ret["status"] in (
                 "completed", "failed", "abandoned", "submitted", "reviewing"):
             for run in entries:
-                _clear_context_return(conn, run["id"], now_iso())
+                _clear_context_return_if_current(conn, run, now_iso())
             conn.commit()
             continue
         if ret["status"] != "suspended":
-            # 临时上下文仍在 running/created，等它真正结束再回切。
+            # 临时上下文仍在 running/created：有界等待，过期由上面的分支清掉。
             continue
         if not _context_return_valid(conn, ret, ret_key):
             for run in entries:
-                _clear_context_return(conn, run["id"], now_iso())
+                _clear_context_return_if_current(conn, run, now_iso())
             conn.commit()
             continue
 
@@ -695,7 +901,7 @@ def resolve_context_returns(conn: sqlite3.Connection, pump) -> int:
         for run in entries:
             if run["status"] in ("submitted", "reviewing"):
                 # 临时工作已进入 HITL；按非阻塞规则不等待，清标记。
-                _clear_context_return(conn, run["id"], now_iso())
+                _clear_context_return_if_current(conn, run, now_iso())
                 continue
             if run["status"] not in ("suspended", "completed", "failed", "abandoned"):
                 continue
@@ -708,30 +914,44 @@ def resolve_context_returns(conn: sqlite3.Connection, pump) -> int:
         limit = max(0, int(config.CONTEXT_RETURN_MAX_ATTEMPTS))
         if attempts > limit:
             for run in valid:
-                _clear_context_return(conn, run["id"], now_iso())
+                _clear_context_return_if_current(conn, run, now_iso())
             conn.commit()
             continue
         last_attempts = [
             parsed for parsed in (_parse_dt(run.get("context_return_last_attempt_at"))
                                   for run in valid) if parsed is not None
         ]
-        if last_attempts:
+        # 首次尝试不等待 backoff；重试才退避。
+        if attempts > 1 and last_attempts:
             backoff = max(0.0, float(config.CONTEXT_RETURN_BACKOFF_SECONDS))
             delay = min(300.0, backoff * (2 ** max(0, attempts - 2)))
             if (datetime.now(timezone.utc) - max(last_attempts)).total_seconds() < delay:
                 continue
 
-        # 同一 return run 的多个结果合并；note 用 run id 去重，pump 失败不会重复膨胀。
+        # claim + commit → 追加 note + commit → pump（pump 期间不持事务）。
+        # 代际 CAS：期间若被二次 arm 改了 armed_at，rowcount=0，交由下一 tick。
+        now = now_iso()
+        claimed: list[dict] = []
         for run in valid:
+            cur = conn.execute(
+                "UPDATE runs SET context_return_attempts=?, "
+                "context_return_last_attempt_at=? "
+                "WHERE id=? AND context_return_after_turn=1 "
+                "AND context_returned_at IS NULL "
+                "AND status IN ('suspended','completed','failed','abandoned') "
+                "AND IFNULL(context_return_armed_at,'')=?",
+                (attempts, now, run["id"], _context_return_arm_token(run)))
+            if cur.rowcount:
+                claimed.append(run)
+        conn.commit()
+        if not claimed:
+            continue
+
+        # 同一 return run 的多个结果合并；note 用 run id 去重，pump 失败不会重复膨胀。
+        for run in claimed:
             append_wake_note(
                 conn, ret_id, _context_return_note(conn, run),
                 once_marker=f"run {run['id']}")
-        now = now_iso()
-        for run in valid:
-            conn.execute(
-                "UPDATE runs SET context_return_attempts=?, "
-                "context_return_last_attempt_at=? WHERE id=?",
-                (attempts, now, run["id"]))
         conn.commit()
 
         ok_pump = bool(pump(ret_id, "resume"))
@@ -741,12 +961,14 @@ def resolve_context_returns(conn: sqlite3.Connection, pump) -> int:
             ok_pump and ret_after is not None
             and runs_service.is_dispatchable_status(ret_after["status"]))
         if returned_ok:
-            for run in valid:
-                _clear_context_return(conn, run["id"], now_iso())
-            done += 1
+            cleared = sum(
+                1 for run in claimed
+                if _clear_context_return_if_current(conn, run, now_iso()))
+            if cleared:
+                done += 1
         elif attempts >= limit:
-            for run in valid:
-                _clear_context_return(conn, run["id"], now_iso())
+            for run in claimed:
+                _clear_context_return_if_current(conn, run, now_iso())
         conn.commit()
     return done
 
