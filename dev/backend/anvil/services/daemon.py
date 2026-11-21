@@ -2055,7 +2055,8 @@ class DaemonManager:
                             str(x.get("text") or "")
                             for x in content if isinstance(x, dict))
                     self._late_subagent_result(
-                        run_id, tool_id, str(content or "")[:1200])
+                        run_id, tool_id, str(content or "")[:1200],
+                        generation=generation, session_id=session_id)
                     continue
                 content = block.get("content")
                 if isinstance(content, list):
@@ -2083,23 +2084,33 @@ class DaemonManager:
         except Exception:  # noqa: BLE001 —— 查询失败按未终态处理
             return False
 
-    def _late_subagent_result(self, run_id: str, tool_id: str, content: str) -> None:
-        """tool_result 晚于内存清理到达：running → completed；interrupted 只补结果。"""
+    def _late_subagent_result(self, run_id: str, tool_id: str, content: str,
+                              *, generation: int | None = None,
+                              session_id: str | None = None) -> None:
+        """tool_result 晚于内存清理到达：running → completed；interrupted 只补结果。
+
+        只接受同一父运行时代次/会话的结果，避免旧会话/旧进程的迟到事件污染新记录。
+        """
         try:
             conn = open_conn(self.db_path)
             try:
                 now = now_iso()
+                match = (
+                    " AND (proc_generation IS NULL OR ? IS NULL OR proc_generation=?)"
+                    " AND (native_session_id IS NULL OR ? IS NULL OR native_session_id=?)")
+                params = (generation, generation, session_id, session_id)
                 cur = conn.execute(
                     "UPDATE run_subagents SET status='completed', "
                     "ended_at=COALESCE(ended_at, ?), result_summary=?, updated_at=? "
-                    "WHERE run_id=? AND tool_use_id=? AND status='running'",
-                    (now, content, now, run_id, tool_id))
+                    "WHERE run_id=? AND tool_use_id=? AND status='running'" + match,
+                    (now, content, now, run_id, tool_id, *params))
                 if cur.rowcount == 0:
                     conn.execute(
                         "UPDATE run_subagents SET "
                         "result_summary=COALESCE(result_summary, ?), updated_at=? "
-                        "WHERE run_id=? AND tool_use_id=? AND status='interrupted'",
-                        (content, now, run_id, tool_id))
+                        "WHERE run_id=? AND tool_use_id=? AND status='interrupted'"
+                        + match,
+                        (content, now, run_id, tool_id, *params))
                 conn.commit()
             finally:
                 conn.close()

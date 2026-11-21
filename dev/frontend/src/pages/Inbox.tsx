@@ -9,6 +9,7 @@ import { confirmDialog, promptDialog } from "../components/dialogs";
 
 const KIND_LABEL: Record<InboxItem["kind"], string> = {
   review: "评审",
+  delegation: "委派验收",
   mention: "@我",
   draft: "草案",
   lesson: "经验",
@@ -21,6 +22,7 @@ const KIND_LABEL: Record<InboxItem["kind"], string> = {
 
 const KIND_COLOR: Record<InboxItem["kind"], string> = {
   review: "#b91c1c",
+  delegation: "#0369a1",
   mention: "#1d4ed8",
   draft: "#6b21a8",
   lesson: "#166534",
@@ -36,6 +38,7 @@ type Tab = "all" | InboxItem["kind"];
 const TABS: { key: Tab; label: string }[] = [
   { key: "all", label: "全部" },
   { key: "review", label: "评审" },
+  { key: "delegation", label: "委派验收" },
   { key: "mention", label: "@我" },
   { key: "draft", label: "草案" },
   { key: "lesson", label: "经验" },
@@ -131,6 +134,29 @@ export function Inbox() {
               onClick={() => act(it.id, () => api.reviewTask(it.task_id!, true))}>通过</button>
             <button className="small danger" disabled={disabled}
               onClick={() => act(it.id, () => api.reviewTask(it.task_id!, false))}>驳回</button>
+            <a className="small" href={`/tasks/${it.task_id}`}>看详情</a>
+          </>
+        );
+      case "delegation":
+        return (
+          <>
+            <button className="primary small" disabled={disabled}
+              onClick={() => act(it.id, () => api.acceptDelegation(it.task_id!))}>通过验收</button>
+            <button className="small danger" disabled={disabled}
+              onClick={() => {
+                void (async () => {
+                  const feedback = await promptDialog({
+                    title: "打回委派",
+                    message: "请说明需要负责人返工的问题。",
+                    input: { label: "打回原因", multiline: true },
+                    inputRequired: true,
+                    confirmLabel: "打回",
+                    danger: true,
+                  });
+                  if (!feedback) return;
+                  void act(it.id, () => api.rejectDelegation(it.task_id!, feedback));
+                })();
+              }}>打回</button>
             <a className="small" href={`/tasks/${it.task_id}`}>看详情</a>
           </>
         );

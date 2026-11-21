@@ -132,3 +132,34 @@ async def test_inbox_draft_lesson_proposal(client, seeded):
     pid = next(i["id"] for i in body["items"] if i["kind"] == "proposal").split(":", 1)[1]
     await client.post(f"/api/v1/proposals/{pid}/approve", headers=human_headers())
     assert (await _inbox(client))["count"] == 0
+
+
+async def test_inbox_delegation_review_item(client, app, seeded):
+    """委派 in_review 出现在收件箱；human 验收后消失。"""
+    from anvil.db import open_conn
+
+    conn = open_conn(app.state.db_path)
+    try:
+        now = now_iso()
+        conn.execute(
+            "INSERT INTO tasks (id,title,status,created_at,updated_at) "
+            "VALUES ('T-DPARENT','父任务','in_progress',?,?)", (now, now))
+        conn.execute(
+            "INSERT INTO tasks (id,title,status,type,parent_id,parent_step_id,"
+            "assignee,created_by,created_at,updated_at) "
+            "VALUES ('C-DEL','构造 PoC','in_review','delegation','T-DPARENT','S1',"
+            "'developer','agent:pm',?,?)", (now, now))
+        conn.commit()
+    finally:
+        conn.close()
+
+    body = await _inbox(client)
+    item = next(i for i in body["items"] if i["kind"] == "delegation")
+    assert item["task_id"] == "C-DEL"
+    assert "父步骤" in item["detail"]
+
+    accepted = await client.post(
+        "/api/v1/tasks/C-DEL/delegation/accept", headers=human_headers())
+    assert accepted.status_code == 200, accepted.text
+    assert not [i for i in (await _inbox(client))["items"]
+                if i["kind"] == "delegation"]

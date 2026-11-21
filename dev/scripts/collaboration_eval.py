@@ -163,11 +163,17 @@ def main() -> int:
     parser.add_argument("--offline", action="store_true", help="only contract/fixtures")
     parser.add_argument("--command", default="", help="model command; prompt on stdin")
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--ids", default="", help="comma-separated scenario ids")
     parser.add_argument("--out", default="", help="write JSON report")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
     scenarios = load_scenarios()
+    if args.ids:
+        wanted = {int(x) for x in args.ids.split(",") if str(x).strip()}
+        scenarios = [s for s in scenarios if int(s["id"]) in wanted]
+        if not scenarios:
+            raise SystemExit("no scenarios matched --ids")
     if args.command:
         report = run_model(args.command, scenarios, timeout=args.timeout)
     else:

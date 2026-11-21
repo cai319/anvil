@@ -212,6 +212,25 @@ function DispatchCard({ d }: { d: TaskDispatch }) {
   );
 }
 
+function DraftParticipants({ draftId }: { draftId: string }) {
+  const [data, setData] = useState<{
+    add: string[]; missing: string[];
+  } | null>(null);
+  useEffect(() => {
+    api.getDraftParticipants(draftId).then(setData).catch(() => {});
+  }, [draftId]);
+  if (!data || (!data.add.length && !data.missing.length)) return null;
+  return (
+    <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+      {data.add.length > 0 && <>将新增参与者：{data.add.join("、")}</>}
+      {data.add.length > 0 && data.missing.length > 0 && " · "}
+      {data.missing.length > 0 && (
+        <>human 指定角色未安排，需补进 workflow：{data.missing.join("、")}</>
+      )}
+    </div>
+  );
+}
+
 function WorkflowWeightDialog({ taskId, current, onClose, onApplied }: {
   taskId: string;
   current: Workflow | null;
@@ -1963,6 +1982,7 @@ export function TaskDetail({ id }: { id: string }) {
                       {"服务端按 loop 模板为每片生成 execute -> verify -> fix -> verify2 -> decide 小闭环。"}
                     </div>
                   )}
+                  {d.kind === "workflow" && <DraftParticipants draftId={d.id} />}
                   {d.kind === "workflow_revision" && d.tree?.impact && (
                     <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
                       <strong>{d.tree.impact.classification}</strong>

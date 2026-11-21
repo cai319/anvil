@@ -530,9 +530,11 @@ def test_unsupported_runtime_downgrades_flat_step_hint_with_audit(tmp_path):
         (wf["id"],)).fetchone()
     assert step["subagent_hint"] == 0
     event = conn.execute(
-        "SELECT payload_json FROM events WHERE event_type='subagent_hint.downgraded' "
+        "SELECT task_id, payload_json FROM events "
+        "WHERE event_type='subagent_hint.downgraded' "
         "ORDER BY id DESC LIMIT 1").fetchone()
     assert event is not None and "nocap" in event["payload_json"]
+    assert event["task_id"] == "T1"  # 降级审计保留 task 上下文
     conn.close()
 
 
@@ -712,4 +714,36 @@ def test_replayed_tool_use_does_not_reenter_active_after_terminal(tmp_path):
     row = conn.execute(
         "SELECT status FROM run_subagents WHERE run_id='R1'").fetchone()
     assert row["status"] == "completed"
+    conn.close()
+
+
+def test_late_result_requires_matching_generation_and_session(tmp_path):
+    """旧会话/旧进程的迟到 tool_result 不能污染新记录。"""
+    from anvil.util import now_iso
+
+    conn, mgr = _manager(tmp_path)
+    _seed_run(conn)
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO run_subagents (id,run_id,role_slug,task_id,tool_use_id,"
+        "status,started_at,updated_at,proc_generation,native_session_id) "
+        "VALUES ('S-LATE','R1','dev','T1','tu-late','running',?,?,1,'sess-old')",
+        (now, now))
+    conn.commit()
+
+    mgr._late_subagent_result(  # noqa: SLF001
+        "R1", "tu-late", "旧会话结果", generation=2, session_id="sess-new")
+    row = conn.execute(
+        "SELECT status, result_summary FROM run_subagents WHERE id='S-LATE'"
+    ).fetchone()
+    assert row["status"] == "running"
+    assert row["result_summary"] is None
+
+    mgr._late_subagent_result(  # noqa: SLF001
+        "R1", "tu-late", "匹配结果", generation=1, session_id="sess-old")
+    row = conn.execute(
+        "SELECT status, result_summary FROM run_subagents WHERE id='S-LATE'"
+    ).fetchone()
+    assert row["status"] == "completed"
+    assert "匹配结果" in row["result_summary"]
     conn.close()
