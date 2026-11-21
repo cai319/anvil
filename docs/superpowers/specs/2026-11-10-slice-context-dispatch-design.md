@@ -1,3 +1,8 @@
+> **2026-11-21 v1.45.0 修订**
+> 派遣/委派/subagent/mention 的触发判断统一到
+> `2026-11-21-collaboration-routing-design.md`；委派唤醒改走持久化 `wake_requests`，
+> 最终 workflow 审批同步任务参与者。本文关于触发条件的描述以新协作文档为准。
+>
 > **2026-11-11 模型修订**
 > dispatch 不是顶层任务。顶层任务仅 human 手动创建；所有 dispatch 都是来源 task 下的
 > 派遣子任务（`parent_id=来源 task`、`parent_step_id=NULL`、`type=dispatch`），共享来源

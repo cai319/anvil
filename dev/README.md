@@ -76,7 +76,7 @@ Cindy 在规划时从已选角色中指定 reviewer，并保证 workflow 覆盖�
 ## 当前实现状态
 
 详见 `implementation-status.md`（各里程碑的已实现 / 未实现清单）。当前自动化测试：
-**964 passed + 61 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；模型评测需要
+**967 passed + 61 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；模型评测需要
 `ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。
 
 切片上下文与派遣子任务默认已启用显式入口（`anvil task dispatch` /
@@ -95,6 +95,15 @@ child task：负责人在 `submit`、派发者在 `accept/reject`、human 在 `c
 默认 21600 秒），超时后恢复 nudge，要求父 step 上报或 @human 处理。`closed/cancelled`
 的委派视为已解除，不再永久阻塞父 step。
 
+slice/step 角色的协作方式由 `COLLABORATION_PROTOCOL` 统一判断：先查 workflow 是否已排定
+该产出；阻塞当前 step 时按“自己做 / 同角色只读 subagent / 仅评审 mention / 另一角色独立交付
+委派”选择；不阻塞时只在需要独立上下文且不等待的情况下 dispatch；需要改 workflow/角色/顺序
+则 @cindy。同角色委派、把 blocking 工作 dispatch 都会被协议禁止。未来步骤的上下文用
+`anvil task note --for-step` 写入 task-wide 系统备注（不唤醒），后续 slice/step 启动时带入。
+最终 workflow 审批会自动把 workflow 中未绑定的现有角色加入任务参与者，并阻止 human 指定
+但未安排的角色；审批前可用 `GET /board/drafts/{id}/participants` 预览。设计见
+`../docs/superpowers/specs/2026-11-21-collaboration-routing-design.md`。
+
 运行时原生 subagent 只做观测：`run_subagents` 记录父运行时归属（role/run/task、
 proc_generation、native_session_id、parent_tool_use_id、slice/step），turn 结束或进程
 退出后统一收尾为 `interrupted`；Anvil 不调度、不唤醒、不把其状态纳入 workflow/lease
@@ -106,3 +115,11 @@ proc_generation、native_session_id、parent_tool_use_id、slice/step），turn 
 载体的 `true` 自动降为 `false` 并写审计（不拒绝草案）；Cindy 的 Roster 会标注每个角色
 runtime 是否支持 subagent。设计见
 `../docs/superpowers/specs/2026-11-21-subagent-hint-contract-design.md`。
+
+## 最近版本
+
+- `../docs/v1.45.1-release.md` — 角色删除关闭委派、dispatch 通知补投、subagent 幽灵收尾
+- `../docs/v1.45.0-release.md` — 协作方式判断、角色一致性、D1–D4 收尾
+- `../docs/v1.44.1-release.md` — context_return 死标记修复与看门狗有界等待
+- `../docs/v1.44.0-release.md` — 旁路验证节点、按步骤 subagent 提示、Windows 编码加固
+- CLI 全量用法见 `../docs/cli-reference.md`

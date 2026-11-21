@@ -445,6 +445,17 @@ def delete(conn: sqlite3.Connection, slug: str) -> bool:
     if role and jloads(role.get("definition_json") or "{}", {}).get("kind") == "onboarding":
         from ..util import ConflictError
         raise ConflictError("built-in onboarding assistant cannot be deleted")
+    # 被删角色名下的 open 委派无人处理：先按人工取消语义关闭并唤醒父 step，
+    # 避免父 workflow 永久等待一个已不存在的角色。
+    from . import tasks as tasks_service
+    rows = conn.execute(
+        "SELECT id FROM tasks WHERE type='delegation' AND assignee=? "
+        "AND status NOT IN ('done','closed')", (slug,)).fetchall()
+    for row in rows:
+        try:
+            tasks_service.cancel(conn, row["id"], role="human")
+        except Exception:  # noqa: BLE001 —— 清理失败不阻断角色删除
+            pass
     conn.execute("DELETE FROM sessions WHERE role_slug=?", (slug,))
     conn.execute("DELETE FROM role_sessions WHERE role_slug=?", (slug,))
     conn.execute("DELETE FROM role_task_sessions WHERE role_slug=?", (slug,))

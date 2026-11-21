@@ -94,6 +94,7 @@ pip install --force-reinstall <anvil-cli-wheel-or-sdist>
 ```bash
 anvil task list [--type T] [--tag T] [--parent <id>] [--json]
 anvil task show <id> [--json]
+anvil task delegations <id> [--json]          # 父任务下的委派工单与父 step 状态
 anvil task create --title "..." [--description "..."] [--assignee <role>]
                  [--assignees a,b] [--parent <id>] [--parent-step <step-id>]
                  [--workspace <id>] [--repo <name>] [--base-branch <branch>]
@@ -110,6 +111,7 @@ anvil task submit <id> --summary "完成摘要"
 anvil task delegation-accept <id>
 anvil task delegation-reject <id> --feedback "打回原因"
 anvil task comment <id> "正文"                 # 也可 --message
+anvil task note <id> --for-step <step-id> "正文"  # 系统备注：带入未来步骤上下文，不唤醒
 anvil task mention <id> --to <role|human> "正文"  # 也可 --message
   [--slice <slice-key>] [--context-mode auto|reuse|switch|dispatch]
 anvil task dispatch <id> --to <role> "正文" [--slice <slice-key>] \
@@ -140,21 +142,26 @@ anvil task knowledge-delete <id> --id <knowledge-id>   # human
   先终止 workflow（abandon 正在跑的 run），再让 task 进入最终评审。
 - 规划期间（`plan_first`、planner run 活跃或存在待审草案）不接受 human
   `task assign` 或手动 `POST /runs`；先等草案批准/驳回，或改走 `task dispatch`。
-- **委派工单（子任务）默认不建**：只有能换取独立上下文、只读并行、不同角色权限、
-  独立验收、失败后动态分解或跨会话持久责任时才建；能用当前 step 或 `mention`
-  解决的不建。规划级分解只能由 Cindy 定义，执行角色只能 `@cindy` 提议。
-- 工作流内的委派必须带 `--parent <父任务> --parent-step <步骤ID>`，并写清
-  `--description`（目标/输入/输出）、`--acceptance`、`--scope-paths`、owner、TTL；
-  TTL 用 `--due-at <ISO8601>` 记录（当前只展示/告警，超时处理在后续版本）；
-  目标角色忙时排队，父 step 提交前必须等委派完成。创建者不要 claim 委派给别人的工单。
-- **派遣子任务是来源 task 下的 child**：与本切片弱相关、需要新上下文的工作用
-  `task dispatch` 创建 `parent_id=来源 task`、`parent_step_id=NULL` 的非阻塞子任务；
-  共享来源 workspace，不进入 Lobby，角色 `task submit` 即 done，无人工评审；
-  原切片仍 running 时自动回切。同 task 同 slice 的复核不要派遣，用 `mention`。
-- 委派完成后由派发者验收：`anvil task delegation-accept <id>` 或
-  `anvil task delegation-reject <id> --feedback "原因"`（对应
-  `POST /tasks/{id}/delegation/accept|reject`）；负责人不能验收自己的产出；
-  父任务最终评审仍由 human 完成。
+- **协作方式先判断**（`COLLABORATION_PROTOCOL`）：先查 workflow 是否已由其他步骤/阶段
+  承担该产出；已执行/执行中 → `mention` 负责角色；尚未启动且本 step 需要 →
+  记录 workflow 缺口 + `@cindy`/`@human`，评估是否新增委派；尚未启动且本 step 不需要 →
+  `task note --for-step` 把信息带入未来步骤上下文（不唤醒）。
+- **委派工单**：只有“本 step 验收依赖另一角色的独立交付物（PoC/复现/专门产物）、
+  workflow 未排定、目标角色 ≠ 当前 step 角色”才建。工作流内必须带
+  `--parent <父任务> --parent-step <步骤ID>`，写清目标/输入/输出/验收/scope/owner/TTL；
+  父 step 在委派 done/closed 前不能 submit/decide；提交/验收/打回/取消会主动唤醒父 step
+  或负责人。负责人不能验收自己的产出；父任务最终评审仍由 human 完成。
+- **派遣子任务**：只有“与本切片弱相关、本 step 不依赖其结果、需要另一角色独立上下文、
+  结果不要求本 step 等待”才用 `task dispatch`。派遣不阻塞父 step，submit 即 done；
+  回切只在原切片仍 running 时尝试。同 task 同 slice 的复核/澄清用 `mention`，不要派遣。
+- **协作方式边界**：同角色只读并行用 subagent（需 `subagent_hint` 且运行时支持）；
+  仅评审/挑战/澄清用 `mention`；同角色委派、把 blocking 工作 dispatch、重复 workflow
+  已排定的 verify/fix/PoC 都是反模式。
+- **最终 workflow 审批**：workflow 中出现但未绑定的现有角色会自动加入任务参与者；
+  human 指定但 workflow 未安排的角色会阻止审批。可用
+  `GET /board/drafts/{id}/participants` 预览；参与者与 workflow 角色以最终评审结果为准。
+- `anvil task delegations <父任务>` 查看父任务下的委派工单与父 step 状态；
+  `anvil subagent list` 只读查询运行时子代理观测记录（Anvil 不调度其状态）。
 - `--issue-board` 只能由 human 在顶层任务启用；任务会强制走 Cindy 计划先行。
   Cindy 用 `task reviewers <id> --assignees <role>` 指定审核者（必须是已存在且被
   workflow 覆盖的角色），之后 reviewer 用 `anvil finding ...` 填写问题板。
@@ -452,6 +459,9 @@ anvil lease release <path>... [--task <id>]
 anvil board draft --task <id> --goal "..." --tree-file wf.json --kind workflow
 anvil board drafts [--task <id>]
 
+anvil subagent list --run <run-id> | --task <task-id> | --role <slug> \
+  [--status running|completed|interrupted] [--limit 50] [--json]
+
 anvil action prepare --kind task.cancel --task <id> --reason "..."
 anvil action list
 ```
@@ -463,6 +473,10 @@ anvil action list
 - `inbox check/commit` 默认取当前 run 的 slice，只返回本切片 + task-wide 消息；
   显式 `--slice` 指定切片，`--task-wide` 才拉整个任务。slice 与 task-wide 的
   cursor 相互独立。
+- `task note --for-step` 写入 task-wide、system 作者的备注：不产生 mention、不唤醒，
+  后续 slice/step 启动时会进入其未读/上下文；用于“本 step 不需要结果但未来步骤需要”的信息。
+- `subagent list` 只读观测运行时子代理（状态 running/completed/interrupted 与
+  result_summary）；Anvil 不创建、不终止、不唤醒子代理。
 
 ## 11. 常见错误与处理
 

@@ -2037,6 +2037,9 @@ class DaemonManager:
                     "slice_key": slice_key,
                     "step_id": step_id,
                 }
+                if self._subagent_terminal(run_id, tool_id):
+                    # 重复/重放事件：DB 行已是终态，不能再塞回内存 active。
+                    continue
                 with r.lock:
                     r.active_subagents[tool_id] = info
                 self._persist_subagent(r, run_id, task_id, info)
@@ -2065,6 +2068,20 @@ class DaemonManager:
                 with r.lock:
                     r.active_subagents.pop(tool_id, None)
                 self._persist_subagent(r, run_id, task_id, info)
+
+    def _subagent_terminal(self, run_id: str, tool_id: str) -> bool:
+        try:
+            conn = open_conn(self.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT status FROM run_subagents WHERE run_id=? AND tool_use_id=?",
+                    (run_id, tool_id)).fetchone()
+                return row is not None and row["status"] in (
+                    "completed", "interrupted")
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 —— 查询失败按未终态处理
+            return False
 
     def _late_subagent_result(self, run_id: str, tool_id: str, content: str) -> None:
         """tool_result 晚于内存清理到达：running → completed；interrupted 只补结果。"""
