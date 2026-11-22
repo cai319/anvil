@@ -107,6 +107,8 @@ DEFAULT_PERMISSION_MODE = _env("ANVIL_DEFAULT_PERMISSION_MODE", "bypassPermissio
 # 而是新建会话并注入 5 块构造上下文（MEMORY 头/最近消息/最近动作/唤醒）。
 # 0 = 自动：按模型上下文窗口 × CIC_RESET_RATIO；>0 = 绝对阈值覆盖。
 CIC_THRESHOLD_TOKENS = int(_env("ANVIL_CIC_THRESHOLD_TOKENS", "0"))
+# 冷唤醒 CIC 首屏字符预算（Raft 借鉴：只注入有限摘要，其余走拉模式）。
+CIC_COLD_BUDGET_CHARS = int(_env("ANVIL_CIC_COLD_BUDGET_CHARS", "32000"))
 CIC_RESET_RATIO = float(_env("ANVIL_CIC_RESET_RATIO", "0.8"))
 # 模型上下文窗口：优先 ANVIL_MODEL_CONTEXT_WINDOWS（JSON: {"model-id": 1000000}），
 # 否则按模型名中的 1m/200k/128k 推断，最后退回默认值。

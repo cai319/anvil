@@ -384,6 +384,7 @@ anvil knowledge card-validate --file card.json --for-approval
 | `ANVIL_RESET_SESSION_ON_FAILURE` | `1` | 非零退出后丢弃旧 session |
 | `ANVIL_CIC_THRESHOLD_TOKENS` | `0` | 冷唤醒阈值；`0`=按模型窗口自动，`>0`=绝对覆盖 |
 | `ANVIL_CIC_RESET_RATIO` | `0.8` | 自动 CIC 阈值占模型窗口比例 |
+| `ANVIL_CIC_COLD_BUDGET_CHARS` | `32000` | 冷唤醒 CIC 首屏字符预算；其余内容走拉模式 |
 | `ANVIL_CONTEXT_HINT_RATIO` | `0.5` | 上下文提示阈值占模型窗口比例 |
 | `ANVIL_CONTEXT_HARD_RESET_RATIO` | `0.9` | 单轮内上下文达到窗口比例时主动换会话；`0`=关闭 |
 | `ANVIL_CONTEXT_OUTPUT_RESERVE` | `32000` | 硬阈值预留的响应额度（API 上限为 input+max_tokens） |

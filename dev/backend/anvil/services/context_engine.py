@@ -765,6 +765,7 @@ class ContextEngineMixin:
         以蒸馏后的知识/决策进入。
         """
         from . import knowledge as knowledge_service  # 惰性导入避免循环
+        from . import agent_inbox
         from . import knowledge_binding as knowledge_binding_service
         from . import knowledge_repos as knowledge_repos_service
         from . import memory as memory_service
@@ -998,6 +999,24 @@ class ContextEngineMixin:
             })
 
         if task is not None:
+            try:
+                unread = agent_inbox.unread_count(
+                    conn, role, task_id, slice_key=slice_key)
+            except Exception:  # noqa: BLE001 —— 游标异常不阻断 CIC
+                unread = 0
+            if unread:
+                blocks.append({
+                    "priority": 25, "order": 65, "cap": 800, "min": 200,
+                    "text": (
+                        "## 未读消息（拉模式）\n"
+                        f"- 当前上下文有 {unread} 条未读；冷唤醒只给摘要，"
+                        "完整内容按需拉取，避免重复阅读。\n"
+                        f"- 查看：`anvil inbox check --task {task_id} --limit 30`\n"
+                        f"- 确认：`anvil inbox commit --task {task_id} "
+                        "--up-to <最大消息 id>`"),
+                    "name": "unread_inbox", "layer": "L1", "kind": "inbox",
+                    "scope": "task", "source_ids": [task_id],
+                })
             clause, params = self._activity_scope(task_id, slice_key)
             rows = conn.execute(
                 "SELECT id, role_slug, kind, payload_json FROM activities "
@@ -1073,13 +1092,15 @@ class ContextEngineMixin:
                 "scope": "role_or_task",
             })
 
-        text, manifest = knowledge_service.pack_blocks_with_manifest(blocks, 32000)
+        budget_chars = max(1000, int(config.CIC_COLD_BUDGET_CHARS or 32000))
+        text, manifest = knowledge_service.pack_blocks_with_manifest(
+            blocks, budget_chars)
         try:
             from . import context_manifest as manifest_service
             manifest_service.record(
                 conn, run_id=run_id, role_slug=role, task_id=task_id,
                 slice_key=slice_key,
-                kind="cic", budget_chars=32000, total_chars=len(text),
+                kind="cic", budget_chars=budget_chars, total_chars=len(text),
                 blocks=manifest)
             conn.commit()
         except Exception:  # noqa: BLE001 —— manifest 失败不影响 CIC

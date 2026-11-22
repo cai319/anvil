@@ -413,6 +413,10 @@
   `ANVIL_CIC_THRESHOLD_TOKENS`（默认 128K）→ 不 `--resume`，新建会话并注入构造上下文：
   MEMORY.md 头部 / 最近 25 条消息 / 最近 12 条动作；不宣布重置、不列未决问题。
 - 阈值可配；测试覆盖构造内容与三负规则。
+- 冷唤醒首屏预算 `ANVIL_CIC_COLD_BUDGET_CHARS`（默认 32000 字符）可配，
+  并记录到 `context_manifests.budget_chars`。
+- CIC 注入「未读消息（拉模式）」摘要：只给未读数与 `anvil inbox check/commit`
+  指令，完整内容由角色按需拉取。
 
 ### P1-4 身份保鲜（轻量）
 - 周复盘 prompt 增加「检查 description 是否漂移；用 lesson propose + @human，不自行改写」。

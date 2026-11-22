@@ -64,6 +64,15 @@
 - 新增/修改返回体时优先补 `response_model`，再跑生成脚本；手写类型只用于
   前端视图模型与后端尚未建模的响应。
 
+## P2.15 Raft 借鉴收口
+
+- Pull inbox：`services.agent_inbox.check/commit` + CLI `anvil inbox check|commit` 已具备；
+  冷唤醒 CIC 新增「未读消息（拉模式）」摘要，只给未读数与拉取/确认指令。
+- Held draft：评论/@ 已支持 `expect_activity_id`，过期返回 409 held + 新内容，
+  `force=true` 知情越过；人类消息不受影响。
+- CIC 冷唤醒预算：`ANVIL_CIC_COLD_BUDGET_CHARS`（默认 32000 字符）可配，
+  并写入 `context_manifests.budget_chars`。
+
 ## P0.7 清理记录
 
 - 删除 `cost_ledger` 建表：旧美元成本账本已无读写，Token 统计见 `token_usage`。
