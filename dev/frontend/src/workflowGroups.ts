@@ -35,6 +35,31 @@ export const STATUS_META: Record<WorkflowStep["status"], {
   skipped:   stepMeta("跳过", "skipped"),
 };
 
+export const WAITING_WAKE_META = {
+  label: "等待唤醒", tone: "gray" as StatusTone,
+  color: TONE_COLOR.gray, bg: TONE_BG.gray,
+};
+
+/** 步骤已派发但 run 处于 suspended：工作流侧也应显示“等待唤醒”。 */
+export function stepWaitingWake(
+  step: WorkflowStep | null | undefined,
+  suspendedStepIds?: Set<string>,
+): boolean {
+  return Boolean(
+    step && suspendedStepIds && step.status === "running"
+    && suspendedStepIds.has(step.step_id));
+}
+
+export function displayStepMeta(
+  step: WorkflowStep,
+  suspendedStepIds?: Set<string>,
+) {
+  if (stepWaitingWake(step, suspendedStepIds)) {
+    return WAITING_WAKE_META;
+  }
+  return STATUS_META[step.status];
+}
+
 export function isDoneStatus(status: WorkflowStep["status"]): boolean {
   return status === "approved" || status === "skipped";
 }

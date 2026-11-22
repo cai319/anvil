@@ -8,7 +8,7 @@ import { roleStatusFromServer, taskRoleState } from "../roleStatus";
 import { formatClock, formatDateTime } from "../time";
 import { useRoleRuntimes } from "../useRoleRuntimes";
 import { usePanelLayout } from "../usePanelLayout";
-import { STATUS_META, isDynamicStep, summarizeLoops, type LoopSummary } from "../workflowGroups";
+import { STATUS_META, displayStepMeta, isDynamicStep, stepWaitingWake, summarizeLoops, type LoopSummary } from "../workflowGroups";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { TaskHeader } from "../components/TaskHeader";
 import { SubtasksPanel } from "../components/SubtasksPanel";
@@ -786,7 +786,12 @@ export function TaskDetail({ id }: { id: string }) {
     scrollToBottom("smooth");
   };
 
-  const statusTone = (status: WorkflowStep["status"]) => STATUS_META[status].tone;
+  const suspendedStepIds = new Set(
+    (isViewingHistory ? [] : (workflow?.steps ?? []))
+      .filter((s) => s.status === "running" && s.run_id
+        && runs.some((r) => r.id === s.run_id && r.status === "suspended"))
+      .map((s) => s.step_id),
+  );
 
   const isReviewable = (st: WorkflowStep) =>
     !isViewingHistory && (
@@ -795,8 +800,9 @@ export function TaskDetail({ id }: { id: string }) {
         && (st.status === "submitted" || st.status === "running")));
 
   const renderStepRow = (st: WorkflowStep) => {
-    const tone = statusTone(st.status);
-    const label = STATUS_META[st.status].label;
+    const meta = displayStepMeta(st, suspendedStepIds);
+    const tone = meta.tone;
+    const label = meta.label;
     const stepChildren = children.filter((c) => c.parent_step_id === st.step_id);
     // 门禁只看委派：派遣是非阻塞软关联，不参与父 step 收口。
     const stepDelegations = stepChildren.filter((c) => c.relation_type === "delegation");
@@ -892,12 +898,14 @@ export function TaskDetail({ id }: { id: string }) {
   };
 
   const renderLoopList = (loop: LoopSummary) => {
-    const meta = STATUS_META[loop.status];
+    const meta = stepWaitingWake(loop.currentStep, suspendedStepIds)
+      ? { label: "等待唤醒", tone: "gray" as const }
+      : { label: STATUS_META[loop.status].label, tone: STATUS_META[loop.status].tone };
     return (
       <details key={`loop-${loop.sourceStepId}`} className="wf-loop-list">
         <summary className="wf-loop-summary">
           <span className="wf-loop-mark"><Icon name="refresh" size={12} /> 切片循环</span>
-          <span className={`status tone-${statusTone(loop.status)}`}>{meta.label}</span>
+          <span className={`status tone-${meta.tone}`}>{meta.label}</span>
           <span className="muted">
             {loop.totalSlices} 片 · {loop.totalSteps} 步 · 已完成 {loop.doneSlices}/{loop.totalSlices} 片
           </span>
@@ -911,7 +919,10 @@ export function TaskDetail({ id }: { id: string }) {
           {loop.groups.map((g) => (
             <details key={g.key} className="wf-slice-item">
               <summary className="wf-slice-item-summary">
-                <i className="wf-slice-dot" style={{ background: STATUS_META[g.status].color }} />
+                <i className="wf-slice-dot" style={{
+                  background: stepWaitingWake(g.active, suspendedStepIds)
+                    ? "var(--status-gray)" : STATUS_META[g.status].color,
+                }} />
                 <span className="wf-slice-name" title={g.title}>{g.title}</span>
                 <span className="muted">{g.done}/{g.total} · {g.phase}</span>
               </summary>
@@ -1763,6 +1774,7 @@ export function TaskDetail({ id }: { id: string }) {
                 <WorkflowGraph
                   workflow={displayWorkflow}
                   roles={roles}
+                  suspendedStepIds={suspendedStepIds}
                   busy={busy}
                   readOnly={isViewingHistory}
                   onOpenReview={(step) => setReviewStep(step)}

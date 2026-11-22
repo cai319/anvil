@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { Role, Workflow, WorkflowStep } from "../api/client";
 import {
-  STATUS_META,
+  STATUS_META, WAITING_WAKE_META, displayStepMeta, stepWaitingWake,
   isDynamicStep,
   slicePhases,
   summarizeLoops,
@@ -101,11 +101,12 @@ function computeLayers(nodes: VisualNode[]): Map<string, number> {
   return layers;
 }
 
-export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenReview, onRetry, onOpenRoleContext }: {
+export function WorkflowGraph({ workflow, roles, busy, readOnly = false, suspendedStepIds, onOpenReview, onRetry, onOpenRoleContext }: {
   workflow: Workflow;
   roles: Role[];
   busy: boolean;
   readOnly?: boolean;
+  suspendedStepIds?: Set<string>;
   onOpenReview: (step: WorkflowStep) => void;
   onRetry: (step: WorkflowStep) => void;
   onOpenRoleContext?: (role: string, sliceKey: string | null, runId?: string | null) => void;
@@ -125,6 +126,8 @@ export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenR
     : null;
   const activePhases = activeGroup ? slicePhases(activeGroup) : [];
   const activeStep = activeGroup?.active ?? null;
+  const activeGroupMeta = activeGroup && stepWaitingWake(activeStep, suspendedStepIds)
+    ? WAITING_WAKE_META : STATUS_META[activeGroup?.status ?? "pending"];
   const wrapRef = useRef<HTMLDivElement>(null);
   const detailRef = useRef<HTMLDivElement>(null);
   const [fitScale, setFitScale] = useState(1);
@@ -310,7 +313,8 @@ export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenR
             if (!p) return null;
             if (node.kind === "loop") {
               const loop = node.loop;
-              const meta = STATUS_META[loop.status];
+              const meta = stepWaitingWake(loop.currentStep, suspendedStepIds)
+                ? WAITING_WAKE_META : STATUS_META[loop.status];
               // 进度条表达“当前这一片的闭环进度”；整体片数/步骤数在标题里。
               const pct = loop.currentGroup
                 ? Math.round((loop.currentGroup.done
@@ -346,7 +350,7 @@ export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenR
               );
             }
             const s = node.step;
-            const meta = STATUS_META[s.status];
+            const meta = displayStepMeta(s, suspendedStepIds);
             return (
               <button
                 key={node.id}
@@ -396,8 +400,8 @@ export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenR
               第 {selectedLoop.groups.findIndex((g) => g.key === activeGroup.key) + 1}/{selectedLoop.totalSlices} 片
               {" · "}本片 {activeGroup.done}/{activeGroup.total}
             </span>
-            <span className="status" style={{ color: STATUS_META[activeGroup.status].color }}>
-              {STATUS_META[activeGroup.status].label}
+            <span className="status" style={{ color: activeGroupMeta.color }}>
+              {activeGroupMeta.label}
             </span>
           </div>
           <div className="muted">
@@ -413,7 +417,9 @@ export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenR
           {/* 单一循环流程：scope -> execute -> verify -> fix -> verify2 -> decide */}
           <div className="wf-loop-flow">
             {activePhases.map((phase, i) => {
-              const meta = STATUS_META[phase.status];
+              const meta = phase.status === "running"
+                && phase.steps.some((s) => stepWaitingWake(s, suspendedStepIds))
+                ? WAITING_WAKE_META : STATUS_META[phase.status];
               const isCurrent = Boolean(activeStep
                 && phase.steps.some((s) => s.step_id === activeStep.step_id));
               return (
@@ -477,7 +483,7 @@ export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenR
             <summary>本片步骤（{activeGroup.done}/{activeGroup.total}）</summary>
             <div className="wf-slice-step-list">
               {activeGroup.steps.map((s) => {
-                const meta = STATUS_META[s.status];
+                const meta = displayStepMeta(s, suspendedStepIds);
                 return (
                   <div
                     key={s.step_id}
@@ -516,7 +522,10 @@ export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenR
                     className="wf-slice-row-btn"
                     onClick={() => setSelectedSliceKey(g.key)}
                   >
-                    <i className="wf-slice-dot" style={{ background: STATUS_META[g.status].color }} />
+                    <i className="wf-slice-dot" style={{
+                      background: stepWaitingWake(g.active, suspendedStepIds)
+                        ? WAITING_WAKE_META.color : STATUS_META[g.status].color,
+                    }} />
                     <span className="wf-slice-name" title={g.title}>{idx + 1}. {g.title}</span>
                     <span className="muted">{g.done}/{g.total}</span>
                     <span className="muted">{g.phase}</span>
@@ -549,8 +558,8 @@ export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenR
           <div className="wf-detail-head">
             <strong>{selectedStep.step_id} · {selectedStep.title}</strong>
             <span className="muted">{selectedStep.role_slug}</span>
-            <span className="status" style={{ color: STATUS_META[selectedStep.status].color }}>
-              {STATUS_META[selectedStep.status].label}
+            <span className="status" style={{ color: displayStepMeta(selectedStep, suspendedStepIds).color }}>
+              {displayStepMeta(selectedStep, suspendedStepIds).label}
             </span>
           </div>
           {selectedStep.reviewer && <div className="muted">验证者（builder ≠ verifier）：{selectedStep.reviewer}</div>}
