@@ -1128,6 +1128,19 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
 .finding-status.is-false_positive { color: var(--green); }
 .finding-status.is-changes_requested { color: var(--red); }
 
+/* 风险类型/置信度：与状态徽标同尺寸，避免在列表里比“待确认”更抢眼。 */
+.finding-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.2;
+  border: 1.5px solid var(--border);
+  color: var(--muted);
+}
+
 /* 右侧详情抽屉 */
 .finding-drawer-overlay {
   align-items: stretch;
@@ -1552,9 +1565,9 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
   border-color: var(--green-on-paper, #15803d);
   color: var(--green-on-paper, #15803d);
 }
-.finding-drawer-external {
-  border-top: 1px dashed var(--border);
-  padding-top: 8px;
-  margin-top: 4px;
+.finding-drawer-export-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
 }
-.finding-drawer-external .muted { align-self: center; }

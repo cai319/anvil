@@ -158,15 +158,12 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
             <div className="finding-board-submit">
               <button type="button" className="primary"
                 disabled={!tracker?.configured || eligible.length === 0 || bulkBusy}
+                title={!tracker?.configured ? "未配置问题跟踪服务器" : undefined}
                 onClick={() => { void exportAll(); }}>
                 <Icon name="send" size={14} />
                 {bulkBusy ? "提交中…" : `提交全部可提交问题（${eligible.length}）`}
               </button>
-              {!tracker?.configured ? (
-                <a className="small button-like" href="/tooling">
-                  去工具页配置问题跟踪服务器
-                </a>
-              ) : (
+              {tracker?.configured && (
                 <span className="muted finding-board-target">
                   目标：{tracker.server_url}
                 </span>
@@ -347,8 +344,8 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
                     <span className={`finding-status is-${f.status}`}>
                       {FINDING_STATUS_LABEL[f.status] || f.status}
                     </span>
-                    <span className="chip">{riskLabel(schema, f.risk_type)}</span>
-                    <span className="chip">置信度 {f.confidence}%</span>
+                    <span className="finding-tag">{riskLabel(schema, f.risk_type)}</span>
+                    <span className="finding-tag">置信度 {f.confidence}%</span>
                     {f.external_id && (
                       <span className="chip finding-external-badge">外部 #{f.external_id}</span>
                     )}

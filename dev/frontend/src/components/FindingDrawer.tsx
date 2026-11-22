@@ -312,8 +312,8 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
                 <span className={`finding-status is-${finding.status}`}>
                   {FINDING_STATUS_LABEL[finding.status] || finding.status}
                 </span>
-                <span className="chip">置信度 {finding.confidence}%</span>
-                <span className="chip">{riskLabel(schema, finding.risk_type)}</span>
+                <span className="finding-tag">置信度 {finding.confidence}%</span>
+                <span className="finding-tag">{riskLabel(schema, finding.risk_type)}</span>
                 {finding.external_id && (
                   <span className="chip finding-external-badge">
                     外部 #{finding.external_id}
@@ -409,34 +409,33 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
 
         {finding && (actionable || decided || canExport) && (
           <div className="finding-drawer-footer">
-            {actionable && (
-              <div className="finding-decisions">
-                <button className="primary" disabled={busy} onClick={confirm}>确认真实问题</button>
-                <button disabled={busy} onClick={falsePositive}>标记误报</button>
-                <button className="danger" disabled={busy} onClick={requestChanges}>要求重新评估</button>
-              </div>
-            )}
-            {decided && (
-              <div className="finding-decisions">
+            <div className="finding-decisions">
+              {actionable && (
+                <>
+                  <button className="primary" disabled={busy} onClick={confirm}>确认真实问题</button>
+                  <button disabled={busy} onClick={falsePositive}>标记误报</button>
+                  <button className="danger" disabled={busy} onClick={requestChanges}>要求重新评估</button>
+                </>
+              )}
+              {decided && (
                 <button className="small" disabled={busy} onClick={reopen}>推翻结论，重新评估</button>
-              </div>
-            )}
-            {canExport && (
-              <div className="finding-decisions finding-drawer-external">
-                <button className="primary" disabled={busy || !trackerConfigured}
-                  onClick={() => { void exportFinding(); }}>
-                  提交到问题跟踪
-                </button>
-                {finding.external_id ? (
-                  <span className="muted">
-                    已提交 #{finding.external_id}
-                    {finding.external_submitted_at ? ` · ${finding.external_submitted_at}` : ""}
-                  </span>
-                ) : !trackerConfigured ? (
-                  <a className="small button-like" href="/tooling">去工具页配置问题跟踪服务器</a>
-                ) : null}
-              </div>
-            )}
+              )}
+              {canExport && (
+                <span className="finding-drawer-export-group">
+                  {finding.external_id && (
+                    <span className="muted">
+                      已提交 #{finding.external_id}
+                      {finding.external_submitted_at ? ` · ${finding.external_submitted_at}` : ""}
+                    </span>
+                  )}
+                  <button className="primary" disabled={busy || !trackerConfigured}
+                    title={!trackerConfigured ? "未配置问题跟踪服务器" : undefined}
+                    onClick={() => { void exportFinding(); }}>
+                    提交到问题跟踪
+                  </button>
+                </span>
+              )}
+            </div>
           </div>
         )}
       </aside>
