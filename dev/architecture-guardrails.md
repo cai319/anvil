@@ -34,7 +34,7 @@
 | `workflow.py` LOC | 75（门面；最大子模块 1,618） | ≤2,500/文件 ✅ P1.9 |
 | `daemon.py` LOC | 165（门面+核心；最大子模块 1,100） | ≤2,000/文件 ✅ P1.10 |
 | `TaskDetail.tsx` LOC | 1,831（已拆 7 个组件） | ≤1,500（剩余 chat/workflow 面板） |
-| scheduler 阶段 | 22 | ≤12 |
+| scheduler 阶段 | 10 个域（22 阶段，顺序锁定） | ≤12 ✅ P1.14 |
 | 前端状态映射 | 1 份/实体（task/run/dispatch/role/step） | 保持 |
 | 镜像状态字段 | 0（`dispatch_status` 已派生） | 0 |
 

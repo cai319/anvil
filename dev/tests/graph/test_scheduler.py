@@ -696,3 +696,40 @@ def test_recover_failed_dispatch_run_before_claim(tmp_path, monkeypatch):
     assert new["status"] == "created"
     assert new["recovery_of_run_id"] == "R-DISP"
     conn.close()
+
+
+def test_phase_domains_preserve_order_and_budget(tmp_path, monkeypatch):
+    """P1.14：22 个阶段收敛为 ≤12 个域入口，顺序必须逐项不变。"""
+    env = make_env(tmp_path, monkeypatch)
+    sched = Scheduler(env["db_path"], env["orch"])
+    domains = sched._phase_domains(None)  # 只构造，不执行
+    names = [name for _, phases in domains for name, _ in phases]
+    assert names == [
+        "governance",
+        "advance_workflows",
+        "flush_wake_requests",
+        "reap_revision_drafts",
+        "reconcile_knowledge_completion",
+        "backfill_knowledge_harvest",
+        "finalize_ready_tasks",
+        "resolve_dispatch_returns",
+        "retry_dispatch_notifications",
+        "resolve_context_returns",
+        "recover_failed_runs",
+        "pump_created",
+        "repair_terminal_task_runs",
+        "monitor",
+        "clear_terminal_role_runs",
+        "reap_interrupted_subagents",
+        "reap_dead_runs",
+        "release_requested_claims",
+        "reap_orphaned_step_runs",
+        "reap_stalled_phases",
+        "cleanup_workspaces",
+        "reconcile",
+    ]
+    assert len(domains) <= 12
+    assert [domain for domain, _ in domains] == [
+        "governance", "advance", "wake", "maintenance", "finalize",
+        "dispatch", "recovery", "monitor", "reap", "reconcile",
+    ]

@@ -80,51 +80,82 @@ class Scheduler:
             logger.exception("scheduler pump failed run=%s event=%s", run_id, event)
             return False
 
+    def _phase_domains(self, conn) -> tuple:
+        """按域组织阶段；域的先后与域内阶段的顺序即调度顺序（不可随意调整）。"""
+        return (
+            ("governance", (
+                ("governance",
+                 lambda: governance.tick(conn, dispatch=True, plans_only=True)),
+            )),
+            ("advance", (
+                ("advance_workflows", lambda: self._advance_workflows(conn)),
+            )),
+            ("wake", (
+                ("flush_wake_requests", lambda: self._flush_wake_requests(conn)),
+            )),
+            ("maintenance", (
+                ("reap_revision_drafts",
+                 lambda: board_service.reap_stale_revision_drafts(conn)),
+                ("reconcile_knowledge_completion",
+                 lambda: knowledge_completion.reconcile(conn)),
+                ("backfill_knowledge_harvest",
+                 lambda: knowledge_harvest.backfill(conn)),
+            )),
+            ("finalize", (
+                ("finalize_ready_tasks", lambda: self._finalize_ready_tasks(conn)),
+            )),
+            ("dispatch", (
+                ("resolve_dispatch_returns",
+                 lambda: dispatch_service.resolve_dispatch_returns(
+                     conn, lambda rid, ev: self._pump(rid, ev))),
+                ("retry_dispatch_notifications",
+                 lambda: self._retry_dispatch_notifications(conn)),
+                ("resolve_context_returns",
+                 lambda: dispatch_service.resolve_context_returns(
+                     conn, lambda rid, ev: self._pump(rid, ev))),
+            )),
+            ("recovery", (
+                ("recover_failed_runs", lambda: self._recover_failed_runs(conn)),
+                ("pump_created", lambda: self._pump_created(conn)),
+                ("repair_terminal_task_runs",
+                 lambda: self._repair_terminal_task_runs(conn)),
+            )),
+            ("monitor", (
+                ("monitor", lambda: self._monitor(conn)),
+            )),
+            ("reap", (
+                ("clear_terminal_role_runs",
+                 lambda: self._clear_terminal_role_runs(conn)),
+                ("reap_interrupted_subagents",
+                 lambda: self._reap_interrupted_subagents(conn)),
+                ("reap_dead_runs", lambda: self._reap_dead_runs(conn)),
+                ("release_requested_claims",
+                 lambda: tasks_service.process_release_requests(conn)),
+                ("reap_orphaned_step_runs",
+                 lambda: self._reap_orphaned_step_runs(conn)),
+                ("reap_stalled_phases", lambda: self._reap_stalled_phases(conn)),
+            )),
+            ("reconcile", (
+                ("cleanup_workspaces", lambda: self._cleanup_workspaces(conn)),
+                ("reconcile", lambda: self._reconcile(conn)),
+            )),
+        )
+
     def tick_once(self) -> None:
         self._backup_daily()
         conn = open_conn(self.db_path)
-        phases = (
-            ("governance", lambda: governance.tick(conn, dispatch=True, plans_only=True)),
-            ("advance_workflows", lambda: self._advance_workflows(conn)),
-            ("flush_wake_requests", lambda: self._flush_wake_requests(conn)),
-            ("reap_revision_drafts",
-             lambda: board_service.reap_stale_revision_drafts(conn)),
-            ("reconcile_knowledge_completion",
-             lambda: knowledge_completion.reconcile(conn)),
-            ("backfill_knowledge_harvest",
-             lambda: knowledge_harvest.backfill(conn)),
-            ("finalize_ready_tasks", lambda: self._finalize_ready_tasks(conn)),
-            ("resolve_dispatch_returns", lambda: dispatch_service.resolve_dispatch_returns(
-                conn, lambda rid, ev: self._pump(rid, ev))),
-            ("retry_dispatch_notifications",
-             lambda: self._retry_dispatch_notifications(conn)),
-            ("resolve_context_returns", lambda: dispatch_service.resolve_context_returns(
-                conn, lambda rid, ev: self._pump(rid, ev))),
-            ("recover_failed_runs", lambda: self._recover_failed_runs(conn)),
-            ("pump_created", lambda: self._pump_created(conn)),
-            ("repair_terminal_task_runs",
-             lambda: self._repair_terminal_task_runs(conn)),
-            ("monitor", lambda: self._monitor(conn)),
-            ("clear_terminal_role_runs", lambda: self._clear_terminal_role_runs(conn)),
-            ("reap_interrupted_subagents",
-             lambda: self._reap_interrupted_subagents(conn)),
-            ("reap_dead_runs", lambda: self._reap_dead_runs(conn)),
-            ("release_requested_claims", lambda: tasks_service.process_release_requests(conn)),
-            ("reap_orphaned_step_runs", lambda: self._reap_orphaned_step_runs(conn)),
-            ("reap_stalled_phases", lambda: self._reap_stalled_phases(conn)),
-            ("cleanup_workspaces", lambda: self._cleanup_workspaces(conn)),
-            ("reconcile", lambda: self._reconcile(conn)),
-        )
         try:
-            for name, phase in phases:
-                try:
-                    phase()
-                except Exception:  # noqa: BLE001 —— 一个阶段失败不阻断后续阶段
-                    logger.exception("scheduler phase %s failed", name)
+            for domain, phases in self._phase_domains(conn):
+                for name, phase in phases:
                     try:
-                        conn.rollback()
-                    except sqlite3.Error:
-                        pass
+                        phase()
+                    except Exception:  # noqa: BLE001 —— 一个阶段失败不阻断后续阶段
+                        logger.exception(
+                            "scheduler phase %s.%s failed", domain, name)
+                        try:
+                            conn.rollback()
+                        except sqlite3.Error:
+                            pass
         finally:
             conn.close()
         publish("tick", {})  # 通知前端刷新运行/任务状态
