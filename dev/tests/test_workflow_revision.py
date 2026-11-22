@@ -780,7 +780,11 @@ def test_finalize_and_external_apply_do_not_interleave_badly(
                 thread.start()
         return result
 
+    from anvil.services import workflow_review
+
     monkeypatch.setattr(wf_service, "get_workflow", hooked)
+    # 拆分后 _finalize_if_done 位于 workflow_review，需在同一模块上挂钩。
+    monkeypatch.setattr(workflow_review, "get_workflow", hooked)
     wf_service._finalize_if_done(conn, wid)
     thread.join(timeout=10)
     assert not thread.is_alive()
