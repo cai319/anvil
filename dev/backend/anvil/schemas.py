@@ -798,7 +798,8 @@ class ContextManifestBlockOut(BaseModel):
     chars: int = 0
     injected: bool = False
     reason: str | None = None
-    source_ids: list[str] = Field(default_factory=list)
+    # CIC 块引用可能是知识 id（字符串）或活动 id（整数）。
+    source_ids: list[str | int] = Field(default_factory=list)
     priority: int | None = None
     order: int | None = None
 

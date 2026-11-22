@@ -4698,7 +4698,7 @@ export interface components {
             /** Reason */
             reason?: string | null;
             /** Source Ids */
-            source_ids?: string[];
+            source_ids?: (string | number)[];
             /** Priority */
             priority?: number | null;
             /** Order */
