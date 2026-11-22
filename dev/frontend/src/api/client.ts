@@ -43,45 +43,9 @@ export interface TaskChildren {
   counts: { total: number; delegation: number; dispatch: number };
 }
 
-export type FindingStatus =
-  | "draft" | "submitted" | "confirmed" | "false_positive" | "changes_requested";
+export type FindingStatus = Schemas["FindingOut"]["status"];
 
-export interface Finding {
-  id: string;
-  task_id: string;
-  author_role: string;
-  workflow_id: string | null;
-  step_id: string | null;
-  run_id: string | null;
-  title: string;
-  risk_type: string;
-  severity: string;
-  module: string;
-  function_name: string;
-  file_path: string;
-  line_numbers: string;
-  preconditions: string;
-  reasoning_chain: string;
-  risk_description: string;
-  attack_path: string;
-  trigger_point: string;
-  poc_status: string;
-  poc: string;
-  fix_priority: string;
-  fix_suggestion: string;
-  confidence: number;
-  status: FindingStatus;
-  decided_by: string | null;
-  decided_at: string | null;
-  decision_note: string | null;
-  version: number;
-  created_at: string;
-  updated_at: string;
-  submitted_at: string | null;
-  external_id?: string | number | null;
-  external_source?: string | null;
-  external_submitted_at?: string | null;
-}
+export type Finding = Required<Schemas["FindingOut"]>;
 
 export type FindingInput = Partial<Omit<Finding,
   "id" | "task_id" | "author_role" | "status" | "version" |
@@ -114,51 +78,18 @@ export interface FindingExportResult {
   failed: { finding_id: string; error: string }[];
 }
 
-export interface FindingBoard {
-  task_id: string;
-  status: "in_progress" | "completed";
-  summary: string | null;
-  created_at: string;
-  completed_by: string | null;
-  completed_at: string | null;
-  reopened_by: string | null;
-  reopened_at: string | null;
-  updated_at: string;
-}
+export type FindingBoard = Required<Schemas["FindingBoardOut"]>;
 
-export interface FindingSummary {
-  task_id: string;
-  task_status: string;
+export type FindingSummary = Required<
+  Omit<Schemas["FindingSummaryOut"], "board" | "items">
+> & {
   board: FindingBoard;
-  reviewers: string[];
-  counts: Record<FindingStatus | string, number>;
-  severity_counts: Record<string, number>;
-  total: number;
-  pending: number;
-  can_complete: boolean;
-  all_decided: boolean;
   items?: Finding[];
-}
+};
 
-export interface FindingFieldSpec {
-  key: string;
-  label: string;
-  required?: boolean;
-  max?: number;
-  enum?: Record<string, string>;
-  enum_labels?: Record<string, string>;
-  int?: boolean;
-}
+export type FindingFieldSpec = Required<Schemas["FindingFieldSpecOut"]>;
 
-export interface FindingSchema {
-  fields: FindingFieldSpec[];
-  risk_types: Record<string, string>;
-  severities: Record<string, string>;
-  fix_priorities: Record<string, string>;
-  poc_statuses: Record<string, string>;
-  statuses: string[];
-  required: string[];
-}
+export type FindingSchema = Required<Schemas["FindingSchemaOut"]>;
 
 export type Runtime = Schemas["RuntimeOut"];
 

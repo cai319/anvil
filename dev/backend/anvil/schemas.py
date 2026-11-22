@@ -455,6 +455,93 @@ class TaskOut(BaseModel):
     archived_at: str | None = None
 
 
+FindingStatusLiteral = Literal[
+    "draft", "submitted", "confirmed", "false_positive", "changes_requested"]
+
+
+class FindingOut(BaseModel):
+    id: str
+    task_id: str
+    author_role: str
+    workflow_id: str | None = None
+    step_id: str | None = None
+    run_id: str | None = None
+    title: str
+    risk_type: str
+    severity: str
+    module: str
+    function_name: str
+    file_path: str
+    line_numbers: str
+    preconditions: str
+    reasoning_chain: str
+    risk_description: str
+    attack_path: str
+    trigger_point: str
+    poc_status: str
+    poc: str
+    fix_priority: str
+    fix_suggestion: str
+    confidence: int = 0
+    status: FindingStatusLiteral
+    decided_by: str | None = None
+    decided_at: str | None = None
+    decision_note: str | None = None
+    version: int = 1
+    created_at: str
+    updated_at: str
+    submitted_at: str | None = None
+    external_id: str | int | None = None
+    external_source: str | None = None
+    external_submitted_at: str | None = None
+
+
+class FindingBoardOut(BaseModel):
+    task_id: str
+    status: Literal["in_progress", "completed"]
+    summary: str | None = None
+    created_at: str
+    completed_by: str | None = None
+    completed_at: str | None = None
+    reopened_by: str | None = None
+    reopened_at: str | None = None
+    updated_at: str
+
+
+class FindingSummaryOut(BaseModel):
+    task_id: str
+    task_status: str
+    board: FindingBoardOut
+    reviewers: list[str] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
+    severity_counts: dict[str, int] = Field(default_factory=dict)
+    total: int = 0
+    pending: int = 0
+    can_complete: bool = False
+    all_decided: bool = False
+    items: list[FindingOut] | None = None
+
+
+class FindingFieldSpecOut(BaseModel):
+    key: str
+    label: str
+    required: bool | None = None
+    max: int | None = None
+    enum: dict[str, str] | None = None
+    enum_labels: dict[str, str] | None = None
+    int_: bool | None = Field(default=None, alias="int")
+
+
+class FindingSchemaOut(BaseModel):
+    fields: list[FindingFieldSpecOut] = Field(default_factory=list)
+    risk_types: dict[str, str] = Field(default_factory=dict)
+    severities: dict[str, str] = Field(default_factory=dict)
+    fix_priorities: dict[str, str] = Field(default_factory=dict)
+    poc_statuses: dict[str, str] = Field(default_factory=dict)
+    statuses: list[str] = Field(default_factory=list)
+    required: list[str] = Field(default_factory=list)
+
+
 class DelegationOut(BaseModel):
     """委派工单：声明前端/CLI 使用的稳定字段；其余 task 列透传。"""
     model_config = ConfigDict(extra="allow")

@@ -4736,6 +4736,30 @@ export interface components {
             /** Depends On */
             depends_on: string[];
         };
+        /** FindingBoardOut */
+        FindingBoardOut: {
+            /** Task Id */
+            task_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "in_progress" | "completed";
+            /** Summary */
+            summary?: string | null;
+            /** Created At */
+            created_at: string;
+            /** Completed By */
+            completed_by?: string | null;
+            /** Completed At */
+            completed_at?: string | null;
+            /** Reopened By */
+            reopened_by?: string | null;
+            /** Reopened At */
+            reopened_at?: string | null;
+            /** Updated At */
+            updated_at: string;
+        };
         /** FindingCompleteIn */
         FindingCompleteIn: {
             /** Summary */
@@ -4745,6 +4769,27 @@ export interface components {
         FindingDecisionIn: {
             /** Note */
             note?: string | null;
+        };
+        /** FindingFieldSpecOut */
+        FindingFieldSpecOut: {
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
+            /** Required */
+            required?: boolean | null;
+            /** Max */
+            max?: number | null;
+            /** Enum */
+            enum?: {
+                [key: string]: string;
+            } | null;
+            /** Enum Labels */
+            enum_labels?: {
+                [key: string]: string;
+            } | null;
+            /** Int */
+            int?: boolean | null;
         };
         /**
          * FindingIn
@@ -4843,6 +4888,86 @@ export interface components {
             /** Run Id */
             run_id?: string | null;
         };
+        /** FindingOut */
+        FindingOut: {
+            /** Id */
+            id: string;
+            /** Task Id */
+            task_id: string;
+            /** Author Role */
+            author_role: string;
+            /** Workflow Id */
+            workflow_id?: string | null;
+            /** Step Id */
+            step_id?: string | null;
+            /** Run Id */
+            run_id?: string | null;
+            /** Title */
+            title: string;
+            /** Risk Type */
+            risk_type: string;
+            /** Severity */
+            severity: string;
+            /** Module */
+            module: string;
+            /** Function Name */
+            function_name: string;
+            /** File Path */
+            file_path: string;
+            /** Line Numbers */
+            line_numbers: string;
+            /** Preconditions */
+            preconditions: string;
+            /** Reasoning Chain */
+            reasoning_chain: string;
+            /** Risk Description */
+            risk_description: string;
+            /** Attack Path */
+            attack_path: string;
+            /** Trigger Point */
+            trigger_point: string;
+            /** Poc Status */
+            poc_status: string;
+            /** Poc */
+            poc: string;
+            /** Fix Priority */
+            fix_priority: string;
+            /** Fix Suggestion */
+            fix_suggestion: string;
+            /**
+             * Confidence
+             * @default 0
+             */
+            confidence: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "draft" | "submitted" | "confirmed" | "false_positive" | "changes_requested";
+            /** Decided By */
+            decided_by?: string | null;
+            /** Decided At */
+            decided_at?: string | null;
+            /** Decision Note */
+            decision_note?: string | null;
+            /**
+             * Version
+             * @default 1
+             */
+            version: number;
+            /** Created At */
+            created_at: string;
+            /** Updated At */
+            updated_at: string;
+            /** Submitted At */
+            submitted_at?: string | null;
+            /** External Id */
+            external_id?: string | number | null;
+            /** External Source */
+            external_source?: string | null;
+            /** External Submitted At */
+            external_submitted_at?: string | null;
+        };
         /** FindingPatch */
         FindingPatch: {
             /** Title */
@@ -4885,6 +5010,71 @@ export interface components {
             step_id?: string | null;
             /** Run Id */
             run_id?: string | null;
+        };
+        /** FindingSchemaOut */
+        FindingSchemaOut: {
+            /** Fields */
+            fields?: components["schemas"]["FindingFieldSpecOut"][];
+            /** Risk Types */
+            risk_types?: {
+                [key: string]: string;
+            };
+            /** Severities */
+            severities?: {
+                [key: string]: string;
+            };
+            /** Fix Priorities */
+            fix_priorities?: {
+                [key: string]: string;
+            };
+            /** Poc Statuses */
+            poc_statuses?: {
+                [key: string]: string;
+            };
+            /** Statuses */
+            statuses?: string[];
+            /** Required */
+            required?: string[];
+        };
+        /** FindingSummaryOut */
+        FindingSummaryOut: {
+            /** Task Id */
+            task_id: string;
+            /** Task Status */
+            task_status: string;
+            board: components["schemas"]["FindingBoardOut"];
+            /** Reviewers */
+            reviewers?: string[];
+            /** Counts */
+            counts?: {
+                [key: string]: number;
+            };
+            /** Severity Counts */
+            severity_counts?: {
+                [key: string]: number;
+            };
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+            /**
+             * Pending
+             * @default 0
+             */
+            pending: number;
+            /**
+             * Can Complete
+             * @default false
+             */
+            can_complete: boolean;
+            /**
+             * All Decided
+             * @default false
+             */
+            all_decided: boolean;
+            /** Items */
+            items?: components["schemas"]["FindingOut"][] | null;
         };
         /** FlagUpdate */
         FlagUpdate: {
@@ -9463,7 +9653,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["FindingSchemaOut"];
                 };
             };
             /** @description Validation Error */
@@ -9497,7 +9687,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["FindingSummaryOut"];
                 };
             };
             /** @description Validation Error */
@@ -9613,7 +9803,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["FindingOut"][];
                 };
             };
             /** @description Validation Error */
@@ -9651,7 +9841,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["FindingOut"];
                 };
             };
             /** @description Validation Error */
@@ -9761,7 +9951,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["FindingOut"];
                 };
             };
             /** @description Validation Error */
@@ -9833,7 +10023,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["FindingOut"];
                 };
             };
             /** @description Validation Error */
@@ -9868,7 +10058,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["FindingOut"];
                 };
             };
             /** @description Validation Error */
@@ -9907,7 +10097,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["FindingOut"];
                 };
             };
             /** @description Validation Error */
@@ -9946,7 +10136,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["FindingOut"];
                 };
             };
             /** @description Validation Error */
@@ -9985,7 +10175,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["FindingOut"];
                 };
             };
             /** @description Validation Error */
@@ -10024,7 +10214,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["FindingOut"];
                 };
             };
             /** @description Validation Error */
