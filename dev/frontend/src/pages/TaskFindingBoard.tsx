@@ -242,22 +242,22 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
 
       <div className="finding-board-stats">
         <div className="finding-stat is-total">
-          <strong>{summary?.total ?? 0}</strong><span>全部</span>
+          <span>全部</span><strong>{summary?.total ?? 0}</strong>
         </div>
         <div className="finding-stat is-pending">
-          <strong>{counts.submitted || 0}</strong><span>待你确认</span>
+          <span>待你确认</span><strong>{counts.submitted || 0}</strong>
         </div>
         <div className="finding-stat is-confirmed">
-          <strong>{counts.confirmed || 0}</strong><span>真实问题</span>
+          <span>真实问题</span><strong>{counts.confirmed || 0}</strong>
         </div>
         <div className="finding-stat is-fp">
-          <strong>{counts.false_positive || 0}</strong><span>误报</span>
+          <span>误报</span><strong>{counts.false_positive || 0}</strong>
         </div>
         <div className="finding-stat is-rework">
-          <strong>{counts.changes_requested || 0}</strong><span>需重评</span>
+          <span>需重评</span><strong>{counts.changes_requested || 0}</strong>
         </div>
         <div className="finding-stat is-draft">
-          <strong>{counts.draft || 0}</strong><span>草稿</span>
+          <span>草稿</span><strong>{counts.draft || 0}</strong>
         </div>
       </div>
 
