@@ -23,7 +23,15 @@ from . import knowledge, knowledge_card, knowledge_quality, knowledge_repos
 
 
 def repo_dir(repo_id: str) -> Path:
-    return Path(config.KNOWLEDGE_REPOS_DIR) / str(repo_id)
+    from ..util import safe_component
+    root = Path(config.KNOWLEDGE_REPOS_DIR).resolve()
+    path = (root / safe_component(
+        repo_id, fallback="repo", max_len=120)).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("knowledge repo path escapes its root") from exc
+    return path
 
 
 def _card_paths(repo_id: str, card_id: str, status: str) -> Path:
@@ -67,6 +75,20 @@ def _write_card_file(repo_id: str, card: dict, status: str) -> str:
         except OSError:
             pass
     return str(target.relative_to(repo_dir(repo_id)))
+
+
+def _remove_card_file(repo_id: str, card_id: str) -> None:
+    """驳回/废弃后移除文件副本，避免 reindex 把旧状态读回来。"""
+    if not repo_id or not card_id:
+        return
+    for sub in ("cards", "proposed"):
+        target = repo_dir(repo_id) / sub / f"{card_id}.md"
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
 
 
 def _row(row: sqlite3.Row | None) -> dict | None:
@@ -317,6 +339,7 @@ def reject(conn: sqlite3.Connection, card_id: str, *,
     card = get(conn, card_id)
     if card is None:
         raise LookupError(card_id)
+    _remove_card_file(str(card.get("repo_id") or ""), card_id)
     conn.execute(
         "UPDATE repo_knowledge SET status='rejected', updated_at=? WHERE id=?",
         (now_iso(), card_id))
@@ -327,8 +350,10 @@ def reject(conn: sqlite3.Connection, card_id: str, *,
 
 def deprecate(conn: sqlite3.Connection, card_id: str, *,
               actor: str = "human", commit: bool = True) -> dict:
-    if get(conn, card_id) is None:
+    card = get(conn, card_id)
+    if card is None:
         raise LookupError(card_id)
+    _remove_card_file(str(card.get("repo_id") or ""), card_id)
     conn.execute(
         "UPDATE repo_knowledge SET status='deprecated', updated_at=? WHERE id=?",
         (now_iso(), card_id))
@@ -356,6 +381,12 @@ def render_for_task(conn: sqlite3.Connection, task: dict, repo_ids: list[str], *
     used = 0
     for row in rows:
         card = _row(row) or {}
+        # 历史审批但字段不完整的卡保留展示与补全入口，不进入自动注入。
+        if card.get("legacy") or knowledge_card.submission_errors(
+                str(card.get("kind") or ""), card.get("title") or "",
+                card.get("tldr") or "", card.get("body_md") or "",
+                card.get("fields") or {}):
+            continue
         tags = ",".join(card.get("tags") or [])[:80]
         label = "约束（必须遵守）" if card.get("authority") == "normative" else "参考"
         line = (f"- [{label} · {card.get('kind')}"

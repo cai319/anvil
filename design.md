@@ -371,10 +371,12 @@ OpenRouter 的 `context_length`、agent 框架的 per-agent/per-node 模型绑�
 ### 2.8 安全边界（本地单用户）
 
 - **统一 API 鉴权**：`/api/v1/*` 全部请求必须携带有效 `X-Anvil-Session`（SSE 可用
-  `?token=`）。有效身份只有两类：未过期的运行级 session，或人类共享 token
-  （`ANVIL_AUTH_TOKEN`；未设置时仅接受本地默认 `anvil` / `anvil-web`）。
+  `?token=`）。有效身份只有两类：未过期的运行级 session，或人类共享 secret
+  （`ANVIL_AUTH_TOKEN`；未设置时首次启动生成 `data/auth-token`，0600 随机值，不再接受
+  公开默认 token）。
 - **人类身份显式化**：共享 token 只映射为 `human`，不能通过 `X-Anvil-Role` 冒充 Agent；
-  `require_human` 只接受 `human`。非回环访问必须配置 `ANVIL_AUTH_TOKEN`。
+  `require_human` 只接受 `human`。人类 secret 不注入 Agent 子进程环境；非回环访问必须
+  显式配置 `ANVIL_AUTH_TOKEN`。
   Agent 运行级 token 调用 HITL 端点一律 403。HITL 决策写入 `audit`（含 client/
   user-agent/referer），Web UI 与本地脚本可追溯；**不在 HITL 流程中弹任何系统/浏览器
   确认窗**，审批仍由 UI 按钮直接触发，权限边界落在 token + `require_human` + 审计。

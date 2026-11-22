@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 
 from .. import config
+from ..util import scrub_agent_env
 from .base import CredentialStore, ProbeResult, ProcessManager, SpawnResult
 
 # native_session_id → Popen 句柄（后端单进程长驻，模块级即可）。保留句柄以在 probe
@@ -30,9 +31,10 @@ _SESSION_ENV_KEYS = {
 
 
 def _clean_env(extra: dict[str, str]) -> dict[str, str]:
-    """子进程环境：继承 os.environ 但去掉编排器自身的会话变量，再叠加运行时 env。"""
-    merged = {k: v for k, v in os.environ.items() if k not in _SESSION_ENV_KEYS}
-    merged.update(extra)
+    """子进程环境：去掉编排器会话变量与人类认证，再叠加角色运行变量。"""
+    base = {k: v for k, v in os.environ.items() if k not in _SESSION_ENV_KEYS}
+    merged = scrub_agent_env(base, allow_run_token=False)
+    merged.update(scrub_agent_env(extra, allow_run_token=True))
     return merged
 
 

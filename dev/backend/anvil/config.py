@@ -300,6 +300,44 @@ PORT = int(_env("ANVIL_PORT", "7317"))
 
 # 鉴权轻校验 token（P3#13）：设置后要求 X-Anvil-Session 匹配；留空则仅要求存在头（M1）。
 AUTH_TOKEN = _env("ANVIL_AUTH_TOKEN", "")
+AUTH_TOKEN_FILE = Path(
+    _env("ANVIL_AUTH_TOKEN_FILE", str(DATA_DIR / "auth-token"))).expanduser()
+_WEAK_AUTH_TOKENS = {"anvil", "anvil-web", "test", "password", "token"}
+
+
+def resolve_auth_token(path: Path | None = None) -> str:
+    """解析人类共享 token；未配置时生成安装级随机 secret（0600）。
+
+    Agent 子进程的环境会在 daemon/平台层被剥离该 token，不能用它冒充 human。
+    """
+    import secrets
+
+    explicit = str(AUTH_TOKEN or "").strip()
+    if explicit:
+        if explicit.lower() in _WEAK_AUTH_TOKENS or len(explicit) < 16:
+            raise RuntimeError(
+                "ANVIL_AUTH_TOKEN is too weak; use at least 16 random characters")
+        return explicit
+    token_path = Path(
+        path or os.environ.get("ANVIL_AUTH_TOKEN_FILE") or (DATA_DIR / "auth-token"))
+    try:
+        existing = token_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        existing = ""
+    if existing and existing.lower() not in _WEAK_AUTH_TOKENS and len(existing) >= 16:
+        try:
+            token_path.chmod(0o600)
+        except OSError:
+            pass
+        return existing
+    token = secrets.token_urlsafe(32)
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text(token + "\n", encoding="utf-8")
+    try:
+        token_path.chmod(0o600)
+    except OSError:
+        pass
+    return token
 
 
 def ensure_dirs() -> None:

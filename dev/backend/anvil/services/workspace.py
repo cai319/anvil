@@ -11,7 +11,7 @@ import sqlite3
 import subprocess
 
 from .. import config
-from ..util import new_id, now_iso
+from ..util import ConflictError, new_id, now_iso, validate_component_id
 
 
 def _repo(ws_id: str):
@@ -68,6 +68,10 @@ def create_channel(conn: sqlite3.Connection, name: str, repo: str | None = None,
                    description: str | None = None, id: str | None = None,
                    knowledge_repo: str | None = None) -> dict:
     wid = id or new_id()
+    try:
+        wid = validate_component_id(wid, label="workspace id")
+    except ValueError as exc:
+        raise ConflictError(str(exc)) from exc
     now = now_iso()
     conn.execute(
         "INSERT INTO workspaces (id, name, repo, description, knowledge_repo, created_at, updated_at) "

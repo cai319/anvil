@@ -297,7 +297,15 @@ def _default_authority(kind: str) -> str:
 
 
 def channel_knowledge_dir(workspace_id: str) -> Path:
-    return Path(config.CHANNELS_DIR) / str(workspace_id) / "knowledge"
+    from ..util import safe_component
+    root = Path(config.CHANNELS_DIR).resolve()
+    path = (root / safe_component(
+        workspace_id, fallback="channel", max_len=120) / "knowledge").resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("channel knowledge path escapes its root") from exc
+    return path
 
 
 def _write_card_file(card: dict, status: str | None = None) -> str:
@@ -337,6 +345,20 @@ def _write_card_file(card: dict, status: str | None = None) -> str:
         except OSError:
             pass
     return str(target)
+
+
+def _remove_card_files(workspace_id: str, card_id: str) -> None:
+    """删除/驳回后移除两种状态目录的文件，避免 reindex 把卡“复活”。"""
+    if not workspace_id or not card_id:
+        return
+    for sub in ("cards", "proposed"):
+        target = channel_knowledge_dir(workspace_id) / sub / f"{card_id}.md"
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
 
 
 def create(conn: sqlite3.Connection, workspace_id: str, *,
@@ -450,6 +472,19 @@ def create(conn: sqlite3.Connection, workspace_id: str, *,
         _replace_conflicts(conn, workspace_id, kid, conflicts)
     knowledge = get(conn, kid)
     assert knowledge is not None
+    # 人工直接 create(status=approved) 也走与 approve 相同的 supersede 语义。
+    if supersedes_id and status == "approved":
+        old = get(conn, supersedes_id)
+        if (old is not None and old.get("workspace_id") == workspace_id
+                and old["status"] != "deprecated"):
+            conn.execute(
+                "UPDATE workspace_knowledge SET status='deprecated', version=version+1, "
+                "updated_at=? WHERE id=? AND version=?",
+                (now_iso(), supersedes_id, old["version"]))
+            _remove_card_files(workspace_id, supersedes_id)
+            old = get(conn, supersedes_id)
+            if old is not None:
+                _snapshot(conn, old)
     _snapshot(conn, knowledge)
     _write_card_file(knowledge, knowledge["status"])
     conn.commit()
@@ -576,6 +611,7 @@ def approve(conn: sqlite3.Connection, knowledge_id: str, *,
                 "updated_at=? WHERE id=? AND version=?",
                 (now_iso(), superseded, old["version"]),
             )
+            _remove_card_files(current["workspace_id"], superseded)
             old = get(conn, superseded)
             if old is not None:
                 _snapshot(conn, old)
@@ -602,6 +638,7 @@ def reject(conn: sqlite3.Connection, knowledge_id: str, *,
         "version=version+1, updated_at=? WHERE id=? AND version=?",
         (now_iso(), knowledge_id, current["version"]),
     )
+    _remove_card_files(current["workspace_id"], knowledge_id)
     rejected = get(conn, knowledge_id)
     assert rejected is not None
     _snapshot(conn, rejected)
@@ -613,6 +650,7 @@ def delete(conn: sqlite3.Connection, knowledge_id: str) -> bool:
     current = get(conn, knowledge_id)
     if current is not None:
         _detach_conflicts(conn, current["workspace_id"], knowledge_id)
+        _remove_card_files(current["workspace_id"], knowledge_id)
     conn.execute("DELETE FROM workspace_knowledge_versions WHERE knowledge_id=?", (knowledge_id,))
     cur = conn.execute("DELETE FROM workspace_knowledge WHERE id=?", (knowledge_id,))
     conn.commit()
@@ -717,6 +755,12 @@ def render_for_task(conn: sqlite3.Connection, task: dict, *,
     lines: list[str] = []
     used = 0
     for card in cards:
+        # 历史审批但字段不完整的卡保留展示与补全入口，不进入自动注入。
+        if card.get("legacy") or knowledge_card.submission_errors(
+                str(card.get("kind") or ""), card.get("title") or "",
+                card.get("tldr") or "", card.get("body_md") or "",
+                card.get("fields") or {}):
+            continue
         bound = bool(ws_id and card["workspace_id"] == ws_id)
         normative = bound and card["authority"] == "normative" and card["kind"] == "convention"
         label = "约束（必须遵守）" if normative else "参考"
@@ -752,14 +796,20 @@ def harvest_from_task(conn: sqlite3.Connection, workspace_id: str, task_id: str,
     parent_id = task.get("parent_id")
     source_task_id = parent_id or task_id
     source_subtask_id = task_id if parent_id else None
-    title = f"{task['title']}：可复用经验"
+    # 必须条款要求标题 ≤80 字：长任务标题先截断，再追加固定后缀。
+    raw_title = str(task.get("title") or task_id).strip()
+    suffix = "：可复用经验"
+    title = (raw_title[:max(1, 80 - len(suffix))] + suffix)[:80]
     tldr = (task.get("description") or task["title"]).strip()[:200]
     fields = {
-        "observation": task["title"],
-        "evidence": task.get("description") or f"任务 {task['id']} 已完成",
-        "lesson": task.get("description") or task["title"],
-        "applicability": "、".join(task.get("tags") or []) or task.get("repo") or "当前频道",
-        "use_when": "、".join(task.get("tags") or []) or task.get("repo") or "同类已完成任务",
+        "observation": str(task["title"])[:2000],
+        "evidence": str(task.get("description")
+                        or f"任务 {task['id']} 已完成")[:2000],
+        "lesson": str(task.get("description") or task["title"])[:2000],
+        "applicability": str("、".join(task.get("tags") or [])
+                             or task.get("repo") or "当前频道")[:2000],
+        "use_when": str("、".join(task.get("tags") or [])
+                        or task.get("repo") or "同类已完成任务")[:2000],
         "expected_effect": "复用已完成任务的结论，减少同类任务的重复探索。",
         "counterexamples": "暂无已知反例",
     }

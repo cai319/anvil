@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip("anvil.main")
-from tests.conftest import API, auth_headers, role_payload, runtime_payload  # noqa: E402
+from tests.conftest import API, auth_headers, human_headers, role_payload, runtime_payload  # noqa: E402
 
 
 async def test_new_role_does_not_inherit_profile(client):
@@ -21,7 +21,7 @@ async def test_new_role_does_not_inherit_profile(client):
     )
     assert r.status_code == 201, r.text
 
-    a = (await client.get(f"{API}/roles/role-a/profile", headers=auth_headers())).json()
-    b = (await client.get(f"{API}/roles/role-b/profile", headers=auth_headers())).json()
+    a = (await client.get(f"{API}/roles/role-a/profile", headers=human_headers())).json()
+    b = (await client.get(f"{API}/roles/role-b/profile", headers=human_headers())).json()
     assert a == {"system_prompt": "A", "responsibilities": ["a"]}
     assert b == {"system_prompt": "", "responsibilities": []}

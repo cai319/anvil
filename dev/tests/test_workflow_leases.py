@@ -62,6 +62,42 @@ def test_stale_or_expired_lease_rejects_submit(tmp_path):
     assert row["status"] == "expired"
 
 
+def test_submit_rejects_terminated_workflow(tmp_path):
+    conn = _conn(tmp_path)
+    wf = _wf(conn)
+    conn.execute("UPDATE workflows SET status='terminated' WHERE id=?", (wf["id"],))
+    conn.commit()
+    with pytest.raises(ConflictError, match="terminated"):
+        wf_service.submit_step(conn, wf["id"], "S1", "dev", "完成", run_id="run-S1")
+    step = conn.execute(
+        "SELECT status FROM workflow_steps WHERE workflow_id=? AND step_id='S1'",
+        (wf["id"],)).fetchone()
+    assert step["status"] == "running"
+
+
+def test_terminate_does_not_rewrite_completed_run(tmp_path):
+    conn = _conn(tmp_path)
+    wf = _wf(conn)
+    step = wf["steps"][0]
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO runs (id, role_slug, task_id, workflow_id, step_id, status, "
+        "started_at, ended_at) VALUES ('R-DONE','dev','T1',?,?, 'completed', ?, ?)",
+        (wf["id"], "S1", now, now))
+    conn.execute(
+        "UPDATE workflow_steps SET status='submitted' WHERE workflow_id=? AND step_id='S1'",
+        (wf["id"],))
+    conn.commit()
+    wf_service._terminate_running_workflow(conn, wf["id"], "test terminate", now)
+    conn.commit()
+    run = conn.execute("SELECT status FROM runs WHERE id='R-DONE'").fetchone()
+    assert run["status"] == "completed"
+    workflow = conn.execute(
+        "SELECT status FROM workflows WHERE id=?", (wf["id"],)).fetchone()
+    assert workflow["status"] == "terminated"
+    assert step["status"]
+
+
 def test_path_reservations_conflict_and_release(tmp_path):
     conn = _conn(tmp_path)
     first = leases.reserve_paths(conn, "T1", ["src/app.ts", "src/lib/"], holder="dev")

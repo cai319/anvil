@@ -109,6 +109,8 @@ def assert_step(conn: sqlite3.Connection, step: dict,
         raise ConflictError(f"lease_expired: step {step.get('step_id')} lease is not active")
     if row["expires_at"] and row["expires_at"] <= now_iso():
         conn.execute("UPDATE leases SET status='expired' WHERE id=?", (lease_id,))
+        # 过期标记必须持久化：外层 lifecycle lock 的异常回滚不应把 expired 改回 active。
+        conn.commit()
         raise ConflictError(f"lease_expired: step {step.get('step_id')} lease expired")
     if int(step.get("fence_token") or 0) != int(row["fence"]):
         raise ConflictError(f"lease_fenced: step {step.get('step_id')} fence mismatch")

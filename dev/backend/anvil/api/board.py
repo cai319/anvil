@@ -7,8 +7,23 @@ from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..services.tasks import ConflictError
 from ..util import jdumps, now_iso
+from . import access
 
 router = APIRouter()
+
+
+def _can_access_draft(conn, auth: Auth, draft: dict) -> bool:
+    if not access.is_agent(auth):
+        return True
+    if auth.task_id:
+        return str(draft.get("source_task") or "") == auth.task_id
+    source_task = draft.get("source_task")
+    if source_task:
+        return access.can_task_read(conn, auth, str(source_task))
+    workspace_id = draft.get("workspace_id")
+    if workspace_id:
+        return access.can_workspace_read(conn, auth, str(workspace_id))
+    return False
 
 
 @router.get("/board/templates")
@@ -29,15 +44,20 @@ def decompose(body: dict, conn=Depends(get_db)):
 
 @router.get("/board/drafts")
 def list_drafts(workspace_id: str | None = None, source_task: str | None = None,
-                conn=Depends(get_db)):
-    return services.board.list_drafts(conn, workspace_id, source_task=source_task)
+                conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    drafts = services.board.list_drafts(conn, workspace_id, source_task=source_task)
+    if access.is_agent(auth):
+        drafts = [d for d in drafts if _can_access_draft(conn, auth, d)]
+    return drafts
 
 
 @router.get("/board/drafts/{did}")
-def get_draft(did: str, conn=Depends(get_db)):
+def get_draft(did: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     draft = services.board.get_draft(conn, did)
     if draft is None:
         raise HTTPException(status_code=404, detail="draft not found")
+    if not _can_access_draft(conn, auth, draft):
+        raise HTTPException(status_code=403, detail="agent cannot read this draft")
     return draft
 
 
@@ -71,9 +91,23 @@ def create_draft(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth
     tree = body.get("tree")
     if not goal or not isinstance(tree, dict):
         raise HTTPException(status_code=422, detail="goal and tree are required")
-    if auth.role and body.get("source_task") and auth.task_id and body["source_task"] != auth.task_id:
-        raise HTTPException(status_code=403, detail="session not bound to this task")
-    created_by = body.get("created_by") or (f"agent:{auth.role}" if auth.role else "human")
+    if access.is_agent(auth):
+        source_task = str(body.get("source_task") or "").strip()
+        workspace_id = str(body.get("workspace_id") or "").strip()
+        if source_task:
+            access.assert_task_read(conn, auth, source_task)
+        elif workspace_id:
+            access.assert_workspace_write(conn, auth, workspace_id)
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail="agent draft must reference a task or workspace it participates in")
+    if access.is_agent(auth):
+        # 真实 Agent 不能伪造 created_by；测试旁路仍按声明的角色记录，覆盖审批校验链路。
+        created_by = f"agent:{auth.role}"
+    else:
+        created_by = body.get("created_by") or (
+            f"agent:{auth.role}" if auth.role and auth.role != "human" else "human")
     try:
         return services.board.create_draft(
             conn, goal=goal, tree=tree, created_by=created_by,

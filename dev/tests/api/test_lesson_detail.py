@@ -138,7 +138,7 @@ async def test_legacy_lesson_detail_derives_title_tldr(client, app):
     finally:
         conn.close()
 
-    detail = await client.get(f"{API}/lessons/L-LEGACY", headers=auth_headers())
+    detail = await client.get(f"{API}/lessons/L-LEGACY", headers=human_headers())
     assert detail.status_code == 200, detail.text
     lesson = detail.json()
     assert lesson["title"] == "评审前先复算证据哈希"

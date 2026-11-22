@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -31,8 +32,12 @@ def create_workspace(body: dict, conn=Depends(get_db),
 
 
 @router.get("/workspaces")
-def list_workspaces(conn=Depends(get_db)):
-    return services.workspace.list_channels(conn)
+def list_workspaces(conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    channels = services.workspace.list_channels(conn)
+    if access.is_agent(auth):
+        channels = [c for c in channels
+                    if access.can_workspace_read(conn, auth, str(c.get("id") or ""))]
+    return channels
 
 
 @router.get("/workspaces/{ws_id}")
@@ -133,13 +138,21 @@ def list_workspace_knowledge(ws_id: str, status: str | None = None,
     if services.workspace.get_channel(conn, ws_id) is None:
         raise HTTPException(status_code=404, detail="workspace not found")
     access.assert_workspace_read(conn, auth, ws_id)
-    return services.workspace_knowledge.list_for_workspace(
+    cards = services.workspace_knowledge.list_for_workspace(
         conn, ws_id, status=status, kind=kind, sort=sort)
+    if access.is_agent(auth):
+        # Agent 只看到已批准卡，以及自己提交的待审/草稿。
+        cards = [
+            card for card in cards
+            if card.get("status") == "approved"
+            or auth.role in (card.get("owner"), card.get("created_by"))
+        ]
+    return cards
 
 
 @router.get("/workspaces/{ws_id}/knowledge/review")
 def review_workspace_knowledge(ws_id: str, conn=Depends(get_db),
-                               auth: Auth = Depends(get_auth)):
+                               auth: Auth = Depends(require_human)):
     if services.workspace.get_channel(conn, ws_id) is None:
         raise HTTPException(status_code=404, detail="workspace not found")
     access.assert_workspace_read(conn, auth, ws_id)
@@ -151,18 +164,24 @@ def create_workspace_knowledge(ws_id: str, body: dict, conn=Depends(get_db),
                                auth: Auth = Depends(get_auth)):
     is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
     actor = auth.role or "human"
+    access.assert_workspace_write(
+        conn, auth, ws_id, task_id=str(body.get("source_task_id") or "").strip() or None)
+    authority = body.get("authority")
+    if is_real_agent and authority == "normative":
+        # 强制约束必须由人工确认；Agent 只能提交 reference 草稿。
+        authority = "reference"
     try:
         return services.workspace_knowledge.create(
             conn, ws_id,
             title=str(body.get("title") or "").strip(),
             tldr=str(body.get("tldr") or "").strip(),
             kind=str(body.get("kind") or ""),
-            authority=body.get("authority"),
+            authority=authority,
             fields=body.get("fields") or {},
             tags=body.get("tags") or [],
             source_task_id=body.get("source_task_id"),
             source_subtask_id=body.get("source_subtask_id"),
-            owner=body.get("owner"),
+            owner=(actor if is_real_agent else body.get("owner")),
             review_at=body.get("review_at"),
             expires_at=body.get("expires_at"),
             related=body.get("related") or [],
@@ -269,13 +288,21 @@ def harvest_workspace_knowledge(ws_id: str, body: dict, conn=Depends(get_db),
         raise HTTPException(status_code=422, detail="task_id is required")
     is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
     actor = auth.role or "human"
+    access.assert_workspace_write(conn, auth, ws_id, task_id=task_id)
     try:
         return services.workspace_knowledge.harvest_from_task(
             conn, ws_id, task_id, actor=actor if not is_real_agent else "system")
     except LookupError:
         raise HTTPException(status_code=404, detail="task or workspace not found")
+    except services.knowledge_card.IncompleteKnowledgeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except services.knowledge_quality.QualityGateError as exc:
+        raise HTTPException(status_code=409, detail={
+            "message": str(exc), "quality": exc.quality}) from exc
     except services.tasks.ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 # ---- 成员管理（旧接口，保留一个版本；忽略 access） ------------------------

@@ -12,7 +12,7 @@ async def test_new_role_catalog_is_empty(client):
     await client.post(f"{API}/runtimes", json=runtime_payload(), headers=auth_headers())
     await client.post(f"{API}/roles", json=role_payload("dev"), headers=auth_headers())
 
-    r = await client.get(f"{API}/roles/dev/catalog")
+    r = await client.get(f"{API}/roles/dev/catalog", headers=human_headers())
     assert r.status_code == 200, r.text
     assert r.json() == {"skills": [], "mcp": []}
 
@@ -27,13 +27,13 @@ async def test_role_catalog_is_per_role_and_clearable(client):
                          json={"skills": ["pdf"], "mcp": ["codegraph"]})
     assert r.status_code == 200, r.text
 
-    a = (await client.get(f"{API}/roles/dev-a/catalog")).json()
-    b = (await client.get(f"{API}/roles/dev-b/catalog")).json()
+    a = (await client.get(f"{API}/roles/dev-a/catalog", headers=human_headers())).json()
+    b = (await client.get(f"{API}/roles/dev-b/catalog", headers=human_headers())).json()
     assert a == {"skills": ["pdf"], "mcp": ["codegraph"]}
     assert b == {"skills": [], "mcp": []}
 
     r = await client.put(f"{API}/roles/dev-a/catalog", headers=human_headers(),
                          json={"skills": [], "mcp": []})
     assert r.status_code == 200, r.text
-    a = (await client.get(f"{API}/roles/dev-a/catalog")).json()
+    a = (await client.get(f"{API}/roles/dev-a/catalog", headers=human_headers())).json()
     assert a == {"skills": [], "mcp": []}

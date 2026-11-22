@@ -243,8 +243,11 @@ def update(conn: sqlite3.Connection, knowledge_id: str, *,
         raise LookupError(knowledge_id)
     if old.get("status") != "proposed":
         raise ConflictError("only proposed task knowledge can be edited")
-    if expected_version is not None and old.get("version") and int(expected_version) != int(old["version"]):
-        raise ConflictError("task knowledge changed; reload and retry")
+    current_version = int(old.get("version") or 1)
+    if expected_version is not None and int(expected_version) != current_version:
+        raise ConflictError(
+            f"task knowledge changed: expected version {expected_version}, "
+            f"current {current_version}; reload and retry")
     new_title = title if title is not None else old["title"]
     new_tldr = tldr if tldr is not None else old["tldr"]
     new_fields = knowledge_card.normalize_fields(
@@ -256,18 +259,21 @@ def update(conn: sqlite3.Connection, knowledge_id: str, *,
         "fields": new_fields, "review_at": review_at,
     }, "task_knowledge")
     now = now_iso()
-    conn.execute(
+    cur = conn.execute(
         "UPDATE task_knowledge SET title=?, tldr=?, body_md=?, fields_json=?, "
         "tags_json=?, completeness=?, content_hash=?, quality_json=?, quality_score=?, "
-        "quality_checked_at=?, review_at=?, updated_at=? WHERE id=?",
+        "quality_checked_at=?, review_at=?, version=version+1, updated_at=? "
+        "WHERE id=? AND version=?",
         (new_title, new_tldr, body_md, jdumps(new_fields),
          jdumps(tags if tags is not None else old.get("tags") or []),
          knowledge_card.completeness(old["kind"], new_fields),
          knowledge_card.content_hash(new_title, new_tldr, body_md),
          jdumps(quality), quality["score"], quality["checked_at"],
          review_at if review_at is not None else old.get("review_at"), now,
-         knowledge_id),
+         knowledge_id, current_version),
     )
+    if cur.rowcount != 1:
+        raise ConflictError("task knowledge changed; reload and retry")
     current = get(conn, knowledge_id)
     assert current is not None
     path = _write_card_file(conn, current["task_id"], current)
@@ -335,6 +341,12 @@ def render_for_task(conn: sqlite3.Connection, task_id: str, *,
     now = now_iso()
     hit_ids: list[str] = []
     for card in cards:
+        # 历史/异常数据里可能有不完整卡：保留在任务知识页，但不注入上下文。
+        if card.get("legacy") or knowledge_card.submission_errors(
+                str(card.get("kind") or ""), card.get("title") or "",
+                card.get("tldr") or "", card.get("body_md") or "",
+                card.get("fields") or {}):
+            continue
         origin = (f"来自子任务 {card['source_subtask_id']}"
                   if card.get("source_subtask_id") else "任务共享")
         line = f"- [{origin}] {card['title']}：{card['tldr']}"

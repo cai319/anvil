@@ -1,6 +1,8 @@
 """CIC：冷唤醒构造上下文（MEMORY 头 / 最近消息 / 最近动作），不宣布重置。"""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from anvil import config
@@ -108,10 +110,23 @@ def test_cic_isolates_task_scoped_knowledge(tmp_path, monkeypatch):
     memory.write_note(
         conn, "dev", "vulns/jwt.md", "ROLEPATTERNUNIQUE jwt algorithm confusion",
         kind="vulnerability_pattern", scope="role", tags=["jwt"], repo="openssl")
+    lesson_fields = {
+        "use_when": "JWT 算法校验任务", "expected_effect": "避免算法混淆",
+        "evidence": "任务 TA 的复现记录", "observation": "未校验算法白名单",
+        "lesson": "先验证算法白名单", "applicability": "JWT 校验",
+        "counterexamples": "暂无",
+    }
+    conn.execute(
+        "INSERT INTO lessons (id, content, title, tldr, fields_json, tags_json, "
+        "source_task, repo, status, created_at) "
+        "VALUES ('L1','LESSONUNIQUE 先验证算法白名单','先验证算法白名单',"
+        "'LESSONUNIQUE',?,'[\"jwt\"]','TA','openssl','approved',?)",
+        (json.dumps(lesson_fields), now))
+    # 历史已批准但不完整：保留数据，但绝不能进入 CIC 自动注入。
     conn.execute(
         "INSERT INTO lessons (id, content, tags_json, source_task, repo, status, created_at) "
-        "VALUES ('L1','LESSONUNIQUE 先验证算法白名单','[\"jwt\"]','TA','openssl','approved',?)",
-        (now,))
+        "VALUES ('L-LEGACY','LEGACYUNIQUE 只有正文','[\"jwt\"]','TA','openssl',"
+        "'approved',?)", (now,))
     conn.commit()
 
     mgr = DaemonManager(db_path, enabled=False)
@@ -126,6 +141,7 @@ def test_cic_isolates_task_scoped_knowledge(tmp_path, monkeypatch):
     assert "ROLEPATTERNUNIQUE" in cic_b
     assert "ROLEPATTERNUNIQUE" in cic_global
     assert "## 共享经验（已批准）" in cic_a and "LESSONUNIQUE" in cic_a
+    assert "LEGACYUNIQUE" not in cic_a
     assert "## 知识库索引" in cic_a
     assert "重置" not in cic_a and "重置" not in cic_b  # 三负规则
     conn.close()

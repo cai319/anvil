@@ -50,7 +50,13 @@ async def _workspace(client, name: str) -> dict:
         headers=human_headers(),
     )
     assert r.status_code == 201, r.text
-    return r.json()
+    ws = r.json()
+    await client.post(
+        f"{API}/workspaces/{ws['id']}/members",
+        json={"role_slug": "agent-role", "access": "write"},
+        headers=human_headers(),
+    )
+    return ws
 
 
 async def _card(client, ws_id: str, title: str, *, kind: str = "convention") -> dict:

@@ -10,6 +10,7 @@ from ..services import (knowledge_card, knowledge_clean, knowledge_quality,
                         repo_knowledge, task_knowledge, utility,
                         workspace_knowledge)
 from ..util import ConflictError
+from . import access
 
 router = APIRouter()
 
@@ -123,9 +124,19 @@ def repo_suggest(body: SuggestIn, conn=Depends(get_db),
     )
 
 
+def _strip_catalog_samples(catalog: dict) -> dict:
+    """主题目录对 Agent 隐藏任务/经验样本标题，只保留共享主题元数据。"""
+    repos = [
+        {**profile, "samples": {"lessons": [], "tasks": []}}
+        for profile in catalog.get("repos") or []
+    ]
+    return {**catalog, "repos": repos}
+
+
 @router.get("/repos")
 def repo_list(conn=Depends(get_db), auth: Auth = Depends(get_auth)):
-    return repo_catalog.build_catalog(conn)
+    catalog = repo_catalog.build_catalog(conn)
+    return _strip_catalog_samples(catalog) if access.is_agent(auth) else catalog
 
 
 @router.get("/topic-repos")
@@ -138,8 +149,8 @@ def topic_repo_list(status: str = "active", conn=Depends(get_db),
 @router.get("/repo-cards")
 def repo_card_queue(status: str | None = "proposed", q: str | None = None,
                     limit: int = 200, conn=Depends(get_db),
-                    auth: Auth = Depends(get_auth)):
-    """跨主题知识库的卡片队列（默认待审批）。"""
+                    auth: Auth = Depends(require_human)):
+    """跨主题知识库的卡片队列（默认待审批，人工审核视图）。"""
     if status and status != "all" and status not in _KNOWLEDGE_STATUSES:
         raise HTTPException(status_code=422, detail=f"invalid status: {status}")
     return {"cards": repo_knowledge.list_cards(
@@ -198,8 +209,14 @@ def repo_lock(repo: str, body: dict, conn=Depends(get_db),
 def repo_cards(repo: str, status: str | None = None, q: str | None = None,
                limit: int = 200, conn=Depends(get_db),
                auth: Auth = Depends(get_auth)):
-    return repo_knowledge.list_cards(
-        conn, repo=repo, status=status, q=q, limit=limit)
+    cards = repo_knowledge.list_cards(
+        conn, repo=repo, status=None if status == "all" else status,
+        q=q, limit=limit)
+    if access.is_agent(auth):
+        # Agent 只能看已批准主题卡；proposed/draft 是人工审核工作区。
+        cards = [card for card in cards
+                 if card.get("status") == "approved"]
+    return cards
 
 
 @router.post("/repos/{repo:path}/cards", status_code=201)
@@ -209,6 +226,11 @@ def repo_card_create(repo: str, body: dict, conn=Depends(get_db),
     is_agent = bool(auth.role and auth.role not in (None, "human")
                     and not auth.test_bypass)
     status = "proposed" if is_agent else str(body.get("status") or "proposed")
+    source_task_id = body.get("source_task_id") or auth.task_id
+    if auth.task_id and source_task_id and source_task_id != auth.task_id:
+        raise HTTPException(status_code=403, detail="session is bound to another task")
+    if is_agent and source_task_id:
+        access.assert_task_read(conn, auth, str(source_task_id))
     try:
         return repo_knowledge.create(
             conn, repo,
@@ -218,11 +240,14 @@ def repo_card_create(repo: str, body: dict, conn=Depends(get_db),
             body_md=str(body.get("body_md") or body.get("body") or ""),
             fields=body.get("fields") or {},
             tags=body.get("tags") or [],
-            authority=str(body.get("authority") or "reference"),
+            # Agent 不能自设 normative 约束；只能提出 reference 草稿。
+            authority=("reference" if is_agent
+                       else str(body.get("authority") or "reference")),
             status=status if status in ("proposed", "draft") else "proposed",
-            source_task_id=body.get("source_task_id") or auth.task_id,
+            source_task_id=source_task_id,
             source_step_id=body.get("source_step_id"),
-            source_role=body.get("source_role") or auth.role,
+            source_role=(auth.role if is_agent
+                         else body.get("source_role") or auth.role),
             source_event=body.get("source_event"),
             confidence=float(body.get("confidence") or 0.5),
             created_by=auth.role or "human",
@@ -290,13 +315,20 @@ def repo_card_feedback(card_id: str, body: dict, conn=Depends(get_db),
     card = repo_knowledge.get(conn, card_id)
     if card is None:
         raise HTTPException(status_code=404, detail="card not found")
+    is_agent = access.is_agent(auth)
+    feedback_task = body.get("task_id") or auth.task_id
+    if auth.task_id and feedback_task and feedback_task != auth.task_id:
+        raise HTTPException(status_code=403, detail="session is bound to another task")
+    if is_agent and feedback_task:
+        access.assert_task_read(conn, auth, str(feedback_task))
     try:
         return knowledge_quality.add_feedback(
             conn, "repo_knowledge", card_id,
             str(body.get("signal") or ""),
-            task_id=body.get("task_id") or auth.task_id,
+            task_id=feedback_task,
             run_id=body.get("run_id") or auth.run_id,
-            role_slug=body.get("role_slug") or auth.role,
+            role_slug=(auth.role if is_agent
+                       else body.get("role_slug") or auth.role),
             note=str(body.get("note") or ""))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -360,6 +392,8 @@ def repo_card_to_channel(card_id: str, body: dict, conn=Depends(get_db),
             conn, card_id, workspace_id, actor=auth.role or "human")
     except LookupError as exc:
         raise HTTPException(status_code=404, detail="card not found") from exc
+    except knowledge_card.IncompleteKnowledgeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -373,6 +407,8 @@ def repo_card_to_shared(card_id: str, conn=Depends(get_db),
             conn, card_id, actor=auth.role or "human")
     except LookupError as exc:
         raise HTTPException(status_code=404, detail="card not found") from exc
+    except knowledge_card.IncompleteKnowledgeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -382,4 +418,6 @@ def repo_profile(repo: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)
     profile = repo_catalog.get_profile(conn, repo)
     if profile is None:
         raise HTTPException(status_code=404, detail="repo not found")
+    if access.is_agent(auth):
+        profile = {**profile, "samples": {"lessons": [], "tasks": []}}
     return profile

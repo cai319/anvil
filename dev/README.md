@@ -65,7 +65,7 @@ v1.30 起明确区分三个容易混淆的概念：
 422；共享经验与角色知识支持角色按自身上下文智能补全，角色忙碌时排队。顶层任务在 Cindy
 规划、human 批准 workflow 落板后自动获得一条 `when(task done)` 知识收割提醒；任务完成时
 Cindy 收割任务/主题/频道知识，只写 proposed，审批仍由 human/任务参与者完成。详见
-`../docs/v1.30-channel-knowledge.md` 与 `../docs/v1.46.0-release.md`。
+`../docs/v1.30-channel-knowledge.md` 与 `../docs/v1.47.0-release.md`。
 
 ## 问题板（Issue Board）
 
@@ -123,6 +123,7 @@ runtime 是否支持 subagent。设计见
 
 ## 最近版本
 
+- `../docs/v1.47.0-release.md` — HITL 认证隔离、对象级授权、workflow CAS、知识收割加固
 - `../docs/v1.46.0-release.md` — 知识入库必须条款、智能补全、任务完成自动收割、弹窗冻结
 - `../docs/v1.45.2-release.md` — 收件箱委派验收、审批参与者预览、评测实跑
 - `../docs/v1.45.1-release.md` — 角色删除关闭委派、dispatch 通知补投、subagent 幽灵收尾

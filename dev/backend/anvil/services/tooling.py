@@ -18,6 +18,7 @@ import yaml  # type: ignore
 
 from .. import config
 from ..util import (ConflictError, force_utf8_stdio, jdumps, jloads, new_id, now_iso,
+                    scrub_agent_env,
                     read_text_file)
 from ..version import VERSION
 
@@ -212,8 +213,11 @@ def probe_mcp_server(conn: sqlite3.Connection, mid: str, timeout: float = 8.0) -
     if not server["command"]:
         return {"id": server["id"], "ok": False, "detail": "缺少 command", "tools": []}
 
-    merged_env = force_utf8_stdio(
-        {**os.environ, **{str(k): str(v) for k, v in (server["env"] or {}).items()}})
+    merged_env = scrub_agent_env(dict(os.environ), allow_run_token=False)
+    merged_env.update(scrub_agent_env(
+        {str(k): str(v) for k, v in (server["env"] or {}).items()},
+        allow_run_token=False))
+    merged_env = force_utf8_stdio(merged_env)
     try:
         proc = subprocess.Popen(
             [server["command"], *[str(a) for a in server["args"]]],

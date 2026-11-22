@@ -14,7 +14,9 @@ from ..deps import Auth
 
 
 def is_agent(auth: Auth) -> bool:
-    return bool(auth.role and auth.role != "human")
+    # ANVIL_TEST_AUTH 是测试环境的全量旁路身份，不代表真实 Agent 会话；
+    # 对象级授权只对真实 session token 生效（安全测试用真实 sessions 覆盖）。
+    return bool(auth.role and auth.role != "human" and not auth.test_bypass)
 
 
 def _assert_task_bound(conn: sqlite3.Connection, auth: Auth, tid: str) -> None:
@@ -28,6 +30,15 @@ def assert_task_bound(conn: sqlite3.Connection, auth: Auth, tid: str) -> None:
     任务被他人认领时由 claim 返回 409（可换任务），而不是 403（越权）。
     """
     _assert_task_bound(conn, auth, tid)
+
+
+def can_task_read(conn: sqlite3.Connection, auth: Auth, tid: str) -> bool:
+    """不抛异常的参与范围判定，用于 list 过滤。"""
+    try:
+        assert_task_read(conn, auth, tid)
+        return True
+    except HTTPException:
+        return False
 
 
 def assert_task_read(conn: sqlite3.Connection, auth: Auth, tid: str) -> None:
@@ -67,20 +78,98 @@ def assert_task_read(conn: sqlite3.Connection, auth: Auth, tid: str) -> None:
     raise HTTPException(status_code=403, detail="agent is not a participant of this task")
 
 
+def _is_onboarding(conn: sqlite3.Connection, role: str | None) -> bool:
+    if not role:
+        return False
+    from ..services import roles as roles_service
+    return roles_service.is_onboarding(conn, role)
+
+
+def _workspace_member_write(conn: sqlite3.Connection, ws_id: str,
+                            role: str | None) -> bool:
+    if not role:
+        return False
+    row = conn.execute(
+        "SELECT access FROM workspace_members WHERE workspace_id=? AND role_slug=?",
+        (ws_id, role)).fetchone()
+    return bool(row and row["access"] in ("write", "admin"))
+
+
+def _task_in_workspace_for_role(conn: sqlite3.Connection, ws_id: str,
+                                role: str | None, *, task_id: str | None = None) -> bool:
+    if not role:
+        return False
+    sql = (
+        "SELECT 1 FROM tasks t WHERE t.workspace_id=? AND ("
+        " t.assignee=? OR t.planner=? OR EXISTS("
+        "   SELECT 1 FROM task_assignees a WHERE a.task_id=t.id AND a.role_slug=?"
+        " ))"
+    )
+    params: list = [ws_id, role, role, role]
+    if task_id:
+        sql += " AND t.id=?"
+        params.append(task_id)
+    return conn.execute(sql + " LIMIT 1", params).fetchone() is not None
+
+
 def assert_workspace_read(conn: sqlite3.Connection, auth: Auth, ws_id: str) -> None:
     """Agent 只能读取自己参与任务所在的频道内容。"""
     if not is_agent(auth):
         return
-    row = conn.execute(
-        "SELECT 1 FROM tasks t WHERE t.workspace_id=? AND ("
-        "  t.assignee=? OR t.planner=? OR EXISTS("
-        "    SELECT 1 FROM task_assignees a WHERE a.task_id=t.id AND a.role_slug=?"
-        "  )) LIMIT 1",
-        (ws_id, auth.role, auth.role, auth.role),
-    ).fetchone()
-    if row is None:
-        raise HTTPException(
-            status_code=403, detail="agent has no participating task in this workspace")
+    if _is_onboarding(conn, auth.role):
+        return
+    if _task_in_workspace_for_role(conn, ws_id, auth.role):
+        return
+    raise HTTPException(
+        status_code=403, detail="agent has no participating task in this workspace")
+
+
+def assert_workspace_write(conn: sqlite3.Connection, auth: Auth, ws_id: str,
+                           task_id: str | None = None) -> None:
+    """Agent 只能向自己参与任务所在频道写；task-bound token 必须绑定同一任务。"""
+    if not is_agent(auth):
+        return
+    if auth.task_id:
+        if task_id and task_id != auth.task_id:
+            raise HTTPException(
+                status_code=403, detail="session is bound to another task")
+        if not _task_in_workspace_for_role(
+                conn, ws_id, auth.role, task_id=auth.task_id):
+            raise HTTPException(
+                status_code=403,
+                detail="agent is not a participant of this workspace task")
+        return
+    if _is_onboarding(conn, auth.role) or _workspace_member_write(conn, ws_id, auth.role):
+        return
+    if _task_in_workspace_for_role(conn, ws_id, auth.role, task_id=task_id):
+        return
+    raise HTTPException(
+        status_code=403, detail="agent cannot write this workspace's knowledge")
+
+
+def can_workspace_read(conn: sqlite3.Connection, auth: Auth, ws_id: str) -> bool:
+    try:
+        assert_workspace_read(conn, auth, ws_id)
+        return True
+    except HTTPException:
+        return False
+
+
+def assert_role_self(conn: sqlite3.Connection, auth: Auth, slug: str) -> None:
+    """角色私有配置/指标/会话只能自己或 human 读取（onboarding 也不行）。"""
+    if not is_agent(auth):
+        return
+    if auth.role != slug:
+        raise HTTPException(status_code=403, detail="agent cannot read another role")
+
+
+def assert_role_read(conn: sqlite3.Connection, auth: Auth, slug: str) -> None:
+    """角色元数据读取：自己、onboarding 规划者或 human。"""
+    if not is_agent(auth):
+        return
+    if auth.role == slug or _is_onboarding(conn, auth.role):
+        return
+    raise HTTPException(status_code=403, detail="agent cannot read another role")
 
 
 def assert_run_read(conn: sqlite3.Connection, auth: Auth, run: dict) -> None:

@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     parent_id        TEXT,
     parent_step_id   TEXT,                          -- 委派工单：父任务下的 workflow step
     due_at           TEXT,                          -- 委派工单截止时间（展示/后续告警）
+    review_rejected_at TEXT,                        -- 最终评审驳回后等待返工；阻止自动回弹
     -- DEPRECATED: 旧版美元成本字段，仅保留兼容；不再写入/展示。Token 见 token_usage。
     cost_budget_usd  REAL,
     cost_used_usd    REAL NOT NULL DEFAULT 0,
@@ -1211,7 +1212,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
             pass
     for col in ("plan_first INTEGER NOT NULL DEFAULT 0", "planner TEXT",
                 "workflow_weight TEXT", "workflow_weight_source TEXT",
-                "workflow_weight_reason TEXT", "parent_step_id TEXT", "due_at TEXT"):
+                "workflow_weight_reason TEXT", "parent_step_id TEXT", "due_at TEXT",
+                "review_rejected_at TEXT"):
         try:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col}")
         except sqlite3.OperationalError:
@@ -1352,6 +1354,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_knowledge_repos_v1(conn)
     _migrate_notes_repo_ids_v2(conn)
     _migrate_knowledge_quality_v1(conn)
+    _migrate_task_knowledge_version_v1(conn)
     _migrate_repo_split_v1(conn)
     _migrate_knowledge_completion_v1(conn)
     conn.commit()
@@ -2383,6 +2386,19 @@ def _migrate_notes_repo_ids_v2(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_task_knowledge_version_v1(conn: sqlite3.Connection) -> None:
+    """任务知识版本号：expected_version 必须真实生效，而不是静默跳过。"""
+    if _setting(conn, "schema.task_knowledge_version_v1"):
+        return
+    try:
+        conn.execute(
+            "ALTER TABLE task_knowledge ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
+    _set_setting(conn, "schema.task_knowledge_version_v1", "1")
+    conn.commit()
+
+
 def _migrate_knowledge_repos_v1(conn: sqlite3.Connection) -> None:
     """主题知识库注册表 + repo_id 回填 + repo_knowledge FTS。"""
     if _setting(conn, "schema.knowledge_repos_v1"):
@@ -2575,9 +2591,11 @@ def _migrate_repo_split_v1(conn: sqlite3.Connection) -> None:
 def _safe_task_segment(task_id: str) -> str:
     """与 services.knowledge.task_path_segment 保持一致的目录段算法。"""
     raw = str(task_id or "")
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", raw)[:64] or "task"
+    safe = re.sub(r"[^\w.+-]", "_", raw)[:64]
+    if safe in ("", ".", "..") or not safe.strip("."):
+        safe = "task"
     if safe != raw:
-        safe += "-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
+        safe = f"{safe[:64]}-{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:8]}"
     return safe
 
 

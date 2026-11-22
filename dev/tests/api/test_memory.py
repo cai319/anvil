@@ -386,6 +386,75 @@ async def test_role_knowledge_smart_completion(client, app):
     assert updated["ready"] is True
 
 
+async def test_role_knowledge_partial_fill_is_rejected_without_completing(
+        client, app):
+    """部分字段补全仍不满足必须条款：422，且不能把 job 标成 completed。"""
+    from anvil.db import open_conn
+    from anvil.services import knowledge_completion
+
+    await client.post(f"{API}/runtimes", json=runtime_payload())
+    await client.post(f"{API}/roles", json=role_payload())
+    created = await client.post(
+        f"{API}/me/notes",
+        json={"path": "modules/partial.md", "content": "旧正文",
+              "kind": "module_knowledge", "scope": "role",
+              "title": "旧标题", "tldr": "旧摘要",
+              "fields": {"use_when": "认证模块"}},
+        headers=auth_headers())
+    assert created.status_code == 200, created.text
+    note = created.json()
+    requested = await client.post(
+        f"{API}/me/knowledge/{note['id']}/request-completion",
+        params={"role": "qa-role"}, headers=human_headers())
+    assert requested.status_code == 200, requested.text
+
+    partial = await client.post(
+        f"{API}/me/knowledge/{note['id']}/fill",
+        params={"role": "qa-role"},
+        json={"title": "只有标题和场景",
+              "fields": {"use_when": "认证模块任务"}},
+        headers=auth_headers("qa-role"))
+    assert partial.status_code == 422, partial.text
+    assert "知识格式不合法" in str(partial.json()["detail"])
+
+    conn = open_conn(app.state.db_path)
+    try:
+        state = knowledge_completion.status_for(
+            conn, "role_note", note["id"], ready=False)
+    finally:
+        conn.close()
+    assert state is not None and state["state"] != "completed"
+
+
+async def test_knowledge_completion_job_is_deduplicated_and_reconciled(
+        client, app):
+    """同一目标只有一个 active job；目标删除后对账为 failed。"""
+    from anvil.db import open_conn
+    from anvil.services import knowledge_completion
+
+    conn = open_conn(app.state.db_path)
+    try:
+        first = knowledge_completion.create_job(
+            conn, target_type="lesson", target_id="L-DEDUPE")
+        second = knowledge_completion.create_job(
+            conn, target_type="lesson", target_id="L-DEDUPE")
+        assert first["id"] == second["id"]
+        knowledge_completion.complete(conn, "lesson", "L-DEDUPE")
+        assert knowledge_completion.status_for(
+            conn, "lesson", "L-DEDUPE")["state"] == "completed"
+
+        orphan = knowledge_completion.create_job(
+            conn, target_type="lesson", target_id="L-MISSING")
+        result = knowledge_completion.reconcile(conn)
+        assert result["failed"] >= 1
+        state = knowledge_completion.status_for(
+            conn, "lesson", "L-MISSING")
+        assert state is not None and state["state"] == "failed"
+        assert orphan["id"]
+    finally:
+        conn.close()
+
+
 async def test_knowledge_index_and_reindex(client):
     await _seed_knowledge_tasks(client)
     await client.post(

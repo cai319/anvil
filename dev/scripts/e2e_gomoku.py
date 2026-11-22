@@ -5,7 +5,7 @@
   agent 通过 `anvil` CLI 反向调用 claim → 干活（写文件到 worktree）→ submit →
   人（PM）review approve → done。
 
-运行前提：后端已启动（ANVIL_AUTH_TOKEN=dev-secret、调度器开或关均可，本脚本手动派发）。
+运行前提：后端已启动（ANVIL_AUTH_TOKEN=anvil-local-dev-secret-2026、调度器开或关均可，本脚本手动派发）。
 用法：python3 scripts/e2e_gomoku.py [base_url]
 """
 from __future__ import annotations
@@ -18,7 +18,7 @@ import httpx
 REAL = "--real" in sys.argv
 BASE = next((a for a in sys.argv[1:] if not a.startswith("--")), "http://127.0.0.1:7317")
 API = BASE + "/api/v1"
-H = {"X-Anvil-Session": "dev-secret"}
+H = {"X-Anvil-Session": "anvil-local-dev-secret-2026"}
 DEMO_AGENT = "/Users/ikaruga/cctest/aliceAgent/data/demo-agent.sh"
 # 真实运行时：claude CLI 自动执行（需已登录）；demo 模式用假 agent 脚本。
 EXECUTABLE = "/opt/homebrew/bin/claude" if REAL else DEMO_AGENT

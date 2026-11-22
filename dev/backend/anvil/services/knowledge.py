@@ -33,12 +33,9 @@ _WS_RE = re.compile(r"\s+")
 
 
 def task_path_segment(task_id: str) -> str:
-    """任务目录段：普通 id 保持原样；特殊字符替换后加短 hash 防碰撞。"""
-    raw = str(task_id or "")
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", raw)[:64] or "task"
-    if safe != raw:
-        safe += "-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
-    return safe
+    """任务目录段：普通 id 保持原样；点段/特殊字符替换后加短 hash 防碰撞。"""
+    from ..util import safe_component
+    return safe_component(task_id, fallback="task", max_len=64)
 
 
 def _clamp01(value) -> float:
@@ -633,7 +630,8 @@ def search_knowledge(conn: sqlite3.Connection, role_slug: str, query: str, *,
                      limit: int = 8,
                      snippet_chars: int = 400,
                      min_score: float = 0.0,
-                     allow_empty: bool = True) -> list[dict]:
+                     allow_empty: bool = True,
+                     ready_only: bool = False) -> list[dict]:
     """检索角色知识；任务隔离在 SQL 与后置过滤两层执行。
 
     `include_task_snapshots` 是设计文档里的参数名，保留为
@@ -718,7 +716,16 @@ def search_knowledge(conn: sqlite3.Connection, role_slug: str, query: str, *,
         cand["_lex"] = (-float(row["bm25"])) if row["bm25"] is not None else 0.3
         cand["snippet"] = _snippet(content, terms, snippet_chars)
         candidates.append(cand)
-    ranked = _rank(candidates, task_ctx, limit, snippet_chars, task_id)
+    ranked = _rank(candidates, task_ctx,
+                   limit * 3 if ready_only else limit, snippet_chars, task_id)
+    if ready_only:
+        # CIC/自动注入只使用满足必须条款的知识卡；普通 note（kind=note 等）
+        # 不受知识卡必须条款约束，否则会把角色日常记忆全部挡在上下文之外。
+        ranked = [
+            h for h in ranked
+            if h.get("ready") is not False
+            or h.get("kind") not in knowledge_card.KINDS
+        ][:limit]
     if min_score > 0:
         # 当前任务的 task-scoped 知识即使分数略低也保留（它就是这个任务的事实）；
         # 跨任务 role 知识才受阈值约束。
@@ -761,6 +768,7 @@ def delete_note(conn: sqlite3.Connection, role_slug: str, note_id: str) -> bool:
         (note_id, role_slug)).fetchone()
     if row is None:
         return False
+    knowledge_completion.cancel(conn, "role_note", note_id)
     conn.execute("DELETE FROM notes WHERE id=? AND role_slug=?",
                  (note_id, role_slug))
     conn.commit()

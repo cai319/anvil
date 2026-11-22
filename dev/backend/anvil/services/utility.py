@@ -19,7 +19,7 @@ import tempfile
 
 from .. import config
 from ..graph.render import render_template
-from ..util import decode_text_file, force_utf8_stdio
+from ..util import decode_text_file, force_utf8_stdio, scrub_agent_env
 from . import governance, runtime as runtime_service
 
 DEFAULT_RUNTIME_KEY = "default_runtime"
@@ -63,11 +63,12 @@ def _definition(runtime_id: str) -> dict:
 
 
 def _clean_env(extra: dict[str, str]) -> dict[str, str]:
-    merged = {
+    base = {
         k: v for k, v in os.environ.items()
         if not k.startswith(_SESSION_ENV_PREFIXES) and k not in _SESSION_ENV_KEYS
     }
-    merged.update(extra)
+    merged = scrub_agent_env(base, allow_run_token=False)
+    merged.update(scrub_agent_env(extra, allow_run_token=False))
     # 与 daemon/one-shot 一致：Windows 上强制 Python 子进程 UTF-8 stdio。
     return force_utf8_stdio(merged)
 

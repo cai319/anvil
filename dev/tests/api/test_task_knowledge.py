@@ -63,6 +63,42 @@ async def _knowledge(client, tid: str, headers: dict, title: str = "子任务发
     )
 
 
+async def test_task_knowledge_expected_version_is_enforced(client, app):
+    """expected_version 必须真实生效，不能静默忽略。"""
+    await _seed(client)
+    await _task(client, "T-VERSION", assignees=["qa-role"])
+    body = {
+        "title": "版本化任务知识", "tldr": "验证乐观锁。", "kind": "task_finding",
+        "status": "proposed",
+        "fields": {
+            "task_context": "当前任务", "finding": "发现 A",
+            "verification": "测试验证", "reuse_scope": "当前任务",
+            "use_when": "同类任务", "expected_effect": "减少排查",
+            "evidence": "测试记录",
+        },
+    }
+    created = await client.post(
+        f"{API}/tasks/T-VERSION/knowledge", json=body,
+        headers=_agent_headers(app))
+    assert created.status_code == 201, created.text
+    card = created.json()
+    assert card["version"] == 1
+
+    updated = await client.patch(
+        f"{API}/tasks/T-VERSION/knowledge/{card['id']}",
+        json={"title": "版本化任务知识 v2", "expected_version": 1},
+        headers=human_headers())
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["version"] == 2
+
+    stale = await client.patch(
+        f"{API}/tasks/T-VERSION/knowledge/{card['id']}",
+        json={"title": "过期更新", "expected_version": 1},
+        headers=human_headers())
+    assert stale.status_code == 409, stale.text
+    assert "version" in str(stale.json()["detail"]).lower()
+
+
 async def test_incomplete_task_knowledge_is_rejected(client, app):
     """知识提交前必须条款：任务知识缺字段即 422。"""
     await _seed(client)

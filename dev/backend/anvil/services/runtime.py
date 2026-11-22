@@ -18,7 +18,8 @@ from pathlib import Path
 import yaml  # type: ignore
 
 from .. import config
-from ..util import ConflictError, jdumps, jloads, now_iso, read_text_file
+from ..util import (ConflictError, jdumps, jloads, now_iso, read_text_file,
+                    scrub_agent_env)
 
 
 # ---- 定义加载（存储分层） -------------------------------------------------
@@ -265,8 +266,10 @@ def _run_version_probe(executable: str, definition: dict | None) -> tuple[str, s
     vp = (definition or {}).get("version_probe") or {}
     args = vp.get("args") or ["--version"]
     try:
-        out = subprocess.run([executable, *args], capture_output=True, text=True,
-                             encoding="utf-8", errors="replace", timeout=15)
+        out = subprocess.run(
+            [executable, *args], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=15,
+            env=scrub_agent_env(dict(os.environ), allow_run_token=False))
     except Exception as exc:  # noqa: BLE001
         return "unhealthy", None, _with_wrapper_warning(str(exc), executable)
     text = (out.stdout or out.stderr) or ""

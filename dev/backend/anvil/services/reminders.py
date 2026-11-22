@@ -222,7 +222,10 @@ def fire_due_reminders(conn: sqlite3.Connection, now: datetime | None = None) ->
         role = r["role_slug"]
         if not role or conn.execute(
                 "SELECT 1 FROM roles WHERE slug=? AND enabled=1", (role,)).fetchone() is None:
-            conn.execute("UPDATE reminders SET status='error' WHERE id=?", (r["id"],))
+            # 条件提醒（如任务完成知识收割）在角色暂不可用时保持 pending；
+            # 角色重新启用后下一轮 tick 会自然触发。cron/at 一次性提醒维持 error。
+            if r["kind"] != "when":
+                conn.execute("UPDATE reminders SET status='error' WHERE id=?", (r["id"],))
             continue
         create_reminder_run(conn, role, r["prompt"] or "定时提醒")
         conn.execute(

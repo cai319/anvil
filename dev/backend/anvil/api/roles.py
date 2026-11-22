@@ -13,6 +13,7 @@ from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import RoleIn, RoleOut, ToolsIn
 from ..services import tokens as tokens_service, utility
 from ..util import ConflictError
+from . import access
 
 router = APIRouter()
 logger = logging.getLogger("anvil.roles")
@@ -22,12 +23,16 @@ logger = logging.getLogger("anvil.roles")
 def role_subagents(slug: str, status: str | None = None, limit: int = 100,
                    conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """角色历史运行时子代理（只读观测）；Agent 只能读自己。"""
-    if auth.role not in (None, "human") and not auth.test_bypass \
-            and auth.role != slug:
+    if access.is_agent(auth) and auth.role != slug:
         raise HTTPException(
             status_code=403, detail="cannot list another role's subagents")
-    return services.runs.list_subagents(
+    rows = services.runs.list_subagents(
         conn, role_slug=slug, status=status, limit=limit)
+    if access.is_agent(auth) and not auth.task_id:
+        rows = [row for row in rows
+                if not row.get("task_id")
+                or access.can_task_read(conn, auth, str(row["task_id"]))]
+    return rows
 
 def _validate_avatar(value: object) -> str | None:
     """头像只接受 null / initials / big-smile:<id>（规则见 services.roles）。"""
@@ -257,15 +262,31 @@ def create_role(body: RoleIn, conn=Depends(get_db),
         raise HTTPException(status_code=422, detail=str(exc))
 
 
+def _public_role(role: dict) -> dict:
+    """Agent 可见的角色画像不含 system_prompt（避免读取他人提示词）。"""
+    definition = role.get("definition")
+    if isinstance(definition, dict) and "system_prompt" in definition:
+        role = {**role, "definition": {
+            **definition, "system_prompt": ""}}
+    return role
+
+
 @router.get("/roles", response_model=list[RoleOut])
-def list_roles(conn=Depends(get_db)):
-    return services.roles.list_all(conn)
+def list_roles(conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    roles = services.roles.list_all(conn)
+    if access.is_agent(auth):
+        roles = [_public_role(role) for role in roles]
+    return roles
 
 
 @router.get("/roles/runtime")
-def list_role_runtimes(conn=Depends(get_db)):
+def list_role_runtimes(conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """所有角色的运行时状态；任务大厅据此判断角色忙在哪张任务卡上。"""
-    return [role_runtime(role["slug"], conn) for role in services.roles.list_all(conn)]
+    if access.is_agent(auth):
+        # Agent 只能看到自己的运行时；人类看板才需要全量。
+        return [role_runtime(str(auth.role), conn, auth)]
+    return [role_runtime(role["slug"], conn, auth)
+            for role in services.roles.list_all(conn)]
 
 
 @router.post("/roles/onboarding/ensure", response_model=RoleOut)
@@ -276,10 +297,12 @@ def ensure_onboarding_role(conn=Depends(get_db),
 
 
 @router.get("/roles/{slug}", response_model=RoleOut)
-def get_role(slug: str, conn=Depends(get_db)):
+def get_role(slug: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     role = services.roles.get(conn, slug)
     if role is None:
         raise HTTPException(status_code=404, detail="role not found")
+    if access.is_agent(auth) and auth.role != slug:
+        role = _public_role(role)
     return role
 
 
@@ -385,7 +408,9 @@ def role_home_history(slug: str, path: str | None = None, conn=Depends(get_db),
 
 
 @router.get("/roles/{slug}/versions")
-def role_versions(slug: str, conn=Depends(get_db)):
+def role_versions(slug: str, conn=Depends(get_db),
+                  auth: Auth = Depends(get_auth)):
+    access.assert_role_self(conn, auth, slug)
     if services.roles.get(conn, slug) is None:
         raise HTTPException(status_code=404, detail="role not found")
     return services.roles.list_versions(conn, slug)
@@ -420,8 +445,10 @@ def message_role(slug: str, body: dict, request: Request, conn=Depends(get_db),
 
 
 @router.get("/roles/{slug}/metrics")
-def role_metrics(slug: str, conn=Depends(get_db)):
+def role_metrics(slug: str, conn=Depends(get_db),
+                 auth: Auth = Depends(get_auth)):
     """角色执行指标（design §10 / §6.5）：run 分布 + Token 用量 + 任务吞吐。"""
+    access.assert_role_self(conn, auth, slug)
     if services.roles.get(conn, slug) is None:
         raise HTTPException(status_code=404, detail="role not found")
     runs = conn.execute(
@@ -449,11 +476,13 @@ def role_metrics(slug: str, conn=Depends(get_db)):
 
 
 @router.get("/roles/{slug}/runtime")
-def role_runtime(slug: str, conn=Depends(get_db)):
+def role_runtime(slug: str, conn=Depends(get_db),
+                 auth: Auth = Depends(get_auth)):
     """角色当前运行时：进程忙闲、正在处理的任务、队列、所有任务上下文槽。
 
     任务详情用它回答「这个角色现在是不是在忙别的任务、本任务排了几条」。
     """
+    access.assert_role_self(conn, auth, slug)
     if services.roles.get(conn, slug) is None and slug != services.roles.ONBOARDING_SLUG:
         raise HTTPException(status_code=404, detail="role not found")
     from ..services import daemon as daemon_service
@@ -590,7 +619,9 @@ def role_runtime(slug: str, conn=Depends(get_db)):
 
 
 @router.get("/roles/{slug}/tools")
-def role_tools(slug: str, conn=Depends(get_db)):
+def role_tools(slug: str, conn=Depends(get_db),
+               auth: Auth = Depends(get_auth)):
+    access.assert_role_read(conn, auth, slug)
     if services.roles.get(conn, slug) is None:
         raise HTTPException(status_code=404, detail="role not found")
     return services.roles.get_tools(conn, slug)
@@ -610,7 +641,9 @@ def update_role_tools(slug: str, body: ToolsIn, conn=Depends(get_db),
 
 
 @router.get("/roles/{slug}/effective-config")
-def effective_config(slug: str, conn=Depends(get_db)):
+def effective_config(slug: str, conn=Depends(get_db),
+                     auth: Auth = Depends(get_auth)):
+    access.assert_role_read(conn, auth, slug)
     cfg = services.roles.effective_config(conn, slug)
     if cfg is None:
         raise HTTPException(status_code=404, detail="role not found")
@@ -618,7 +651,9 @@ def effective_config(slug: str, conn=Depends(get_db)):
 
 
 @router.get("/roles/{slug}/catalog")
-def role_catalog(slug: str, conn=Depends(get_db)):
+def role_catalog(slug: str, conn=Depends(get_db),
+                 auth: Auth = Depends(get_auth)):
+    access.assert_role_read(conn, auth, slug)
     if services.roles.get(conn, slug) is None:
         raise HTTPException(status_code=404, detail="role not found")
     tools = services.roles.get_tools(conn, slug)
@@ -636,7 +671,9 @@ def update_role_catalog(slug: str, body: dict, conn=Depends(get_db),
 
 
 @router.get("/roles/{slug}/profile")
-def role_profile(slug: str, conn=Depends(get_db)):
+def role_profile(slug: str, conn=Depends(get_db),
+                 auth: Auth = Depends(get_auth)):
+    access.assert_role_read(conn, auth, slug)
     if services.roles.get(conn, slug) is None:
         raise HTTPException(status_code=404, detail="role not found")
     return services.roles.get_profile(conn, slug)

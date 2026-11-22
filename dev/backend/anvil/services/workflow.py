@@ -1441,15 +1441,23 @@ def terminate_running_workflows(conn: sqlite3.Connection, task_id: str,
 
 def _terminate_running_workflow(conn: sqlite3.Connection, wid: str, reason: str,
                                 now: str) -> None:
-    """终止一次执行但保留其 workflow/step/run 历史。"""
+    """终止一次执行但保留其 workflow/step/run 历史。终态 workflow 不可再终止。"""
     from . import runs as runs_service
+    current = conn.execute(
+        "SELECT status FROM workflows WHERE id=?", (wid,)).fetchone()
+    if current is None or current["status"] != "running":
+        return
     for st in conn.execute(
         "SELECT run_id FROM workflow_steps WHERE workflow_id=? "
         "AND status IN ('running','submitted')", (wid,)
     ).fetchall():
         if st["run_id"]:
             try:
-                runs_service.set_status(conn, st["run_id"], "abandoned", ended_at=now)
+                # 终态不可逆：已完成/失败的 submitted gate run 不能再改 abandoned。
+                runs_service.set_status(
+                    conn, st["run_id"], "abandoned", ended_at=now,
+                    from_statuses=("created", "projecting", "running",
+                                   "suspended", "submitted", "reviewing"))
             except Exception:  # noqa: BLE001
                 pass
     for lease in leases.for_workflow(conn, wid):
@@ -1473,7 +1481,7 @@ def _terminate_running_workflow(conn: sqlite3.Connection, wid: str, reason: str,
         "SELECT task_id, execution_no FROM workflows WHERE id=?", (wid,)).fetchone()
     conn.execute(
         "UPDATE workflows SET status='terminated', termination_reason=?, terminated_at=?, "
-        "finished_at=?, updated_at=? WHERE id=?",
+        "finished_at=?, updated_at=? WHERE id=? AND status='running'",
         (reason, now, now, now, wid),
     )
     if wf:
@@ -1648,7 +1656,7 @@ def _create_workflow_locked(conn: sqlite3.Connection, task_id: str, definition: 
         )
     task_cur = conn.execute(
         "UPDATE tasks SET status='in_progress', assignee=NULL, lease_expires_at=NULL, "
-        "claimed_at=NULL, updated_at=? "
+        "claimed_at=NULL, review_rejected_at=NULL, updated_at=? "
         "WHERE id=? AND status IN ('todo','in_progress','in_review')",
         (now, task_id))
     if task_cur.rowcount != 1:
@@ -3494,11 +3502,28 @@ def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
                 evidence: list | None = None,
                 changed_paths: list | None = None) -> dict:
     """角色提交当前步骤（anvil step submit）。gate 步骤进入人工审核。"""
+    wf = get_workflow(conn, wid)
+    task_id = wf["task_id"] if wf else None
+    # 与 decide/review/terminate 共用 task 生命周期锁：提交与决策/终止不能并发
+    # 把 approved 覆盖回 submitted，也不能在 terminated workflow 上写提交。
+    with workflow_lifecycle_lock(
+            conn, task_id, required=True, wait_seconds=2.0):
+        return _submit_step_locked(
+            conn, wid, step_id, role, summary, run_id, evidence, changed_paths)
+
+
+def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
+                        summary: str | None, run_id: str | None = None,
+                        evidence: list | None = None,
+                        changed_paths: list | None = None) -> dict:
     from . import runs as runs_service
 
     wf = get_workflow(conn, wid)
     if wf is None:
         raise LookupError(wid)
+    if wf.get("status") != "running":
+        raise ConflictError(
+            f"workflow {wid} is {wf.get('status')}; cannot submit a step")
     step = next((s for s in wf["steps"] if s["step_id"] == step_id), None)
     if step is None:
         raise LookupError(step_id)
@@ -3533,16 +3558,20 @@ def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
         if outside:
             raise ConflictError(f"scope_violation: {outside[0]} is outside step scope")
     now = now_iso()
-    conn.execute(
+    # CAS：只有仍处于 running 的步骤才能提交，避免与 fail/terminate/rework 竞态
+    # 把已结束步骤写回 submitted（形成 orphan run / 重复 packet）。
+    cur = conn.execute(
         "UPDATE workflow_steps SET status='submitted', summary=?, evidence_json=?, "
-        "updated_at=? WHERE workflow_id=? AND step_id=?",
+        "updated_at=? WHERE workflow_id=? AND step_id=? AND status='running'",
         (summary, jdumps(normalized or step.get("evidence") or []), now, wid, step_id),
     )
+    if cur.rowcount != 1:
+        raise ConflictError(
+            f"step {step_id} state changed while submitting; refresh and retry")
     if step["run_id"]:
-        try:
-            runs_service.set_status(conn, step["run_id"], "completed", ended_at=now)
-        except Exception:  # noqa: BLE001
-            pass
+        runs_service.set_status(
+            conn, step["run_id"], "completed", ended_at=now,
+            from_statuses=("created", "projecting", "running", "suspended"))
     if step["gate"]:
         # 审核门条目由收件箱聚合（kind=gate），这里只记时间线，不重复发 mention
         _step_activity(conn, wf["task_id"], role, step, "submitted", summary)
@@ -3787,10 +3816,30 @@ def escalate_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | 
                   proposed_feedback: str | None = None,
                   run_id: str | None = None) -> dict:
     """AI decider escalates to a human; the packet stays open for human decision."""
+    wf = get_workflow(conn, wid)
+    task_id = wf["task_id"] if wf else None
+    with workflow_lifecycle_lock(
+            conn, task_id, required=True, wait_seconds=2.0):
+        return _escalate_step_locked(
+            conn, wid, step_id, role, reason, triggers,
+            proposed_decision, proposed_feedback, run_id)
+
+
+def _escalate_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
+                          role: str | None, reason: str,
+                          triggers: list[str] | None = None,
+                          proposed_decision: str | None = None,
+                          proposed_feedback: str | None = None,
+                          run_id: str | None = None) -> dict:
+    from . import runs as runs_service
+
     now = now_iso()
     wf = get_workflow(conn, wid)
     if wf is None:
         raise LookupError(wid)
+    if wf.get("status") != "running":
+        raise ConflictError(
+            f"workflow {wid} is {wf.get('status')}; cannot escalate a step")
     step = next((s for s in wf["steps"] if s["step_id"] == step_id), None)
     if step is None:
         raise LookupError(step_id)
@@ -3810,20 +3859,19 @@ def escalate_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | 
     triggers = sorted(set(triggers or []) | set(
         reviews.escalation_triggers(step, packet)))
     if step["run_id"]:
-        row = conn.execute("SELECT status FROM runs WHERE id=?", (step["run_id"],)).fetchone()
-        conn.execute("UPDATE runs SET status='completed', ended_at=? WHERE id=?",
-                     (now, step["run_id"]))
-        ledger.emit(
-            conn, "run.status_changed", task_id=wf["task_id"], workflow_id=wid,
-            execution_no=wf.get("execution_no"), step_id=step_id,
-            run_id=step["run_id"], actor_type="role", actor=step["role_slug"],
-            payload={"status": "completed", "prev": row["status"] if row else None},
-            mirror_activity=True, activity_kind="run", activity_role=step["role_slug"],
-        )
-    conn.execute(
+        runs_service.set_status(
+            conn, step["run_id"], "completed", ended_at=now,
+            from_statuses=("created", "projecting", "running", "suspended"))
+    # CAS：决策步骤只能从 running/submitted 升级为 submitted；已 approve 的步骤
+    # 不能被并发的 escalate 覆盖回待审。
+    cur = conn.execute(
         "UPDATE workflow_steps SET status='submitted', submitted_at=?, feedback=?, "
-        "updated_at=? WHERE workflow_id=? AND step_id=?",
+        "updated_at=? WHERE workflow_id=? AND step_id=? "
+        "AND status IN ('running','submitted')",
         (now, reason, now, wid, step_id))
+    if cur.rowcount != 1:
+        raise ConflictError(
+            f"step {step_id} state changed while escalating; refresh and retry")
     _step_activity(conn, wf["task_id"], role or step["role_slug"], step,
                    "escalated", reason, extra={"triggers": triggers or []})
     reviews.record_escalation(
@@ -4190,14 +4238,17 @@ def close_step_delegations(conn: sqlite3.Connection, wid: str, step_id: str,
                            *, reason: str) -> list[str]:
     """step failed/execution terminated 时关闭其 open 委派，避免永久阻塞。"""
     wf = conn.execute(
-        "SELECT task_id FROM workflows WHERE id=?", (wid,)).fetchone()
+        "SELECT task_id, execution_no FROM workflows WHERE id=?", (wid,)).fetchone()
     if wf is None:
         return []
+    # 只关闭本次 execution 的委派；同名 step_id 在新 execution 里的子任务必须保留。
     rows = conn.execute(
         "SELECT id FROM tasks WHERE parent_id=? AND parent_step_id=? "
         "AND COALESCE(type,'') NOT IN ('dispatch','dispatched') "
-        "AND status NOT IN ('done','closed')",
-        (wf["task_id"], step_id)).fetchall()
+        "AND status NOT IN ('done','closed') "
+        "AND (parent_workflow_id IS NULL OR parent_workflow_id=?) "
+        "AND (parent_execution_no IS NULL OR parent_execution_no=?)",
+        (wf["task_id"], step_id, wid, wf["execution_no"])).fetchall()
     ids = [r["id"] for r in rows]
     if not ids:
         return []
@@ -4236,23 +4287,31 @@ def fail_step(conn: sqlite3.Connection, wid: str, step_id: str, reason: str,
         delay = _retry_backoff_seconds(recovery)
         next_at = (datetime.now(timezone.utc)
                    + timedelta(seconds=delay)).isoformat()
-        conn.execute(
+        cur = conn.execute(
             "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, "
             "ended_at=NULL, summary=?, failure_reason=?, recovery_count=?, next_retry_at=?, "
             "lease_id=NULL, fence_token=0, nudge_count=0, last_nudge_at=NULL, updated_at=? "
-            "WHERE workflow_id=? AND step_id=?",
+            "WHERE workflow_id=? AND step_id=? AND status='running'",
             (reason, category, recovery, next_at, now, wid, step_id))
+        if cur.rowcount != 1:
+            # 步骤已被提交/决策抢先推进：保留旧 run 收尾，但不再改写新状态。
+            conn.commit()
+            return
         _step_activity(conn, wf["task_id"], step["role_slug"], step, "retrying", reason,
                        extra={"failure_reason": category, "attempt": recovery,
                               "retry_at": next_at, "backoff_seconds": int(delay)})
         leases.release(conn, step.get("lease_id"), commit=False)
         conn.commit()
         return
-    conn.execute(
+    cur = conn.execute(
         "UPDATE workflow_steps SET status='failed', summary=?, failure_reason=?, "
         "recovery_count=?, next_retry_at=NULL, lease_id=NULL, fence_token=0, "
-        "ended_at=?, updated_at=? WHERE workflow_id=? AND step_id=?",
+        "ended_at=?, updated_at=? "
+        "WHERE workflow_id=? AND step_id=? AND status='running'",
         (reason, category, recovery, now, now, wid, step_id))
+    if cur.rowcount != 1:
+        conn.commit()
+        return
     _step_activity(conn, wf["task_id"], step["role_slug"], step, "failed", reason,
                    extra={"failure_reason": category, "attempt": recovery})
     # 非阻塞通知：写 comment 而不是 @human。human 回来后在任务时间线能看到；
@@ -4335,6 +4394,10 @@ def finalize_task_review_if_ready(conn: sqlite3.Connection, task_id: str) -> boo
     幂等：任务已 in_review/done 或最新 workflow 尚未 done 时不做任何事。
     """
     if task_review_blocker(conn, task_id) is not None:
+        return False
+    task = conn.execute(
+        "SELECT review_rejected_at FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if task is not None and task["review_rejected_at"]:
         return False
     now = now_iso()
     conn.execute(

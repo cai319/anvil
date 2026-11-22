@@ -12,7 +12,7 @@ from ..services import metrics as metrics_service
 from ..services import replay as replay_service
 from ..services import reviews as review_service
 from ..services import weights as weight_service
-from . import events
+from . import access, events
 
 router = APIRouter()
 
@@ -32,7 +32,9 @@ def _attach_pending_revision(conn, wf: dict) -> dict:
 
 
 @router.get("/tasks/{tid}/workflow")
-def get_task_workflow(tid: str, conn=Depends(get_db)):
+def get_task_workflow(tid: str, conn=Depends(get_db),
+                      auth: Auth = Depends(get_auth)):
+    access.assert_task_read(conn, auth, tid)
     wf = services.workflow.get_for_task(conn, tid)
     if wf is None:
         raise HTTPException(status_code=404, detail="task has no workflow")
@@ -40,22 +42,25 @@ def get_task_workflow(tid: str, conn=Depends(get_db)):
 
 
 @router.get("/tasks/{tid}/workflows")
-def list_task_workflows(tid: str, conn=Depends(get_db)):
+def list_task_workflows(tid: str, conn=Depends(get_db),
+                        auth: Auth = Depends(get_auth)):
     """任务的执行历史；旧执行保留为 terminated，不覆盖。"""
+    access.assert_task_read(conn, auth, tid)
     return services.workflow.list_for_task(conn, tid)
 
 
 @router.get("/workflows/{wid}")
-def get_workflow(wid: str, conn=Depends(get_db)):
-    wf = services.workflow.get_workflow(conn, wid)
-    if wf is None:
-        raise HTTPException(status_code=404, detail="workflow not found")
+def get_workflow(wid: str, conn=Depends(get_db),
+                 auth: Auth = Depends(get_auth)):
+    wf = _assert_workflow_task(conn, wid, auth)
     wf["dispatch"] = services.workflow.explain_dispatch(conn, wf)
     return _attach_pending_revision(conn, wf)
 
 
 @router.get("/workflows/{wid}/metrics")
-def get_metrics(wid: str, conn=Depends(get_db)):
+def get_metrics(wid: str, conn=Depends(get_db),
+                auth: Auth = Depends(get_auth)):
+    _assert_workflow_task(conn, wid, auth)
     try:
         return metrics_service.compute(conn, wid)
     except LookupError:
@@ -63,7 +68,9 @@ def get_metrics(wid: str, conn=Depends(get_db)):
 
 
 @router.get("/workflows/{wid}/graph")
-def get_graph(wid: str, mode: str = "actual", conn=Depends(get_db)):
+def get_graph(wid: str, mode: str = "actual", conn=Depends(get_db),
+              auth: Auth = Depends(get_auth)):
+    _assert_workflow_task(conn, wid, auth)
     try:
         if mode == "planned":
             return metrics_service.planned_graph(conn, wid)
@@ -75,7 +82,9 @@ def get_graph(wid: str, mode: str = "actual", conn=Depends(get_db)):
 
 
 @router.get("/workflows/{wid}/dossier")
-def get_dossier(wid: str, format: str = "json", conn=Depends(get_db)):
+def get_dossier(wid: str, format: str = "json", conn=Depends(get_db),
+                auth: Auth = Depends(get_auth)):
+    _assert_workflow_task(conn, wid, auth)
     payload = dossier_service.get(conn, wid)
     if payload is None:
         raise HTTPException(status_code=404, detail="workflow not found")
@@ -99,21 +108,40 @@ def rebuild_dossier(wid: str, conn=Depends(get_db),
 
 @router.get("/tasks/{tid}/dossier")
 def get_task_dossier(tid: str, workflow_id: str | None = None,
-                     format: str = "json", conn=Depends(get_db)):
+                     format: str = "json", conn=Depends(get_db),
+                     auth: Auth = Depends(get_auth)):
+    access.assert_task_read(conn, auth, tid)
     wid = workflow_id
     if wid is None:
         row = conn.execute(
             "SELECT id FROM workflows WHERE task_id=? "
             "ORDER BY created_at DESC, rowid DESC LIMIT 1", (tid,)).fetchone()
         wid = row["id"] if row else None
+    else:
+        owned = conn.execute(
+            "SELECT 1 FROM workflows WHERE id=? AND task_id=?",
+            (wid, tid)).fetchone()
+        if owned is None:
+            raise HTTPException(status_code=404, detail="workflow not found for task")
     if wid is None:
         raise HTTPException(status_code=404, detail="task has no workflow")
-    return get_dossier(wid, format=format, conn=conn)
+    payload = dossier_service.get(conn, wid)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="workflow not found")
+    if format == "md":
+        body = dossier_service.render_md(payload)
+        return Response(
+            content=body, media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition":
+                     f'attachment; filename="dossier-{wid[:8]}.md"'})
+    return payload
 
 
 @router.get("/tasks/{tid}/replay/log")
-def download_replay_log(tid: str, conn=Depends(get_db)):
+def download_replay_log(tid: str, conn=Depends(get_db),
+                        auth: Auth = Depends(get_auth)):
     """Export the complete task replay (metadata + workflow + event stream) as .log."""
+    access.assert_task_read(conn, auth, tid)
     try:
         content = replay_service.render_log(conn, tid)
     except LookupError:
@@ -125,7 +153,9 @@ def download_replay_log(tid: str, conn=Depends(get_db)):
 
 
 @router.get("/tasks/{tid}/leases")
-def list_leases(tid: str, conn=Depends(get_db)):
+def list_leases(tid: str, conn=Depends(get_db),
+                auth: Auth = Depends(get_auth)):
+    access.assert_task_read(conn, auth, tid)
     steps = [dict(r) for r in conn.execute(
         "SELECT s.workflow_id, s.step_id, s.status, s.lease_id, s.fence_token, "
         "l.holder, l.expires_at, l.status AS lease_status "
@@ -139,6 +169,7 @@ def list_leases(tid: str, conn=Depends(get_db)):
 @router.post("/tasks/{tid}/reservations")
 def reserve_paths(tid: str, body: dict, conn=Depends(get_db),
                   auth: Auth = Depends(get_auth)):
+    access.assert_task_read(conn, auth, tid)
     paths = body.get("paths") or []
     if not isinstance(paths, list) or not paths:
         raise HTTPException(status_code=422, detail="paths is required")
@@ -157,6 +188,7 @@ def reserve_paths(tid: str, body: dict, conn=Depends(get_db),
 @router.delete("/tasks/{tid}/reservations")
 def release_reservations(tid: str, body: dict, conn=Depends(get_db),
                          auth: Auth = Depends(get_auth)):
+    access.assert_task_read(conn, auth, tid)
     paths = body.get("paths") or []
     holder = auth.role or "human"
     if holder == "human" and body.get("holder"):
@@ -215,23 +247,13 @@ def _assert_workflow_task(conn, wid: str, auth: Auth) -> dict:
     wf = services.workflow.get_workflow(conn, wid)
     if wf is None:
         raise HTTPException(status_code=404, detail="workflow not found")
-    if auth.task_id and auth.task_id != wf["task_id"]:
-        raise HTTPException(status_code=403, detail="session is bound to another task")
-    if auth.role and auth.role != "human" and auth.task_id is None:
-        t = services.tasks.get(conn, wf["task_id"]) or {}
-        bound = set(t.get("assignees") or [])
-        if t.get("assignee"):
-            bound.add(t["assignee"])
-        if t.get("planner"):
-            bound.add(t["planner"])
-        if bound and auth.role not in bound and not services.roles.is_onboarding(conn, auth.role):
-            raise HTTPException(status_code=403, detail="role is not a participant of this task")
+    access.assert_task_read(conn, auth, str(wf["task_id"]))
     return wf
 
 
 def _assert_revision_actor(conn, wf: dict, auth: Auth) -> None:
     """只有任务 planner / onboarding 助理（Cindy）可提交修订；human 可预览。"""
-    if auth.role in (None, "human"):
+    if auth.role in (None, "human") or auth.test_bypass:
         return
     task = services.tasks.get(conn, wf["task_id"]) or {}
     planner = str(task.get("planner") or "")
@@ -274,11 +296,10 @@ def create_workflow_revision(wid: str, body: dict, conn=Depends(get_db),
 
 
 @router.get("/workflows/{wid}/steps/{sid}/packet")
-def get_packet(wid: str, sid: str, conn=Depends(get_db)):
+def get_packet(wid: str, sid: str, conn=Depends(get_db),
+               auth: Auth = Depends(get_auth)):
     """Gate/decision review packet + immutable decisions."""
-    wf = services.workflow.get_workflow(conn, wid)
-    if wf is None:
-        raise HTTPException(status_code=404, detail="workflow not found")
+    wf = _assert_workflow_task(conn, wid, auth)
     step = next((s for s in wf["steps"] if s["step_id"] == sid), None)
     if step is None:
         raise HTTPException(status_code=404, detail="step not found")
