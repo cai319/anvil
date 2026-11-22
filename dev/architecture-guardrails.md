@@ -47,7 +47,7 @@
   `npm run gen:api` → `src/api/schema.d.ts`。
 - 已接入生成类型：`TaskStatus`、`Role`、`Runtime`、`Task`、`Run`、
   `KnowledgeRepoBinding`、`Workflow`、`WorkflowStep`、`WorkflowHistoryItem`、
-  `TaskChild`、`TaskRoleState`。
+  `TaskChild`、`TaskRoleState`、`Delegation`、`TaskDispatch`。
 - 已补响应模型：Task 嵌套（workspace/role_claims/plan_seed/knowledge_repos）、
   RunOut、WorkflowOut/StepOut/HistoryOut（含 definition/evidence/decision_options）。
 - 契约回归：`tests/api/test_contract_models.py` 锁定 Task/Run 嵌套字段不被裁剪。

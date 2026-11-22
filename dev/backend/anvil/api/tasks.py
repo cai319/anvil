@@ -10,8 +10,9 @@ from fastapi.responses import JSONResponse
 from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import (
-    ClaimIn, CommentIn, DepIn, ReviewIn, SubmitIn, TaskChildOut, TaskChildrenOut,
-    TaskIn, TaskOut, TaskPatch, TaskRoleStatesBatchOut, TaskRoleStatesOut,
+    ClaimIn, CommentIn, DelegationOut, DepIn, ReviewIn, SubmitIn, TaskChildOut,
+    TaskChildrenOut, TaskDispatchOut, TaskIn, TaskOut, TaskPatch,
+    TaskRoleStatesBatchOut, TaskRoleStatesOut,
 )
 from ..services import knowledge_quality, ledger, repo_catalog
 from ..services.tasks import ConflictError
@@ -888,7 +889,7 @@ def list_children(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)
         raise HTTPException(status_code=404, detail="task not found")
 
 
-@router.get("/{tid}/delegations")
+@router.get("/{tid}/delegations", response_model=list[DelegationOut])
 def list_delegations(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """父任务下的委派工单（含旧子任务），供「委派」页签/step 详情使用。"""
     _assert_session_task(conn, auth, tid)
@@ -1582,7 +1583,7 @@ def create_dispatch(tid: str, body: dict, request: Request, conn=Depends(get_db)
     return result
 
 
-@router.get("/{tid}/dispatches")
+@router.get("/{tid}/dispatches", response_model=list[TaskDispatchOut])
 def list_dispatches(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     _assert_session_task(conn, auth, tid)
     return services.dispatch.list_dispatches(conn, tid)

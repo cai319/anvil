@@ -455,6 +455,60 @@ class TaskOut(BaseModel):
     archived_at: str | None = None
 
 
+class DelegationOut(BaseModel):
+    """委派工单：声明前端/CLI 使用的稳定字段；其余 task 列透传。"""
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    title: str
+    type: str | None = None
+    status: TaskStatus
+    parent_id: str | None = None
+    parent_step_id: str | None = None
+    step_title: str | None = None
+    created_by: str | None = None
+    assignee: str | None = None
+    assignees: list[str] = Field(default_factory=list)
+    acceptance: list[str] = Field(default_factory=list)
+    scope_paths: list[str] = Field(default_factory=list)
+    description: str | None = None
+    due_at: str | None = None
+    run_id: str | None = None
+    run_status: str | None = None
+    run_failure_class: str | None = None
+    submitted_summary: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class TaskDispatchOut(BaseModel):
+    """派遣记录：声明展示/操作所需字段；请求哈希等内部列透传。"""
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    source_task_id: str
+    source_workflow_id: str | None = None
+    source_step_id: str | None = None
+    source_slice_key: str | None = None
+    requester_run_id: str | None = None
+    requested_by: str | None = None
+    target_task_id: str
+    target_role: str | None = None
+    target_title: str | None = None
+    target_status: str | None = None
+    return_context_key: str | None = None
+    return_run_id: str | None = None
+    return_step_id: str | None = None
+    reason_code: str
+    reason_json: str = "{}"
+    status: Literal[
+        "open", "return_ready", "returning", "returned", "no_return", "cancelled"]
+    attempts: int = 0
+    returned_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
 class TaskRoleStateOut(BaseModel):
     role_slug: str
     state: Literal[

@@ -32,30 +32,8 @@ export type TaskStatus = Schemas["TaskStatus"];
 
 export type Task = Required<Schemas["TaskOut"]>;
 
-export interface Delegation {
-  id: string;
-  title: string;
-  type: string | null;
-  status: Task["status"];
-  parent_id: string;
-  parent_step_id: string | null;
-  step_title: string | null;
-  created_by: string | null;
-  assignee: string | null;
-  assignees: string[];
-  acceptance: string[];
-  scope_paths: string[];
-  description: string | null;
-  due_at: string | null;
-  run_id: string | null;
-  run_status: string | null;
-  run_failure_class: string | null;
-  submitted_summary: string | null;
-  created_at: string;
-  updated_at: string;
-}
+export type Delegation = Required<Schemas["DelegationOut"]>;
 
-/** 委派/派遣统一子任务投影（GET /tasks/{id}/children）。 */
 export type TaskChild = Required<Omit<Schemas["TaskChildOut"], "raw">> & {
   raw: Delegation | TaskDispatch;
 };
@@ -1522,29 +1500,7 @@ export type RunStatus =
 
 export type Run = Required<Schemas["RunOut"]>;
 
-export interface TaskDispatch {
-  id: string;
-  source_task_id: string;
-  source_workflow_id: string | null;
-  source_step_id: string | null;
-  source_slice_key: string | null;
-  requester_run_id: string | null;
-  requested_by: string | null;
-  target_task_id: string;
-  target_role: string | null;
-  target_title?: string | null;
-  target_status?: string | null;
-  return_context_key: string | null;
-  return_run_id: string | null;
-  return_step_id: string | null;
-  reason_code: string;
-  reason_json: string;
-  status: "open" | "return_ready" | "returning" | "returned" | "no_return" | "cancelled";
-  attempts: number;
-  returned_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
+export type TaskDispatch = Required<Schemas["TaskDispatchOut"]>;
 
 export interface AnvilEvent {
   topic: string;

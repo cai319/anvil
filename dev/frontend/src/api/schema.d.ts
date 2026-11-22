@@ -4684,6 +4684,53 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /**
+         * DelegationOut
+         * @description 委派工单：声明前端/CLI 使用的稳定字段；其余 task 列透传。
+         */
+        DelegationOut: {
+            /** Id */
+            id: string;
+            /** Title */
+            title: string;
+            /** Type */
+            type?: string | null;
+            status: components["schemas"]["TaskStatus"];
+            /** Parent Id */
+            parent_id?: string | null;
+            /** Parent Step Id */
+            parent_step_id?: string | null;
+            /** Step Title */
+            step_title?: string | null;
+            /** Created By */
+            created_by?: string | null;
+            /** Assignee */
+            assignee?: string | null;
+            /** Assignees */
+            assignees?: string[];
+            /** Acceptance */
+            acceptance?: string[];
+            /** Scope Paths */
+            scope_paths?: string[];
+            /** Description */
+            description?: string | null;
+            /** Due At */
+            due_at?: string | null;
+            /** Run Id */
+            run_id?: string | null;
+            /** Run Status */
+            run_status?: string | null;
+            /** Run Failure Class */
+            run_failure_class?: string | null;
+            /** Submitted Summary */
+            submitted_summary?: string | null;
+            /** Created At */
+            created_at: string;
+            /** Updated At */
+            updated_at: string;
+        } & {
+            [key: string]: unknown;
+        };
         /** DepIn */
         DepIn: {
             /** Depends On */
@@ -5442,6 +5489,65 @@ export interface components {
             /** Items */
             items?: components["schemas"]["TaskChildOut"][];
             counts?: components["schemas"]["TaskChildrenCountsOut"];
+        };
+        /**
+         * TaskDispatchOut
+         * @description 派遣记录：声明展示/操作所需字段；请求哈希等内部列透传。
+         */
+        TaskDispatchOut: {
+            /** Id */
+            id: string;
+            /** Source Task Id */
+            source_task_id: string;
+            /** Source Workflow Id */
+            source_workflow_id?: string | null;
+            /** Source Step Id */
+            source_step_id?: string | null;
+            /** Source Slice Key */
+            source_slice_key?: string | null;
+            /** Requester Run Id */
+            requester_run_id?: string | null;
+            /** Requested By */
+            requested_by?: string | null;
+            /** Target Task Id */
+            target_task_id: string;
+            /** Target Role */
+            target_role?: string | null;
+            /** Target Title */
+            target_title?: string | null;
+            /** Target Status */
+            target_status?: string | null;
+            /** Return Context Key */
+            return_context_key?: string | null;
+            /** Return Run Id */
+            return_run_id?: string | null;
+            /** Return Step Id */
+            return_step_id?: string | null;
+            /** Reason Code */
+            reason_code: string;
+            /**
+             * Reason Json
+             * @default {}
+             */
+            reason_json: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "open" | "return_ready" | "returning" | "returned" | "no_return" | "cancelled";
+            /**
+             * Attempts
+             * @default 0
+             */
+            attempts: number;
+            /** Returned At */
+            returned_at?: string | null;
+            /** Created At */
+            created_at: string;
+            /** Updated At */
+            updated_at: string;
+        } & {
+            [key: string]: unknown;
         };
         /** TaskIn */
         TaskIn: {
@@ -8951,7 +9057,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DelegationOut"][];
                 };
             };
             /** @description Validation Error */
@@ -9283,7 +9389,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["TaskDispatchOut"][];
                 };
             };
             /** @description Validation Error */
