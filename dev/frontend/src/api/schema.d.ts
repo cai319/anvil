@@ -10890,7 +10890,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["FindingOut"][];
+                    "application/json": components["schemas"]["FindingSummaryOut"];
                 };
             };
             /** @description Validation Error */

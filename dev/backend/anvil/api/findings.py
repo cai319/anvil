@@ -152,7 +152,7 @@ def reopen_finding_board(tid: str, body: FindingDecisionIn, request: Request,
     return board
 
 
-@router.get("/tasks/{tid}/findings", response_model=list[FindingOut])
+@router.get("/tasks/{tid}/findings", response_model=FindingSummaryOut)
 def list_findings(tid: str, status: str | None = None, severity: str | None = None,
                   risk_type: str | None = None, q: str | None = None,
                   limit: int = 500, conn=Depends(get_db), auth: Auth = Depends(get_auth)):

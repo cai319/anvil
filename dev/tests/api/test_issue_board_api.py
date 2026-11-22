@@ -341,3 +341,20 @@ async def test_flag_and_reviewer_permissions(client, app):
     removed = await client.delete(f"{API}/tasks/T-IB-PERM/reviewers/auditor",
                                   headers=human_headers())
     assert removed.status_code == 409, removed.text
+
+
+async def test_list_findings_returns_board_summary(client, app):
+    """回归：GET /findings 返回问题板摘要（含 items），不是裸列表。"""
+    reviewer = await _seed(client, app, tid="T-IB-LIST")
+    created = await client.post(
+        f"{API}/tasks/T-IB-LIST/findings",
+        json={"title": "待补全的命令注入"}, headers=reviewer)
+    assert created.status_code == 201, created.text
+
+    listed = await client.get(
+        f"{API}/tasks/T-IB-LIST/findings", headers=reviewer)
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert body["task_id"] == "T-IB-LIST"
+    assert body["counts"]["draft"] == 1
+    assert body["items"][0]["id"] == created.json()["id"]
