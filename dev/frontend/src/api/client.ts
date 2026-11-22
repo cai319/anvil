@@ -1737,80 +1737,13 @@ export interface StepPacketResponse {
   };
 }
 
-export interface WorkflowStep {
-  workflow_id: string;
-  step_id: string;
-  title: string;
+export type WorkflowStep = Required<Schemas["WorkflowStepOut"]> & {
   role_slug: string;
-  instructions: string | null;
-  depends_on: string[];
-  acceptance: string[];
-  gate: boolean;
-  reviewer: string | null;
-  contract: string | null;
-  kind?: "task" | "decision" | "plan_slices" | "external";
-  on_reject?: string[];
-  max_rework?: number;
-  rework_count?: number;
-  feedback?: string | null;
-  source_step_id?: string | null;
-  slice_key?: string | null;
-  plan_json?: string | null;
-  decision_authority?: DecisionAuthority | "";
-  risk_level?: "normal" | "high" | "critical";
-  reversible?: boolean;
-  escalate?: string[];
-  decision_question?: string | null;
-  decision_options?: { id?: string; label?: string; decision: string; requires_note?: boolean }[];
-  evidence_required?: boolean;
-  subagent_hint?: boolean;
-  evidence?: ReviewEvidence[];
-  packet_id?: string | null;
-  submitted_at?: string | null;
-  scope_paths?: string[];
-  lease_id?: string | null;
-  fence_token?: number;
-  lease_holder?: string | null;
-  lease_expires_at?: string | null;
-  lease_fence?: number | null;
-  failure_reason: string | null;
-  recovery_count?: number;
-  next_retry_at?: string | null;
-  run_status?: string | null;
-  status: "pending" | "running" | "submitted" | "approved" | "rejected" | "failed" | "skipped";
-  run_id: string | null;
-  summary: string | null;
-  started_at: string | null;
-  ended_at: string | null;
-  updated_at: string;
-}
+};
 
-export interface Workflow {
-  id: string;
-  task_id: string;
-  status: "running" | "done" | "failed" | "terminated";
-  definition: {
-    feedback_rules?: string[];
-    verification?: { cell: string; method: string; verifier_role?: string }[];
-  };
+export type Workflow = Required<Omit<Schemas["WorkflowOut"], "steps">> & {
   steps: WorkflowStep[];
-  created_at: string;
-  updated_at: string;
-  execution_no?: number;
-  previous_workflow_id?: string | null;
-  termination_reason?: string | null;
-  terminated_at?: string | null;
-  weight?: WorkflowWeight;
-  weight_source?: string;
-  weight_reason?: string | null;
-  definition_hash?: string | null;
-  finished_at?: string | null;
-  pending_revision?: {
-    draft_id: string;
-    impact?: RevisionImpact;
-    created_by?: string;
-  } | null;
-}
+};
 
 export type WorkflowWeight = "light" | "standard" | "strict";
 
@@ -1949,28 +1882,7 @@ export interface TaskWeightResult {
   running_weight: WorkflowWeight | null;
 }
 
-export interface WorkflowHistoryItem {
-  id: string;
-  task_id: string;
-  status: Workflow["status"];
-  created_by: string | null;
-  created_at: string;
-  updated_at: string;
-  termination_reason: string | null;
-  terminated_at: string | null;
-  previous_workflow_id: string | null;
-  execution_no: number;
-  template_id: string | null;
-  template_version: number | null;
-  step_count: number;
-  approved_count: number | null;
-  weight?: WorkflowWeight;
-  weight_source?: string;
-  weight_reason?: string | null;
-  definition_hash?: string | null;
-  finished_at?: string | null;
-  metrics?: WorkflowMetrics;
-}
+export type WorkflowHistoryItem = Required<Schemas["WorkflowHistoryOut"]>;
 
 export interface TemplateRoleSlot {
   key: string;

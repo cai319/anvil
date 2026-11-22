@@ -148,7 +148,7 @@ async def test_pending_revision_only_attached_to_its_base_workflow(client, app):
 
     old = (await client.get(f"{API}/workflows/wf-old-execution",
                             headers=auth_headers())).json()
-    assert "pending_revision" not in old
+    assert old.get("pending_revision") is None
     current = (await client.get(f"{API}/workflows/{wid}", headers=auth_headers())).json()
     assert current["pending_revision"]["draft_id"] == draft.json()["id"]
 

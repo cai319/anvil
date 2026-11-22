@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TaskStatus(str, Enum):
@@ -240,6 +240,171 @@ class RunOut(BaseModel):
     context_return_attempts: int = 0
     context_return_last_attempt_at: str | None = None
     context_return_armed_at: str | None = None
+
+
+class VerificationCellOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    cell: str | None = None
+    method: str | None = None
+    verifier_role: str | None = None
+
+
+class DecisionOptionOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str | None = None
+    label: str | None = None
+    decision: str
+    requires_note: bool | None = None
+
+
+class ReviewEvidenceOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str | None = None
+    kind: str | None = None
+    ref: str | None = None
+    label: str | None = None
+    digest: str | None = None
+    captured_at: str | None = None
+    fresh: bool | None = None
+
+
+class WorkflowDefinitionOut(BaseModel):
+    """定义 JSON 的稳定子集；其余字段（slices/loop 等）原样透传。"""
+    model_config = ConfigDict(extra="allow")
+
+    feedback_rules: list[str] | None = None
+    verification: list[VerificationCellOut] | None = None
+
+
+class RevisionImpactOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    classification: str | None = None
+    safe: bool | None = None
+    summary: str | None = None
+    affected_steps: list[str] | None = None
+
+
+class PendingRevisionOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    draft_id: str
+    impact: RevisionImpactOut | None = None
+    created_by: str | None = None
+
+
+class WorkflowStepOut(BaseModel):
+    workflow_id: str
+    step_id: str
+    title: str
+    role_slug: str | None = None
+    instructions: str | None = None
+    depends_on: list[str] = Field(default_factory=list)
+    acceptance: list[str] = Field(default_factory=list)
+    gate: bool = False
+    reviewer: str | None = None
+    contract: str | None = None
+    failure_reason: str | None = None
+    last_nudge_at: str | None = None
+    nudge_count: int = 0
+    recovery_count: int = 0
+    next_retry_at: str | None = None
+    kind: str = "task"
+    on_reject: list[str] = Field(default_factory=list)
+    max_rework: int = 0
+    rework_count: int = 0
+    feedback: str | None = None
+    source_step_id: str | None = None
+    slice_key: str | None = None
+    plan_json: str | None = None
+    decision_authority: Literal["ai", "human", "joint", ""] | None = None
+    risk_level: str | None = None
+    reversible: bool = True
+    escalate: list[str] = Field(default_factory=list)
+    decision_question: str | None = None
+    decision_options: list[DecisionOptionOut] = Field(default_factory=list)
+    evidence: list[ReviewEvidenceOut] = Field(default_factory=list)
+    evidence_required: bool = False
+    subagent_hint: bool | None = None
+    packet_id: str | None = None
+    submitted_at: str | None = None
+    scope_paths: list[str] = Field(default_factory=list)
+    lease_id: str | None = None
+    fence_token: int = 0
+    status: str
+    run_id: str | None = None
+    summary: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    updated_at: str
+    lease_holder: str | None = None
+    lease_expires_at: str | None = None
+    lease_fence: int | None = None
+
+
+class WorkflowOut(BaseModel):
+    id: str
+    task_id: str
+    status: Literal["running", "done", "failed", "terminated"]
+    created_by: str | None = None
+    created_at: str
+    approved_at: str | None = None
+    updated_at: str
+    termination_reason: str | None = None
+    terminated_at: str | None = None
+    previous_workflow_id: str | None = None
+    execution_no: int = 1
+    weight: Literal["light", "standard", "strict"] | None = None
+    weight_source: str | None = None
+    weight_reason: str | None = None
+    definition_hash: str | None = None
+    finished_at: str | None = None
+    template_id: str | None = None
+    template_version: int | None = None
+    definition: WorkflowDefinitionOut = Field(default_factory=WorkflowDefinitionOut)
+    steps: list[WorkflowStepOut] = Field(default_factory=list)
+    dispatch: dict[str, Any] | None = None
+    pending_revision: PendingRevisionOut | None = None
+
+
+class WorkflowMetricsDecisionsOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    total: int = 0
+    rejected: int = 0
+
+
+class WorkflowMetricsOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    decisions: WorkflowMetricsDecisionsOut = Field(
+        default_factory=WorkflowMetricsDecisionsOut)
+
+
+class WorkflowHistoryOut(BaseModel):
+    id: str
+    task_id: str
+    status: str
+    created_by: str | None = None
+    created_at: str
+    updated_at: str
+    termination_reason: str | None = None
+    terminated_at: str | None = None
+    previous_workflow_id: str | None = None
+    execution_no: int = 1
+    template_id: str | None = None
+    template_version: int | None = None
+    weight: Literal["light", "standard", "strict"] | None = None
+    weight_source: str | None = None
+    weight_reason: str | None = None
+    definition_hash: str | None = None
+    finished_at: str | None = None
+    step_count: int = 0
+    approved_count: int | None = None
+    metrics: WorkflowMetricsOut | None = None
 
 
 class TaskOut(BaseModel):

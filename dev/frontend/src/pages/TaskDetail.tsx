@@ -1742,7 +1742,7 @@ export function TaskDetail({ id }: { id: string }) {
                         </span>
                         {item.metrics && (
                           <span className="muted">
-                            决策 {item.metrics.decisions.total} · 打回 {item.metrics.decisions.rejected}
+                            决策 {item.metrics.decisions?.total ?? 0} · 打回 {item.metrics.decisions?.rejected ?? 0}
                           </span>
                         )}
                         {item.termination_reason && (

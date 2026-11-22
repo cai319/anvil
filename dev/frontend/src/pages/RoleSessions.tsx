@@ -61,7 +61,7 @@ export function RoleSessions({
       : (task.role_claims ?? []).map((c) => c.role_slug)),
     ...(task.planner ? [task.planner] : []),
     ...((workflow?.steps ?? []).map((s) => s.role_slug)),
-  ])).filter(Boolean);
+  ])).filter((s): s is string => Boolean(s));
   const slugKey = slugs.join(",");
 
   const lastLogAtRef = useRef(0);

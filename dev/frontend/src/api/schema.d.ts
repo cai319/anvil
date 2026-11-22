@@ -4671,6 +4671,19 @@ export interface components {
              */
             force: boolean;
         };
+        /** DecisionOptionOut */
+        DecisionOptionOut: {
+            /** Id */
+            id?: string | null;
+            /** Label */
+            label?: string | null;
+            /** Decision */
+            decision: string;
+            /** Requires Note */
+            requires_note?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** DepIn */
         DepIn: {
             /** Depends On */
@@ -4994,6 +5007,16 @@ export interface components {
                 [key: string]: unknown;
             } | null;
         };
+        /** PendingRevisionOut */
+        PendingRevisionOut: {
+            /** Draft Id */
+            draft_id: string;
+            impact?: components["schemas"]["RevisionImpactOut"] | null;
+            /** Created By */
+            created_by?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** PlanSeedOut */
         PlanSeedOut: {
             /** Template Id */
@@ -5018,6 +5041,25 @@ export interface components {
             /** Risk */
             risk?: string | null;
         };
+        /** ReviewEvidenceOut */
+        ReviewEvidenceOut: {
+            /** Id */
+            id?: string | null;
+            /** Kind */
+            kind?: string | null;
+            /** Ref */
+            ref?: string | null;
+            /** Label */
+            label?: string | null;
+            /** Digest */
+            digest?: string | null;
+            /** Captured At */
+            captured_at?: string | null;
+            /** Fresh */
+            fresh?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** ReviewIn */
         ReviewIn: {
             /** Approve */
@@ -5029,6 +5071,19 @@ export interface components {
         ReviewersIn: {
             /** Roles */
             roles?: string[];
+        };
+        /** RevisionImpactOut */
+        RevisionImpactOut: {
+            /** Classification */
+            classification?: string | null;
+            /** Safe */
+            safe?: boolean | null;
+            /** Summary */
+            summary?: string | null;
+            /** Affected Steps */
+            affected_steps?: string[] | null;
+        } & {
+            [key: string]: unknown;
         };
         /** RoleIn */
         RoleIn: {
@@ -5542,6 +5597,273 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /** VerificationCellOut */
+        VerificationCellOut: {
+            /** Cell */
+            cell?: string | null;
+            /** Method */
+            method?: string | null;
+            /** Verifier Role */
+            verifier_role?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * WorkflowDefinitionOut
+         * @description 定义 JSON 的稳定子集；其余字段（slices/loop 等）原样透传。
+         */
+        WorkflowDefinitionOut: {
+            /** Feedback Rules */
+            feedback_rules?: string[] | null;
+            /** Verification */
+            verification?: components["schemas"]["VerificationCellOut"][] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** WorkflowHistoryOut */
+        WorkflowHistoryOut: {
+            /** Id */
+            id: string;
+            /** Task Id */
+            task_id: string;
+            /** Status */
+            status: string;
+            /** Created By */
+            created_by?: string | null;
+            /** Created At */
+            created_at: string;
+            /** Updated At */
+            updated_at: string;
+            /** Termination Reason */
+            termination_reason?: string | null;
+            /** Terminated At */
+            terminated_at?: string | null;
+            /** Previous Workflow Id */
+            previous_workflow_id?: string | null;
+            /**
+             * Execution No
+             * @default 1
+             */
+            execution_no: number;
+            /** Template Id */
+            template_id?: string | null;
+            /** Template Version */
+            template_version?: number | null;
+            /** Weight */
+            weight?: ("light" | "standard" | "strict") | null;
+            /** Weight Source */
+            weight_source?: string | null;
+            /** Weight Reason */
+            weight_reason?: string | null;
+            /** Definition Hash */
+            definition_hash?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
+            /**
+             * Step Count
+             * @default 0
+             */
+            step_count: number;
+            /** Approved Count */
+            approved_count?: number | null;
+            metrics?: components["schemas"]["WorkflowMetricsOut"] | null;
+        };
+        /** WorkflowMetricsDecisionsOut */
+        WorkflowMetricsDecisionsOut: {
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+            /**
+             * Rejected
+             * @default 0
+             */
+            rejected: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** WorkflowMetricsOut */
+        WorkflowMetricsOut: {
+            decisions?: components["schemas"]["WorkflowMetricsDecisionsOut"];
+        } & {
+            [key: string]: unknown;
+        };
+        /** WorkflowOut */
+        WorkflowOut: {
+            /** Id */
+            id: string;
+            /** Task Id */
+            task_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "running" | "done" | "failed" | "terminated";
+            /** Created By */
+            created_by?: string | null;
+            /** Created At */
+            created_at: string;
+            /** Approved At */
+            approved_at?: string | null;
+            /** Updated At */
+            updated_at: string;
+            /** Termination Reason */
+            termination_reason?: string | null;
+            /** Terminated At */
+            terminated_at?: string | null;
+            /** Previous Workflow Id */
+            previous_workflow_id?: string | null;
+            /**
+             * Execution No
+             * @default 1
+             */
+            execution_no: number;
+            /** Weight */
+            weight?: ("light" | "standard" | "strict") | null;
+            /** Weight Source */
+            weight_source?: string | null;
+            /** Weight Reason */
+            weight_reason?: string | null;
+            /** Definition Hash */
+            definition_hash?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
+            /** Template Id */
+            template_id?: string | null;
+            /** Template Version */
+            template_version?: number | null;
+            definition?: components["schemas"]["WorkflowDefinitionOut"];
+            /** Steps */
+            steps?: components["schemas"]["WorkflowStepOut"][];
+            /** Dispatch */
+            dispatch?: {
+                [key: string]: unknown;
+            } | null;
+            pending_revision?: components["schemas"]["PendingRevisionOut"] | null;
+        };
+        /** WorkflowStepOut */
+        WorkflowStepOut: {
+            /** Workflow Id */
+            workflow_id: string;
+            /** Step Id */
+            step_id: string;
+            /** Title */
+            title: string;
+            /** Role Slug */
+            role_slug?: string | null;
+            /** Instructions */
+            instructions?: string | null;
+            /** Depends On */
+            depends_on?: string[];
+            /** Acceptance */
+            acceptance?: string[];
+            /**
+             * Gate
+             * @default false
+             */
+            gate: boolean;
+            /** Reviewer */
+            reviewer?: string | null;
+            /** Contract */
+            contract?: string | null;
+            /** Failure Reason */
+            failure_reason?: string | null;
+            /** Last Nudge At */
+            last_nudge_at?: string | null;
+            /**
+             * Nudge Count
+             * @default 0
+             */
+            nudge_count: number;
+            /**
+             * Recovery Count
+             * @default 0
+             */
+            recovery_count: number;
+            /** Next Retry At */
+            next_retry_at?: string | null;
+            /**
+             * Kind
+             * @default task
+             */
+            kind: string;
+            /** On Reject */
+            on_reject?: string[];
+            /**
+             * Max Rework
+             * @default 0
+             */
+            max_rework: number;
+            /**
+             * Rework Count
+             * @default 0
+             */
+            rework_count: number;
+            /** Feedback */
+            feedback?: string | null;
+            /** Source Step Id */
+            source_step_id?: string | null;
+            /** Slice Key */
+            slice_key?: string | null;
+            /** Plan Json */
+            plan_json?: string | null;
+            /** Decision Authority */
+            decision_authority?: ("ai" | "human" | "joint" | "") | null;
+            /** Risk Level */
+            risk_level?: string | null;
+            /**
+             * Reversible
+             * @default true
+             */
+            reversible: boolean;
+            /** Escalate */
+            escalate?: string[];
+            /** Decision Question */
+            decision_question?: string | null;
+            /** Decision Options */
+            decision_options?: components["schemas"]["DecisionOptionOut"][];
+            /** Evidence */
+            evidence?: components["schemas"]["ReviewEvidenceOut"][];
+            /**
+             * Evidence Required
+             * @default false
+             */
+            evidence_required: boolean;
+            /** Subagent Hint */
+            subagent_hint?: boolean | null;
+            /** Packet Id */
+            packet_id?: string | null;
+            /** Submitted At */
+            submitted_at?: string | null;
+            /** Scope Paths */
+            scope_paths?: string[];
+            /** Lease Id */
+            lease_id?: string | null;
+            /**
+             * Fence Token
+             * @default 0
+             */
+            fence_token: number;
+            /** Status */
+            status: string;
+            /** Run Id */
+            run_id?: string | null;
+            /** Summary */
+            summary?: string | null;
+            /** Started At */
+            started_at?: string | null;
+            /** Ended At */
+            ended_at?: string | null;
+            /** Updated At */
+            updated_at: string;
+            /** Lease Holder */
+            lease_holder?: string | null;
+            /** Lease Expires At */
+            lease_expires_at?: string | null;
+            /** Lease Fence */
+            lease_fence?: number | null;
         };
         /** WorkspaceRefOut */
         WorkspaceRefOut: {
@@ -9820,7 +10142,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WorkflowOut"];
                 };
             };
             /** @description Validation Error */
@@ -9854,7 +10176,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WorkflowHistoryOut"][];
                 };
             };
             /** @description Validation Error */
@@ -9888,7 +10210,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WorkflowOut"];
                 };
             };
             /** @description Validation Error */
