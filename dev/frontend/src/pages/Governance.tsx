@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { formatDateTime } from "../time";
 import { PageHeader } from "../components/ui";
+import { useLiveRefresh } from "../useLiveRefresh";
 
 interface AuditRow {
   created_at: string;
@@ -96,6 +97,13 @@ export function Governance() {
   useEffect(() => {
     refresh();
   }, []);
+
+  useLiveRefresh(refresh, {
+    topics: ["task"],
+    tickMinGapMs: 15_000,
+    pollMs: 60_000,
+    initial: false,
+  });
 
   const toggle = async () => {
     try {

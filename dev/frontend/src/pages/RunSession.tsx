@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, subscribeEvents, type Run, type TimelineEvent } from "../api/client";
+import { api, type Run, type TimelineEvent } from "../api/client";
+import { useLiveRefresh } from "../useLiveRefresh";
 import { formatClock, formatDateTime, parseTime, useNow } from "../time";
 import { Icon } from "../components/Icon";
 import { confirmDialog } from "../components/dialogs";
@@ -47,10 +48,14 @@ export function RunSession({ id }: { id: string }) {
 
   useEffect(() => {
     refresh();
-    return subscribeEvents((ev) => {
-      if (ev.topic === "tick" || ev.topic === "task") refresh();
-    });
   }, [id]);
+
+  useLiveRefresh(refresh, {
+    topics: ["task", "tick"],
+    tickMinGapMs: 10_000,
+    pollMs: 30_000,
+    initial: false,
+  });
 
   if (error) return <p className="error">{error}</p>;
   if (!run) return <p className="muted">加载中…</p>;

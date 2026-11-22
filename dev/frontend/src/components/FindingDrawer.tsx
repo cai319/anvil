@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { api, subscribeEvents, type Finding, type FindingSchema } from "../api/client";
+import { api, type Finding, type FindingSchema } from "../api/client";
+import { useLiveRefresh } from "../useLiveRefresh";
 import { confirmDialog, promptDialog } from "../components/dialogs";
 import { Icon } from "../components/Icon";
 
@@ -156,14 +157,13 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
     return () => { alive = false; };
   }, [taskId, findingId, reloadKey]);
 
-  useEffect(() => {
-    return subscribeEvents((ev) => {
-      if (ev.topic !== "task" || ev.payload.id !== taskId) return;
-      if (ev.payload.kind !== "finding") return;
-      if (ev.payload.finding_id && ev.payload.finding_id !== findingId) return;
-      setReloadKey((n) => n + 1);
-    });
-  }, [taskId, findingId]);
+  useLiveRefresh(() => setReloadKey((n) => n + 1), {
+    match: (ev) => ev.topic === "task" && ev.payload.id === taskId
+      && ev.payload.kind === "finding"
+      && (!ev.payload.finding_id || ev.payload.finding_id === findingId),
+    pollMs: 30_000,
+    initial: false,
+  });
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };

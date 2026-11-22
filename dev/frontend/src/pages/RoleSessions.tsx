@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  api, subscribeEvents,
+  api,
   type ContextManifest, type Role, type RoleRuntimeStatus, type Run, type SubagentRecord,
   type Task, type TaskDispatch, type TimelineEvent, type Workflow,
 } from "../api/client";
+import { useLiveRefresh } from "../useLiveRefresh";
 import { taskRoleState } from "../roleStatus";
 import { formatClock, formatShort } from "../time";
 import { HEADER_ONLY_RUN_LOG_HINT, isHeaderOnlyRunLog } from "../runLog";
@@ -63,42 +64,51 @@ export function RoleSessions({ task, roles, workflow, dispatches = [], relatedTa
   ])).filter(Boolean);
   const slugKey = slugs.join(",");
 
+  const lastLogAtRef = useRef(0);
+  const loadRuntimes = (roles: string[]) => {
+    for (const slug of roles) {
+      api.getRoleRuntime(slug)
+        .then((rt) => setRuntimes((prev) => ({ ...prev, [slug]: rt })))
+        .catch(() => {});
+    }
+  };
+  const load = () => {
+    if (expanded) {
+      api.listRunSubagents(expanded)
+        .then((rows) => setSubagentHistory((prev) => ({ ...prev, [expanded]: rows })))
+        .catch(() => {});
+    }
+    api.listTaskRuns(task.id)
+      .then((r) => {
+        setRuns(r);
+        setRunsLoaded(true);
+        // 被 @ 但不在 assignees 里的角色也会出现在本任务 run 列表中。
+        loadRuntimes(Array.from(new Set([...slugs, ...r.map((x) => x.role_slug)])));
+      })
+      .catch(() => setRunsLoaded(true));
+    if (slugs.length) loadRuntimes(slugs);
+  };
+  const refreshLog = () => {
+    if (!expanded || Date.now() - lastLogAtRef.current <= 3000) return;
+    lastLogAtRef.current = Date.now();
+    api.getRunLog(expanded)
+      .then((r) => setLogs((prev) => ({ ...prev, [expanded]: r.exists ? r.content : "（该会话暂无日志）" })))
+      .catch(() => {});
+  };
+
   useEffect(() => {
-    let lastLogAt = 0;
-    const loadRuntimes = (roles: string[]) => {
-      for (const slug of roles) {
-        api.getRoleRuntime(slug)
-          .then((rt) => setRuntimes((prev) => ({ ...prev, [slug]: rt })))
-          .catch(() => {});
-      }
-    };
-    const load = (ev?: { topic?: string }) => {
-      if (expanded && ev?.topic === "tick" && Date.now() - lastLogAt > 3000) {
-        lastLogAt = Date.now();
-        api.getRunLog(expanded)
-          .then((r) => setLogs((prev) => ({ ...prev, [expanded]: r.exists ? r.content : "（该会话暂无日志）" })))
-          .catch(() => {});
-      }
-      if (expanded) {
-        api.listRunSubagents(expanded)
-          .then((rows) => setSubagentHistory((prev) => ({ ...prev, [expanded]: rows })))
-          .catch(() => {});
-      }
-      api.listTaskRuns(task.id)
-        .then((r) => {
-          setRuns(r);
-          setRunsLoaded(true);
-          // 被 @ 但不在 assignees 里的角色也会出现在本任务 run 列表中。
-          loadRuntimes(Array.from(new Set([...slugs, ...r.map((x) => x.role_slug)])));
-        })
-        .catch(() => setRunsLoaded(true));
-      if (slugs.length) loadRuntimes(slugs);
-    };
     load();
-    return subscribeEvents((ev) => {
-      if (ev.topic === "task" || ev.topic === "tick") load(ev);
-    });
   }, [task.id, task.status, slugKey, expanded]);
+
+  useLiveRefresh(load, {
+    topics: ["task", "tick"],
+    tickMinGapMs: 10_000,
+    pollMs: 30_000,
+    initial: false,
+    onEvent: (ev) => {
+      if (ev.topic === "tick") refreshLog();
+    },
+  });
 
   const latestByRole = new Map<string, Run>();
   for (const r of runs) {

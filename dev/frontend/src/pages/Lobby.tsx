@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, subscribeEvents, type Channel, type Role, type RoleRuntimeStatus, type Run, type Task, type TaskRoleStatusSummary, type Workflow } from "../api/client";
+import { api, type Channel, type Role, type RoleRuntimeStatus, type Run, type Task, type TaskRoleStatusSummary, type Workflow } from "../api/client";
+import { useLiveRefresh } from "../useLiveRefresh";
 import { navigate } from "../router";
 import { formatClock, formatDateTime, formatRelative, parseTime, useNow } from "../time";
 import { usePanelLayout } from "../usePanelLayout";
@@ -257,19 +258,24 @@ export function Lobby() {
   useEffect(() => {
     refresh();
     refreshActivity();
-    return subscribeEvents((ev) => {
-      if (ev.topic === "task" || ev.topic === "tick" || ev.topic === "run") refresh();
-      if (ev.topic === "task") {
-        const p = ev.payload as Record<string, unknown>;
-        setActivity((prev) =>
-          [
-            { time: ev.at, role: null, task: String(p.id ?? ""), action: `任务 ${STATUS_LABEL[String(p.status) as Task["status"]] ?? p.status}` },
-            ...prev,
-          ].slice(0, 100)
-        );
-      }
-    });
   }, []);
+
+  useLiveRefresh(refresh, {
+    topics: ["task", "tick", "run"],
+    tickMinGapMs: 10_000,
+    pollMs: 30_000,
+    initial: false,
+    onEvent: (ev) => {
+      if (ev.topic !== "task") return;
+      const p = ev.payload as Record<string, unknown>;
+      setActivity((prev) =>
+        [
+          { time: ev.at, role: null, task: String(p.id ?? ""), action: `任务 ${STATUS_LABEL[String(p.status) as Task["status"]] ?? p.status}` },
+          ...prev,
+        ].slice(0, 100)
+      );
+    },
+  });
 
   const act = async (id: string, fn: () => Promise<unknown>) => {
     setBusy(id);

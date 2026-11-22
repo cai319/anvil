@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  api, subscribeEvents, type Finding, type FindingBoard, type FindingExportResult,
+  api, type Finding, type FindingBoard, type FindingExportResult,
   type FindingSchema, type FindingSummary, type IssueTrackerSettings,
 } from "../api/client";
+import { useLiveRefresh } from "../useLiveRefresh";
 import { FindingDrawer, FINDING_STATUS_LABEL, riskLabel, severityLabel, sortFindings } from "../components/FindingDrawer";
 import { Icon } from "../components/Icon";
 import { confirmDialog } from "../components/dialogs";
@@ -71,12 +72,12 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
   }, [taskId]);
 
   // CLI/其他角色写入 finding 后，列表与统计要实时刷新，不能等用户切页。
-  useEffect(() => {
-    return subscribeEvents((ev) => {
-      if (ev.topic !== "task" || ev.payload.id !== taskId) return;
-      if (ev.payload.kind === "finding") load(true);
-    });
-  }, [taskId, load]);
+  useLiveRefresh(() => load(true), {
+    match: (ev) => ev.topic === "task"
+      && ev.payload.id === taskId && ev.payload.kind === "finding",
+    pollMs: 30_000,
+    initial: false,
+  });
 
   useEffect(() => {
     api.getIssueTrackerSettings()

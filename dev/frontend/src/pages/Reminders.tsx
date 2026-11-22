@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type Reminder, type Role } from "../api/client";
 import { formatDateTime } from "../time";
 import { PageHeader } from "../components/ui";
+import { useLiveRefresh } from "../useLiveRefresh";
 
 const KIND_LABEL: Record<string, string> = { cron: "定时", at: "延时", when: "条件" };
 const STATUS_LABEL: Record<string, string> = {
@@ -33,6 +34,13 @@ export function Reminders() {
   useEffect(() => {
     refresh();
   }, []);
+
+  // 提醒触发由后端定时器驱动，没有 SSE 事件；低频轮询保证状态不过期。
+  useLiveRefresh(refresh, {
+    topics: [],
+    pollMs: 60_000,
+    initial: false,
+  });
 
   const create = async () => {
     if (!roleSlug || !prompt.trim()) return;

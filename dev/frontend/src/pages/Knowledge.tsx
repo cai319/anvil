@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useLiveRefresh } from "../useLiveRefresh";
 import { api, type Channel, type Lesson, type Proposal, type Role } from "../api/client";
 import { PageHeader } from "../components/ui";
 import { Icon } from "../components/Icon";
@@ -315,6 +316,13 @@ export function Knowledge() {
   useEffect(() => {
     refresh();
   }, []);
+
+  useLiveRefresh(refresh, {
+    topics: ["task", "proposal"],
+    tickMinGapMs: 15_000,
+    pollMs: 60_000,
+    initial: false,
+  });
 
   const propose = async () => {
     if (!content.trim() || proposing) return;

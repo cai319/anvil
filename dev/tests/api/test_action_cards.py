@@ -36,6 +36,28 @@ async def test_agent_prepares_human_executes(client, seeded):
     assert not any(i["kind"] == "action" for i in inbox["items"])
 
 
+async def test_action_card_mutations_publish_refresh_signal(
+        client, seeded, monkeypatch):
+    """动作卡是收件箱待办：prepare/approve 必须广播刷新信号。"""
+    from anvil.api import events
+
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        events, "publish", lambda topic, payload=None: published.append((topic, payload or {})))
+
+    r = await client.post(f"{API}/action-cards", headers=auth_headers("pm"), json={
+        "kind": "task.cancel", "task_id": "T-ACT", "reason": "取消"})
+    assert r.status_code == 201, r.text
+    assert any(p.get("kind") == "action_card" and p.get("status") == "pending"
+               for topic, p in published if topic == "task"), published
+
+    cid = r.json()["id"]
+    assert (await client.post(
+        f"{API}/action-cards/{cid}/approve", headers=human_headers())).status_code == 200
+    assert any(p.get("kind") == "action_card" and p.get("status") == "executed"
+               for topic, p in published if topic == "task"), published
+
+
 async def test_reject_action_does_not_execute(client, seeded):
     # reopen 只能针对已终止任务；先人工终止。
     closed = await client.post(f"{API}/tasks/T-ACT/cancel", headers=human_headers())

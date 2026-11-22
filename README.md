@@ -6,7 +6,7 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **前端**：React + TypeScript + Vite
 - **Agent CLI**：`anvil`，Agent 在自己的工具循环里调用它上报状态
 - **地址**：`http://127.0.0.1:7317`（仅回环）
-- **当前版本**：v1.47.0（HITL 认证隔离、对象级授权、状态机与知识收割加固）
+- **当前版本**：v1.47.1（实时刷新修复、spawn 状态机修复、workflow 子代理标记）
 
 > 架构、数据模型、工作流引擎与实现细节见 [design.md](design.md)。
 
@@ -664,6 +664,7 @@ anvil init
 - [docs/v1.45.0-release.md](docs/v1.45.0-release.md)：v1.45.0 协作方式判断、角色一致性与 D1–D4 收尾
 - [docs/v1.45.1-release.md](docs/v1.45.1-release.md)：v1.45.1 角色删除关闭委派、dispatch 通知补投与 subagent 幽灵收尾
 - [docs/v1.45.2-release.md](docs/v1.45.2-release.md)：v1.45.2 收件箱委派验收、审批参与者预览与评测实跑
+- [docs/v1.47.1-release.md](docs/v1.47.1-release.md)：v1.47.1 实时刷新与 spawn 状态机修复、系统备注归属、workflow 子代理标记
 - [docs/v1.47.0-release.md](docs/v1.47.0-release.md)：v1.47.0 HITL 认证隔离、对象级授权、workflow CAS 与知识收割加固
 - [docs/v1.46.0-release.md](docs/v1.46.0-release.md)：v1.46.0 知识入库必须条款、智能补全、任务完成自动收割与弹窗冻结
 - [docs/workflow-revision.md](docs/workflow-revision.md)：运行中 workflow 的增量修订（安全变更不重启任务）

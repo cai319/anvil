@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { PageHeader } from "../components/ui";
+import { useLiveRefresh } from "../useLiveRefresh";
 
 interface Draft {
   id: string;
@@ -25,6 +26,13 @@ export function Decompose() {
     refresh();
     api.listBoardTemplates().then(setTemplates).catch(() => {});
   }, []);
+
+  useLiveRefresh(refresh, {
+    topics: ["task"],
+    tickMinGapMs: 15_000,
+    pollMs: 60_000,
+    initial: false,
+  });
 
   const decompose = async () => {
     if (!goal.trim()) return;

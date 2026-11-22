@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { api, getSessionToken, setSessionToken, subscribeEvents } from "./api/client";
+import { api, getSessionToken, setSessionToken } from "./api/client";
+import { useLiveRefresh } from "./useLiveRefresh";
 import { installLinkInterceptor, setRouteListener } from "./router";
 import { APP_VERSION } from "./version";
 import { Icon, type IconName } from "./components/Icon";
@@ -192,10 +193,11 @@ function TopStatus() {
     })).catch(() => {});
   };
 
-  useEffect(() => {
-    refresh();
-    return subscribeEvents(() => refresh());
-  }, []);
+  useLiveRefresh(refresh, {
+    topics: ["task", "tick"],
+    tickMinGapMs: 15_000,
+    pollMs: 60_000,
+  });
 
   const toggle = async () => {
     try {
@@ -242,11 +244,11 @@ function TopStatus() {
 
 function InboxBadge() {
   const [count, setCount] = useState(0);
-  useEffect(() => {
-    const refresh = () => api.getInbox().then((b) => setCount(b.count)).catch(() => {});
-    refresh();
-    return subscribeEvents(() => refresh());
-  }, []);
+  // 收件箱计数由 task/proposal 事件即时驱动；30s 轮询兜底漏事件/断线。
+  useLiveRefresh(
+    () => api.getInbox().then((b) => setCount(b.count)).catch(() => {}),
+    { topics: ["task", "proposal"], pollMs: 30_000 },
+  );
   if (!count) return null;
   return <span className="nav-badge">{count}</span>;
 }

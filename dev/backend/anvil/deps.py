@@ -6,7 +6,7 @@ import os
 import sqlite3
 from dataclasses import dataclass
 
-from fastapi import Depends, Header, HTTPException, Request
+from fastapi import Depends, Header, HTTPException, Query, Request
 
 from . import config
 from .db import open_conn
@@ -56,42 +56,62 @@ def get_db(request: Request):
         conn.close()
 
 
-def get_auth(
-    request: Request,
-    x_anvil_session: str | None = Header(default=None, alias="X-Anvil-Session"),
-    x_anvil_role: str | None = Header(default=None, alias="X-Anvil-Role"),
-) -> Auth:
+def _resolve_auth(request: Request, session_token: str | None,
+                  declared_role: str | None) -> Auth:
+    """统一鉴权实现；get_auth / get_event_auth 共用，保证算法唯一。"""
     # 运行级会话（design §10 末段）：spawn 时为每个 run 发一个 token，绑定角色与任务。
     # 命中了就以会话表为准，忽略客户端自填的 X-Anvil-Role（防止冒充）。测试旁路也先查会话，
     # 这样「会话绑定」本身可被测试覆盖。
-    if x_anvil_session:
-        row = _session_row(request, x_anvil_session)
+    if session_token:
+        row = _session_row(request, session_token)
         if row is not None:
             if row["expires_at"] and row["expires_at"] < now_iso():
                 raise HTTPException(status_code=401, detail="session expired")
-            return Auth(session=x_anvil_session, role=row["role_slug"],
+            return Auth(session=session_token, role=row["role_slug"],
                         task_id=row["task_id"], run_id=row["run_id"])
 
     # 测试旁路（仅测试环境用；M2 上真 session 校验时须确保生产关死 ANVIL_TEST_AUTH）。
     test_auth = bool(getattr(request.app.state, "test_auth", False)) or os.environ.get("ANVIL_TEST_AUTH") == "1"
     if test_auth:
         return Auth(
-            session=x_anvil_session or "test-session",
-            role=x_anvil_role or "qa-role",
+            session=session_token or "test-session",
+            role=declared_role or "qa-role",
             test_bypass=True,
         )
-    if not x_anvil_session:
+    if not session_token:
         raise HTTPException(status_code=401, detail="missing X-Anvil-Session")
 
     # 人/Web 的共享 token：只代表人类，不能通过 X-Anvil-Role 冒充 Agent。
-    if not token_is_valid(request, x_anvil_session):
+    if not token_is_valid(request, session_token):
         raise HTTPException(status_code=401, detail="invalid X-Anvil-Session")
-    if x_anvil_role and x_anvil_role != "human":
+    if declared_role and declared_role != "human":
         raise HTTPException(
             status_code=403,
             detail="shared token cannot impersonate an agent role; use the agent's run token",
         )
-    return Auth(session=x_anvil_session, role="human")
+    return Auth(session=session_token, role="human")
+
+
+def get_auth(
+    request: Request,
+    x_anvil_session: str | None = Header(default=None, alias="X-Anvil-Session"),
+    x_anvil_role: str | None = Header(default=None, alias="X-Anvil-Role"),
+) -> Auth:
+    return _resolve_auth(request, x_anvil_session, x_anvil_role)
+
+
+def get_event_auth(
+    request: Request,
+    token: str | None = Query(default=None, description="SSE-only query token"),
+    x_anvil_session: str | None = Header(default=None, alias="X-Anvil-Session"),
+    x_anvil_role: str | None = Header(default=None, alias="X-Anvil-Role"),
+) -> Auth:
+    """SSE 专用鉴权：EventSource 无法设置请求头，只对 events 路由接受 ?token=。
+
+    头优先：同时携带时以 X-Anvil-Session 为准，避免无效头被静默降级成 query 凭据。
+    其他路由必须继续使用 get_auth，防止 query token 扩散。
+    """
+    return _resolve_auth(request, x_anvil_session or token, x_anvil_role)
 
 
 def require_human(request: Request, auth: Auth = Depends(get_auth)) -> Auth:

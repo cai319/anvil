@@ -935,6 +935,41 @@ select { height: 34px; }
 }
 .thread-avatar.mention-avatar { background: var(--yellow); }
 .thread-avatar.human-avatar { background: var(--cyan); }
+/* 系统备注：独立机器人头像 + 作用范围标记，不走居中系统事件样式。 */
+.thread-avatar.system-avatar {
+  background: var(--paper-3);
+  box-shadow: 2px 2px 0 var(--orange);
+}
+.thread-note-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border: 1.5px solid var(--ink-900);
+  border-radius: 4px;
+  background: var(--paper-2);
+  color: var(--ink-900);
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+}
+.thread-scope-tag {
+  display: inline-flex;
+  align-items: center;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 7px;
+  border: 1.5px solid var(--ink-900);
+  border-radius: 4px;
+  background: var(--orange);
+  color: var(--ink-900);
+  font-size: 9px;
+  font-weight: 900;
+}
+.thread-item.is-system-note.is-message .thread-body {
+  background: var(--paper-2);
+}
 .thread-role-avatar { width: 32px; height: 32px; }
 .thread-item.is-message .thread-body {
   padding: 8px 10px;

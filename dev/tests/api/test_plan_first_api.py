@@ -126,3 +126,30 @@ async def test_agent_can_submit_draft_and_human_approves(client, seeded):
     # 按 source_task 过滤草案列表
     drafts = await client.get("/api/v1/board/drafts?source_task=T-PF4", headers=auth_headers())
     assert len(drafts.json()) == 1
+
+
+async def test_board_draft_mutations_publish_refresh_signal(
+        client, seeded, monkeypatch):
+    """草案增删改审批都会改变收件箱待办数，必须广播 task 刷新信号。"""
+    from anvil.api import events
+
+    await client.post("/api/v1/tasks", json=task_payload(
+        id="T-PF5", assignees=["pm", "designer"], plan_first=True, planner="pm"),
+        headers=auth_headers())
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        events, "publish", lambda topic, payload=None: published.append((topic, payload or {})))
+    tree = {"leader": "pm", "children": [
+        {"id": "S1", "title": "设计", "type": "design", "role": "designer"}]}
+    r = await client.post("/api/v1/board/drafts", headers=auth_headers("pm"), json={
+        "goal": "草案事件", "tree": tree, "source_task": "T-PF5"})
+    assert r.status_code == 201, r.text
+    did = r.json()["id"]
+    assert any(p.get("kind") == "board_draft" and p.get("status") == "pending"
+               for topic, p in published if topic == "task"), published
+
+    assert (await client.post(
+        "/api/v1/board/drafts/approve", headers=human_headers(),
+        json={"draft_ids": [did]})).status_code == 200
+    assert any(p.get("kind") == "board_draft" and p.get("status") == "approved"
+               for topic, p in published if topic == "task"), published

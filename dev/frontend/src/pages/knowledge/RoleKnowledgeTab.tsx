@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useLiveRefresh } from "../../useLiveRefresh";
 import {
   api, type KnowledgeHit, type Role, type RoleKnowledgeIndex,
 } from "../../api/client";
@@ -88,6 +89,13 @@ export function RoleKnowledgeTab({ roles, onTotal }: {
     void run();
     return () => { alive = false; };
   }, [roleSlug, debouncedQuery, refreshTick]);
+
+  useLiveRefresh(() => setRefreshTick((n) => n + 1), {
+    topics: ["task", "proposal"],
+    tickMinGapMs: 15_000,
+    pollMs: 60_000,
+    initial: false,
+  });
 
   const openDetail = async (note: { id: string }) => {
     try {
