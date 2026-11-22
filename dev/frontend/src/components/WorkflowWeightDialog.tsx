@@ -124,4 +124,3 @@ export function WorkflowWeightDialog({ taskId, current, onClose, onApplied }: {
     </div>
   );
 }
-

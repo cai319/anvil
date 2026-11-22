@@ -132,4 +132,3 @@ export function WorkflowSummary({ workflow, taskStatus, metrics, diff }: {
     </div>
   );
 }
-

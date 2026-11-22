@@ -207,4 +207,3 @@ export function ChildTaskCard({ c, onChanged }: { c: TaskChild; onChanged: () =>
     </div>
   );
 }
-
