@@ -318,6 +318,20 @@ def task_status_summary(task_ids: str = Query(default=""), conn=Depends(get_db),
     return out
 
 
+@router.get("/{tid}/role-states")
+def task_role_states(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    """任务内角色状态（服务端单一推导）；前端只做标签/颜色映射。"""
+    access.assert_task_read(conn, auth, tid)
+    from ..services import daemon as daemon_service
+    from ..services import role_state as role_state_service
+
+    mgr = daemon_service.get_manager()
+    return {
+        "task_id": tid,
+        "roles": role_state_service.task_role_states(conn, tid, mgr),
+    }
+
+
 @router.get("/{tid}", response_model=TaskOut)
 def get_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     t = services.tasks.get(conn, tid)

@@ -368,3 +368,13 @@ async def test_D2_anvilignore_always_denied(client):
         headers=auth_headers(),
     )
     assert sub.status_code == 409
+
+
+async def test_task_role_states_endpoint(client):
+    await _seed(client)
+    r = await _post_task(client, id_="T-RS", assignees=["qa-role"])
+    assert r.status_code == 201, r.text
+    r = await client.get(f"{API}/tasks/T-RS/role-states")
+    assert r.status_code == 200, r.text
+    roles = r.json()["roles"]
+    assert any(row["role_slug"] == "qa-role" for row in roles)
