@@ -954,10 +954,6 @@ export const api = {
     req("POST", "/workflow-templates/import", {
       source_kind: sourceKind, source_id: sourceId, name,
     }).then((r) => json<WorkflowTemplate>(r)),
-  previewApplyTemplate: (id: string, body: Record<string, unknown>): Promise<Record<string, unknown>> =>
-    req("POST", `/workflow-templates/${id}/preview-apply`, body).then((r) => json(r)),
-  applyTemplateToTask: (taskId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> =>
-    req("POST", `/tasks/${taskId}/workflow/from-template`, body).then((r) => json(r)),
   setPlanSeed: (taskId: string, templateId: string, version: number): Promise<Record<string, unknown>> =>
     req("POST", `/tasks/${taskId}/plan-seed`, { template_id: templateId, version }).then((r) => json(r)),
   clearPlanSeed: (taskId: string): Promise<void> =>
@@ -2315,34 +2311,97 @@ export interface McpServer {
 // 全应用共享一条 SSE 连接：HTTP/1.1 每域名最多 6 个连接，
 // 每个页面各开一条会把连接池占满，导致后续请求排队、页面像卡死。
 type EventListener = (ev: AnvilEvent) => void;
+const RETRY_BASE_MS = 1_000;
+const RETRY_MAX_MS = 30_000;
 let sharedES: EventSource | null = null;
+let retryTimer: ReturnType<typeof setTimeout> | null = null;
+let retryAttempt = 0;
+let everConnected = false;
 const listeners = new Set<EventListener>();
 
+function notifyEvent(ev: AnvilEvent) {
+  // 快照遍历 + 单订阅者隔离：一个组件抛错不能杀死整条事件流。
+  for (const fn of Array.from(listeners)) {
+    try {
+      fn(ev);
+    } catch {
+      /* 单个订阅者异常不影响其他消费者 */
+    }
+  }
+}
+
+function clearRetry() {
+  if (retryTimer !== null) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+}
+
+function scheduleReconnect() {
+  if (retryTimer !== null || listeners.size === 0 || !getSessionToken()) return;
+  const base = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** retryAttempt);
+  retryAttempt += 1;
+  // ±20% 抖动，避免多标签页同时重连。
+  const delay = Math.round(base * (0.8 + Math.random() * 0.4));
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    if (listeners.size > 0) ensureEventSource();
+  }, delay);
+}
+
+function closeShared() {
+  clearRetry();
+  if (sharedES) {
+    sharedES.close();
+    sharedES = null;
+  }
+}
+
 function ensureEventSource(): EventSource | null {
-  if (sharedES) return sharedES;
+  // 不能复用 CLOSED 的共享连接：浏览器在 401/403 后会关闭且不再自动重连。
+  if (sharedES && sharedES.readyState !== EventSource.CLOSED) return sharedES;
+  if (sharedES) closeShared();
   const token = getSessionToken();
   if (!token) return null;
   const es = new EventSource(`${BASE}/events?token=${encodeURIComponent(token)}`);
+  es.onopen = () => {
+    retryAttempt = 0;
+  };
+  // 服务端握手是命名事件，不会触发 onmessage；重连成功后用它补拉一次。
+  es.addEventListener("connected", () => {
+    retryAttempt = 0;
+    if (everConnected) {
+      notifyEvent({ topic: "connected", payload: {}, at: new Date().toISOString() });
+    }
+    everConnected = true;
+  });
   es.onmessage = (e) => {
     try {
       const ev = JSON.parse(e.data) as AnvilEvent;
-      listeners.forEach((fn) => fn(ev));
+      notifyEvent(ev);
     } catch {
       /* 忽略无法解析的心跳/其他行 */
     }
+  };
+  es.onerror = () => {
+    if (sharedES !== es) return;
+    sharedES = null;
+    es.close();
+    scheduleReconnect();
   };
   sharedES = es;
   return es;
 }
 
 export function subscribeEvents(onEvent: EventListener): () => void {
-  if (!ensureEventSource()) return () => {};
   listeners.add(onEvent);
+  ensureEventSource();
   return () => {
     listeners.delete(onEvent);
-    if (listeners.size === 0 && sharedES) {
-      sharedES.close();
-      sharedES = null;
+    if (listeners.size === 0) {
+      closeShared();
+      everConnected = false;
+      retryAttempt = 0;
     }
   };
 }

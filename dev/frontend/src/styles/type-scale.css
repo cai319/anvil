@@ -2069,32 +2069,6 @@ select { height: var(--control-h); }
   margin: 0 3px;
   background: var(--border);
 }
-.wft-apply-modal { width: min(700px, 92vw); }
-.wft-apply-modal .field { margin: 10px 0; }
-.wft-apply-mapping {
-  margin: 10px 0;
-  padding: 9px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-}
-.wft-apply-mapping h3 { margin: 0 0 7px; font-size: var(--fs-sm); }
-.wft-apply-slot {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 220px;
-  gap: 8px;
-  align-items: center;
-  padding: 5px 0;
-  border-top: 1px solid var(--border);
-  font-size: var(--fs-meta);
-}
-.wft-apply-preview {
-  margin: 10px 0;
-  padding: 8px 10px;
-  border: 1px dashed var(--border);
-  border-radius: 8px;
-  font-size: var(--fs-meta);
-}
-.wft-apply-preview .error { margin-bottom: 5px; }
 .wft-notice {
   margin: 6px 2px 0;
   color: var(--yellow);
@@ -2313,13 +2287,6 @@ select { height: var(--control-h); }
   width: 100%;
   min-height: 44px;
   resize: vertical;
-}
-
-.wft-apply-slot-info { min-width: 0; }
-.wft-apply-slot-desc {
-  margin: 2px 0 0;
-  font-size: var(--fs-hint);
-  line-height: 1.35;
 }
 
 .wft-slot-derived {

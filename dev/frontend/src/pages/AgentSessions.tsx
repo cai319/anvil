@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, subscribeEvents, type Role, type RoleRuntimeStatus, type Run, type Task } from "../api/client";
+import { api, type Role, type RoleRuntimeStatus, type Run, type Task } from "../api/client";
+import { useLiveRefresh } from "../useLiveRefresh";
 import { formatClock, parseTime, useNow } from "../time";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
@@ -49,10 +50,14 @@ export function AgentSessions({ slug }: { slug: string }) {
 
   useEffect(() => {
     refresh();
-    return subscribeEvents((ev) => {
-      if (ev.topic === "tick" || ev.topic === "task") refresh();
-    });
   }, [slug]);
+
+  useLiveRefresh(refresh, {
+    topics: ["task", "tick"],
+    tickMinGapMs: 10_000,
+    pollMs: 30_000,
+    initial: false,
+  });
 
   if (error) return <p className="error">{error}</p>;
   if (!role) return <p className="muted">加载中…</p>;

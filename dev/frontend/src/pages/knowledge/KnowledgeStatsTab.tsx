@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useLiveRefresh } from "../../useLiveRefresh";
 import { api, type KnowledgeStats } from "../../api/client";
 import { EmptyState } from "../../components/ui";
 import { formatDateTime } from "../../time";
@@ -25,6 +26,13 @@ export function KnowledgeStatsTab() {
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+
+  useLiveRefresh(load, {
+    topics: ["task", "proposal"],
+    tickMinGapMs: 15_000,
+    pollMs: 60_000,
+    initial: false,
+  });
 
   if (loading && !stats) return <p className="muted">加载中…</p>;
   if (!stats) {

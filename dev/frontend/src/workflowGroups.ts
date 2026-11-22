@@ -44,6 +44,11 @@ export function isDynamicStep(step: WorkflowStep): boolean {
   return Boolean(step.source_step_id);
 }
 
+/** 该步骤是否允许角色使用运行时只读子代理（subagent_hint）。 */
+export function hasSubagentHint(step: WorkflowStep): boolean {
+  return Boolean(step.subagent_hint);
+}
+
 /** 把步骤 id 后缀映射成闭环阶段名：scope/execute/verify/fix/verify2/decide。 */
 export function phaseLabel(step: WorkflowStep): string {
   const suffix = step.step_id.split(".").pop() || "";
@@ -78,6 +83,8 @@ export interface LoopGroup {
   total: number;
   done: number;
   status: WorkflowStep["status"];
+  /** 本片带 subagent_hint 的步骤数。 */
+  subagentCount: number;
   /** 真正处于 running/submitted/rejected/failed 的步骤（无则 null）。 */
   active: WorkflowStep | null;
   /** 当前活动步骤；若没有，则取第一个 pending 作为“下一步”。 */
@@ -116,6 +123,7 @@ export function groupSliceLoops(steps: WorkflowStep[]): LoopGroup[] {
       total: groupSteps.length,
       done: groupSteps.filter((s) => isDoneStatus(s.status)).length,
       status: groupStatus(groupSteps),
+      subagentCount: groupSteps.filter((s) => hasSubagentHint(s)).length,
       active,
       current,
       phase: current ? phaseLabel(current) : "完成",
@@ -133,6 +141,8 @@ export interface SlicePhase {
   status: WorkflowStep["status"];
   done: number;
   total: number;
+  /** 该阶段内带 subagent_hint 的步骤数。 */
+  subagentCount: number;
   roleSlug: string;
 }
 
@@ -173,6 +183,7 @@ export function slicePhases(group: LoopGroup): SlicePhase[] {
       status: groupStatus(steps),
       done: steps.filter((s) => isDoneStatus(s.status)).length,
       total: steps.length,
+      subagentCount: steps.filter((s) => hasSubagentHint(s)).length,
       roleSlug: steps[0].role_slug || "",
     }];
   });
@@ -185,6 +196,8 @@ export interface LoopSummary {
   doneSlices: number;
   totalSteps: number;
   doneSteps: number;
+  /** 循环内带 subagent_hint 的步骤数。 */
+  subagentCount: number;
   status: WorkflowStep["status"];
   currentGroup: LoopGroup | null;
   currentStep: WorkflowStep | null;
@@ -217,6 +230,7 @@ export function summarizeLoops(steps: WorkflowStep[]): LoopSummary[] {
       doneSlices: groups.filter((g) => g.status === "approved").length,
       totalSteps: sourceSteps.length,
       doneSteps: sourceSteps.filter((s) => isDoneStatus(s.status)).length,
+      subagentCount: sourceSteps.filter((s) => hasSubagentHint(s)).length,
       status: groupStatus(sourceSteps),
       currentGroup,
       currentStep,

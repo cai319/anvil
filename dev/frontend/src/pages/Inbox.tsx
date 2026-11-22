@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import {
   api,
-  subscribeEvents,
   type InboxItem,
   type Lesson,
   type Role,
 } from "../api/client";
+import { useLiveRefresh } from "../useLiveRefresh";
 import { completionLabel } from "../knowledgeCard";
 import { formatDateTime } from "../time";
 import { PageHeader } from "../components/ui";
@@ -97,8 +97,14 @@ export function Inbox() {
   useEffect(() => {
     refresh();
     api.listRoles().then(setRoles).catch(() => setRoles([]));
-    return subscribeEvents(() => refresh()); // 任何事件后重取（轻量只读端点）
   }, []);
+
+  useLiveRefresh(refresh, {
+    topics: ["task", "proposal"],
+    tickMinGapMs: 5_000,
+    pollMs: 30_000,
+    initial: false,
+  });
 
   const openLesson = async (item: InboxItem, lid: string) => {
     setError(null);

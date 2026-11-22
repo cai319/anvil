@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useLiveRefresh } from "../../useLiveRefresh";
 import {
   api,
   type Channel,
@@ -364,6 +365,13 @@ export function TopicKnowledgeTab({ channels, onTotal }: {
   }, [debouncedQuery, selectedRepo, status]);
 
   useEffect(() => { void load(); }, [load]);
+
+  useLiveRefresh(load, {
+    topics: ["task", "proposal"],
+    tickMinGapMs: 15_000,
+    pollMs: 60_000,
+    initial: false,
+  });
   useEffect(() => {
     api.listFeatureFlags()
       .then((data) => setLlmEnabled(Boolean(

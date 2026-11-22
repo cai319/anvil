@@ -705,6 +705,15 @@ dd { margin: 0; }
 .wf-node-title { font-size: 12px; font-weight: 600; line-height: 1.3; overflow: hidden;
   text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .wf-node-role { font-size: 10px; color: var(--muted); }
+/* 子代理提示：只在切片标题后显示橙色 CPU 小图标，无文字、无底色。 */
+.wf-subagent-mark {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  margin-left: 5px;
+  color: var(--orange);
+  vertical-align: -2px;
+}
 .wf-loop-node { gap: 4px; }
 .wf-loop-current { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wf-loop-progress { display: block; height: 4px; border-radius: 2px; margin-top: auto;

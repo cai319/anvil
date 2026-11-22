@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useLiveRefresh } from "../../useLiveRefresh";
 import { api, type Channel, type WorkspaceKnowledge } from "../../api/client";
 import { EmptyState } from "../../components/ui";
 import { KNOWLEDGE_STATUS_LABEL } from "../../knowledgeCard";
@@ -42,6 +43,13 @@ export function ChannelKnowledgeTab({ channels, onTotal }: {
   }, [debouncedQuery, status, workspaceId]);
 
   useEffect(() => { void load(); }, [load]);
+
+  useLiveRefresh(load, {
+    topics: ["task", "proposal"],
+    tickMinGapMs: 15_000,
+    pollMs: 60_000,
+    initial: false,
+  });
 
   const act = async (card: WorkspaceKnowledge, fn: () => Promise<unknown>) => {
     setBusy(card.id);

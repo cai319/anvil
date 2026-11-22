@@ -425,7 +425,15 @@ export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenR
                     title={phase.steps.map((s) => s.title).join(" / ")}
                   >
                     <div className="wf-flow-phase-head">
-                      <span className="wf-flow-phase-label">{phase.label}</span>
+                      <span className="wf-flow-phase-label">
+                        {phase.label}
+                        {phase.subagentCount > 0 && (
+                          <span className="wf-subagent-mark"
+                            title="该阶段允许使用运行时只读子代理（不独立验收）">
+                            <Icon name="network" size={12} />
+                          </span>
+                        )}
+                      </span>
                       <span className="wf-flow-phase-count">{phase.done}/{phase.total}</span>
                     </div>
                     <div className="wf-flow-phase-role">{roleName(phase.roleSlug)}</div>
@@ -477,7 +485,15 @@ export function WorkflowGraph({ workflow, roles, busy, readOnly = false, onOpenR
                   >
                     <i className="wf-slice-dot" style={{ background: meta.color }} />
                     <span className="mono wf-slice-step-id">{s.step_id}</span>
-                    <span className="wf-slice-step-title" title={s.title}>{s.title}</span>
+                    <span className="wf-slice-step-title" title={s.title}>
+                      {s.title}
+                      {s.subagent_hint && (
+                        <span className="wf-subagent-mark"
+                          title="该步骤允许使用运行时只读子代理（不独立验收）">
+                          <Icon name="network" size={12} />
+                        </span>
+                      )}
+                    </span>
                     <span className="muted wf-slice-step-role">{roleName(s.role_slug)}</span>
                     <span style={{ color: meta.color }}>{meta.label}</span>
                     {s.run_id && <a href={`/runs/${s.run_id}`}>会话</a>}

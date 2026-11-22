@@ -13,6 +13,7 @@ import {
   type WorkspaceKnowledge,
 } from "../api/client";
 import { PageHeader } from "../components/ui";
+import { useLiveRefresh } from "../useLiveRefresh";
 import { confirmDialog } from "../components/dialogs";
 import { UNBOUND_CHANNEL_VIEW } from "../channelView";
 import {
@@ -188,6 +189,19 @@ export function Channels() {
     setHarvestTask("");
     setTaskQuery("");
   }, [selected]);
+
+  useLiveRefresh(
+    () => Promise.all([
+      refreshChannels(),
+      selected ? refreshDetail(selected) : Promise.resolve(),
+    ]),
+    {
+      topics: ["task", "tick"],
+      tickMinGapMs: 15_000,
+      pollMs: 60_000,
+      initial: false,
+    },
+  );
 
   useEffect(() => {
     setRepo(selectedChannel?.repo ?? "");

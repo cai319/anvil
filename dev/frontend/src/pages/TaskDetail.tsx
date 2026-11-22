@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { api, isOnboardingRole, subscribeEvents, type BoardDraft, type Delegation, type FindingSummary, type KnowledgeKind, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Run, type Task, type TaskDispatch, type TaskKnowledge, type TaskLeases, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight, type WorkspaceKnowledge } from "../api/client";
+import { api, isOnboardingRole, type BoardDraft, type Delegation, type FindingSummary, type KnowledgeKind, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Run, type Task, type TaskDispatch, type TaskKnowledge, type TaskLeases, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight, type WorkspaceKnowledge } from "../api/client";
+import { useLiveRefresh } from "../useLiveRefresh";
 import {
   AUTHORITY_LABEL,
   KNOWLEDGE_CARD_FIELDS,
@@ -9,7 +10,6 @@ import {
 } from "../knowledgeCard";
 import { UNBOUND_CHANNEL_VIEW } from "../channelView";
 import { RoleSessions } from "./RoleSessions";
-import { ApplyTemplateModal } from "./ApplyTemplateModal";
 import { WorkflowGraph } from "./WorkflowGraph";
 import { taskRoleState } from "../roleStatus";
 import { formatClock, formatDateTime, formatDuration } from "../time";
@@ -1077,7 +1077,6 @@ export function TaskDetail({ id }: { id: string }) {
   const [plannerActive, setPlannerActive] = useState(false);
   const [runs, setRuns] = useState<Run[]>([]);
   const [wfView, setWfView] = useState<"graph" | "list">("graph");
-  const [showApplyTemplate, setShowApplyTemplate] = useState(false);
   const [seedTemplates, setSeedTemplates] = useState<WorkflowTemplate[]>([]);
   const [seedId, setSeedId] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1087,11 +1086,11 @@ export function TaskDetail({ id }: { id: string }) {
   const displayWorkflow = viewingWorkflow ?? workflow;
   const isViewingHistory = Boolean(viewingWorkflow);
 
-  const refreshWorkflow = () => {
-    api.getTaskWorkflow(id).then(setWorkflow).catch(() => setWorkflow(null));
-    api.listTaskWorkflows(id).then(setWorkflowHistory).catch(() => setWorkflowHistory([]));
-    api.listTaskLeases(id).then(setTaskLeases).catch(() => setTaskLeases(null));
-  };
+  const refreshWorkflow = () => Promise.all([
+    api.getTaskWorkflow(id).then(setWorkflow).catch(() => setWorkflow(null)),
+    api.listTaskWorkflows(id).then(setWorkflowHistory).catch(() => setWorkflowHistory([])),
+    api.listTaskLeases(id).then(setTaskLeases).catch(() => setTaskLeases(null)),
+  ]);
 
   useEffect(() => {
     api.listTaskLeases(id).then(setTaskLeases).catch(() => setTaskLeases(null));
@@ -1118,6 +1117,9 @@ export function TaskDetail({ id }: { id: string }) {
 
   const refreshDispatches = () =>
     api.listDispatches(id).then(setDispatches).catch(() => setDispatches([]));
+
+  const refreshDrafts = () =>
+    api.listDrafts(id).then(setDrafts).catch(() => setDrafts([]));
 
   const refresh = () =>
     Promise.all([api.getTask(id), api.getTaskTimeline(id), api.listTaskRuns(id)])
@@ -1183,18 +1185,23 @@ export function TaskDetail({ id }: { id: string }) {
       setSeedTemplates(list.filter((item) => item.published_version
         && (item.use_mode === "seed" || item.use_mode === "both")));
     }).catch(() => setSeedTemplates([]));
-    const refreshDrafts = () => api.listDrafts(id).then(setDrafts).catch(() => {});
     refreshDrafts();
-    return subscribeEvents((ev) => {
-      if (ev.topic === "tick" || (ev.topic === "task" && ev.payload.id === id)) {
-        refresh();
-        refreshWorkflow();
-        refreshDelegations();
-        refreshDispatches();
-        refreshDrafts();
-      }
-    });
   }, [id, gone]);
+
+  useLiveRefresh(
+    () => Promise.all([
+      refresh(), refreshWorkflow(), refreshDelegations(),
+      refreshDispatches(), refreshDrafts(),
+    ]),
+    {
+      enabled: !gone,
+      initial: false,
+      match: (ev) => ev.topic === "tick"
+        || (ev.topic === "task" && ev.payload.id === id),
+      tickMinGapMs: 10_000,
+      pollMs: 45_000,
+    },
+  );
 
   useEffect(() => {
     setSeedId(task?.plan_seed?.template_id || seedTemplates[0]?.id || "");
@@ -1626,15 +1633,15 @@ export function TaskDetail({ id }: { id: string }) {
         <div className="wf-main">
           <div className="wf-title">
             {st.title}
+            {st.subagent_hint && (
+              <span className="wf-subagent-mark"
+                title="该步骤允许使用运行时只读子代理（不独立验收）">
+                <Icon name="network" size={12} />
+              </span>
+            )}
             <span className="wf-role">{st.role_slug}</span>
             {st.reviewer && <span className="wf-role">验证：{st.reviewer}</span>}
             {st.gate && <span className="badge wf-gate">审核门</span>}
-            {st.subagent_hint && (
-              <span className="badge wf-gate"
-                title="该步骤角色可在同一 turn 内使用运行时只读子代理；由运行时管理，Anvil 只观测">
-                子代理调查
-              </span>
-            )}
             {st.kind === "decision" && (
               <span className={`badge wf-gate ${stepAuthority(st) === "joint" ? "is-joint" : ""}`}>
                 {stepAuthority(st) === "human" ? "人工决策"
@@ -2155,21 +2162,42 @@ export function TaskDetail({ id }: { id: string }) {
             )}
             {visibleTimeline.map((ev) => {
               const d = describe(ev, displayNameFor);
-              const role = ev.role ?? "human";
+              const p = ev.payload as Record<string, unknown>;
+              const noteBody = ev.kind === "comment" ? String(p.body ?? "") : "";
+              const noteAuthor = typeof p.author === "string" && p.author ? p.author : null;
+              // 系统备注（context note）以 role_slug=NULL 存储，不能 fallback 成自然人。
+              const isSystemNote = !ev.role && ev.kind === "comment"
+                && (noteAuthor !== null || noteBody.startsWith("系统备注"));
+              const noteStep = typeof p.for_step === "string" ? p.for_step : null;
+              const role = ev.role ?? (isSystemNote ? "system" : "human");
               const isHuman = role === "human";
               const systemLabel = SYSTEM_SENDERS[role];
               // 聊天框用户名显示昵称；后台仍保留 slug 作为身份。
-              const displayRole = isHuman
-                ? "你（自然人）"
-                : (systemLabel ?? displayNameFor(role));
+              const displayRole = isSystemNote
+                ? "系统"
+                : isHuman
+                  ? "你（自然人）"
+                  : (systemLabel ?? displayNameFor(role));
               const roleInfo = roles.find((r) => r.slug === role);
-              const liveRole = !isHuman && !systemLabel ? roleLiveFor(role) : null;
+              const liveRole = !isHuman && !systemLabel && !isSystemNote
+                ? roleLiveFor(role) : null;
+              const noteScope = noteStep ?? "全任务";
+              const metaTitle = isSystemNote
+                ? `系统备注 · 作者 ${noteAuthor ?? "系统"} · 作用范围 ${noteScope}`
+                : isHuman ? "human" : `${displayRole}（${role}）`;
+              const noteText = isSystemNote
+                ? d.text.replace(/^系统备注(?:（给 [^）]+）)?：\s*/, "")
+                : d.text;
               return (
                 <div
-                  className={`thread-item ${ev.kind === "comment" ? "is-message" : ""} ${d.mention ? "is-mention" : ""} ${isHuman ? "is-human" : ""} ${systemLabel ? "is-system-event" : ""}`}
+                  className={`thread-item ${ev.kind === "comment" ? "is-message" : ""} ${d.mention ? "is-mention" : ""} ${isHuman ? "is-human" : ""} ${isSystemNote ? "is-system-note" : ""} ${systemLabel && !isSystemNote ? "is-system-event" : ""}`}
                   key={ev.key}
                 >
-                  {d.mention ? (
+                  {isSystemNote ? (
+                    <span className="thread-avatar system-avatar" title="系统备注">
+                      <Icon name="cpu" size={16} />
+                    </span>
+                  ) : d.mention ? (
                     <span className="thread-avatar mention-avatar">@</span>
                   ) : isHuman ? (
                     <span className="thread-avatar human-avatar">人</span>
@@ -2186,14 +2214,27 @@ export function TaskDetail({ id }: { id: string }) {
                   )}
                   <div className="thread-body">
                     <div className="thread-meta">
-                      <strong title={isHuman ? "human" : `${displayRole}（${role}）`}>
+                      <strong title={metaTitle}>
                         {displayRole}
                       </strong>
+                      {isSystemNote && (
+                        <span className="thread-note-badge">系统备注</span>
+                      )}
                       <span className="muted mono">{formatClock(ev.ts)}</span>
                       {ev.step_id && (
                         <span className="muted mono" title="执行号 / 步骤">
                           {ev.execution_no ? `E${ev.execution_no} ` : ""}{ev.step_id}
                         </span>
+                      )}
+                      {isSystemNote && (
+                        <>
+                          {noteAuthor && (
+                            <span className="muted">作者 {displayNameFor(noteAuthor)}</span>
+                          )}
+                          <span className="thread-scope-tag" title="系统备注作用范围">
+                            作用范围 · {noteScope}
+                          </span>
+                        </>
                       )}
                       {d.runStatus && <span className={`status status-${d.runStatus}`}>{RUN_LABEL[d.runStatus]}</span>}
                     </div>
@@ -2206,7 +2247,7 @@ export function TaskDetail({ id }: { id: string }) {
                           {renderMentionText(d.text, roleTokens)}
                         </>
                       ) : (
-                        renderMentionText(d.text, roleTokens)
+                        renderMentionText(noteText, roleTokens)
                       )}
                     </div>
                   </div>
@@ -2413,8 +2454,6 @@ export function TaskDetail({ id }: { id: string }) {
       {tab === "workflow" && (
         <div className={`workflow-view ${wfView === "graph" ? "is-graph" : "is-list"}`}>
           <div className="wf-template-actions">
-            <button className="small" disabled={busy || task.status === "done" || task.status === "closed"}
-              onClick={() => setShowApplyTemplate(true)}>套用模板</button>
             {displayWorkflow && (
               <button className="small" disabled={busy}
                 onClick={async () => {
@@ -2469,7 +2508,7 @@ export function TaskDetail({ id }: { id: string }) {
             )}
           </div>
           {!displayWorkflow && (
-            <p className="muted">还没有工作流。多角色任务启动后，Cindy 会生成步骤状态机并在此展示；也可以直接套用已发布模板。</p>
+            <p className="muted">还没有工作流。多角色任务启动后，Cindy 会生成步骤状态机并在此展示。</p>
           )}
           {displayWorkflow && (
             <>
@@ -2698,18 +2737,6 @@ export function TaskDetail({ id }: { id: string }) {
             if (wf) setWorkflow(wf);
             setViewingWorkflow(null);
             refreshWorkflow();
-          }}
-        />
-      )}
-      {showApplyTemplate && (
-        <ApplyTemplateModal
-          task={task}
-          roles={roles}
-          onClose={() => setShowApplyTemplate(false)}
-          onApplied={async (applied) => {
-            setShowApplyTemplate(false);
-            setWorkflow(applied as unknown as Workflow);
-            await refreshWorkflow();
           }}
         />
       )}
