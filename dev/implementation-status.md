@@ -709,6 +709,22 @@ cd frontend && npm run build         # tsc + vite build
 - 全量：**1005 passed / 63 skipped**；前端 `npm run build` 通过。
 - 发布说明：`docs/v1.46.0-release.md`。
 
+## 实时刷新与状态机补丁（2026-11-22，v1.47.1）
+
+- **spawn 竞态**：常驻投递时 daemon 已把 run 提升为 `running`，`spawn_node` 的 CAS 失败
+  不得再按“并发终止”清理进程；只有 run 已终态时才 clear，修复 v1.47.0 派发即杀进程。
+- **SSE 鉴权**：`/events` 增加仅限该路由的 query-token 依赖（头优先），修复 EventSource
+  无法带 `X-Anvil-Session` 导致的全前端实时刷新失效；补 SSE 鉴权回归测试。
+- **前端实时刷新**：EventSource 断线重连/退避、`connected` 握手补拉；新增
+  `useLiveRefresh`（事件过滤、tick 节流、in-flight 合并、低频轮询、可见性恢复），接入
+  收件箱角标/Inbox/Lobby/任务详情/角色运行时/finding/会话/频道/知识/提醒等计数面。
+- **后端事件补齐**：action card、board draft 增删审批发布 `task` 刷新信号。
+- **UI**：任务详情工作流页移除「套用模板」；系统备注（`role_slug=NULL`）不再显示为自然人，
+  改为系统机器人头像 + 作者/作用范围；workflow 在带 `subagent_hint` 的步骤/阶段显示
+  组织者→workers 图标。
+- 全量：**1043 passed / 63 skipped**；前端 `npm run build` 通过。
+- 发布说明：`docs/v1.47.1-release.md`。
+
 ## 安全边界、对象级授权与状态机加固（2026-11-22，v1.47.0）
 
 - **HITL 认证隔离**：移除公开默认 token；每安装生成 `data/auth-token`（0600）或显式
