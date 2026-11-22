@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, type Channel, type Role, type RoleRuntimeStatus, type Run, type Task, type TaskRoleStatusSummary, type Workflow } from "../api/client";
+import { api, type Channel, type Role, type RoleRuntimeStatus, type Run, type Task, type TaskRoleState, type TaskRoleStatusSummary, type Workflow } from "../api/client";
 import { useLiveRefresh } from "../useLiveRefresh";
 import { navigate } from "../router";
 import { formatClock, formatDateTime, formatRelative, parseTime, useNow } from "../time";
@@ -8,7 +8,7 @@ import { NewTaskModal } from "./NewTaskModal";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
 import { PageHeader } from "../components/ui";
-import { globalRoleState, taskRoleState, type StatusTone } from "../roleStatus";
+import { globalRoleState, roleStatusFromServer, taskRoleState, type StatusTone } from "../roleStatus";
 
 const COLUMNS: Task["status"][] = ["todo", "in_progress", "in_review", "done", "closed"];
 const MAX_CARD_TAGS = 2;
@@ -53,7 +53,9 @@ const RUN_STATUS_LABEL: Record<string, string> = {
 };
 
 /** 任务卡头像：只显示头像，阴影色表示该角色是否投入这张任务。 */
-function TaskRoleAvatar({ task, slug, roles, runtime, relatedTaskIds, workflow, runStatus }: {
+function TaskRoleAvatar({
+  task, slug, roles, runtime, relatedTaskIds, workflow, runStatus, serverStates,
+}: {
   task: Task;
   slug: string;
   roles: Role[];
@@ -61,11 +63,15 @@ function TaskRoleAvatar({ task, slug, roles, runtime, relatedTaskIds, workflow, 
   relatedTaskIds: string[];
   workflow?: Pick<Workflow, "status" | "steps"> | null;
   runStatus?: string | null;
+  serverStates?: Record<string, TaskRoleState>;
 }) {
   const role = roles.find((r) => r.slug === slug);
-  const state = taskRoleState({
-    task, role: slug, runtime, relatedTaskIds, workflow, runStatus,
-  });
+  const serverState = serverStates?.[slug];
+  const state = serverState
+    ? roleStatusFromServer({ ...serverState, currentStepId: runtime?.current_step_id })
+    : taskRoleState({
+        task, role: slug, runtime, relatedTaskIds, workflow, runStatus,
+      });
   const name = role?.display_name ?? slug;
   return (
     <RoleAvatar
@@ -127,6 +133,9 @@ export function Lobby() {
   const [taskSummaries, setTaskSummaries] = useState<Map<string, TaskRoleStatusSummary>>(
     () => new Map(),
   );
+  const [taskRoleStates, setTaskRoleStates] = useState<
+    Map<string, Record<string, TaskRoleState>>
+  >(() => new Map());
   const [activity, setActivity] = useState<Activity[]>([]);
   const [showNew, setShowNew] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -241,10 +250,16 @@ export function Lobby() {
       setRoleRuntimes(rt);
       setChannels(cs);
       const ids = t.map((task) => task.id);
-      const summaries = ids.length
-        ? await api.getTaskStatusSummaries(ids).catch(() => [])
-        : [];
+      const [summaries, roleStateRes] = await Promise.all([
+        ids.length ? api.getTaskStatusSummaries(ids).catch(() => []) : Promise.resolve([]),
+        ids.length
+          ? api.getTaskRoleStatesBatch(ids).catch(() => ({ tasks: {} as Record<string, TaskRoleState[]> }))
+          : Promise.resolve({ tasks: {} as Record<string, TaskRoleState[]> }),
+      ]);
       setTaskSummaries(new Map(summaries.map((s) => [s.task_id, s])));
+      setTaskRoleStates(new Map(Object.entries(roleStateRes.tasks).map(
+        ([tid, rows]) => [tid, Object.fromEntries(rows.map((row) => [row.role_slug, row]))],
+      )));
     } catch (e) {
       setError(String(e));
     }
@@ -383,6 +398,7 @@ export function Lobby() {
                                 workflow={summary?.workflow}
                                 runStatus={summary?.run_statuses?.[slug]?.status
                                   ?? runStatusByTaskRole.get(`${t.id}:${slug}`)?.status}
+                                serverStates={taskRoleStates.get(t.id)}
                               />
                             ))}
                           </span>
@@ -397,6 +413,7 @@ export function Lobby() {
                               workflow={summary?.workflow}
                               runStatus={summary?.run_statuses?.[t.assignee]?.status
                                 ?? runStatusByTaskRole.get(`${t.id}:${t.assignee}`)?.status}
+                              serverStates={taskRoleStates.get(t.id)}
                             />
                           </span>
                         ) : (

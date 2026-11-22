@@ -318,6 +318,25 @@ def task_status_summary(task_ids: str = Query(default=""), conn=Depends(get_db),
     return out
 
 
+@router.get("/role-states")
+def task_role_states_batch(task_ids: str = Query(...), conn=Depends(get_db),
+                           auth: Auth = Depends(get_auth)):
+    """批量角色状态（Lobby/列表页）；按任务读取权限过滤。"""
+    ids = [tid.strip() for tid in task_ids.split(",") if tid.strip()]
+    if len(ids) > 200:
+        raise HTTPException(status_code=422, detail="too many task_ids (max 200)")
+    from ..services import daemon as daemon_service
+    from ..services import role_state as role_state_service
+
+    mgr = daemon_service.get_manager()
+    tasks: dict[str, list[dict]] = {}
+    for tid in ids:
+        if not access.can_task_read(conn, auth, tid):
+            continue
+        tasks[tid] = role_state_service.task_role_states(conn, tid, mgr)
+    return {"tasks": tasks}
+
+
 @router.get("/{tid}/role-states")
 def task_role_states(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """任务内角色状态（服务端单一推导）；前端只做标签/颜色映射。"""

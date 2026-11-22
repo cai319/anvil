@@ -443,6 +443,9 @@ export const api = {
   getTaskRoleStates: (id: string): Promise<{ task_id: string; roles: TaskRoleState[] }> =>
     authFetch(`${BASE}/tasks/${id}/role-states`)
       .then((r) => json<{ task_id: string; roles: TaskRoleState[] }>(r)),
+  getTaskRoleStatesBatch: (ids: string[]): Promise<{ tasks: Record<string, TaskRoleState[]> }> =>
+    authFetch(`${BASE}/tasks/role-states?task_ids=${encodeURIComponent(ids.join(","))}`)
+      .then((r) => json<{ tasks: Record<string, TaskRoleState[]> }>(r)),
   createTask: (title: string, opts?: {
     description?: string; assignees?: string[]; plan_first?: boolean; planner?: string;
     plan_seed?: { template_id: string; version: number; name?: string } | null;

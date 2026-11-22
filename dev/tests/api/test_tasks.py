@@ -378,3 +378,14 @@ async def test_task_role_states_endpoint(client):
     assert r.status_code == 200, r.text
     roles = r.json()["roles"]
     assert any(row["role_slug"] == "qa-role" for row in roles)
+
+
+async def test_task_role_states_batch_endpoint(client):
+    await _seed(client)
+    await _post_task(client, id_="T-RS1", assignees=["qa-role"])
+    await _post_task(client, id_="T-RS2", assignees=["qa-role"])
+    r = await client.get(f"{API}/tasks/role-states?task_ids=T-RS1,T-RS2")
+    assert r.status_code == 200, r.text
+    tasks = r.json()["tasks"]
+    assert set(tasks) == {"T-RS1", "T-RS2"}
+    assert any(row["role_slug"] == "qa-role" for row in tasks["T-RS1"])
