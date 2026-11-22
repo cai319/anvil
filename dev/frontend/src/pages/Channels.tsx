@@ -26,16 +26,9 @@ import {
   KNOWLEDGE_STATUS_LABEL,
 } from "../knowledgeCard";
 import { KnowledgeFieldList } from "./knowledge/KnowledgeDetail";
+import { TASK_STATUS_META } from "../statusVocabulary";
 
 type Tab = "overview" | "tasks" | "knowledge" | "assets" | "participants" | "settings";
-
-const TASK_STATUS_LABEL: Record<Task["status"], string> = {
-  todo: "待办",
-  in_progress: "进行中",
-  in_review: "待评审",
-  done: "完成",
-  closed: "已终止",
-};
 
 const REVIEW_REASON_LABEL: Record<string, string> = {
   expired: "已过期",
@@ -366,7 +359,7 @@ export function Channels() {
           <a href={`/tasks/${t.id}`} title={t.title}>{t.title}</a>
           <span className="channel-task-meta">
             <span className={`status status-${t.status}`}>
-              {TASK_STATUS_LABEL[t.status] ?? t.status}
+              {TASK_STATUS_META[t.status]?.label ?? t.status}
             </span>
             {t.parent_id && <span className="muted">子任务</span>}
             {t.archived_at && <span className="chip">已归档</span>}

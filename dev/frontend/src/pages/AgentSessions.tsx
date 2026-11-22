@@ -5,18 +5,7 @@ import { formatClock, parseTime, useNow } from "../time";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
 import { globalRoleState } from "../roleStatus";
-
-const RUN_LABEL: Record<string, string> = {
-  created: "已创建",
-  projecting: "准备中",
-  running: "运行中",
-  submitted: "已提交",
-  reviewing: "评审中",
-  completed: "已完成",
-  failed: "失败",
-  abandoned: "已放弃",
-  suspended: "等待唤醒",
-};
+import { runStatusLabel } from "../statusVocabulary";
 
 function fmtDuration(start: string | null, end: string | null, now = Date.now()): string {
   const a = parseTime(start);
@@ -105,7 +94,7 @@ export function AgentSessions({ slug }: { slug: string }) {
           const t = r.task_id ? tasks.get(r.task_id) : null;
           return (
             <a className="run-row" href={`/runs/${r.id}`} key={r.id}>
-              <span className={`status status-${r.status}`}>{RUN_LABEL[r.status] ?? r.status}</span>
+              <span className={`status status-${r.status}`}>{runStatusLabel(r.status)}</span>
               <span className="run-row-task">{t ? t.title : (r.task_id ?? "无任务")}</span>
               <span className="muted mono">{r.id.slice(0, 8)}</span>
               <span className="muted mono">{formatClock(r.started_at)}</span>

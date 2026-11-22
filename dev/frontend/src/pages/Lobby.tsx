@@ -9,17 +9,10 @@ import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
 import { PageHeader } from "../components/ui";
 import { globalRoleState, roleStatusFromServer, taskRoleState, type StatusTone } from "../roleStatus";
+import { TASK_STATUS_META, runStatusLabel } from "../statusVocabulary";
 
 const COLUMNS: Task["status"][] = ["todo", "in_progress", "in_review", "done", "closed"];
 const MAX_CARD_TAGS = 2;
-const STATUS_LABEL: Record<Task["status"], string> = {
-  todo: "待办",
-  in_progress: "进行中",
-  in_review: "待评审",
-  done: "完成",
-  closed: "已终止",
-};
-
 interface Activity {
   time: string;
   role: string | null;
@@ -40,16 +33,6 @@ const ACTION_LABEL: Record<string, string> = {
   cancel: "人工终止",
   reopen: "重新打开",
   plan: "规划",
-};
-
-/** 活跃会话的 run 状态（常驻模式下 suspended = 等待下一条消息）。 */
-const RUN_STATUS_LABEL: Record<string, string> = {
-  created: "已创建",
-  projecting: "准备中",
-  running: "运行中",
-  submitted: "已提交",
-  reviewing: "评审中",
-  suspended: "等待唤醒",
 };
 
 /** 任务卡头像：只显示头像，阴影色表示该角色是否投入这张任务。 */
@@ -285,7 +268,7 @@ export function Lobby() {
       const p = ev.payload as Record<string, unknown>;
       setActivity((prev) =>
         [
-          { time: ev.at, role: null, task: String(p.id ?? ""), action: `任务 ${STATUS_LABEL[String(p.status) as Task["status"]] ?? p.status}` },
+          { time: ev.at, role: null, task: String(p.id ?? ""), action: `任务 ${TASK_STATUS_META[String(p.status) as Task["status"]]?.label ?? p.status}` },
           ...prev,
         ].slice(0, 100)
       );
@@ -369,7 +352,7 @@ export function Lobby() {
                 onDrop={() => onDrop(status)}
               >
                 <h2>
-                  {STATUS_LABEL[status]}
+                  {TASK_STATUS_META[status].label}
                   <span className="n">{boardTasks.filter((t) => t.status === status).length}</span>
                 </h2>
                 {boardTasks.filter((t) => t.status === status).map((t) => {
@@ -531,7 +514,7 @@ export function Lobby() {
             const live = state.tone === "orange";
             return (
               <a key={r.id} className="run-card" href={`/runs/${r.id}`}
-                title={`${state.label} · ${state.detail} · run ${RUN_STATUS_LABEL[r.status] ?? r.status}`}>
+                title={`${state.label} · ${state.detail} · run ${runStatusLabel(r.status)}`}>
                 <RoleAvatar
                   slug={r.role_slug}
                   name={roleName}
@@ -546,7 +529,7 @@ export function Lobby() {
                     {roleName} · <span className={live ? "run-live" : "muted"}>{state.label}</span>
                   </div>
                   <div className="muted run-sub">
-                    {task?.title ?? "无任务会话"} · {RUN_STATUS_LABEL[r.status] ?? r.status} · {fmtElapsed(r.started_at, now)}
+                    {task?.title ?? "无任务会话"} · {runStatusLabel(r.status)} · {fmtElapsed(r.started_at, now)}
                   </div>
                 </div>
                 <span className={`status-light ${state.tone}`} />

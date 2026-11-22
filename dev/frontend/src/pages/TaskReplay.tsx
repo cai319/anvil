@@ -14,6 +14,7 @@ import { Icon } from "../components/Icon";
 import { formatClock, formatDateTime, formatDuration, secondsBetween } from "../time";
 import { STATUS_META } from "../workflowGroups";
 import { METRIC_TIPS } from "../metricsHelp";
+import { runStatusShortLabel } from "../statusVocabulary";
 
 const fmt = (value?: number) => (value ?? 0).toLocaleString("en-US");
 
@@ -33,18 +34,6 @@ const KIND_LABEL: Record<string, string> = {
   "task.tags_cindy": "Cindy 标签",
   "task.knowledge_bind": "知识仓库",
   "task.knowledge_bind_cindy": "Cindy 知识仓库",
-};
-
-const RUN_LABEL: Record<string, string> = {
-  created: "创建",
-  projecting: "准备",
-  running: "运行",
-  suspended: "等待唤醒",
-  submitted: "提交",
-  reviewing: "评审",
-  completed: "完成",
-  failed: "失败",
-  abandoned: "中止",
 };
 
 const STEP_LABEL: Record<string, string> = {
@@ -95,7 +84,7 @@ function eventBody(ev: TimelineEvent): string {
       return `${String(p.step ?? "")}「${String(p.title ?? "")}」· ${
         STEP_LABEL[String(p.status ?? "")] || String(p.status ?? "")}`;
     case "run":
-      return `运行状态：${RUN_LABEL[String(p.status ?? "")] || String(p.status ?? "")}`;
+      return `运行状态：${runStatusShortLabel(String(p.status ?? ""))}`;
     case "review":
       return p.approve ? "评审通过，任务完成" : "评审驳回";
     case "board.approve":
