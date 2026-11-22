@@ -73,6 +73,15 @@
 - CIC 冷唤醒预算：`ANVIL_CIC_COLD_BUDGET_CHARS`（默认 32000 字符）可配，
   并写入 `context_manifests.budget_chars`。
 
+## P2 范围决定（2026-11-22）
+
+- P2.15（Raft：pull inbox / held draft / CIC 冷唤醒预算）已完成。
+- P2.16–P2.18 **不实施**：DeepSeek 不可变 Mandate/准入、OpenAI OS 沙箱与
+  approval 分离。owner 判断这些方向对 Anvil 当前“单机单用户多角色运行时”
+  价值有限，不作为参考方向；后续不再主动提议。
+- P1.12 剩余灵活载荷（BoardDraft tree、模板 definition、知识管理视图）保持手写，
+  仅在有稳定契约需求时再建模。
+
 ## P0.7 清理记录
 
 - 删除 `cost_ledger` 建表：旧美元成本账本已无读写，Token 统计见 `token_usage`。
