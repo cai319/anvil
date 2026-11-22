@@ -6591,6 +6591,79 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** WorkflowGraphChangedOut */
+        WorkflowGraphChangedOut: {
+            /** Step Id */
+            step_id: string;
+            /** Field */
+            field: string;
+            /** Planned */
+            planned?: unknown;
+            /** Actual */
+            actual?: unknown;
+        };
+        /** WorkflowGraphNodeOut */
+        WorkflowGraphNodeOut: {
+            /** Step Id */
+            step_id: string;
+            /** Title */
+            title: string;
+            /**
+             * Role Slug
+             * @default
+             */
+            role_slug: string;
+            /** Depends On */
+            depends_on?: string[];
+            /**
+             * Kind
+             * @default task
+             */
+            kind: string;
+            /**
+             * Gate
+             * @default false
+             */
+            gate: boolean;
+            /**
+             * Decision Authority
+             * @default
+             */
+            decision_authority: string;
+            /** Status */
+            status?: string | null;
+            /** Run Id */
+            run_id?: string | null;
+            /** Slice Key */
+            slice_key?: string | null;
+            /** Source Step Id */
+            source_step_id?: string | null;
+            /**
+             * Rework Count
+             * @default 0
+             */
+            rework_count: number;
+            /** Origin */
+            origin: string;
+        };
+        /** WorkflowGraphOut */
+        WorkflowGraphOut: {
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "planned" | "actual" | "diff";
+            /** Workflow Id */
+            workflow_id: string;
+            /** Nodes */
+            nodes?: components["schemas"]["WorkflowGraphNodeOut"][];
+            /** Added */
+            added?: components["schemas"]["WorkflowGraphNodeOut"][];
+            /** Missing */
+            missing?: components["schemas"]["WorkflowGraphNodeOut"][];
+            /** Changed */
+            changed?: components["schemas"]["WorkflowGraphChangedOut"][];
+        };
         /** WorkflowHistoryOut */
         WorkflowHistoryOut: {
             /** Id */
@@ -6647,18 +6720,237 @@ export interface components {
              */
             total: number;
             /**
+             * Recorded
+             * @default 0
+             */
+            recorded: number;
+            /**
+             * Legacy
+             * @default 0
+             */
+            legacy: number;
+            /**
+             * Human
+             * @default 0
+             */
+            human: number;
+            /**
+             * Human Reviews
+             * @default 0
+             */
+            human_reviews: number;
+            /**
+             * Human Interventions
+             * @default 0
+             */
+            human_interventions: number;
+            /**
              * Rejected
              * @default 0
              */
             rejected: number;
-        } & {
-            [key: string]: unknown;
+            /**
+             * Pending Human
+             * @default 0
+             */
+            pending_human: number;
+            /**
+             * Rework Rate
+             * @default 0
+             */
+            rework_rate: number;
+        };
+        /** WorkflowMetricsEvidenceOut */
+        WorkflowMetricsEvidenceOut: {
+            /**
+             * Packets
+             * @default 0
+             */
+            packets: number;
+        };
+        /** WorkflowMetricsGatesOut */
+        WorkflowMetricsGatesOut: {
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+            /**
+             * Pending
+             * @default 0
+             */
+            pending: number;
         };
         /** WorkflowMetricsOut */
         WorkflowMetricsOut: {
+            /** Workflow Id */
+            workflow_id: string;
+            /** Task Id */
+            task_id: string;
+            /**
+             * Execution No
+             * @default 1
+             */
+            execution_no: number;
+            /** Status */
+            status: string;
+            /** Weight */
+            weight: string;
+            /** Weight Source */
+            weight_source: string;
+            /** Created At */
+            created_at?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
+            /**
+             * Duration Seconds
+             * @default 0
+             */
+            duration_seconds: number;
+            /**
+             * Active Duration Seconds
+             * @default 0
+             */
+            active_duration_seconds: number;
+            steps?: components["schemas"]["WorkflowMetricsStepsOut"];
+            gates?: components["schemas"]["WorkflowMetricsGatesOut"];
             decisions?: components["schemas"]["WorkflowMetricsDecisionsOut"];
-        } & {
-            [key: string]: unknown;
+            waiting?: components["schemas"]["WorkflowMetricsWaitingOut"];
+            evidence?: components["schemas"]["WorkflowMetricsEvidenceOut"];
+            tokens?: components["schemas"]["WorkflowMetricsTokensOut"];
+        };
+        /** WorkflowMetricsStepsOut */
+        WorkflowMetricsStepsOut: {
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+            /**
+             * Done
+             * @default 0
+             */
+            done: number;
+            /**
+             * Running
+             * @default 0
+             */
+            running: number;
+            /**
+             * Submitted
+             * @default 0
+             */
+            submitted: number;
+            /**
+             * Failed
+             * @default 0
+             */
+            failed: number;
+            /**
+             * Max Depth
+             * @default 0
+             */
+            max_depth: number;
+            /**
+             * Parallel Roles
+             * @default 0
+             */
+            parallel_roles: number;
+            /**
+             * Generated Slices
+             * @default 0
+             */
+            generated_slices: number;
+            /** By Status */
+            by_status?: {
+                [key: string]: number;
+            };
+        };
+        /** WorkflowMetricsTokensOut */
+        WorkflowMetricsTokensOut: {
+            /**
+             * Input Tokens
+             * @default 0
+             */
+            input_tokens: number;
+            /**
+             * Output Tokens
+             * @default 0
+             */
+            output_tokens: number;
+            /**
+             * Cache Read Tokens
+             * @default 0
+             */
+            cache_read_tokens: number;
+            /**
+             * Cache Creation Tokens
+             * @default 0
+             */
+            cache_creation_tokens: number;
+            /**
+             * Total Tokens
+             * @default 0
+             */
+            total_tokens: number;
+            /**
+             * Records
+             * @default 0
+             */
+            records: number;
+            /**
+             * Task Input Tokens
+             * @default 0
+             */
+            task_input_tokens: number;
+            /**
+             * Task Output Tokens
+             * @default 0
+             */
+            task_output_tokens: number;
+            /**
+             * Task Cache Read Tokens
+             * @default 0
+             */
+            task_cache_read_tokens: number;
+            /**
+             * Task Cache Creation Tokens
+             * @default 0
+             */
+            task_cache_creation_tokens: number;
+            /**
+             * Task Total Tokens
+             * @default 0
+             */
+            task_total_tokens: number;
+            /**
+             * Task Records
+             * @default 0
+             */
+            task_records: number;
+        };
+        /** WorkflowMetricsWaitingOut */
+        WorkflowMetricsWaitingOut: {
+            /**
+             * Human Seconds
+             * @default 0
+             */
+            human_seconds: number;
+            /**
+             * Pending Human Seconds
+             * @default 0
+             */
+            pending_human_seconds: number;
+            /**
+             * Excluded Seconds
+             * @default 0
+             */
+            excluded_seconds: number;
+            /**
+             * Active Seconds
+             * @default 0
+             */
+            active_seconds: number;
         };
         /** WorkflowOut */
         WorkflowOut: {
@@ -11353,7 +11645,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WorkflowMetricsOut"];
                 };
             };
             /** @description Validation Error */
@@ -11389,7 +11681,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WorkflowGraphOut"];
                 };
             };
             /** @description Validation Error */

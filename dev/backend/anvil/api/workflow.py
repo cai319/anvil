@@ -5,7 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 
 from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
-from ..schemas import TaskLeasesOut, WorkflowHistoryOut, WorkflowOut
+from ..schemas import (
+    TaskLeasesOut, WorkflowGraphOut, WorkflowHistoryOut, WorkflowMetricsOut,
+    WorkflowOut,
+)
 from ..services.tasks import ConflictError
 from ..services import dossier as dossier_service
 from ..services import leases as lease_service
@@ -58,7 +61,7 @@ def get_workflow(wid: str, conn=Depends(get_db),
     return _attach_pending_revision(conn, wf)
 
 
-@router.get("/workflows/{wid}/metrics")
+@router.get("/workflows/{wid}/metrics", response_model=WorkflowMetricsOut)
 def get_metrics(wid: str, conn=Depends(get_db),
                 auth: Auth = Depends(get_auth)):
     _assert_workflow_task(conn, wid, auth)
@@ -68,7 +71,7 @@ def get_metrics(wid: str, conn=Depends(get_db),
         raise HTTPException(status_code=404, detail="workflow not found")
 
 
-@router.get("/workflows/{wid}/graph")
+@router.get("/workflows/{wid}/graph", response_model=WorkflowGraphOut)
 def get_graph(wid: str, mode: str = "actual", conn=Depends(get_db),
               auth: Auth = Depends(get_auth)):
     _assert_workflow_task(conn, wid, auth)

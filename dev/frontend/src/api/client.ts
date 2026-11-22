@@ -1473,87 +1473,28 @@ export type Workflow = Required<Omit<Schemas["WorkflowOut"], "steps">> & {
 
 export type WorkflowWeight = "light" | "standard" | "strict";
 
-export interface WorkflowMetrics {
-  workflow_id: string;
-  task_id: string;
-  execution_no: number;
-  status: Workflow["status"];
-  weight: WorkflowWeight;
-  weight_source: string;
-  created_at: string | null;
-  finished_at: string | null;
-  duration_seconds: number;
-  active_duration_seconds: number;
-  steps: {
-    total: number;
-    done: number;
-    running: number;
-    submitted: number;
-    failed: number;
-    max_depth: number;
-    parallel_roles: number;
-    generated_slices: number;
+export type WorkflowMetrics = Required<
+  Omit<Schemas["WorkflowMetricsOut"],
+    "steps" | "gates" | "decisions" | "waiting" | "evidence" | "tokens">
+> & {
+  steps: Required<Schemas["WorkflowMetricsStepsOut"]> & {
     by_status: Record<string, number>;
   };
-  gates: { total: number; pending: number };
-  decisions: {
-    total: number;
-    recorded?: number;
-    legacy?: number;
-    human: number;
-    human_reviews?: number;
-    human_interventions?: number;
-    rejected: number;
-    pending_human: number;
-    rework_rate: number;
-  };
-  waiting: {
-    human_seconds: number;
-    pending_human_seconds: number;
-    excluded_seconds?: number;
-    active_seconds?: number;
-  };
-  evidence: { packets: number };
-  tokens: {
-    input_tokens?: number;
-    output_tokens?: number;
-    cache_read_tokens?: number;
-    cache_creation_tokens?: number;
-    total_tokens?: number;
-    records?: number;
-    task_input_tokens?: number;
-    task_output_tokens?: number;
-    task_cache_read_tokens?: number;
-    task_cache_creation_tokens?: number;
-    task_total_tokens?: number;
-    task_records?: number;
-  };
-}
+  gates: Required<Schemas["WorkflowMetricsGatesOut"]>;
+  decisions: Required<Schemas["WorkflowMetricsDecisionsOut"]>;
+  waiting: Required<Schemas["WorkflowMetricsWaitingOut"]>;
+  evidence: Required<Schemas["WorkflowMetricsEvidenceOut"]>;
+  tokens: Required<Schemas["WorkflowMetricsTokensOut"]>;
+};
 
-export interface WorkflowGraphNode {
-  step_id: string;
-  title: string;
-  role_slug: string;
-  depends_on: string[];
-  kind: string;
-  gate: boolean;
-  decision_authority: string;
-  status?: string;
-  run_id?: string | null;
-  slice_key?: string | null;
-  source_step_id?: string | null;
-  rework_count?: number;
-  origin: string;
-}
+export type WorkflowGraphNode = Required<Schemas["WorkflowGraphNodeOut"]>;
 
-export interface WorkflowGraphResponse {
-  mode: "planned" | "actual" | "diff";
-  workflow_id: string;
+export type WorkflowGraphResponse = Omit<Schemas["WorkflowGraphOut"], "nodes" | "added" | "missing" | "changed"> & {
   nodes?: WorkflowGraphNode[];
   added?: WorkflowGraphNode[];
   missing?: WorkflowGraphNode[];
   changed?: { step_id: string; field: string; planned: unknown; actual: unknown }[];
-}
+};
 
 export interface WorkflowDossier {
   workflow: Record<string, unknown>;

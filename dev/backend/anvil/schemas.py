@@ -370,18 +370,113 @@ class WorkflowOut(BaseModel):
     pending_revision: PendingRevisionOut | None = None
 
 
-class WorkflowMetricsDecisionsOut(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
+class WorkflowMetricsStepsOut(BaseModel):
     total: int = 0
+    done: int = 0
+    running: int = 0
+    submitted: int = 0
+    failed: int = 0
+    max_depth: int = 0
+    parallel_roles: int = 0
+    generated_slices: int = 0
+    by_status: dict[str, int] = Field(default_factory=dict)
+
+
+class WorkflowMetricsGatesOut(BaseModel):
+    total: int = 0
+    pending: int = 0
+
+
+class WorkflowMetricsDecisionsOut(BaseModel):
+    total: int = 0
+    recorded: int = 0
+    legacy: int = 0
+    human: int = 0
+    human_reviews: int = 0
+    human_interventions: int = 0
     rejected: int = 0
+    pending_human: int = 0
+    rework_rate: float = 0.0
+
+
+class WorkflowMetricsWaitingOut(BaseModel):
+    human_seconds: float = 0.0
+    pending_human_seconds: float = 0.0
+    excluded_seconds: float = 0.0
+    active_seconds: float = 0.0
+
+
+class WorkflowMetricsEvidenceOut(BaseModel):
+    packets: int = 0
+
+
+class WorkflowMetricsTokensOut(BaseModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    total_tokens: int = 0
+    records: int = 0
+    task_input_tokens: int = 0
+    task_output_tokens: int = 0
+    task_cache_read_tokens: int = 0
+    task_cache_creation_tokens: int = 0
+    task_total_tokens: int = 0
+    task_records: int = 0
 
 
 class WorkflowMetricsOut(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
+    workflow_id: str
+    task_id: str
+    execution_no: int = 1
+    status: str
+    weight: str
+    weight_source: str
+    created_at: str | None = None
+    finished_at: str | None = None
+    duration_seconds: float = 0.0
+    active_duration_seconds: float = 0.0
+    steps: WorkflowMetricsStepsOut = Field(default_factory=WorkflowMetricsStepsOut)
+    gates: WorkflowMetricsGatesOut = Field(default_factory=WorkflowMetricsGatesOut)
     decisions: WorkflowMetricsDecisionsOut = Field(
         default_factory=WorkflowMetricsDecisionsOut)
+    waiting: WorkflowMetricsWaitingOut = Field(
+        default_factory=WorkflowMetricsWaitingOut)
+    evidence: WorkflowMetricsEvidenceOut = Field(
+        default_factory=WorkflowMetricsEvidenceOut)
+    tokens: WorkflowMetricsTokensOut = Field(default_factory=WorkflowMetricsTokensOut)
+
+
+class WorkflowGraphNodeOut(BaseModel):
+    step_id: str
+    title: str
+    role_slug: str = ""
+    depends_on: list[str] = Field(default_factory=list)
+    kind: str = "task"
+    gate: bool = False
+    decision_authority: str = ""
+    status: str | None = None
+    run_id: str | None = None
+    slice_key: str | None = None
+    source_step_id: str | None = None
+    rework_count: int = 0
+    origin: str
+
+
+class WorkflowGraphChangedOut(BaseModel):
+    step_id: str
+    field: str
+    planned: Any = None
+    actual: Any = None
+
+
+class WorkflowGraphOut(BaseModel):
+    mode: Literal["planned", "actual", "diff"]
+    workflow_id: str
+    nodes: list[WorkflowGraphNodeOut] = Field(default_factory=list)
+    added: list[WorkflowGraphNodeOut] = Field(default_factory=list)
+    missing: list[WorkflowGraphNodeOut] = Field(default_factory=list)
+    changed: list[WorkflowGraphChangedOut] = Field(default_factory=list)
 
 
 class WorkflowHistoryOut(BaseModel):
