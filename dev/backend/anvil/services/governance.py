@@ -150,10 +150,11 @@ def tick(conn: sqlite3.Connection, force: bool = False, dispatch: bool = True,
         if _run_liveness(conn, tid):
             _renew_lease(conn, now, tid)
             continue
-        conn.execute(
-            "UPDATE tasks SET status='todo', assignee=NULL, claimed_at=NULL, lease_expires_at=NULL, updated_at=? WHERE id=?",
-            (now, tid),
-        )
+        from . import tasks as tasks_service
+        tasks_service.transition_task(
+            conn, tid, "todo",
+            fields={"assignee": None, "claimed_at": None, "lease_expires_at": None},
+            now=now)
         _terminate_runs(conn, tid)  # 回收前终止仍存活的子进程（防孤儿烧钱）
         from . import runs as runs_service
         for run in conn.execute(

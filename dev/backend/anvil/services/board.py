@@ -717,10 +717,10 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
         _land_tree(conn, root, parent_id=draft.get("source_task"),
                    workspace_id=draft.get("workspace_id"), defaults=root)
         if draft.get("source_task"):
-            conn.execute(
-                "UPDATE tasks SET status='in_progress', updated_at=? WHERE id=? AND status='todo'",
-                (now_iso(), draft["source_task"]),
-            )
+            from . import tasks as tasks_service
+            tasks_service.transition_task(
+                conn, draft["source_task"], "in_progress",
+                from_statuses=("todo",), now=now_iso())
             n = len((draft.get("tree") or {}).get("children") or []) or 1
             conn.execute(
                 "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "

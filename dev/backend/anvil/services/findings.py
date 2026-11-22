@@ -477,13 +477,13 @@ def request_changes(conn: sqlite3.Connection, task_id: str, finding_id: str,
         "reopened_by=?, reopened_at=?, updated_at=? WHERE task_id=?",
         (by, now, now, task_id),
     )
-    conn.execute(
-        "UPDATE tasks SET status='in_progress', updated_at=? "
-        "WHERE id=? AND status='in_review'", (now, task_id))
+    from . import tasks as tasks_service
+    tasks_service.transition_task(
+        conn, task_id, "in_progress",
+        from_statuses=("in_review",), now=now)
     _audit(conn, by, task_id, "finding.request_changes",
            {"finding_id": finding_id, "note": note})
     conn.commit()
-    from . import tasks as tasks_service
     tasks_service.mention(
         conn, task_id, "human", finding["author_role"],
         f"问题板 finding「{finding['title']}」需要重新评估：{note.strip()}。"
@@ -507,12 +507,12 @@ def reopen_board(conn: sqlite3.Connection, task_id: str, by: str,
         "WHERE task_id=?",
         (by, now, (note or "").strip() or None, now, task_id),
     )
-    conn.execute(
-        "UPDATE tasks SET status='in_progress', updated_at=? "
-        "WHERE id=? AND status='in_review'", (now, task_id))
+    from . import tasks as tasks_service
+    tasks_service.transition_task(
+        conn, task_id, "in_progress",
+        from_statuses=("in_review",), now=now)
     _audit(conn, by, task_id, "finding_board.reopen", {"note": note})
     conn.commit()
-    from . import tasks as tasks_service
     for role in reviewer_roles(conn, task_id):
         tasks_service.mention(
             conn, task_id, "human", role,

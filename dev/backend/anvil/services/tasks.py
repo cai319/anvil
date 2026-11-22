@@ -238,11 +238,73 @@ def _assert_assignable(conn: sqlite3.Connection, roles: list[str]) -> None:
             raise ConflictError(f"{slug} is the built-in onboarding assistant and cannot join tasks")
 
 
+def transition_task(
+    conn: sqlite3.Connection,
+    tid: str,
+    new_status: str,
+    *,
+    from_statuses: tuple[str, ...] | list[str] | None = None,
+    fields: dict[str, object] | None = None,
+    raw_sets: list[tuple[str, object]] | None = None,
+    extra_where: str | None = None,
+    extra_params: tuple | list = (),
+    now: str | None = None,
+) -> bool:
+    """任务状态的唯一写入点（CAS）。
+
+    只负责 `tasks.status` 与附加列；mention/wake/audit/run 收尾等副作用仍由调用方执行。
+    `from_statuses` 为空表示不做状态约束；空列表表示永不命中（防御式）。
+    """
+    stamp = now or now_iso()
+    sets = ["status=?", "updated_at=?"]
+    params: list[object] = [new_status, stamp]
+    for key, value in (fields or {}).items():
+        if key == "status":
+            raise ValueError("status is owned by transition_task")
+        sets.append(f"{key}=?")
+        params.append(value)
+    # 少数迁移需要保留 SQL 表达式（如 COALESCE）；赋值片段只允许内部代码传入。
+    for assignment, value in (raw_sets or []):
+        sets.append(assignment)
+        params.append(value)
+    sql = f"UPDATE tasks SET {', '.join(sets)} WHERE id=?"
+    params.append(tid)
+    if from_statuses is not None:
+        allowed = tuple(from_statuses)
+        if allowed:
+            sql += " AND status IN (" + ",".join("?" * len(allowed)) + ")"
+            params.extend(allowed)
+        else:
+            sql += " AND 0"
+    if extra_where:
+        sql += f" AND ({extra_where})"
+        params.extend(extra_params)
+    return conn.execute(sql, params).rowcount == 1
+
+
+def _attach_dispatch_status(conn: sqlite3.Connection, tasks: list[dict]) -> None:
+    """dispatch_status 是 task_dispatches 的派生视图；tasks.dispatch_status 列仅保留旧数据。"""
+    if not tasks:
+        return
+    ids = [t["id"] for t in tasks]
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT target_task_id, status FROM task_dispatches "
+        f"WHERE target_task_id IN ({placeholders}) "
+        "ORDER BY updated_at DESC, rowid DESC", ids).fetchall()
+    latest: dict[str, str] = {}
+    for row in rows:
+        latest.setdefault(row["target_task_id"], row["status"])
+    for task in tasks:
+        task["dispatch_status"] = latest.get(task["id"], "none")
+
+
 def get(conn: sqlite3.Connection, tid: str) -> dict | None:
     r = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
     if not r:
         return None
     d = _row(r)
+    _attach_dispatch_status(conn, [d])
     d["depends_on"] = [x["depends_on"] for x in conn.execute(
         "SELECT depends_on FROM task_deps WHERE task_id=?", (tid,))]
     d["assignees"] = [x["role_slug"] for x in conn.execute(
@@ -452,6 +514,7 @@ def list_all(conn: sqlite3.Connection, status: str | None = None, assignee: str 
         q += " WHERE " + " AND ".join(clauses)
     q += " ORDER BY created_at DESC"
     tasks = [_with_deps(conn, _row(r)) for r in conn.execute(q, params)]
+    _attach_dispatch_status(conn, tasks)
     _attach_workspaces(conn, tasks)
     return knowledge_binding.attach_bindings(conn, tasks)
 
@@ -576,20 +639,23 @@ def claim(conn: sqlite3.Connection, tid: str, role: str, paths: list[str] | None
                 "updated_at=excluded.updated_at",
                 (tid, role, "working", run["id"] if run else None, now, lease, now),
             )
-            conn.execute(
-                "UPDATE tasks SET status='in_progress', "
-                "assignee=COALESCE(NULLIF(assignee,''), ?), "
-                "claimed_at=COALESCE(claimed_at, ?), lease_expires_at=?, updated_at=? WHERE id=?",
-                (role, now, lease, now, tid),
-            )
+            transition_task(
+                conn, tid, "in_progress",
+                raw_sets=[
+                    ("assignee=COALESCE(NULLIF(assignee,''), ?)", role),
+                    ("claimed_at=COALESCE(claimed_at, ?)", now),
+                ],
+                fields={"lease_expires_at": lease},
+                now=now)
         else:
-            cur = conn.execute(
-                "UPDATE tasks SET status='in_progress', assignee=?, claimed_at=?, "
-                "lease_expires_at=?, updated_at=? WHERE id=? AND status='todo' "
-                "AND (assignee IS NULL OR assignee = '' OR assignee = ?)",
-                (role, now, lease, now, tid, role),
+            claimed = transition_task(
+                conn, tid, "in_progress",
+                from_statuses=("todo",),
+                fields={"assignee": role, "claimed_at": now, "lease_expires_at": lease},
+                extra_where="(assignee IS NULL OR assignee = '' OR assignee = ?)",
+                extra_params=(role,), now=now,
             )
-            if cur.rowcount == 0:
+            if not claimed:
                 if t["status"] not in ("todo", "in_progress"):
                     raise ConflictError(f"task {tid} is {t['status']}, cannot claim")
                 owner = t.get("assignee") or ""
@@ -663,9 +729,10 @@ def _reconcile_after_release(conn: sqlite3.Connection, tid: str, now: str,
             (assignee, now, now, tid),
         )
         return
-    conn.execute(
-        "UPDATE tasks SET status='todo', assignee=NULL, claimed_at=NULL, "
-        "lease_expires_at=NULL, updated_at=? WHERE id=?", (now, tid),
+    transition_task(
+        conn, tid, "todo",
+        fields={"assignee": None, "claimed_at": None, "lease_expires_at": None},
+        now=now,
     )
 
 
@@ -846,11 +913,11 @@ def _submit_locked(conn: sqlite3.Connection, tid: str, *, summary: str | None = 
                     "submitted_at=COALESCE(submitted_at, ?), lease_expires_at=NULL, "
                     "updated_at=? WHERE task_id=? AND role_slug=?",
                     (summary, now, now, tid, role))
-        cur = conn.execute(
-            "UPDATE tasks SET status='done', lease_expires_at=NULL, "
-            "review_rejected_at=NULL, updated_at=? "
-            "WHERE id=? AND status='in_progress'", (now, tid))
-        if cur.rowcount != 1:
+        if not transition_task(
+                conn, tid, "done",
+                from_statuses=("in_progress",),
+                fields={"lease_expires_at": None, "review_rejected_at": None},
+                now=now):
             raise ConflictError(
                 f"task {tid} state changed; refresh before submitting")
         _complete_runs(conn, tid, role)
@@ -895,11 +962,11 @@ def _submit_locked(conn: sqlite3.Connection, tid: str, *, summary: str | None = 
             return get(conn, tid)  # type: ignore[return-value]
 
         # 全部提交（或人工收口）→ 任务进入评审
-        cur = conn.execute(
-            "UPDATE tasks SET status='in_review', lease_expires_at=NULL, "
-            "review_rejected_at=NULL, updated_at=? "
-            "WHERE id=? AND status='in_progress'", (now, tid))
-        if cur.rowcount != 1:
+        if not transition_task(
+                conn, tid, "in_review",
+                from_statuses=("in_progress",),
+                fields={"lease_expires_at": None, "review_rejected_at": None},
+                now=now):
             raise ConflictError(
                 f"task {tid} state changed; refresh before submitting")
         _complete_runs(conn, tid)
@@ -913,10 +980,11 @@ def _submit_locked(conn: sqlite3.Connection, tid: str, *, summary: str | None = 
         conn.commit()
         return get(conn, tid)  # type: ignore[return-value]
 
-    cur = conn.execute(
-        "UPDATE tasks SET status='in_review', review_rejected_at=NULL, updated_at=? "
-        "WHERE id=? AND status='in_progress'", (now, tid))
-    if cur.rowcount != 1:
+    if not transition_task(
+            conn, tid, "in_review",
+            from_statuses=("in_progress",),
+            fields={"review_rejected_at": None},
+            now=now):
         raise ConflictError(
             f"task {tid} state changed; refresh before submitting")
     conn.execute(
@@ -973,11 +1041,12 @@ def review(conn: sqlite3.Connection, tid: str, approve: bool,
              (datetime.now(timezone.utc) + timedelta(seconds=LEASE_SECONDS)).isoformat())
     conn.execute("BEGIN IMMEDIATE")
     try:
-        cur = conn.execute(
-            "UPDATE tasks SET status=?, lease_expires_at=?, review_rejected_at=?, "
-            "updated_at=? WHERE id=? AND status='in_review'",
-            (new_status, lease, None if approve else now, now, tid))
-        if cur.rowcount != 1:
+        if not transition_task(
+                conn, tid, new_status,
+                from_statuses=("in_review",),
+                fields={"lease_expires_at": lease,
+                        "review_rejected_at": None if approve else now},
+                now=now):
             raise ConflictError(
                 f"task {tid} state changed; refresh before reviewing")
         if approve:
@@ -1134,10 +1203,11 @@ def cancel(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
         raise LookupError(tid)
     _assert_can_terminate(t)
     now = now_iso()
-    cur = conn.execute(
-        "UPDATE tasks SET status='closed', lease_expires_at=NULL, updated_at=? "
-        "WHERE id=? AND status NOT IN ('done','closed')", (now, tid))
-    if cur.rowcount != 1:
+    if not transition_task(
+            conn, tid, "closed",
+            from_statuses=("todo", "in_progress", "in_review"),
+            fields={"lease_expires_at": None},
+            now=now):
         raise ConflictError(f"task {tid} state changed; refresh before cancelling")
     _release_or_defer_claims(conn, tid, role, bool(t["assignees"]), now)
     # 委派子任务被人工终止 = 视为已解除：唤醒父 step 继续，避免门禁永久卡死。
@@ -1158,9 +1228,9 @@ def cancel(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
         "AND COALESCE(type,'') IN ('dispatch','dispatched') "
         "AND status NOT IN ('done','closed')", (tid,)).fetchall()]
     for cid in child_ids:
-        conn.execute(
-            "UPDATE tasks SET status='closed', lease_expires_at=NULL, updated_at=? WHERE id=?",
-            (now_iso(), cid))
+        transition_task(
+            conn, cid, "closed",
+            fields={"lease_expires_at": None}, now=now_iso())
         _release_or_defer_claims(conn, cid, None, False, now_iso())
         for row in conn.execute(
                 "SELECT id, source_task_id FROM task_dispatches WHERE target_task_id=? "
@@ -1176,9 +1246,10 @@ def cancel(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
         "AND parent_step_id IS NOT NULL "
         "AND status NOT IN ('done','closed')", (tid,)).fetchall()]
     for cid in delegation_children:
-        conn.execute(
-            "UPDATE tasks SET status='closed', lease_expires_at=NULL, updated_at=? "
-            "WHERE id=? AND status NOT IN ('done','closed')", (now_iso(), cid))
+        transition_task(
+            conn, cid, "closed",
+            from_statuses=("todo", "in_progress", "in_review"),
+            fields={"lease_expires_at": None}, now=now_iso())
         conn.execute(
             "UPDATE task_role_claims SET status='released', lease_expires_at=NULL, "
             "updated_at=? WHERE task_id=? AND status IN ('pending','working')",
@@ -1196,19 +1267,12 @@ def cancel(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
         conn.execute(
             "UPDATE task_dispatches SET status='no_return', updated_at=? WHERE id=?",
             (now, row["id"]))
-    if target_dispatch:
-        conn.execute(
-            "UPDATE tasks SET dispatch_status='no_return', updated_at=? WHERE id=?",
-            (now, tid))
     for row in conn.execute(
             "SELECT id, target_task_id FROM task_dispatches WHERE source_task_id=? "
             "AND status IN ('open','return_ready','returning')", (tid,)).fetchall():
         conn.execute(
             "UPDATE task_dispatches SET status='cancelled', updated_at=? WHERE id=?",
             (now, row["id"]))
-        conn.execute(
-            "UPDATE tasks SET dispatch_status='cancelled' WHERE id=?",
-            (row["target_task_id"],))
     from . import knowledge_harvest  # 惰性导入，避免 services 循环
     knowledge_harvest.remove_task_reminder(conn, tid)
     _audit(conn, role, tid, "cancel")
@@ -1236,11 +1300,12 @@ def reopen(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
         status = "in_progress"
     elif latest and latest["status"] == "done":
         status = "in_review"
-    cur = conn.execute(
-        "UPDATE tasks SET status=?, assignee=NULL, claimed_at=NULL, "
-        "lease_expires_at=NULL, archived_at=NULL, review_rejected_at=NULL, updated_at=? "
-        "WHERE id=? AND status='closed'", (status, now_iso(), tid))
-    if cur.rowcount != 1:
+    if not transition_task(
+            conn, tid, status,
+            from_statuses=("closed",),
+            fields={"assignee": None, "claimed_at": None, "lease_expires_at": None,
+                    "archived_at": None, "review_rejected_at": None},
+            now=now_iso()):
         raise ConflictError(f"task {tid} state changed; refresh before reopening")
     conn.execute(
         "UPDATE task_role_claims SET status='pending', summary=NULL, run_id=NULL, "
@@ -1404,9 +1469,6 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
         conn.execute(
             "UPDATE task_dispatches SET status='cancelled', updated_at=? WHERE id=?",
             (now, row["id"]))
-        conn.execute(
-            "UPDATE tasks SET dispatch_status='cancelled' WHERE id=?",
-            (row["target_task_id"],))
     for row in conn.execute(
             "SELECT id FROM task_dispatches WHERE target_task_id=? "
             "AND status IN ('open','return_ready','returning')", (tid,)).fetchall():

@@ -1654,12 +1654,13 @@ def _create_workflow_locked(conn: sqlite3.Connection, task_id: str, definition: 
              jdumps(meta["scope_paths"]), meta["subagent_hint"], s.get("slice_key"),
              s.get("source_step_id"), "pending", now),
         )
-    task_cur = conn.execute(
-        "UPDATE tasks SET status='in_progress', assignee=NULL, lease_expires_at=NULL, "
-        "claimed_at=NULL, review_rejected_at=NULL, updated_at=? "
-        "WHERE id=? AND status IN ('todo','in_progress','in_review')",
-        (now, task_id))
-    if task_cur.rowcount != 1:
+    from . import tasks as tasks_service
+    if not tasks_service.transition_task(
+            conn, task_id, "in_progress",
+            from_statuses=("todo", "in_progress", "in_review"),
+            fields={"assignee": None, "lease_expires_at": None,
+                    "claimed_at": None, "review_rejected_at": None},
+            now=now):
         conn.rollback()
         raise ConflictError(
             "task is no longer active; refresh before starting a workflow")
@@ -3004,9 +3005,11 @@ def _apply_external_revision(conn: sqlite3.Connection, wf: dict, state: dict,
         conn.execute(
             "UPDATE workflows SET updated_at=? WHERE id=?", (now, wid))
     if state.get("task_was_in_review"):
-        conn.execute(
-            "UPDATE tasks SET status='in_progress', lease_expires_at=NULL, updated_at=? "
-            "WHERE id=? AND status='in_review'", (now, state["task_id"]))
+        from . import tasks as tasks_service
+        tasks_service.transition_task(
+            conn, state["task_id"], "in_progress",
+            from_statuses=("in_review",),
+            fields={"lease_expires_at": None}, now=now)
         conn.execute(
             "UPDATE task_role_claims SET status='working', submitted_at=NULL, updated_at=? "
             "WHERE task_id=? AND status IN ('submitted','approved')",
@@ -4220,10 +4223,12 @@ def _end_run_for_step(conn: sqlite3.Connection, wf: dict, step: dict, *,
 
 
 def _close_child_task_rows(conn: sqlite3.Connection, ids: list[str], now: str) -> None:
+    from . import tasks as tasks_service
     for tid in ids:
-        conn.execute(
-            "UPDATE tasks SET status='closed', lease_expires_at=NULL, updated_at=? "
-            "WHERE id=? AND status NOT IN ('done','closed')", (now, tid))
+        tasks_service.transition_task(
+            conn, tid, "closed",
+            from_statuses=("todo", "in_progress", "in_review"),
+            fields={"lease_expires_at": None}, now=now)
         conn.execute(
             "UPDATE task_role_claims SET status='released', lease_expires_at=NULL, "
             "updated_at=? WHERE task_id=? AND status IN ('pending','working')",
@@ -4400,9 +4405,11 @@ def finalize_task_review_if_ready(conn: sqlite3.Connection, task_id: str) -> boo
     if task is not None and task["review_rejected_at"]:
         return False
     now = now_iso()
-    conn.execute(
-        "UPDATE tasks SET status='in_review', lease_expires_at=NULL, updated_at=? "
-        "WHERE id=? AND status IN ('in_progress','todo')", (now, task_id))
+    from . import tasks as tasks_service
+    tasks_service.transition_task(
+        conn, task_id, "in_review",
+        from_statuses=("in_progress", "todo"),
+        fields={"lease_expires_at": None}, now=now)
     conn.commit()
     from . import roles as roles_service
     sender = roles_service.notification_sender(conn, task_id)

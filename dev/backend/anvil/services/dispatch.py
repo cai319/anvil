@@ -178,7 +178,7 @@ def create_dispatch(conn: sqlite3.Connection, *, source_task_id: str,
     tid = task["id"]
     conn.execute(
         "UPDATE tasks SET source_task_id=?, source_slice_key=?, source_step_id=?, "
-        "source_workflow_id=?, requested_by=?, dispatch_status='open', "
+        "source_workflow_id=?, requested_by=?, "
         "dispatch_reason=?, dispatch_reason_json=?, updated_at=? WHERE id=?",
         (source_task_id, source_slice_key, source_step_id, source_workflow_id,
          requester, reason_code, jdumps(reason_json or {}), now, tid),
@@ -397,8 +397,7 @@ def on_task_done(conn: sqlite3.Connection, target_task_id: str) -> dict | None:
         "UPDATE task_dispatches SET status=?, updated_at=? WHERE id=?",
         (status, now, d["id"]))
     conn.execute(
-        "UPDATE tasks SET dispatch_status=?, updated_at=? WHERE id=?",
-        (status, now, target_task_id))
+        "UPDATE tasks SET updated_at=? WHERE id=?", (now, target_task_id))
     if ok:
         append_wake_note(conn, d["return_run_id"],
                          _return_note(conn, d, target_task_id))
@@ -443,7 +442,7 @@ def _promote_open_returns(conn: sqlite3.Connection) -> None:
                 "UPDATE task_dispatches SET status='return_ready', updated_at=? WHERE id=?",
                 (now, d["id"]))
             conn.execute(
-                "UPDATE tasks SET dispatch_status='return_ready', updated_at=? WHERE id=?",
+                "UPDATE tasks SET updated_at=? WHERE id=?",
                 (now, d["target_task_id"]))
             append_wake_note(conn, d["return_run_id"],
                              _return_note(conn, d, d["target_task_id"]))
@@ -453,7 +452,7 @@ def _promote_open_returns(conn: sqlite3.Connection) -> None:
                 "UPDATE task_dispatches SET status='no_return', updated_at=? WHERE id=?",
                 (now, d["id"]))
             conn.execute(
-                "UPDATE tasks SET dispatch_status='no_return', updated_at=? WHERE id=?",
+                "UPDATE tasks SET updated_at=? WHERE id=?",
                 (now, d["target_task_id"]))
             status = "no_return"
         _notify_dispatch_completed(conn, d, d["target_task_id"], summary, status, reason)
@@ -482,7 +481,7 @@ def resolve_dispatch_returns(conn: sqlite3.Connection, pump,
                 "UPDATE task_dispatches SET status='no_return', updated_at=? WHERE id=?",
                 (now_iso(), d["id"]))
             conn.execute(
-                "UPDATE tasks SET dispatch_status='no_return', updated_at=? WHERE id=?",
+                "UPDATE tasks SET updated_at=? WHERE id=?",
                 (now_iso(), d["target_task_id"]))
             conn.commit()
             continue
@@ -495,7 +494,7 @@ def resolve_dispatch_returns(conn: sqlite3.Connection, pump,
                 "UPDATE task_dispatches SET status='no_return', updated_at=? WHERE id=?",
                 (now_iso(), d["id"]))
             conn.execute(
-                "UPDATE tasks SET dispatch_status='no_return', updated_at=? WHERE id=?",
+                "UPDATE tasks SET updated_at=? WHERE id=?",
                 (now_iso(), d["target_task_id"]))
             conn.commit()
             continue
@@ -527,7 +526,7 @@ def resolve_dispatch_returns(conn: sqlite3.Connection, pump,
                     "UPDATE task_dispatches SET status='returned', returned_at=?, "
                     "updated_at=? WHERE id=?", (now, now, s["id"]))
                 conn.execute(
-                    "UPDATE tasks SET dispatch_status='returned', updated_at=? WHERE id=?",
+                    "UPDATE tasks SET updated_at=? WHERE id=?",
                     (now, s["target_task_id"]))
             done += 1
         elif attempts >= max(0, int(limit)):
@@ -535,7 +534,7 @@ def resolve_dispatch_returns(conn: sqlite3.Connection, pump,
                 "UPDATE task_dispatches SET status='no_return', updated_at=? WHERE id=?",
                 (now_iso(), d["id"]))
             conn.execute(
-                "UPDATE tasks SET dispatch_status='no_return', updated_at=? WHERE id=?",
+                "UPDATE tasks SET updated_at=? WHERE id=?",
                 (now_iso(), d["target_task_id"]))
         else:
             conn.execute(
