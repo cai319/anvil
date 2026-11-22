@@ -1,6 +1,10 @@
 """安全加固回归：统一鉴权、SPA 路径穿越、危险入口人类专属、角色 token 任务范围。"""
 from __future__ import annotations
 
+import asyncio
+import contextlib
+from urllib.parse import urlencode
+
 import httpx
 import pytest
 
@@ -234,6 +238,114 @@ async def test_runtime_definition_and_events_are_human_only(
         "/api/v1/runtimes/claude-code/definition", headers=agent)).status_code == 403
     assert (await secure_client.get(
         "/api/v1/events", headers=agent)).status_code == 403
+
+
+async def _asgi_first_chunk(app, query: dict[str, str] | None = None,
+                            headers: dict[str, str] | None = None,
+                            timeout: float = 2.0):
+    """驱动 ASGI app 到首个非空响应体 chunk 后取消（SSE 流不会自然结束）。
+
+    httpx.ASGITransport / Starlette TestClient 会等待完整 body，不能直接用于 SSE 测试。
+    """
+    header_list = [(b"host", b"testserver")]
+    for key, value in (headers or {}).items():
+        header_list.append((key.lower().encode(), value.encode()))
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/api/v1/events",
+        "raw_path": b"/api/v1/events",
+        "query_string": urlencode(query or {}).encode(),
+        "root_path": "",
+        "headers": header_list,
+        "server": ("testserver", 80),
+        "client": ("127.0.0.1", 12345),
+        "app": app,
+    }
+    sent: list[dict] = []
+    first_body = asyncio.Event()
+
+    async def receive():
+        await asyncio.Event().wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+        if message["type"] == "http.response.body" and message.get("body"):
+            first_body.set()
+
+    task = asyncio.create_task(app(scope, receive, send))
+    try:
+        await asyncio.wait_for(first_body.wait(), timeout)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    body = b"".join(
+        m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    return start, body
+
+
+async def test_events_query_token_auth(secure_app):
+    """EventSource 无法带头：/events 必须接受 query token，且返回 connected 握手。"""
+    start, body = await _asgi_first_chunk(
+        secure_app, {"token": secure_app.state.auth_token})
+    headers = {k.decode(): v.decode() for k, v in start["headers"]}
+    assert start["status"] == 200
+    assert headers["content-type"].startswith("text/event-stream")
+    assert headers.get("cache-control") == "no-store"
+    assert b"event: connected" in body
+
+
+async def test_events_query_token_is_scoped_to_events(secure_client, secure_app):
+    """query token 只能用于 events，其他路由继续 401。"""
+    r = await secure_client.get(
+        f"/api/v1/tasks?token={secure_app.state.auth_token}")
+    assert r.status_code == 401
+
+
+async def test_events_missing_or_invalid_query_token(secure_client):
+    assert (await secure_client.get("/api/v1/events")).status_code == 401
+    assert (await secure_client.get("/api/v1/events?token=bogus")).status_code == 401
+
+
+async def test_events_agent_query_token_forbidden(secure_app):
+    _session_token(secure_app, "sse-agent", "qa-role")
+    start, _ = await _asgi_first_chunk(secure_app, {"token": "sse-agent"})
+    assert start["status"] == 403
+
+
+async def test_events_expired_session_query_token(secure_app):
+    conn = open_conn(secure_app.state.db_path)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions "
+            "(token, role_slug, run_id, task_id, created_at, expires_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("expired-sse", "human", None, None, now_iso(),
+             "2000-01-01T00:00:00+00:00"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    start, _ = await _asgi_first_chunk(secure_app, {"token": "expired-sse"})
+    assert start["status"] == 401
+
+
+async def test_events_header_takes_precedence_over_query(secure_app):
+    start, _ = await _asgi_first_chunk(
+        secure_app, {"token": "bogus"},
+        headers={"X-Anvil-Session": secure_app.state.auth_token})
+    assert start["status"] == 200
+
+
+async def test_events_test_auth_bypass_still_human_only(client):
+    """ANVIL_TEST_AUTH 旁路只代表 qa-role，events 仍必须 403。"""
+    assert (await client.get("/api/v1/events?token=whatever")).status_code == 403
 
 
 def test_generated_auth_token_is_private(tmp_path, monkeypatch):

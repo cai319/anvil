@@ -7,7 +7,7 @@ from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..services.tasks import ConflictError
 from ..util import jdumps, now_iso
-from . import access
+from . import access, events
 
 router = APIRouter()
 
@@ -77,6 +77,12 @@ def update_draft(did: str, body: dict, request: Request, conn=Depends(get_db),
         raise HTTPException(status_code=409, detail=str(exc))
     _audit_human_decision(conn, (result or {}).get("source_task"),
                           "board.draft.update", request, {"draft_id": did})
+    events.publish("task", {
+        "id": (result or {}).get("source_task"),
+        "kind": "board_draft",
+        "status": (result or {}).get("status"),
+        "draft_id": did,
+    })
     return result
 
 
@@ -109,13 +115,20 @@ def create_draft(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth
         created_by = body.get("created_by") or (
             f"agent:{auth.role}" if auth.role and auth.role != "human" else "human")
     try:
-        return services.board.create_draft(
+        draft = services.board.create_draft(
             conn, goal=goal, tree=tree, created_by=created_by,
             workspace_id=body.get("workspace_id"), source_task=body.get("source_task"),
             kind=str(body.get("kind") or "tasks"),
         )
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    events.publish("task", {
+        "id": draft.get("source_task"),
+        "kind": "board_draft",
+        "status": draft.get("status"),
+        "draft_id": draft.get("id"),
+    })
+    return draft
 
 
 def _audit_human_decision(conn, task_id: str | None, action: str,
@@ -189,6 +202,12 @@ def approve_drafts(body: dict, request: Request, conn=Depends(get_db),
                 "restart_running": bool(body.get("restart_running")),
                 "restart_reason": body.get("restart_reason"),
             })
+        events.publish("task", {
+            "id": task_id,
+            "kind": "board_draft",
+            "status": "approved",
+            "draft_id": did,
+        })
     return result
 
 
@@ -236,7 +255,6 @@ def _wake_rejected_planner(conn, request: Request, draft: dict,
         )
     except Exception:  # noqa: BLE001 —— 唤醒失败不改变驳回结果
         return None
-    from . import events
     events.publish("task", {"id": task_id, "kind": "plan", "planner": planner})
     return {"run_id": run.get("id"), "planner": planner}
 
@@ -258,6 +276,12 @@ def reject_draft(body: dict, request: Request, conn=Depends(get_db),
         "draft_id": did,
         "feedback": body.get("feedback"),
         "human_decision": True,
+    })
+    events.publish("task", {
+        "id": draft.get("source_task"),
+        "kind": "board_draft",
+        "status": "rejected",
+        "draft_id": did,
     })
     # 驳回后由草案作者（通常是 Cindy）重新规划；不替自然人做其它角色决策。
     replan = _wake_rejected_planner(conn, request, draft, body.get("feedback"))

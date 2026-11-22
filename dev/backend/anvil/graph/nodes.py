@@ -920,12 +920,18 @@ def spawn_node(state: dict, config) -> dict:
             if not runs_service.set_status(
                     conn, run_id, "running",
                     from_statuses=("created", "projecting")):
-                # 并发终止已经赢得竞态：清理刚投递的会话，不能复活终态 run。
-                try:
-                    daemon_service.get_manager().clear_run(run["role_slug"], run_id)
-                except Exception:  # noqa: BLE001
-                    pass
-                runs_service.set_native_session(conn, run_id, None)
+                # CAS 失败有两种来源，必须区分：
+                # 1) daemon 投递链路（_send_locked）在写 stdin 前已把 created/projecting
+                #    提升为 running —— 正常路径，刚投递的进程必须保留；
+                # 2) 并发终止/取消已把 run 置为终态 —— 清理刚投递的会话，不能复活终态 run。
+                current = conn.execute(
+                    "SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
+                if current is None or runs_service.is_terminal_status(current["status"]):
+                    try:
+                        daemon_service.get_manager().clear_run(run["role_slug"], run_id)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    runs_service.set_native_session(conn, run_id, None)
             return {}
         try:
             executable, args, cwd, env, timeout = _render_invocation(

@@ -51,6 +51,84 @@ def test_spawn_resets_started_at_and_freezes_timeout(tmp_path, monkeypatch):
     assert r["timeout_seconds"] == 3600   # P0-2：冻结自 claude-code.yaml invocation.timeout_seconds
 
 
+# ---- v1.47.0 回归：daemon 投递已提升 running，spawn 不得误杀刚拉起的进程 --------
+
+def test_spawn_keeps_run_promoted_to_running_by_delivery(tmp_path, monkeypatch):
+    """真实 DaemonManager._send_locked 在写 stdin 前会把 projecting 置为 running；
+    spawn_node 随后的 CAS 必然失败，但不能当成并发终止去 clear_run——否则刚投递
+    的常驻进程会被立即杀掉，run 永久卡在 running 且无进程。"""
+    from anvil.graph import nodes
+    from anvil.services import daemon as daemon_service
+
+    env = make_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(nodes, "_persistent_session",
+                        lambda conn, effective: {"ok": True})
+
+    class _Mgr:
+        def __init__(self):
+            self.cleared = []
+
+        def ensure_and_deliver(self, conn, role, **kw):
+            # 与真实 _send_locked 一致：投递时把 created/projecting 提升为 running
+            runs_service.set_status(
+                conn, kw["run_id"], "running",
+                from_statuses=("created", "projecting", "suspended"))
+            return {"error": None, "queued": False}
+
+        def clear_run(self, role, run_id):
+            self.cleared.append((role, run_id))
+            return True
+
+    mgr = _Mgr()
+    monkeypatch.setattr(daemon_service, "get_manager", lambda: mgr)
+    conn = open_conn(env["db_path"])
+    run = runs_service.create_run(conn, "dev", task_id=None)
+    conn.close()
+
+    env["orch"].pump(env["db_path"], run["id"], "wake", {})
+
+    r = _get(env, run["id"])
+    assert r["status"] == "running"
+    assert r["native_session_id"] == "rs:dev"   # 会话绑定保留
+    assert mgr.cleared == []                    # 进程未被误杀
+
+
+def test_spawn_cleans_run_terminated_during_delivery(tmp_path, monkeypatch):
+    """投递后若并发终止已把 run 置为终态，spawn 仍须清理会话，不能复活终态。"""
+    from anvil.graph import nodes
+    from anvil.services import daemon as daemon_service
+
+    env = make_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(nodes, "_persistent_session",
+                        lambda conn, effective: {"ok": True})
+
+    class _Mgr:
+        def __init__(self):
+            self.cleared = []
+
+        def ensure_and_deliver(self, conn, role, **kw):
+            runs_service.set_status(
+                conn, kw["run_id"], "failed", ended_at="2026-01-01T00:00:00+00:00")
+            return {"error": None, "queued": False}
+
+        def clear_run(self, role, run_id):
+            self.cleared.append((role, run_id))
+            return True
+
+    mgr = _Mgr()
+    monkeypatch.setattr(daemon_service, "get_manager", lambda: mgr)
+    conn = open_conn(env["db_path"])
+    run = runs_service.create_run(conn, "dev", task_id=None)
+    conn.close()
+
+    env["orch"].pump(env["db_path"], run["id"], "wake", {})
+
+    r = _get(env, run["id"])
+    assert r["status"] == "failed"
+    assert not r["native_session_id"]
+    assert mgr.cleared == [("dev", run["id"])]
+
+
 # ---- Task 4：process_exit 失败分类 + suspended 守卫 ---------------------------
 
 def test_process_exit_classifies_agent_exit(tmp_path, monkeypatch):
