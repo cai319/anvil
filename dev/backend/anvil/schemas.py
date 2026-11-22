@@ -764,6 +764,59 @@ class TaskKnowledgePageOut(BaseModel):
     has_more: bool = False
 
 
+class SubagentRecordOut(BaseModel):
+    id: str
+    run_id: str
+    role_slug: str
+    task_id: str | None = None
+    tool_use_id: str
+    tool_name: str | None = None
+    description: str | None = None
+    prompt_summary: str | None = None
+    status: str
+    started_at: str
+    ended_at: str | None = None
+    result_summary: str | None = None
+    context_available: int = 0
+    updated_at: str | None = None
+    subagent_type: str | None = None
+    proc_generation: int | None = None
+    native_session_id: str | None = None
+    parent_tool_use_id: str | None = None
+    slice_key: str | None = None
+    step_id: str | None = None
+    interrupt_reason: str | None = None
+
+
+class ContextManifestBlockOut(BaseModel):
+    name: str | None = None
+    layer: str | None = None
+    kind: str | None = None
+    scope: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    score: float | None = None
+    chars: int = 0
+    injected: bool = False
+    reason: str | None = None
+    source_ids: list[str] = Field(default_factory=list)
+    priority: int | None = None
+    order: int | None = None
+
+
+class ContextManifestOut(BaseModel):
+    id: int
+    run_id: str | None = None
+    role_slug: str
+    task_id: str | None = None
+    slice_key: str | None = None
+    kind: str
+    budget_chars: int = 0
+    total_chars: int = 0
+    blocks: list[ContextManifestBlockOut] = Field(default_factory=list)
+    omitted: list[ContextManifestBlockOut] = Field(default_factory=list)
+    created_at: str
+
+
 class TimelineEventOut(BaseModel):
     key: str
     ts: str

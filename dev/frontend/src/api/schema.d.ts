@@ -4671,6 +4671,70 @@ export interface components {
              */
             force: boolean;
         };
+        /** ContextManifestBlockOut */
+        ContextManifestBlockOut: {
+            /** Name */
+            name?: string | null;
+            /** Layer */
+            layer?: string | null;
+            /** Kind */
+            kind?: string | null;
+            /** Scope */
+            scope?: string | null;
+            /** Tags */
+            tags?: string[];
+            /** Score */
+            score?: number | null;
+            /**
+             * Chars
+             * @default 0
+             */
+            chars: number;
+            /**
+             * Injected
+             * @default false
+             */
+            injected: boolean;
+            /** Reason */
+            reason?: string | null;
+            /** Source Ids */
+            source_ids?: string[];
+            /** Priority */
+            priority?: number | null;
+            /** Order */
+            order?: number | null;
+        };
+        /** ContextManifestOut */
+        ContextManifestOut: {
+            /** Id */
+            id: number;
+            /** Run Id */
+            run_id?: string | null;
+            /** Role Slug */
+            role_slug: string;
+            /** Task Id */
+            task_id?: string | null;
+            /** Slice Key */
+            slice_key?: string | null;
+            /** Kind */
+            kind: string;
+            /**
+             * Budget Chars
+             * @default 0
+             */
+            budget_chars: number;
+            /**
+             * Total Chars
+             * @default 0
+             */
+            total_chars: number;
+            /** Blocks */
+            blocks?: components["schemas"]["ContextManifestBlockOut"][];
+            /** Omitted */
+            omitted?: components["schemas"]["ContextManifestBlockOut"][];
+            /** Created At */
+            created_at: string;
+        };
         /** DecisionOptionOut */
         DecisionOptionOut: {
             /** Id */
@@ -5911,6 +5975,54 @@ export interface components {
          * @enum {string}
          */
         RuntimeStatus: "ready" | "unverified" | "unhealthy" | "missing";
+        /** SubagentRecordOut */
+        SubagentRecordOut: {
+            /** Id */
+            id: string;
+            /** Run Id */
+            run_id: string;
+            /** Role Slug */
+            role_slug: string;
+            /** Task Id */
+            task_id?: string | null;
+            /** Tool Use Id */
+            tool_use_id: string;
+            /** Tool Name */
+            tool_name?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Prompt Summary */
+            prompt_summary?: string | null;
+            /** Status */
+            status: string;
+            /** Started At */
+            started_at: string;
+            /** Ended At */
+            ended_at?: string | null;
+            /** Result Summary */
+            result_summary?: string | null;
+            /**
+             * Context Available
+             * @default 0
+             */
+            context_available: number;
+            /** Updated At */
+            updated_at?: string | null;
+            /** Subagent Type */
+            subagent_type?: string | null;
+            /** Proc Generation */
+            proc_generation?: number | null;
+            /** Native Session Id */
+            native_session_id?: string | null;
+            /** Parent Tool Use Id */
+            parent_tool_use_id?: string | null;
+            /** Slice Key */
+            slice_key?: string | null;
+            /** Step Id */
+            step_id?: string | null;
+            /** Interrupt Reason */
+            interrupt_reason?: string | null;
+        };
         /** SubmitIn */
         SubmitIn: {
             /** Summary */
@@ -10154,7 +10266,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SubagentRecordOut"][];
                 };
             };
             /** @description Validation Error */
@@ -16135,7 +16247,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SubagentRecordOut"][];
                 };
             };
             /** @description Validation Error */
@@ -16341,7 +16453,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ContextManifestOut"][];
                 };
             };
             /** @description Validation Error */

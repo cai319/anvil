@@ -12,7 +12,8 @@ from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import (
     ClaimIn, CommentIn, DelegationOut, DepIn, ReviewIn, SubmitIn, TaskChildOut,
     TaskChildrenOut, TaskDispatchOut, TaskIn, TaskKnowledgeOut, TaskOut,
-    TaskPatch, TaskRoleStatesBatchOut, TaskRoleStatesOut, TimelineEventOut,
+    TaskPatch, TaskRoleStatesBatchOut, TaskRoleStatesOut, SubagentRecordOut,
+    TimelineEventOut,
 )
 from ..services import knowledge_quality, ledger, repo_catalog
 from ..services.tasks import ConflictError
@@ -870,7 +871,7 @@ def review_task(tid: str, body: ReviewIn, request: Request, conn=Depends(get_db)
     return result
 
 
-@router.get("/{tid}/subagents")
+@router.get("/{tid}/subagents", response_model=list[SubagentRecordOut])
 def list_task_subagents(tid: str, status: str | None = None, limit: int = 100,
                         conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """该任务相关 run 的运行时子代理观测记录（只读，不参与调度）。"""

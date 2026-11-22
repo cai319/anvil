@@ -50,13 +50,17 @@
   `TaskChild`、`TaskRoleState`、`Delegation`、`TaskDispatch`、`Finding`、
   `FindingBoard`、`FindingSummary`、`FindingSchema`、`TaskKnowledge`、
   `WorkspaceKnowledge`、`QualityReport`、`TimelineEvent`、`TaskLeases`、
-  `RoleRuntimeStatus`、`RoleTaskContext`、`WorkflowMetrics`、`WorkflowGraphResponse`。
+  `RoleRuntimeStatus`、`RoleTaskContext`、`WorkflowMetrics`、`WorkflowGraphResponse`、
+  `SubagentRecord`、`ContextManifest`。
 - 已补响应模型：Task 嵌套（workspace/role_claims/plan_seed/knowledge_repos）、
   RunOut、WorkflowOut/StepOut/HistoryOut（含 definition/evidence/decision_options）。
 - 契约回归：`tests/api/test_contract_models.py` 锁定 Task/Run 嵌套字段不被裁剪。
 - 阻塞点：后端 249 条路径仅 32 个 schema，多数端点只返回 dict；`TaskOut` 的
   嵌套字段仍是 `object`。要删除其余手写契约，必须先给 GET 端点补
   `response_model` 与嵌套 Pydantic 模型（属于独立的后端契约工程）。
+- 仍保留的手写类型：BoardDraft/InboxDraftMeta（planner 自由 JSON tree）、
+  WorkflowTemplate 族（模板 definition/layout）、TopicRepo/RepoCard 等管理视图；
+  这些属于灵活载荷或前端视图模型，暂不强建模。
 - 新增/修改返回体时优先补 `response_model`，再跑生成脚本；手写类型只用于
   前端视图模型与后端尚未建模的响应。
 

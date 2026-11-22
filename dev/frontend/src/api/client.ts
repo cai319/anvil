@@ -109,28 +109,7 @@ export type Role = Schemas["RoleOut"];
 
 export type RoleTaskContext = Required<Schemas["RoleTaskContextOut"]>;
 
-export interface SubagentRecord {
-  id: string;
-  run_id: string;
-  role_slug: string;
-  task_id: string | null;
-  tool_use_id: string;
-  tool_name: string | null;
-  subagent_type: string | null;
-  description: string | null;
-  prompt_summary: string | null;
-  status: "running" | "completed" | "interrupted" | string;
-  started_at: string;
-  ended_at: string | null;
-  result_summary: string | null;
-  context_available: number;
-  proc_generation: number | null;
-  native_session_id: string | null;
-  parent_tool_use_id: string | null;
-  slice_key: string | null;
-  step_id: string | null;
-  interrupt_reason: string | null;
-}
+export type SubagentRecord = Required<Schemas["SubagentRecordOut"]>;
 
 export type TaskRoleState = Required<Schemas["TaskRoleStateOut"]>;
 
@@ -1686,34 +1665,14 @@ export interface BoardDraft {
 
 export type TimelineEvent = Required<Schemas["TimelineEventOut"]>;
 
-export interface ContextManifestBlock {
-  name?: string | null;
-  layer?: string | null;
-  kind?: string | null;
-  scope?: string | null;
-  tags?: string[];
-  score?: number | null;
-  chars?: number;
-  injected?: boolean;
-  reason?: string | null;
-  source_ids?: string[];
-  priority?: number;
-  order?: number;
-}
+export type ContextManifestBlock = Required<Schemas["ContextManifestBlockOut"]>;
 
-export interface ContextManifest {
-  id: number;
-  run_id?: string | null;
-  role_slug: string;
-  task_id?: string | null;
-  slice_key?: string | null;
-  kind: string;
-  budget_chars: number;
-  total_chars: number;
+export type ContextManifest = Required<
+  Omit<Schemas["ContextManifestOut"], "blocks" | "omitted">
+> & {
   blocks: ContextManifestBlock[];
   omitted: ContextManifestBlock[];
-  created_at: string;
-}
+};
 
 export interface Reminder {
   id: string;
