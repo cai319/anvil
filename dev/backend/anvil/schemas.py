@@ -21,6 +21,7 @@ class RunStatus(str, Enum):
     running = "running"
     submitted = "submitted"
     reviewing = "reviewing"
+    suspended = "suspended"
     completed = "completed"
     failed = "failed"
     abandoned = "abandoned"

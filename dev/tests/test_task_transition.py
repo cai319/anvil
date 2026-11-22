@@ -93,3 +93,10 @@ def test_no_runtime_dispatch_status_mirror_writes():
         if "UPDATE tasks SET dispatch_status" in path.read_text(encoding="utf-8"):
             offenders.append(str(path.relative_to(root)))
     assert offenders == []
+
+
+def test_run_status_enum_includes_suspended():
+    """schemas.RunStatus 必须与 runs.py 的 9 状态生命周期一致。"""
+    from anvil.schemas import RunStatus
+
+    assert RunStatus("suspended") is RunStatus.suspended
