@@ -92,7 +92,7 @@ Anvil 要解决的就是这一层。它不重新实现 Agent，不代理模型�
 | 图表 | `@xyflow/react`（工作流图） | 仅图编辑需要重型依赖 |
 | 实时推送 | SSE | 单向为主，比 WebSocket 轻 |
 | 打包 | PyInstaller | 单目录分发，前端静态资源内嵌 |
-| 客户端生成 | 手写 TypeScript 契约（生成化待 P1） | 当前 `client.ts` 手写；OpenAPI 生成列为后续优化 |
+| 客户端生成 | OpenAPI 生成 + 手写薄封装 | `schema.d.ts` 由后端规格生成；灵活载荷仍手写 |
 
 服务监听 `127.0.0.1:7317`，仅绑定回环地址，请求携带本地 token 做轻量校验（防止本机其他程序误触，而非防御真实攻击者）。
 
@@ -777,7 +777,9 @@ SQLite 的 `BEGIN IMMEDIATE` 加上单进程编排，足以保证排他性。不
 
 ### 6.1 调度循环
 
-编排器是一个后台线程，每 5 秒扫描一轮。实际顺序（`scheduler.tick_once`）：
+编排器是一个后台线程，每 5 秒扫描一轮。实现按 10 个域组织
+（governance / advance / wake / maintenance / finalize / dispatch / recovery /
+monitor / reap / reconcile），域与域内阶段顺序固定；核心阶段顺序如下：
 
 ```python
 def tick_once():

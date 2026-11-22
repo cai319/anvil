@@ -747,3 +747,20 @@ cd frontend && npm run build         # tsc + vite build
   `shlex.quote`，不可信标题单行截断。
 - 全量：**1032 passed / 63 skipped**；前端 `npm run build` 通过。
 - 发布说明：`docs/v1.47.0-release.md`。
+
+## 状态单写者、结构拆分与契约生成（2026-11-22，v1.48.0）
+
+- **P0 状态收敛**：`tasks.status` 唯一经 `transition_task`（CAS）；`dispatch_status`
+  改为派生；角色状态服务端推导（单任务/批量）；委派/派遣统一为 `/children` 投影；
+  activities/audit/events 走 `ledger` 单写者；新增 `/work-items`；删除
+  `cost_ledger`/`repo_split_map` 建表；新增架构护栏与复杂度预算文档。
+- **P1 结构**：`workflow.py` 拆为 5 个模块（4,505→75 行门面，最大 1,618）；
+  `daemon.py` 拆为 mixin（3,036→160 行核心，最大 1,108）；scheduler 22 阶段→10 域；
+  prompt run 分类/协议选择单点化 + 16 协议哈希快照；TaskDetail 2,834→1,831 行并统一
+  状态词表；OpenAPI 32→92 schemas，核心实体改用生成 TS 类型。
+- **P2.15**：CIC 冷唤醒预算 `ANVIL_CIC_COLD_BUDGET_CHARS` + 拉模式未读提示；
+  pull inbox 与 held draft 沿用既有实现。P2.16–P2.18 不实施。
+- **修复**：`RunStatus.suspended`；context-manifest `source_ids` 整数 id 500；
+  并发测试共享连接导致的偶发失败；任务删除 tombstone 不再污染 events。
+- 全量：**1082 passed / 63 skipped**；前端 `tsc` + `build` 通过；线上重启验证通过。
+- 发布说明：`docs/v1.48.0-release.md`。
