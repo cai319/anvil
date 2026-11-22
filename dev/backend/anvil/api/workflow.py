@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 
 from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
-from ..schemas import WorkflowHistoryOut, WorkflowOut
+from ..schemas import TaskLeasesOut, WorkflowHistoryOut, WorkflowOut
 from ..services.tasks import ConflictError
 from ..services import dossier as dossier_service
 from ..services import leases as lease_service
@@ -153,7 +153,7 @@ def download_replay_log(tid: str, conn=Depends(get_db),
         headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
-@router.get("/tasks/{tid}/leases")
+@router.get("/tasks/{tid}/leases", response_model=TaskLeasesOut)
 def list_leases(tid: str, conn=Depends(get_db),
                 auth: Auth = Depends(get_auth)):
     access.assert_task_read(conn, auth, tid)

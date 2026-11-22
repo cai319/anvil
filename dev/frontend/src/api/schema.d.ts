@@ -5139,6 +5139,44 @@ export interface components {
             /** Reason */
             reason?: string | null;
         };
+        /** LeaseRecordOut */
+        LeaseRecordOut: {
+            /** Id */
+            id: string;
+            /**
+             * Resource Type
+             * @enum {string}
+             */
+            resource_type: "step" | "slice" | "path" | "task";
+            /** Resource Key */
+            resource_key: string;
+            /** Holder Type */
+            holder_type: string;
+            /** Holder */
+            holder?: string | null;
+            /** Run Id */
+            run_id?: string | null;
+            /**
+             * Fence
+             * @default 0
+             */
+            fence: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "active" | "released" | "expired";
+            /** Acquired At */
+            acquired_at: string;
+            /** Renewed At */
+            renewed_at?: string | null;
+            /** Expires At */
+            expires_at?: string | null;
+            /** Meta Json */
+            meta_json?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** LessonIn */
         LessonIn: {
             /** Content */
@@ -5189,6 +5227,21 @@ export interface components {
             tags?: string[];
             /** Repo */
             repo?: string | null;
+        };
+        /** ModelPoolWindowOut */
+        ModelPoolWindowOut: {
+            /** Model */
+            model: string;
+            /**
+             * Context Window
+             * @default 0
+             */
+            context_window: number;
+            /**
+             * Fits
+             * @default false
+             */
+            fits: boolean;
         };
         /** NoteWriteIn */
         NoteWriteIn: {
@@ -5390,6 +5443,34 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** RoleActiveSubagentOut */
+        RoleActiveSubagentOut: {
+            /** Tool Use Id */
+            tool_use_id: string;
+            /** Tool Name */
+            tool_name?: string | null;
+            /** Subagent Type */
+            subagent_type?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Prompt Summary */
+            prompt_summary?: string | null;
+            /** Status */
+            status?: string | null;
+            /** Started At */
+            started_at?: string | null;
+            /** Ended At */
+            ended_at?: string | null;
+            /** Result Summary */
+            result_summary?: string | null;
+            /**
+             * Context Available
+             * @default 0
+             */
+            context_available: number;
+        } & {
+            [key: string]: unknown;
+        };
         /** RoleIn */
         RoleIn: {
             /** Slug */
@@ -5458,6 +5539,216 @@ export interface components {
             definition?: {
                 [key: string]: unknown;
             };
+        };
+        /** RoleQueueContextOut */
+        RoleQueueContextOut: {
+            /** Task Id */
+            task_id?: string | null;
+            /** Slice Key */
+            slice_key?: string | null;
+            /**
+             * Count
+             * @default 0
+             */
+            count: number;
+            /**
+             * Ahead Count
+             * @default 0
+             */
+            ahead_count: number;
+        };
+        /** RoleQueueItemOut */
+        RoleQueueItemOut: {
+            /** Run Id */
+            run_id?: string | null;
+            /** Task Id */
+            task_id?: string | null;
+            /** Slice Key */
+            slice_key?: string | null;
+        };
+        /** RoleQueueTaskOut */
+        RoleQueueTaskOut: {
+            /** Id */
+            id: string;
+            /** Title */
+            title: string;
+            /** Status */
+            status?: string | null;
+            /**
+             * Count
+             * @default 0
+             */
+            count: number;
+            /**
+             * Ahead Count
+             * @default 0
+             */
+            ahead_count: number;
+        };
+        /** RoleRuntimeStatusOut */
+        RoleRuntimeStatusOut: {
+            /** Role Slug */
+            role_slug: string;
+            /**
+             * Alive
+             * @default false
+             */
+            alive: boolean;
+            /**
+             * Status
+             * @default dead
+             */
+            status: string;
+            /** Busy Since */
+            busy_since?: string | null;
+            /** Pid */
+            pid?: number | null;
+            /** Session Id */
+            session_id?: string | null;
+            /** Current Task Id */
+            current_task_id?: string | null;
+            /** Current Run Id */
+            current_run_id?: string | null;
+            /** Current Step Id */
+            current_step_id?: string | null;
+            /** Current Slice Key */
+            current_slice_key?: string | null;
+            /** Context Task Id */
+            context_task_id?: string | null;
+            /** Context Slice Key */
+            context_slice_key?: string | null;
+            /** Context Key */
+            context_key?: string | null;
+            /**
+             * Switching
+             * @default false
+             */
+            switching: boolean;
+            /**
+             * Queue Len
+             * @default 0
+             */
+            queue_len: number;
+            /** Queue */
+            queue?: components["schemas"]["RoleQueueItemOut"][];
+            /** Queue Tasks */
+            queue_tasks?: components["schemas"]["RoleQueueTaskOut"][];
+            /** Queue Contexts */
+            queue_contexts?: components["schemas"]["RoleQueueContextOut"][];
+            /**
+             * Queue Global Count
+             * @default 0
+             */
+            queue_global_count: number;
+            /** Active Subagents */
+            active_subagents?: components["schemas"]["RoleActiveSubagentOut"][];
+            /**
+             * Context Tokens
+             * @default 0
+             */
+            context_tokens: number;
+            /** Model Id */
+            model_id?: string | null;
+            /** Served Model Id */
+            served_model_id?: string | null;
+            /** Model Pool */
+            model_pool?: string[];
+            /** Context Window Floor */
+            context_window_floor?: number | null;
+            /**
+             * Active Context Window
+             * @default 0
+             */
+            active_context_window: number;
+            /**
+             * Context Window
+             * @default 0
+             */
+            context_window: number;
+            /**
+             * Context Fit
+             * @default true
+             */
+            context_fit: boolean;
+            /**
+             * Context Safe Fit
+             * @default true
+             */
+            context_safe_fit: boolean;
+            /** Model Pool Windows */
+            model_pool_windows?: components["schemas"]["ModelPoolWindowOut"][];
+            /**
+             * Cic Threshold Tokens
+             * @default 0
+             */
+            cic_threshold_tokens: number;
+            /**
+             * Hard Limit Tokens
+             * @default 0
+             */
+            hard_limit_tokens: number;
+            /**
+             * Hint Tokens
+             * @default 0
+             */
+            hint_tokens: number;
+            /**
+             * Payload Chars
+             * @default 0
+             */
+            payload_chars: number;
+            /**
+             * Payload Limit Chars
+             * @default 0
+             */
+            payload_limit_chars: number;
+            current_task?: components["schemas"]["TaskRefOut"] | null;
+            /** Current Run Status */
+            current_run_status?: string | null;
+            /** Current Run Failure Class */
+            current_run_failure_class?: string | null;
+            /** Busy Scope */
+            busy_scope?: ("task" | "global") | null;
+            /** Contexts */
+            contexts?: components["schemas"]["RoleTaskContextOut"][];
+        };
+        /** RoleTaskContextOut */
+        RoleTaskContextOut: {
+            /** Context Key */
+            context_key?: string | null;
+            /** Task Id */
+            task_id?: string | null;
+            /** Slice Key */
+            slice_key?: string | null;
+            /** Slice Title */
+            slice_title?: string | null;
+            /** Task Title */
+            task_title: string;
+            /** Task Status */
+            task_status?: string | null;
+            /**
+             * Has Session
+             * @default false
+             */
+            has_session: boolean;
+            /** Session Id */
+            session_id?: string | null;
+            /**
+             * Context Tokens
+             * @default 0
+             */
+            context_tokens: number;
+            /** Last Active At */
+            last_active_at?: string | null;
+            /**
+             * Status
+             * @default idle
+             */
+            status: string;
+            /** Cwd */
+            cwd?: string | null;
+            /** Workspace Path */
+            workspace_path?: string | null;
         };
         /** RunOut */
         RunOut: {
@@ -5984,6 +6275,35 @@ export interface components {
              */
             has_more: boolean;
         };
+        /** TaskLeaseStepOut */
+        TaskLeaseStepOut: {
+            /** Workflow Id */
+            workflow_id: string;
+            /** Step Id */
+            step_id: string;
+            /** Status */
+            status: string;
+            /** Lease Id */
+            lease_id?: string | null;
+            /**
+             * Fence Token
+             * @default 0
+             */
+            fence_token: number;
+            /** Holder */
+            holder?: string | null;
+            /** Expires At */
+            expires_at?: string | null;
+            /** Lease Status */
+            lease_status?: string | null;
+        };
+        /** TaskLeasesOut */
+        TaskLeasesOut: {
+            /** Paths */
+            paths?: components["schemas"]["LeaseRecordOut"][];
+            /** Steps */
+            steps?: components["schemas"]["TaskLeaseStepOut"][];
+        };
         /** TaskOut */
         TaskOut: {
             /** Id */
@@ -6112,6 +6432,15 @@ export interface components {
             /** Issue Board Enabled */
             issue_board_enabled?: boolean | null;
         };
+        /** TaskRefOut */
+        TaskRefOut: {
+            /** Id */
+            id: string;
+            /** Title */
+            title: string;
+            /** Status */
+            status?: string | null;
+        };
         /** TaskRoleClaimOut */
         TaskRoleClaimOut: {
             /** Role Slug */
@@ -6185,6 +6514,35 @@ export interface components {
             kind?: string | null;
             /** Status */
             status?: string | null;
+        };
+        /** TimelineEventOut */
+        TimelineEventOut: {
+            /** Key */
+            key: string;
+            /** Ts */
+            ts: string;
+            /** Kind */
+            kind: string;
+            /** Role */
+            role?: string | null;
+            /** Task Id */
+            task_id?: string | null;
+            /** Run Id */
+            run_id?: string | null;
+            /** Seq */
+            seq?: number | null;
+            /** Workflow Id */
+            workflow_id?: string | null;
+            /** Step Id */
+            step_id?: string | null;
+            /** Slice Key */
+            slice_key?: string | null;
+            /** Execution No */
+            execution_no?: number | null;
+            /** Payload */
+            payload?: {
+                [key: string]: unknown;
+            };
         };
         /** ToolsIn */
         ToolsIn: {
@@ -7284,7 +7642,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["RoleRuntimeStatusOut"][];
                 };
             };
             /** @description Validation Error */
@@ -7494,7 +7852,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["RoleRuntimeStatusOut"];
                 };
             };
             /** @description Validation Error */
@@ -8844,7 +9202,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["TimelineEventOut"][];
                 };
             };
             /** @description Validation Error */
@@ -11206,7 +11564,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["TaskLeasesOut"];
                 };
             };
             /** @description Validation Error */

@@ -669,6 +669,161 @@ class TaskKnowledgePageOut(BaseModel):
     has_more: bool = False
 
 
+class TimelineEventOut(BaseModel):
+    key: str
+    ts: str
+    kind: str
+    role: str | None = None
+    task_id: str | None = None
+    run_id: str | None = None
+    seq: int | None = None
+    workflow_id: str | None = None
+    step_id: str | None = None
+    slice_key: str | None = None
+    execution_no: int | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class LeaseRecordOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    resource_type: Literal["step", "slice", "path", "task"]
+    resource_key: str
+    holder_type: str
+    holder: str | None = None
+    run_id: str | None = None
+    fence: int = 0
+    status: Literal["active", "released", "expired"]
+    acquired_at: str
+    renewed_at: str | None = None
+    expires_at: str | None = None
+    meta_json: str | None = None
+
+
+class TaskLeaseStepOut(BaseModel):
+    workflow_id: str
+    step_id: str
+    status: str
+    lease_id: str | None = None
+    fence_token: int = 0
+    holder: str | None = None
+    expires_at: str | None = None
+    lease_status: str | None = None
+
+
+class TaskLeasesOut(BaseModel):
+    paths: list[LeaseRecordOut] = Field(default_factory=list)
+    steps: list[TaskLeaseStepOut] = Field(default_factory=list)
+
+
+class RoleTaskContextOut(BaseModel):
+    context_key: str | None = None
+    task_id: str | None = None
+    slice_key: str | None = None
+    slice_title: str | None = None
+    task_title: str
+    task_status: str | None = None
+    has_session: bool = False
+    session_id: str | None = None
+    context_tokens: int = 0
+    last_active_at: str | None = None
+    status: str = "idle"
+    cwd: str | None = None
+    workspace_path: str | None = None
+
+
+class RoleQueueItemOut(BaseModel):
+    run_id: str | None = None
+    task_id: str | None = None
+    slice_key: str | None = None
+
+
+class RoleQueueTaskOut(BaseModel):
+    id: str
+    title: str
+    status: str | None = None
+    count: int = 0
+    ahead_count: int = 0
+
+
+class RoleQueueContextOut(BaseModel):
+    task_id: str | None = None
+    slice_key: str | None = None
+    count: int = 0
+    ahead_count: int = 0
+
+
+class RoleActiveSubagentOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    tool_use_id: str
+    tool_name: str | None = None
+    subagent_type: str | None = None
+    description: str | None = None
+    prompt_summary: str | None = None
+    status: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    result_summary: str | None = None
+    context_available: int = 0
+
+
+class ModelPoolWindowOut(BaseModel):
+    model: str
+    context_window: int = 0
+    fits: bool = False
+
+
+class TaskRefOut(BaseModel):
+    id: str
+    title: str
+    status: str | None = None
+
+
+class RoleRuntimeStatusOut(BaseModel):
+    role_slug: str
+    alive: bool = False
+    status: str = "dead"
+    busy_since: str | None = None
+    pid: int | None = None
+    session_id: str | None = None
+    current_task_id: str | None = None
+    current_run_id: str | None = None
+    current_step_id: str | None = None
+    current_slice_key: str | None = None
+    context_task_id: str | None = None
+    context_slice_key: str | None = None
+    context_key: str | None = None
+    switching: bool = False
+    queue_len: int = 0
+    queue: list[RoleQueueItemOut] = Field(default_factory=list)
+    queue_tasks: list[RoleQueueTaskOut] = Field(default_factory=list)
+    queue_contexts: list[RoleQueueContextOut] = Field(default_factory=list)
+    queue_global_count: int = 0
+    active_subagents: list[RoleActiveSubagentOut] = Field(default_factory=list)
+    context_tokens: int = 0
+    model_id: str | None = None
+    served_model_id: str | None = None
+    model_pool: list[str] = Field(default_factory=list)
+    context_window_floor: int | None = None
+    active_context_window: int = 0
+    context_window: int = 0
+    context_fit: bool = True
+    context_safe_fit: bool = True
+    model_pool_windows: list[ModelPoolWindowOut] = Field(default_factory=list)
+    cic_threshold_tokens: int = 0
+    hard_limit_tokens: int = 0
+    hint_tokens: int = 0
+    payload_chars: int = 0
+    payload_limit_chars: int = 0
+    current_task: TaskRefOut | None = None
+    current_run_status: str | None = None
+    current_run_failure_class: str | None = None
+    busy_scope: Literal["task", "global"] | None = None
+    contexts: list[RoleTaskContextOut] = Field(default_factory=list)
+
+
 class DelegationOut(BaseModel):
     """委派工单：声明前端/CLI 使用的稳定字段；其余 task 列透传。"""
     model_config = ConfigDict(extra="allow")

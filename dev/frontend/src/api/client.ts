@@ -107,21 +107,7 @@ export interface FeatureFlag {
 
 export type Role = Schemas["RoleOut"];
 
-export interface RoleTaskContext {
-  context_key?: string | null;
-  task_id: string | null;
-  slice_key?: string | null;
-  slice_title?: string | null;
-  task_title: string;
-  task_status: string | null;
-  has_session: boolean;
-  session_id: string;
-  context_tokens: number;
-  last_active_at: string | null;
-  status: string;
-  cwd: string | null;
-  workspace_path: string | null;
-}
+export type RoleTaskContext = Required<Schemas["RoleTaskContextOut"]>;
 
 export interface SubagentRecord {
   id: string;
@@ -148,49 +134,7 @@ export interface SubagentRecord {
 
 export type TaskRoleState = Required<Schemas["TaskRoleStateOut"]>;
 
-export interface RoleRuntimeStatus {
-  role_slug: string;
-  alive: boolean;
-  status: "dead" | "idle" | "busy" | string;
-  busy_since: string | null;
-  current_task_id: string | null;
-  current_task: { id: string; title: string; status: string | null } | null;
-  current_run_id: string | null;
-  current_run_status?: string | null;
-  current_run_failure_class?: string | null;
-  current_step_id: string | null;
-  current_slice_key?: string | null;
-  context_key?: string | null;
-  context_task_id: string | null;
-  context_slice_key?: string | null;
-  queue_len: number;
-  queue_global_count?: number;
-  queue_tasks: {
-    id: string; title: string; status: string | null; count: number;
-    ahead_count?: number;
-  }[];
-  queue_contexts?: {
-    task_id: string | null; slice_key: string | null; count: number;
-    ahead_count?: number;
-  }[];
-  busy_scope?: "task" | "global" | null;
-  contexts: RoleTaskContext[];
-  switching?: boolean;
-  active_subagents?: {
-    tool_use_id: string;
-    tool_name?: string | null;
-    subagent_type?: string | null;
-    description?: string | null;
-    prompt_summary?: string | null;
-    status?: string | null;
-    started_at?: string | null;
-    ended_at?: string | null;
-    result_summary?: string | null;
-    context_available?: number;
-  }[];
-  context_tokens: number;
-  model_id: string | null;
-}
+export type RoleRuntimeStatus = Required<Schemas["RoleRuntimeStatusOut"]>;
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -1624,36 +1568,9 @@ export interface WorkflowDossier {
   generated_at: string;
 }
 
-export interface LeaseRecord {
-  id: string;
-  resource_type: "step" | "slice" | "path" | "task";
-  resource_key: string;
-  holder_type: string;
-  holder: string | null;
-  run_id: string | null;
-  fence: number;
-  status: "active" | "released" | "expired";
-  acquired_at: string;
-  renewed_at: string | null;
-  expires_at: string | null;
-  meta_json?: string;
-}
-
-export interface TaskLeaseStep {
-  workflow_id: string;
-  step_id: string;
-  status: string;
-  lease_id: string | null;
-  fence_token: number;
-  holder: string | null;
-  expires_at: string | null;
-  lease_status: string | null;
-}
-
-export interface TaskLeases {
-  paths: LeaseRecord[];
-  steps: TaskLeaseStep[];
-}
+export type LeaseRecord = Required<Schemas["LeaseRecordOut"]>;
+export type TaskLeaseStep = Required<Schemas["TaskLeaseStepOut"]>;
+export type TaskLeases = Required<Schemas["TaskLeasesOut"]>;
 
 export interface TaskWeightResult {
   task_id: string;
@@ -1826,20 +1743,7 @@ export interface BoardDraft {
   created_at: string;
 }
 
-export interface TimelineEvent {
-  key: string;
-  ts: string;
-  kind: string;
-  role: string | null;
-  task_id: string | null;
-  run_id: string | null;
-  seq?: number | null;
-  workflow_id?: string | null;
-  step_id?: string | null;
-  slice_key?: string | null;
-  execution_no?: number | null;
-  payload: Record<string, unknown>;
-}
+export type TimelineEvent = Required<Schemas["TimelineEventOut"]>;
 
 export interface ContextManifestBlock {
   name?: string | null;

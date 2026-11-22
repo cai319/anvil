@@ -12,7 +12,7 @@ from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import (
     ClaimIn, CommentIn, DelegationOut, DepIn, ReviewIn, SubmitIn, TaskChildOut,
     TaskChildrenOut, TaskDispatchOut, TaskIn, TaskKnowledgeOut, TaskOut,
-    TaskPatch, TaskRoleStatesBatchOut, TaskRoleStatesOut,
+    TaskPatch, TaskRoleStatesBatchOut, TaskRoleStatesOut, TimelineEventOut,
 )
 from ..services import knowledge_quality, ledger, repo_catalog
 from ..services.tasks import ConflictError
@@ -517,7 +517,7 @@ def delete_task_knowledge(tid: str, kid: str, conn=Depends(get_db),
     return None
 
 
-@router.get("/{tid}/timeline")
+@router.get("/{tid}/timeline", response_model=list[TimelineEventOut])
 def task_timeline(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """任务会话时间线：多角色交互流（认领/提交/评审/评论/运行生命周期）。"""
     if services.tasks.get(conn, tid) is None:
