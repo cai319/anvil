@@ -307,6 +307,14 @@ export interface SubagentRecord {
   interrupt_reason: string | null;
 }
 
+export interface TaskRoleState {
+  role_slug: string;
+  state: string;
+  queued: number;
+  working_here: boolean;
+  busy_elsewhere: boolean;
+}
+
 export interface RoleRuntimeStatus {
   role_slug: string;
   alive: boolean;
@@ -432,6 +440,9 @@ export const api = {
     return authFetch(`${BASE}/tasks${suffix}`).then((r) => json<Task[]>(r));
   },
   getTask: (id: string): Promise<Task> => authFetch(`${BASE}/tasks/${id}`).then((r) => json<Task>(r)),
+  getTaskRoleStates: (id: string): Promise<{ task_id: string; roles: TaskRoleState[] }> =>
+    authFetch(`${BASE}/tasks/${id}/role-states`)
+      .then((r) => json<{ task_id: string; roles: TaskRoleState[] }>(r)),
   createTask: (title: string, opts?: {
     description?: string; assignees?: string[]; plan_first?: boolean; planner?: string;
     plan_seed?: { template_id: string; version: number; name?: string } | null;

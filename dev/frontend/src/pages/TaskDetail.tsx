@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { api, isOnboardingRole, type BoardDraft, type Delegation, type FindingSummary, type KnowledgeKind, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Run, type Task, type TaskDispatch, type TaskKnowledge, type TaskLeases, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight, type WorkspaceKnowledge } from "../api/client";
+import { api, isOnboardingRole, type BoardDraft, type Delegation, type FindingSummary, type KnowledgeKind, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Run, type Task, type TaskDispatch, type TaskKnowledge, type TaskLeases, type TaskRoleState, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight, type WorkspaceKnowledge } from "../api/client";
 import { useLiveRefresh } from "../useLiveRefresh";
 import {
   AUTHORITY_LABEL,
@@ -11,7 +11,7 @@ import {
 import { UNBOUND_CHANNEL_VIEW } from "../channelView";
 import { RoleSessions } from "./RoleSessions";
 import { WorkflowGraph } from "./WorkflowGraph";
-import { taskRoleState } from "../roleStatus";
+import { roleStatusFromServer, taskRoleState } from "../roleStatus";
 import { formatClock, formatDateTime, formatDuration } from "../time";
 import { useRoleRuntimes } from "../useRoleRuntimes";
 import { usePanelLayout } from "../usePanelLayout";
@@ -1079,6 +1079,7 @@ export function TaskDetail({ id }: { id: string }) {
   const [wfView, setWfView] = useState<"graph" | "list">("graph");
   const [seedTemplates, setSeedTemplates] = useState<WorkflowTemplate[]>([]);
   const [seedId, setSeedId] = useState("");
+  const [roleStates, setRoleStates] = useState<Record<string, TaskRoleState>>({});
   const [busy, setBusy] = useState(false);
   const { slugs: liveSlugs, runtimes: roleRuntimes } = useRoleRuntimes(task);
   const panel = usePanelLayout({ storageKey: "task" });
@@ -1120,6 +1121,11 @@ export function TaskDetail({ id }: { id: string }) {
 
   const refreshDrafts = () =>
     api.listDrafts(id).then(setDrafts).catch(() => setDrafts([]));
+
+  const refreshRoleStates = () =>
+    api.getTaskRoleStates(id).then((res) => {
+      setRoleStates(Object.fromEntries(res.roles.map((r) => [r.role_slug, r])));
+    }).catch(() => setRoleStates({}));
 
   const refresh = () =>
     Promise.all([api.getTask(id), api.getTaskTimeline(id), api.listTaskRuns(id)])
@@ -1180,6 +1186,7 @@ export function TaskDetail({ id }: { id: string }) {
     refreshWorkflow();
     refreshDelegations();
     refreshDispatches();
+    refreshRoleStates();
     api.listRoles().then(setRoles).catch(() => {});
     api.listWorkflowTemplates(undefined, "active").then((list) => {
       setSeedTemplates(list.filter((item) => item.published_version
@@ -1191,7 +1198,7 @@ export function TaskDetail({ id }: { id: string }) {
   useLiveRefresh(
     () => Promise.all([
       refresh(), refreshWorkflow(), refreshDelegations(),
-      refreshDispatches(), refreshDrafts(),
+      refreshDispatches(), refreshDrafts(), refreshRoleStates(),
     ]),
     {
       enabled: !gone,
@@ -1357,16 +1364,22 @@ export function TaskDetail({ id }: { id: string }) {
     const returnPending = dispatches.some(
       (d) => d.target_role === slug
         && (d.status === "return_ready" || d.status === "returning"));
-    let state = taskRoleState({
-      task,
-      role: slug,
-      runtime: rt,
-      workflow,
-      relatedTaskIds,
-      sliceKey: wfSlice,
-      runStatus: latestRun?.status ?? null,
-      returnPending,
-    });
+    const serverState = roleStates[slug];
+    let state = serverState
+      ? roleStatusFromServer({
+          ...serverState,
+          currentStepId: rt?.current_step_id,
+        })
+      : taskRoleState({
+          task,
+          role: slug,
+          runtime: rt,
+          workflow,
+          relatedTaskIds,
+          sliceKey: wfSlice,
+          runStatus: latestRun?.status ?? null,
+          returnPending,
+        });
     if (!rt) {
       state = {
         ...state, key: "loading", label: "加载中", tone: "gray",
@@ -2718,7 +2731,7 @@ export function TaskDetail({ id }: { id: string }) {
         );
       })()}
 
-      {tab === "runtime" && <RoleSessions task={task} roles={roles} workflow={workflow} dispatches={dispatches} relatedTaskIds={relatedTaskIds} focus={runtimeFocus} />}
+      {tab === "runtime" && <RoleSessions task={task} roles={roles} workflow={workflow} dispatches={dispatches} relatedTaskIds={relatedTaskIds} roleStates={roleStates} focus={runtimeFocus} />}
       </div>
       {reviewStep && workflow && (
         <GateReviewDrawer

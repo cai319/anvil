@@ -113,58 +113,25 @@ export function taskRoleState(input: TaskRoleStateInput): RoleStatus {
     busyElsewhere,
   };
 
-  if (workingHere) {
-    const step = runtime?.current_step_id;
-    return make("working", "进行中", "orange",
-      step ? `正在本任务工作 · 步骤 ${step}` : "正在本任务工作", base);
-  }
-  if (taskClosed) {
-    return make("closed", "已终止", "gray", "任务已终止", base);
-  }
-  if (taskDone) {
-    return make("done", "完成", "green", "本任务工作已完成", base);
-  }
-  if (failed) {
-    const rework = wf.rejected && !wf.failed;
-    return make(rework ? "rework" : "failed",
-      rework ? "返工" : "失败", "red",
-      rework ? "本任务步骤被驳回，等待返工" : "本任务 run/步骤失败，需要处理", base);
-  }
-  if (queued > 0) {
-    return make("queued", "排队中", "red",
-      `本任务有待处理队列 ${queued} 条；包括 @、委派、指派、派遣和回复`, base);
-  }
-  if (wf.retryWait) {
-    return make("retry", "等待重试", "red",
-      "本任务步骤等待自动恢复重试", base);
-  }
-  if (waitingHuman) {
-    return make("waiting_human", "等待人工", "yellow",
-      "等待人工评审/确认", base);
-  }
-  if (allDone) {
-    return make("done", "完成", "green", "本任务工作已完成", base);
-  }
-  if (busyElsewhere && queued === 0) {
-    return make("not_involved", "未参与", "gray",
-      "正在其他任务工作；本任务没有排队", base);
-  }
-  if (released) {
-    return make("released", "已释放", "gray", "已释放任务认领", base);
-  }
-  if (returnPending) {
-    return make("return_pending", "等待回切", "orange",
-      "等待派遣任务回切原切片", base);
-  }
-  if (hasContext && !busyElsewhere) {
-    return make("idle", "空闲", "green", "空闲 · 本任务上下文已保留", base);
-  }
-  if (pending) {
-    return make("todo", "待办", "gray", "待办 · 尚未开始", base);
-  }
-  return make("not_involved", "未参与", "gray",
-    busyElsewhere ? "正在其他任务工作；本任务没有排队" : "本任务没有该角色的活跃上下文",
-    base);
+  let key: string;
+  if (workingHere) key = "working";
+  else if (taskClosed) key = "closed";
+  else if (taskDone) key = "done";
+  else if (failed) key = wf.rejected && !wf.failed ? "rework" : "failed";
+  else if (queued > 0) key = "queued";
+  else if (wf.retryWait) key = "retry";
+  else if (waitingHuman) key = "waiting_human";
+  else if (allDone) key = "done";
+  else if (busyElsewhere && queued === 0) key = "not_involved";
+  else if (released) key = "released";
+  else if (returnPending) key = "return_pending";
+  else if (hasContext && !busyElsewhere) key = "idle";
+  else if (pending) key = "todo";
+  else key = "not_involved";
+
+  return statusByKey(key, base, {
+    queued, currentStepId: runtime?.current_step_id, busyElsewhere,
+  });
 }
 
 function failureSignal(wf: WorkflowRoleSignal): boolean {
@@ -183,6 +150,81 @@ function make(
     title: `${label} · ${detail}`,
     ...base,
   };
+}
+
+/** 状态 key → 展示文案；服务端推导与前端 fallback 共用。 */
+function statusByKey(
+  key: string,
+  base: Pick<RoleStatus, "queued" | "workingHere" | "busyElsewhere">,
+  opts: { queued?: number; currentStepId?: string | null; busyElsewhere?: boolean } = {},
+): RoleStatus {
+  const queued = opts.queued ?? base.queued;
+  switch (key) {
+    case "working":
+      return make("working", "进行中", "orange",
+        opts.currentStepId ? `正在本任务工作 · 步骤 ${opts.currentStepId}` : "正在本任务工作",
+        base);
+    case "closed":
+      return make("closed", "已终止", "gray", "任务已终止", base);
+    case "done":
+      return make("done", "完成", "green", "本任务工作已完成", base);
+    case "rework":
+      return make("rework", "返工", "red", "本任务步骤被驳回，等待返工", base);
+    case "failed":
+      return make("failed", "失败", "red", "本任务 run/步骤失败，需要处理", base);
+    case "queued":
+      return make("queued", "排队中", "red",
+        `本任务有待处理队列 ${queued} 条；包括 @、委派、指派、派遣和回复`, base);
+    case "retry":
+      return make("retry", "等待重试", "red", "本任务步骤等待自动恢复重试", base);
+    case "waiting_human":
+      return make("waiting_human", "等待人工", "yellow", "等待人工评审/确认", base);
+    case "released":
+      return make("released", "已释放", "gray", "已释放任务认领", base);
+    case "return_pending":
+      return make("return_pending", "等待回切", "orange", "等待派遣任务回切原切片", base);
+    case "idle":
+      return make("idle", "空闲", "green", "空闲 · 本任务上下文已保留", base);
+    case "todo":
+      return make("todo", "待办", "gray", "待办 · 尚未开始", base);
+    case "loading":
+      return make("loading", "加载中", "gray", "状态加载中…", base);
+    case "switching":
+      return make("switching", "切换上下文", "orange", "正在切换到本任务…", base);
+    case "not_involved":
+      return make("not_involved", "未参与", "gray",
+        opts.busyElsewhere
+          ? "正在其他任务工作；本任务没有排队"
+          : "本任务没有该角色的活跃上下文",
+        base);
+    default:
+      return make(key, key, "gray", "状态未知", base);
+  }
+}
+
+export interface ServerRoleStateInput {
+  state: string;
+  queued: number;
+  working_here: boolean;
+  busy_elsewhere: boolean;
+  currentStepId?: string | null;
+}
+
+/** 服务端 role-state 的展示映射：只做 label/tone/detail，不重新推导状态。 */
+export function roleStatusFromServer(input: ServerRoleStateInput): RoleStatus {
+  return statusByKey(
+    input.state,
+    {
+      queued: input.queued,
+      workingHere: input.working_here,
+      busyElsewhere: input.busy_elsewhere,
+    },
+    {
+      queued: input.queued,
+      currentStepId: input.currentStepId,
+      busyElsewhere: input.busy_elsewhere,
+    },
+  );
 }
 
 export interface GlobalRoleStateInput {

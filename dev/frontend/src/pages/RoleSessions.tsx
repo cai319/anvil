@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import {
   api,
   type ContextManifest, type Role, type RoleRuntimeStatus, type Run, type SubagentRecord,
-  type Task, type TaskDispatch, type TimelineEvent, type Workflow,
+  type Task, type TaskDispatch, type TaskRoleState, type TimelineEvent, type Workflow,
 } from "../api/client";
 import { useLiveRefresh } from "../useLiveRefresh";
-import { taskRoleState } from "../roleStatus";
+import { roleStatusFromServer, taskRoleState } from "../roleStatus";
 import { formatClock, formatShort } from "../time";
 import { HEADER_ONLY_RUN_LOG_HINT, isHeaderOnlyRunLog } from "../runLog";
 import { RoleAvatar } from "../components/RoleAvatar";
@@ -34,12 +34,16 @@ function describeEvent(ev: TimelineEvent): string {
   }
 }
 
-export function RoleSessions({ task, roles, workflow, dispatches = [], relatedTaskIds = [], focus = null }: {
+export function RoleSessions({
+  task, roles, workflow, dispatches = [], relatedTaskIds = [], roleStates = {},
+  focus = null,
+}: {
   task: Task;
   roles: Role[];
   workflow?: Workflow | null;
   dispatches?: TaskDispatch[];
   relatedTaskIds?: string[];
+  roleStates?: Record<string, TaskRoleState>;
   focus?: { role: string; sliceKey: string | null } | null;
 }) {
   const [runs, setRuns] = useState<Run[]>([]);
@@ -229,16 +233,22 @@ export function RoleSessions({ task, roles, workflow, dispatches = [], relatedTa
         const returnPending = dispatches.some(
           (d) => d.target_role === slug
             && (d.status === "return_ready" || d.status === "returning"));
-        let state = taskRoleState({
-          task,
-          role: slug,
-          runtime: rt,
-          workflow,
-          relatedTaskIds,
-          sliceKey: wfSlice,
-          runStatus: run?.status ?? null,
-          returnPending,
-        });
+        const serverState = roleStates[slug];
+        let state = serverState
+          ? roleStatusFromServer({
+              ...serverState,
+              currentStepId: rt?.current_step_id,
+            })
+          : taskRoleState({
+              task,
+              role: slug,
+              runtime: rt,
+              workflow,
+              relatedTaskIds,
+              sliceKey: wfSlice,
+              runStatus: run?.status ?? null,
+              returnPending,
+            });
         if (!rt) {
           state = {
             ...state, key: "loading", label: "加载中", tone: "gray",
