@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import RoleIn, RoleOut, ToolsIn
-from ..services import tokens as tokens_service, utility
+from ..services import ledger, tokens as tokens_service, utility
 from ..util import ConflictError
 from . import access
 
@@ -227,12 +227,12 @@ def expand_role(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth)
                                      definition=definition)
     except ConflictError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (auth.role, None, "role_expand",
-         __import__("json").dumps({"slug": slug, "brief": brief}, ensure_ascii=False),
-         now_iso()))
+    ledger.emit_audit(
+        conn, role_slug=auth.role,
+        task_id=None,
+        action="role_expand",
+        payload=__import__("json").dumps({"slug": slug, "brief": brief}, ensure_ascii=False),
+        now=now_iso())
     task_id = body.get("task_id")
     if task_id and services.tasks.get(conn, task_id) is not None:
         services.tasks.comment(conn, task_id, auth.role,

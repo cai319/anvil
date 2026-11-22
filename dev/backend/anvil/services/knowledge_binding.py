@@ -11,6 +11,7 @@ from typing import Any
 
 from .. import config
 from ..util import ConflictError, jdumps, jloads, now_iso
+from . import ledger
 from . import knowledge as knowledge_service
 from . import repo_catalog
 
@@ -122,11 +123,12 @@ def _refs(values: Any) -> list[dict]:
 
 def _audit(conn: sqlite3.Connection, task_id: str, action: str, payload: dict) -> None:
     try:
-        conn.execute(
-            "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-            "VALUES (?,?,?,?,?)",
-            (None, task_id, action, jdumps(payload), now_iso()),
-        )
+        ledger.emit_audit(
+            conn, role_slug=None,
+            task_id=task_id,
+            action=action,
+            payload=jdumps(payload),
+            now=now_iso())
     except sqlite3.Error:
         pass
 

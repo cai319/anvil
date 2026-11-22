@@ -19,6 +19,7 @@ from pathlib import Path
 from .. import config
 from ..util import (ConflictError, jdumps, jloads, new_id, now_iso,
                     read_text_file)
+from . import ledger
 from . import knowledge as knowledge_service
 from . import (knowledge_binding, knowledge_card, knowledge_completion,
                knowledge_repos, repo_catalog, repo_knowledge)
@@ -437,12 +438,12 @@ def write_principles(conn: sqlite3.Connection, role: str, content: str, *,
             f"principles exceed {limit} chars; move details to memory cards")
     _replace_home_file(role, "PRINCIPLES.md", text + "\n")
     now = now_iso()
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (actor or role, None, "memory.principles",
-         jdumps({"chars": len(text), "mode": mode}), now),
-    )
+    ledger.emit_audit(
+        conn, role_slug=actor or role,
+        task_id=None,
+        action="memory.principles",
+        payload=jdumps({"chars": len(text), "mode": mode}),
+        now=now)
     conn.commit()
     return {
         "role_slug": role, "content": text, "chars": len(text),
@@ -575,13 +576,13 @@ def migrate_memory_file(conn: sqlite3.Connection, role: str, *,
             "- 耐久准则：`PRINCIPLES.md`\n"
             "- 经验卡：`notes/memory/cards/`\n"
             f"- 原文归档：`{archive_path}`\n")
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (role, None, "memory.migrate",
-         jdumps({"principles_chars": len(principles), "cards": created,
-                 "deduped": deduped, "archive": archive_path}), now),
-    )
+    ledger.emit_audit(
+        conn, role_slug=role,
+        task_id=None,
+        action="memory.migrate",
+        payload=jdumps({"principles_chars": len(principles), "cards": created,
+                 "deduped": deduped, "archive": archive_path}),
+        now=now)
     conn.commit()
     return {
         **preview, "dry_run": False, "cards_created": created,
@@ -696,13 +697,13 @@ def consolidate_context(conn: sqlite3.Connection, role: str, task_id: str | None
         slice_key=slice_key,
         tags=[*task_tags, "snapshot"], repo=task["repo"],
         confidence=0.9, source="consolidate")
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (role, task_id, "session.context_digest",
-         jdumps({"path": path, "trigger": safe_trigger, "run_id": run_id,
-                 "slice_key": slice_key, "chars": len(content)}), now),
-    )
+    ledger.emit_audit(
+        conn, role_slug=role,
+        task_id=task_id,
+        action="session.context_digest",
+        payload=jdumps({"path": path, "trigger": safe_trigger, "run_id": run_id,
+                 "slice_key": slice_key, "chars": len(content)}),
+        now=now)
     conn.commit()
     return {**note, "chars": len(content), "trigger": safe_trigger}
 
@@ -1196,10 +1197,12 @@ def write_instruction(conn: sqlite3.Connection, role: str, content: str) -> dict
     home = config.AGENTS_DIR / role
     home.mkdir(parents=True, exist_ok=True)
     (home / "instruction.md").write_text(content, encoding="utf-8")
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) VALUES (?,?,?,?,?)",
-        (role, None, "self.edit_instruction", jdumps({"chars": len(content)}), now_iso()),
-    )
+    ledger.emit_audit(
+        conn, role_slug=role,
+        task_id=None,
+        action="self.edit_instruction",
+        payload=jdumps({"chars": len(content)}),
+        now=now_iso())
     conn.commit()
     return {"role": role, "accepted": True, "path": str(home / "instruction.md")}
 

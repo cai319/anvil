@@ -77,6 +77,17 @@ def reset_tokens(conn=Depends(get_db), auth: Auth = Depends(require_human)):
     return tokens_service.reset(conn)
 
 
+@router.get("/work-items")
+def list_work_items(kind: str | None = None, pending: bool = True,
+                    role: str | None = None, task_id: str | None = None,
+                    limit: int = 200, conn=Depends(get_db),
+                    auth: Auth = Depends(require_human)):
+    """四类 durable work item 的统一只读清单（wake/reminder/action_card/draft）。"""
+    return services.work_items.list_items(
+        conn, kinds=[kind] if kind else None, pending_only=pending,
+        role=role, task_id=task_id, limit=limit)
+
+
 @router.get("/audit")
 def list_audit(task_id: str | None = None, role: str | None = None,
                action: str | None = None,

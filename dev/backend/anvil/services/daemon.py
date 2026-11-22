@@ -36,6 +36,7 @@ from .. import config
 from ..db import open_conn
 from ..util import (decode_child_output, force_utf8_stdio, jdumps, jloads, now_iso,
                     scrub_agent_env)
+from . import ledger
 
 # 不泄漏给子进程的编排器会话变量（与 platform/darwin.py 保持一致）。
 # 注意：不能按 `CLAUDE_CODE_` 前缀整片剥离——该命名空间里还有自动压缩窗口、
@@ -1673,10 +1674,12 @@ class DaemonManager:
     def _audit_session(self, conn, role: str, task_id: str | None, action: str,
                        payload: dict) -> None:
         try:
-            conn.execute(
-                "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (role, task_id, action, jdumps(payload), now_iso()))
+            ledger.emit_audit(
+                conn, role_slug=role,
+                task_id=task_id,
+                action=action,
+                payload=jdumps(payload),
+                now=now_iso())
             conn.commit()
         except Exception:  # noqa: BLE001 —— 审计失败不阻断运行
             pass
@@ -2295,16 +2298,16 @@ class DaemonManager:
         try:
             conn = open_conn(self.db_path)
             try:
-                conn.execute(
-                    "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-                    "VALUES (?,?,?,?,?)",
-                    (r.role, task_id, "session.model_switch",
-                     jdumps({"from": old, "to": new,
+                ledger.emit_audit(
+                    conn, role_slug=r.role,
+                    task_id=task_id,
+                    action="session.model_switch",
+                    payload=jdumps({"from": old, "to": new,
                              "served_model_id": r.served_model_id,
                              "context_tokens": tokens,
                              "active_window": active, "safe_window": safe,
-                             "fit": fit, "safe_fit": safe_fit}), now_iso()),
-                )
+                             "fit": fit, "safe_fit": safe_fit}),
+                    now=now_iso())
                 conn.commit()
             finally:
                 conn.close()

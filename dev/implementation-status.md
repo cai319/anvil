@@ -155,7 +155,7 @@
 - **忙时排队**：一轮未结束时收到新消息进入队列，`result` 事件后合并投递（coalescing）。
 - **崩溃/停机**：进程退出触发 `on_exit` → 活跃 run 走 process_exit；停机先关闭常驻进程，
   run 转 suspended；启动时 `role_sessions` 全部标记 dead（session_id 保留）。
-- **成本自动记账**：`result` 事件的 `total_cost_usd` 直接写 `cost_ledger`（P3-1 提前落地）。
+- **Token 自动记账**：`result` 事件的 `usage` 写入 `token_usage`（按角色/任务/run 汇总）；旧 `cost_ledger` 已移除。
 - **角色级会话令牌**：常驻进程使用绑定 role 的长期 token（task_id=NULL），跨任务可用。
 - **Windows UTF-8 管道**：常驻进程 stdin/stdout 显式 UTF-8，stdin `newline="\n"`，避免中文
   prompt 在系统代码页/CRLF 下被 CLI 当成无效 stream-json（表现为 init 后 0 输出）；

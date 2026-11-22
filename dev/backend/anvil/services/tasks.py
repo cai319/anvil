@@ -1609,15 +1609,19 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
     knowledge_harvest.remove_task_reminder(conn, tid)
     conn.execute("DELETE FROM audit WHERE task_id=?", (tid,))
     conn.execute("DELETE FROM tasks WHERE id=?", (tid,))
-    # 留一条删除审计（task_id 仍可读，便于知道这个 id 曾经存在）
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) VALUES (?,?,?,?,?)",
-        (role, tid, "delete", jdumps({
+    # 留一条删除审计（task_id 仍可读，便于知道这个 id 曾经存在）；
+    # events 不再回指已删除的任务，避免 id 复用后串入新任务的时间线。
+    ledger.emit_audit(
+        conn, role_slug=role,
+        task_id=tid,
+        event_task_id=None,
+        action="delete",
+        payload=jdumps({
             "title": t.get("title"), "force": force,
             "consolidated_roles": consolidated,
             "consolidation_errors": consolidation_errors,
-        }), now_iso()),
-    )
+        }),
+        now=now_iso())
     conn.commit()
     return True
 

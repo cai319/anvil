@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import ClaimIn, CommentIn, DepIn, ReviewIn, SubmitIn, TaskIn, TaskOut, TaskPatch
-from ..services import knowledge_quality, repo_catalog
+from ..services import knowledge_quality, ledger, repo_catalog
 from ..services.tasks import ConflictError
 from ..util import jdumps, now_iso
 from . import access, events
@@ -231,21 +231,20 @@ def assign_existing_roles(tid: str, body: dict, request: Request,
         raise HTTPException(status_code=409, detail=str(exc))
     summary = "、".join(roles)
     from ..util import jdumps, now_iso
-    conn.execute(
-        "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (tid, agent, "comment",
-         jdumps({"body": (f"在现有 Roster 上追加角色：{summary}。" if existing
+    ledger.emit_activity(
+        conn, task_id=tid,
+        role_slug=agent,
+        kind="comment",
+        payload=jdumps({"body": (f"在现有 Roster 上追加角色：{summary}。" if existing
                           else f"基于现有角色库绑定任务 Roster：{summary}。")}),
-         now_iso()),
-    )
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (agent, tid, "task.assign_existing",
-         jdumps({"roles": roles, "added": added, "existing": existing,
-                 "planner": planner}), now_iso()),
-    )
+        now=now_iso())
+    ledger.emit_audit(
+        conn, role_slug=agent,
+        task_id=tid,
+        action="task.assign_existing",
+        payload=jdumps({"roles": roles, "added": added, "existing": existing,
+                 "planner": planner}),
+        now=now_iso())
     conn.commit()
     events.publish("task", {"id": tid, "kind": "assign", "by": agent})
     return result
@@ -748,10 +747,12 @@ def accept_suggested_repo(tid: str, repo: str, conn=Depends(get_db),
         (now_iso(), tid, repo))
     if cur.rowcount == 0:
         raise HTTPException(status_code=404, detail="suggestion not found")
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        ("human", tid, "task.knowledge_suggestion_accept", "{}", now_iso()))
+    ledger.emit_audit(
+        conn, role_slug="human",
+        task_id=tid,
+        action="task.knowledge_suggestion_accept",
+        payload="{}",
+        now=now_iso())
     conn.commit()
     return _knowledge_repo_payload(conn, services.tasks.get(conn, tid))
 
@@ -768,10 +769,12 @@ def dismiss_suggested_repo(tid: str, repo: str, conn=Depends(get_db),
         (now_iso(), tid, repo))
     if cur.rowcount == 0:
         raise HTTPException(status_code=404, detail="suggestion not found")
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        ("human", tid, "task.knowledge_suggestion_dismiss", "{}", now_iso()))
+    ledger.emit_audit(
+        conn, role_slug="human",
+        task_id=tid,
+        action="task.knowledge_suggestion_dismiss",
+        payload="{}",
+        now=now_iso())
     conn.commit()
     return _knowledge_repo_payload(conn, services.tasks.get(conn, tid))
 
@@ -870,6 +873,16 @@ def list_task_subagents(tid: str, status: str | None = None, limit: int = 100,
     _assert_session_task(conn, auth, tid)
     return services.runs.list_subagents(
         conn, task_id=tid, status=status, limit=limit)
+
+
+@router.get("/{tid}/children")
+def list_children(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    """委派/派遣子任务的统一投影（relation_type 区分行为，字段归一）。"""
+    _assert_session_task(conn, auth, tid)
+    try:
+        return services.child_tasks.list_children(conn, tid)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="task not found")
 
 
 @router.get("/{tid}/delegations")
@@ -1025,17 +1038,17 @@ def _wake_mentioned_role(conn, request: Request, task: dict, target: str,
             action_kind="mention", message=message,
             explicit_mode=explicit_mode)
     try:
-        conn.execute(
-            "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-            "VALUES (?,?,?,?,?)",
-            (sender, task["id"], "context.routing",
-             jdumps({
+        ledger.emit_audit(
+            conn, role_slug=sender,
+            task_id=task["id"],
+            action="context.routing",
+            payload=jdumps({
                  "target": target, "message": message[:200],
                  "source_slice_key": source_slice_key,
                  "source_run_id": source_run_id,
                  **decision,
-             }), now_iso()),
-        )
+             }),
+            now=now_iso())
         conn.commit()
     except Exception:  # noqa: BLE001 —— 审计失败不阻断唤醒
         pass
@@ -1072,12 +1085,13 @@ def _wake_mentioned_role(conn, request: Request, task: dict, target: str,
             if str(exc).startswith("dispatch blocked by governance"):
                 # frozen/预算/并发达限：不能再退化成 reply run 绕过治理闸门。
                 try:
-                    conn.execute(
-                        "INSERT INTO audit (role_slug, task_id, action, payload_json, "
-                        "created_at) VALUES (?,?,?,?,?)",
-                        (sender, task["id"], "dispatch.suppressed",
-                         jdumps({"target": target, "message": message[:200],
-                                 "reason": str(exc)}), now_iso()))
+                    ledger.emit_audit(
+                        conn, role_slug=sender,
+                        task_id=task["id"],
+                        action="dispatch.suppressed",
+                        payload=jdumps({"target": target, "message": message[:200],
+                                 "reason": str(exc)}),
+                        now=now_iso())
                     conn.commit()
                 except Exception:  # noqa: BLE001
                     pass
@@ -1092,15 +1106,15 @@ def _wake_mentioned_role(conn, request: Request, task: dict, target: str,
         # 首条 context.routing 审计记录的是路由决策；补一条最终生效模式，避免审计
         # 一直停留在未执行的 "dispatch"。
         try:
-            conn.execute(
-                "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (sender, task["id"], "context.routing.downgraded",
-                 jdumps({"target": target, "original_mode": "dispatch",
+            ledger.emit_audit(
+                conn, role_slug=sender,
+                task_id=task["id"],
+                action="context.routing.downgraded",
+                payload=jdumps({"target": target, "original_mode": "dispatch",
                          "final_mode": mode, "reason": downgrade_reason,
                          "source_slice_key": source_slice_key,
-                         "source_run_id": source_run_id}), now_iso()),
-            )
+                         "source_run_id": source_run_id}),
+                now=now_iso())
             conn.commit()
         except Exception:  # noqa: BLE001 —— 审计失败不阻断唤醒
             pass

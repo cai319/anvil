@@ -117,6 +117,42 @@ export interface Delegation {
   updated_at: string;
 }
 
+/** 委派/派遣统一子任务投影（GET /tasks/{id}/children）。 */
+export interface TaskChild {
+  relation_type: "delegation" | "dispatch";
+  relation_id: string | null;
+  task_id: string;
+  title: string;
+  status: Task["status"];
+  type: string | null;
+  assignee: string | null;
+  assignees: string[];
+  created_by: string | null;
+  parent_step_id: string | null;
+  step_title: string | null;
+  due_at: string | null;
+  acceptance: string[];
+  scope_paths: string[];
+  description: string | null;
+  submitted_summary: string | null;
+  run_id: string | null;
+  run_status: string | null;
+  run_failure_class: string | null;
+  blocking: boolean;
+  dispatch_status: string | null;
+  return_pending: boolean;
+  return_context_key: string | null;
+  returned_at: string | null;
+  created_at: string;
+  updated_at: string;
+  raw: Delegation | TaskDispatch;
+}
+
+export interface TaskChildren {
+  items: TaskChild[];
+  counts: { total: number; delegation: number; dispatch: number };
+}
+
 export type FindingStatus =
   | "draft" | "submitted" | "confirmed" | "false_positive" | "changes_requested";
 
@@ -595,6 +631,9 @@ export const api = {
   listTaskDelegations: (taskId: string): Promise<Delegation[]> =>
     authFetch(`${BASE}/tasks/${encodeURIComponent(taskId)}/delegations`)
       .then((r) => json<Delegation[]>(r)),
+  listTaskChildrenUnified: (taskId: string): Promise<TaskChildren> =>
+    authFetch(`${BASE}/tasks/${encodeURIComponent(taskId)}/children`)
+      .then((r) => json<TaskChildren>(r)),
   acceptDelegation: (id: string): Promise<Task> =>
     req("POST", `/tasks/${id}/delegation/accept`, {}).then((r) => json<Task>(r)),
   rejectDelegation: (id: string, feedback: string): Promise<Task> =>

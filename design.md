@@ -79,20 +79,20 @@ Anvil 要解决的就是这一层。它不重新实现 Agent，不代理模型�
 | 层 | 选型 | 理由 |
 |---|---|---|
 | 后端框架 | FastAPI + Uvicorn | 自带 OpenAPI，前端可直接生成类型 |
-| 并发模型 | asyncio 单进程 | 无需分布式，子进程即并发单元 |
-| 存储 | SQLite（WAL 模式） | 单文件、零运维、事务足够 |
-| ORM | SQLAlchemy 2.0 async | 成熟，async 支持已稳定 |
-| Git | pygit2 | 绑定 libgit2，无需 shell 出 git |
-| 校验 | Pydantic v2 | 配置 schema 与 API 模型统一 |
-| 密钥 | keyring（Windows 凭据管理器） | 不落明文 |
+| 并发模型 | 单进程 + 线程 daemon/scheduler | 无需分布式，子进程即并发单元 |
+| 存储 | SQLite（WAL）+ LangGraph checkpoint SQLite | 单文件、零运维、事务足够 |
+| 数据访问 | 原生 `sqlite3` + 手写 SQL | 无 ORM；迁移与查询可控，便于单写者约束 |
+| Git | `git` CLI 子进程 | 不引入 libgit2 绑定；与 Agent 工具链一致 |
+| 校验 | Pydantic v2 | API 模型统一；持久层仍用原始 SQL |
+| 密钥 | 本地文件权限（未集成 keyring） | 单机单用户，无远端凭据托管 |
 | 全文检索 | SQLite FTS5 | 内建，无外部依赖 |
 | 前端 | Vite + React 18 + TypeScript | 标准化工程 |
-| 组件 | shadcn/ui + Tailwind | 可控、无重型运行时 |
-| 数据层 | TanStack Query + Zustand | 服务端状态与本地状态分离 |
-| 图表 / 拖拽 | Recharts / dnd-kit | 任务板拖拽与 Token 图 |
+| 组件 | 原生 CSS（无 UI 组件库） | 体积小、可控 |
+| 数据层 | `fetch` + 自定义 hooks（`useLiveRefresh`） | SSE tick + 轮询兜底，不引入查询库 |
+| 图表 | `@xyflow/react`（工作流图） | 仅图编辑需要重型依赖 |
 | 实时推送 | SSE | 单向为主，比 WebSocket 轻 |
-| 打包 | PyInstaller | 单 exe，前端静态资源内嵌 |
-| 客户端生成 | openapi-typescript | 消除手写接口类型 |
+| 打包 | PyInstaller | 单目录分发，前端静态资源内嵌 |
+| 客户端生成 | 手写 TypeScript 契约（生成化待 P1） | 当前 `client.ts` 手写；OpenAPI 生成列为后续优化 |
 
 服务监听 `127.0.0.1:7317`，仅绑定回环地址，请求携带本地 token 做轻量校验（防止本机其他程序误触，而非防御真实攻击者）。
 
@@ -551,7 +551,7 @@ agents/backend-dev/
 
 **私有 home**（第 3.4 节的目录）是角色的"自我"所在。它不共享、不迁移，是角色记忆和身份的物理载体。raft 的做法是工作空间纯私有且明确不可迁移，Anvil 在私有部分沿用这一判断——记忆与角色是绑定的，试图"把 A 的工作区给 B 用"在语义上就说不通。
 
-**共享 Git 仓库** 是产出的地方。多个角色对同一仓库有各自的分支命名空间（`agent/<slug>/<task-id>`），互不覆盖。仓库通过 pygit2 操作，Anvil 负责建分支、检查 diff 范围、合并到主干。
+**共享 Git 仓库** 是产出的地方。多个角色对同一仓库有各自的分支命名空间（`agent/<slug>/<task-id>`），互不覆盖。仓库通过 `git` CLI 子进程操作，Anvil 负责建分支、检查 diff 范围、合并到主干。
 
 > **v1.30 术语澄清**：本节讨论的是“执行工作区/角色工作区”。产品中的**频道**（`workspaces`
 > 表、`/channels` 页面、任务的 `workspace_id`）是任务的上一层归属，承载频道级知识作用域
@@ -1287,7 +1287,7 @@ run-01H8 至 run-01HR 的日志中无这两个工具的调用记录。
 
 ## 第十章 HTTP API
 
-`http://127.0.0.1:7317`，仅监听回环地址，本地 token 轻校验（用于防止本机其他程序误调，不是账号体系）。FastAPI 自动生成 OpenAPI 规格，前端用 `openapi-typescript` 生成类型化客户端——这条一开始就配好，能省掉后续大量前后端对接摩擦。
+`http://127.0.0.1:7317`，仅监听回环地址，本地 token 轻校验（用于防止本机其他程序误调，不是账号体系）。FastAPI 自动生成 OpenAPI 规格；前端当前使用手写类型化客户端（`api/client.ts`），OpenAPI 生成化列为后续优化项。
 
 ### 10.1 端点清单
 
@@ -1439,7 +1439,7 @@ Agent 侧 CLI 调用的是同一套 API 的子集，附加 `X-Anvil-Session` 头
 
 ### 11.1 视图清单
 
-**大厅（默认页）**。左栏角色卡片列：头像、名称、状态灯（运行中/空闲/已释放/异常）、当前任务、运行时标签、今日 Token。中栏任务板看板，按状态分列，dnd-kit 拖拽改状态。右栏全局实时活动流。顶栏常驻「全场冻结」按钮与今日 Token 预算进度。
+**大厅（默认页）**。左栏角色卡片列：头像、名称、状态灯（运行中/空闲/已释放/异常）、当前任务、运行时标签、今日 Token。中栏任务板看板，按状态分列（当前无拖拽改状态）。右栏全局实时活动流。顶栏常驻「全场冻结」按钮与今日 Token 预算进度。
 
 状态灯的图例必须写清楚**灰点不代表故障**——Raft 特别强调了这一点，安静的 Agent 通常只是空闲，进程被正常释放了。这个误解会让你反复去重启健康的角色。
 
@@ -1500,7 +1500,7 @@ export function useEventStream() {
 }
 ```
 
-活动流用追加而非失效重取——高频事件下重取会打满后端。其余低频事件走 TanStack Query 失效即可。
+活动流用追加而非失效重取——高频事件下重取会打满后端。其余低频事件走 `useLiveRefresh` 的 tick/轮询刷新即可。
 
 ### 11.3 启动体验
 

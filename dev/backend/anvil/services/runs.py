@@ -251,11 +251,12 @@ def note_context_rotation(conn: sqlite3.Connection, run_id: str, *,
         if set_status(conn, run_id, "failed", ended_at=now_iso(),
                       failure_class="context_rotation_loop",
                       from_statuses=ACTIVE_RUN_STATUSES):
-            conn.execute(
-                "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (row["role_slug"], row["task_id"], "session.context_rotation_failed",
-                 jdumps({"run_id": run_id, "count": count}), now_iso()))
+            ledger.emit_audit(
+                conn, role_slug=row["role_slug"],
+                task_id=row["task_id"],
+                action="session.context_rotation_failed",
+                payload=jdumps({"run_id": run_id, "count": count}),
+                now=now_iso())
             conn.commit()
         return "failed"
     conn.execute("UPDATE runs SET context_rotation_count=? WHERE id=?", (count, run_id))
@@ -281,12 +282,12 @@ def reset_run_for_redelivery(conn: sqlite3.Connection, run_id: str, *,
         if set_status(conn, run_id, "failed", ended_at=now_iso(),
                       failure_class="context_rotation_loop",
                       from_statuses=ACTIVE_RUN_STATUSES):
-            conn.execute(
-                "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (row["role_slug"], row["task_id"], "session.context_rotation_failed",
-                 jdumps({"run_id": run_id, "reason": reason, "count": count}),
-                 now_iso()))
+            ledger.emit_audit(
+                conn, role_slug=row["role_slug"],
+                task_id=row["task_id"],
+                action="session.context_rotation_failed",
+                payload=jdumps({"run_id": run_id, "reason": reason, "count": count}),
+                now=now_iso())
             conn.commit()
         return "failed"
     # 更新 started_at，使 reset 前被 monitor 捕获的 process_exit 因 observed_started_at
@@ -301,12 +302,12 @@ def reset_run_for_redelivery(conn: sqlite3.Connection, run_id: str, *,
         return "skip"
     if not set_status(conn, run_id, "created", from_statuses=ACTIVE_RUN_STATUSES):
         return "skip"
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (row["role_slug"], row["task_id"], "session.context_rotation",
-         jdumps({"run_id": run_id, "reason": reason, "count": count}), now_iso()),
-    )
+    ledger.emit_audit(
+        conn, role_slug=row["role_slug"],
+        task_id=row["task_id"],
+        action="session.context_rotation",
+        payload=jdumps({"run_id": run_id, "reason": reason, "count": count}),
+        now=now_iso())
     conn.commit()
     return "retry"
 
@@ -340,13 +341,13 @@ def register_context_overflow(conn: sqlite3.Connection, run_id: str, *,
                           failure_class="context_overflow",
                           from_statuses=ACTIVE_RUN_STATUSES):
             outcome = "skip"
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (row["role_slug"], row["task_id"], "session.context_overflow",
-         jdumps({"run_id": run_id, "reason": reason, "attempt": attempt,
-                 "outcome": outcome}), now_iso()),
-    )
+    ledger.emit_audit(
+        conn, role_slug=row["role_slug"],
+        task_id=row["task_id"],
+        action="session.context_overflow",
+        payload=jdumps({"run_id": run_id, "reason": reason, "attempt": attempt,
+                 "outcome": outcome}),
+        now=now_iso())
     conn.commit()
     return outcome
 

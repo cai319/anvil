@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from .. import config
 from ..util import jdumps, now_iso
+from . import ledger
 
 _SETTING_PREFIX = "feature."
 logger = logging.getLogger("anvil.features")
@@ -223,12 +224,14 @@ def set_flag(conn: sqlite3.Connection, key: str, value: object, *,
         "INSERT INTO settings (key, value, updated_at) VALUES (?,?,?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
         (_setting_key(flag), "1" if enabled else "0", now))
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (actor, None, "feature.toggle", jdumps({
+    ledger.emit_audit(
+        conn, role_slug=actor,
+        task_id=None,
+        action="feature.toggle",
+        payload=jdumps({
             "key": key, "value": enabled, "previous": previous,
-        }), now))
+        }),
+        now=now)
     conn.commit()
     logger.info(
         "feature toggle actor=%s key=%s previous=%s value=%s",
@@ -244,11 +247,12 @@ def reset_flag(conn: sqlite3.Connection, key: str, *,
     default = _BASE_VALUES[flag.attr]
     conn.execute("DELETE FROM settings WHERE key=?", (_setting_key(flag),))
     setattr(config, flag.attr, default)
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (actor, None, "feature.reset", jdumps({"key": key, "value": default}),
-         now_iso()))
+    ledger.emit_audit(
+        conn, role_slug=actor,
+        task_id=None,
+        action="feature.reset",
+        payload=jdumps({"key": key, "value": default}),
+        now=now_iso())
     conn.commit()
     logger.info("feature reset actor=%s key=%s value=%s", actor, key, default)
     return _flag_payload(flag, value=default, overridden=False)

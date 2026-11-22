@@ -24,7 +24,7 @@ from .services import board as board_service
 from .services import daemon as daemon_service
 from .services import dispatch as dispatch_service
 from .services import (governance, knowledge_completion, knowledge_harvest, leases,
-                       runs as runs_service, tasks as tasks_service)
+                       ledger, runs as runs_service, tasks as tasks_service)
 from .services import wake as wake_service
 from .services import workflow as workflow_service
 from .util import ConflictError, now_iso
@@ -697,13 +697,13 @@ class Scheduler:
                 "UPDATE workflow_steps SET last_nudge_at=?, nudge_count=nudge_count+1, updated_at=? "
                 "WHERE workflow_id=? AND step_id=?",
                 (now.isoformat(), now.isoformat(), r["workflow_id"], r["step_id"]))
-            conn.execute(
-                "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (r["role_slug"], r["task_id"], "step_nudge",
-                 __import__("json").dumps({"workflow_id": r["workflow_id"],
+            ledger.emit_audit(
+                conn, role_slug=r["role_slug"],
+                task_id=r["task_id"],
+                action="step_nudge",
+                payload=__import__("json").dumps({"workflow_id": r["workflow_id"],
                                            "step_id": r["step_id"]}, ensure_ascii=False),
-                 now.isoformat()))
+                now=now.isoformat())
             conn.commit()
 
     _RUN_NON_RETRYABLE = {
@@ -739,7 +739,6 @@ class Scheduler:
             "AND COALESCE(r.ended_at,r.started_at) >= ? "
             "ORDER BY COALESCE(r.ended_at,r.started_at) LIMIT 20",
             (cutoff,)).fetchall()
-        from .services import ledger
         for raw in rows:
             run = dict(raw)
             role = run["role_slug"]

@@ -1679,10 +1679,11 @@ def _create_workflow_locked(conn: sqlite3.Connection, task_id: str, definition: 
         )
         if note:
             body += f" 保留/沿用说明：{note}"
-        conn.execute(
-            "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
-            "VALUES (?,?,?,?,?)",
-            (task_id, "human", "comment", jdumps({
+        ledger.emit_activity(
+            conn, task_id=task_id,
+            role_slug="human",
+            kind="comment",
+            payload=jdumps({
                 "body": body,
                 "event": "workflow_restarted",
                 "previous_workflow_id": previous_workflow_id,
@@ -1690,8 +1691,8 @@ def _create_workflow_locked(conn: sqlite3.Connection, task_id: str, definition: 
                 "execution_no": execution_no,
                 "reason": (restart_reason or "").strip() or "人工确认重新执行",
                 "previous_execution_no": running[0]["execution_no"],
-            }), now),
-        )
+            }),
+            now=now)
     if draft_id:
         cur = conn.execute(
             "UPDATE board_drafts SET status='approved', decided_at=? "
@@ -3052,16 +3053,17 @@ def _apply_external_revision(conn: sqlite3.Connection, wf: dict, state: dict,
             "WHERE id=? AND status='pending'", (now, draft_id))
         if cur.rowcount != 1:
             raise ConflictError("draft state changed; refresh before approving")
-    conn.execute(
-        "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (state["task_id"], actor, "comment",
-         jdumps({"body": f"应用工作流修订：{impact['summary']}。"
+    ledger.emit_activity(
+        conn, task_id=state["task_id"],
+        role_slug=actor,
+        kind="comment",
+        payload=jdumps({"body": f"应用工作流修订：{impact['summary']}。"
                          "旁路节点完成后，目标步骤会等待其结果并继续执行。",
                  "event": "workflow_revised", "workflow_id": wid,
                  "draft_id": draft_id,
                  "external_nodes": [node["step_id"] for node in nodes],
-                 "restart_steps": state["restart_steps"]}), now))
+                 "restart_steps": state["restart_steps"]}),
+        now=now)
     ledger.emit(
         conn, "workflow.revised", task_id=state["task_id"], workflow_id=wid,
         execution_no=wf.get("execution_no"),
@@ -3279,14 +3281,15 @@ def _apply_revision_locked(conn: sqlite3.Connection, wid: str, intent: dict,
             if cur.rowcount != 1:
                 raise ConflictError("draft state changed; refresh before approving")
         task_id = wf["task_id"]
-        conn.execute(
-            "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
-            "VALUES (?,?,?,?,?)",
-            (task_id, actor, "comment",
-             jdumps({"body": f"应用工作流修订：{impact['summary']}。"
+        ledger.emit_activity(
+            conn, task_id=task_id,
+            role_slug=actor,
+            kind="comment",
+            payload=jdumps({"body": f"应用工作流修订：{impact['summary']}。"
                              "当前执行继续，不重启。",
                      "event": "workflow_revised", "workflow_id": wid,
-                     "draft_id": draft_id}), now))
+                     "draft_id": draft_id}),
+            now=now)
         ledger.emit(
             conn, "workflow.revised", task_id=task_id, workflow_id=wid,
             execution_no=wf.get("execution_no"),
@@ -3379,13 +3382,14 @@ def _advance_locked(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
             _step_activity(
                 conn, wf["task_id"], role, s, "failed",
                 f"角色 {role} 已禁用，无法派发；启用角色后人工重试该步骤。")
-            conn.execute(
-                "INSERT INTO activities (task_id, role_slug, kind, payload_json, "
-                "created_at) VALUES (?,?,?,?,?)",
-                (wf["task_id"], "workflow", "comment",
-                 jdumps({"body": f"步骤「{s.get('title') or s['step_id']}」的角色 "
+            ledger.emit_activity(
+                conn, task_id=wf["task_id"],
+                role_slug="workflow",
+                kind="comment",
+                payload=jdumps({"body": f"步骤「{s.get('title') or s['step_id']}」的角色 "
                                  f"{role} 已禁用，步骤已标记 failed；"
-                                 "请启用角色后在任务详情重试。"}), fail_now))
+                                 "请启用角色后在任务详情重试。"}),
+                now=fail_now)
             continue
         if conn.execute(
             "SELECT 1 FROM workflow_steps WHERE workflow_id=? AND role_slug=? "
@@ -3751,15 +3755,17 @@ def _decide_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
             from . import roles as roles_service
             sender = roles_service.notification_sender(
                 conn, wf["task_id"], wf.get("created_by"))
-            conn.execute(
-                "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (wf["task_id"], sender, "mention", jdumps({
+            ledger.emit_activity(
+                conn, task_id=wf["task_id"],
+                role_slug=sender,
+                kind="mention",
+                payload=jdumps({
                     "target": "human",
                     "message": f"决策步骤「{step['title']}」已超过最大重做次数"
                                f"（{max_rework} 次）；请人工介入。反馈：{note}",
                     "event": "rework_exhausted", "workflow_id": wid, "step_id": step_id,
-                }), now))
+                }),
+                now=now)
             reviews.record_decision(
                 conn, wf, step, actor_type="human" if role == "human" else "role",
                 actor=role or step["role_slug"], decision="escalate",
@@ -3784,13 +3790,15 @@ def _decide_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
             leases.release(conn, target.get("lease_id"), commit=False)
             target_role = target.get("role_slug") or ""
             if target_role:
-                conn.execute(
-                    "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
-                    "VALUES (?,?,?,?,?)",
-                    (wf["task_id"], step["role_slug"], "mention", jdumps({
+                ledger.emit_activity(
+                    conn, task_id=wf["task_id"],
+                    role_slug=step["role_slug"],
+                    kind="mention",
+                    payload=jdumps({
                         "target": target_role,
                         "message": f"决策打回步骤「{target.get('title', tid)}」：{note}",
-                    }), now))
+                    }),
+                    now=now)
         conn.execute(
             "UPDATE workflow_steps SET status='pending', run_id=NULL, started_at=NULL, "
             "ended_at=NULL, summary=NULL, feedback=?, rework_count=?, updated_at=?, "
@@ -4321,17 +4329,16 @@ def fail_step(conn: sqlite3.Connection, wid: str, step_id: str, reason: str,
                    extra={"failure_reason": category, "attempt": recovery})
     # 非阻塞通知：写 comment 而不是 @human。human 回来后在任务时间线能看到；
     # 但系统不等待人工确认才能继续（依赖此步骤的其它步骤仍按依赖规则等待）。
-    conn.execute(
-        "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (wf["task_id"], "workflow", "comment",
-         jdumps({"body": f"工作流步骤「{step['title']}」（{step['role_slug']}）"
+    ledger.emit_activity(
+        conn, task_id=wf["task_id"],
+        role_slug="workflow",
+        kind="comment",
+        payload=jdumps({"body": f"工作流步骤「{step['title']}」（{step['role_slug']}）"
                           f"自动恢复 {recovery - 1} 次后仍失败：{reason}。"
                           "已保留现场，可在任务详情重试该步骤。",
                  "event": "step_failed", "workflow_id": wid, "step_id": step_id,
                  "auto_recovered": recovery - 1}),
-         now),
-    )
+        now=now)
     # 最终失败：关闭该 step 的 open 委派，避免自动恢复/后续评审被永久阻塞。
     close_step_delegations(conn, wid, step_id, reason="step_failed")
     leases.release(conn, step.get("lease_id"), commit=False)

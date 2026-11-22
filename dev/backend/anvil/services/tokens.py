@@ -5,6 +5,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from ..util import jdumps, now_iso
+from . import ledger
 
 
 def record(conn: sqlite3.Connection, role: str | None, task_id: str | None,
@@ -39,11 +40,12 @@ def reset(conn: sqlite3.Connection) -> dict:
         "INSERT INTO settings (key, value, updated_at) VALUES ('token_reset_at', ?, ?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
         (now, now))
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        ("human", None, "tokens.reset",
-         jdumps({"previous_reset_at": previous, "reset_at": now}), now))
+    ledger.emit_audit(
+        conn, role_slug="human",
+        task_id=None,
+        action="tokens.reset",
+        payload=jdumps({"previous_reset_at": previous, "reset_at": now}),
+        now=now)
     conn.commit()
     return {"reset_at": now, "previous_reset_at": previous}
 

@@ -137,6 +137,81 @@ def _activity_event_type(kind: str, payload: dict) -> str:
     return kind
 
 
+def _payload_json(payload) -> str:
+    if payload is None:
+        return "{}"
+    if isinstance(payload, str):
+        return payload or "{}"
+    return jdumps(payload)
+
+
+def emit_activity(conn: sqlite3.Connection, *, kind: str,
+                  task_id: str | None = None, role_slug: str | None = None,
+                  payload=None, now: str | None = None,
+                  run_id: str | None = None,
+                  workflow_id: str | None = None,
+                  step_id: str | None = None,
+                  slice_key: str | None = None,
+                  execution_no: int | None = None) -> int:
+    """activities 的唯一写者：先写 events，再写带 event_id 的投影。
+
+    activities 仍是会话时间线的权威投影；events 是全局 append-only 事实账本。
+    """
+    stamp = now or now_iso()
+    payload_json = _payload_json(payload)
+    event_type = _activity_event_type(kind, jloads(payload_json, {}))
+    actor_type = ("role" if role_slug and role_slug not in
+                  ("workflow", "human", "system") else "system")
+    cur = conn.execute(
+        "INSERT INTO events (ts, event_type, task_id, workflow_id, execution_no, "
+        "step_id, slice_key, run_id, actor_type, actor, payload_json) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (stamp, event_type, task_id, workflow_id, execution_no, step_id,
+         slice_key, run_id, actor_type, role_slug, payload_json),
+    )
+    event_id = int(cur.lastrowid)
+    cur = conn.execute(
+        "INSERT INTO activities (task_id, role_slug, run_id, kind, payload_json, "
+        "created_at, event_id, workflow_id, step_id, slice_key, execution_no) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (task_id, role_slug, run_id, kind, payload_json, stamp, event_id,
+         workflow_id, step_id, slice_key, execution_no),
+    )
+    return int(cur.lastrowid)
+
+
+_UNSET_EVENT_TASK = object()
+
+
+def emit_audit(conn: sqlite3.Connection, *, role_slug: str | None,
+               task_id: str | None, action: str, payload=None,
+               now: str | None = None,
+               event_task_id=_UNSET_EVENT_TASK) -> int:
+    """audit 的唯一写者：写 audit 后同步 events（source='audit' 幂等回链）。
+
+    `event_task_id` 默认与 audit 的 task_id 一致；任务删除审计需要保留 tombstone
+    但不能再把已删除的 task_id 写回 events 时显式传 None。
+    """
+    stamp = now or now_iso()
+    payload_json = _payload_json(payload)
+    cur = conn.execute(
+        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (role_slug, task_id, action, payload_json, stamp),
+    )
+    audit_id = int(cur.lastrowid)
+    actor_type = ("human" if role_slug == "human"
+                  else "role" if role_slug else "system")
+    event_task = task_id if event_task_id is _UNSET_EVENT_TASK else event_task_id
+    conn.execute(
+        "INSERT INTO events (ts, event_type, task_id, actor_type, actor, source, "
+        "source_id, payload_json) VALUES (?,?,?,?,?,?,?,?)",
+        (stamp, f"audit.{action}", event_task, actor_type, role_slug, "audit",
+         audit_id, payload_json),
+    )
+    return audit_id
+
+
 def backfill(conn: sqlite3.Connection) -> int:
     """把历史 activities/audit 幂等回填到 events。返回新增数量。"""
     added = 0

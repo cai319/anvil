@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 
 from ..util import jdumps, jloads, new_id, now_iso
-from . import knowledge_card, knowledge_quality
+from . import knowledge_card, knowledge_quality, ledger
 from .tasks import ConflictError, get as get_task
 
 
@@ -309,12 +309,13 @@ def approve(conn: sqlite3.Connection, knowledge_id: str, *,
     assert card is not None
     path = _write_card_file(conn, card["task_id"], card)
     conn.execute("UPDATE task_knowledge SET path=? WHERE id=?", (path, knowledge_id))
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (actor, card.get("task_id"), "knowledge.approve",
-         jdumps({"table": "task_knowledge", "card_id": knowledge_id,
-                 "quality_score": quality["score"]}), now))
+    ledger.emit_audit(
+        conn, role_slug=actor,
+        task_id=card.get("task_id"),
+        action="knowledge.approve",
+        payload=jdumps({"table": "task_knowledge", "card_id": knowledge_id,
+                 "quality_score": quality["score"]}),
+        now=now)
     conn.commit()
     return get(conn, knowledge_id) or card
 

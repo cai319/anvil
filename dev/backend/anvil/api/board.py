@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .. import services
+from ..services import ledger
 from ..deps import Auth, get_auth, get_db, require_human
 from ..services.tasks import ConflictError
 from ..util import jdumps, now_iso
@@ -137,17 +138,18 @@ def _audit_human_decision(conn, task_id: str | None, action: str,
     if not task_id:
         return
     try:
-        conn.execute(
-            "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-            "VALUES (?,?,?,?,?)",
-            ("human", task_id, action, jdumps({
+        ledger.emit_audit(
+            conn, role_slug="human",
+            task_id=task_id,
+            action=action,
+            payload=jdumps({
                 **payload,
                 "client": request.client.host if request.client else None,
                 "user_agent": request.headers.get("user-agent"),
                 "referer": request.headers.get("referer"),
                 "origin": request.headers.get("origin"),
-            }), now_iso()),
-        )
+            }),
+            now=now_iso())
         conn.commit()
     except Exception:  # noqa: BLE001 —— 审计失败不阻断已完成的决策
         pass

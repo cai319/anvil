@@ -8,7 +8,7 @@ import sqlite3
 from collections import Counter, defaultdict
 
 from ..util import ConflictError, jdumps, jloads, now_iso
-from . import knowledge_card
+from . import knowledge_card, ledger
 
 class QualityGateError(ConflictError):
     """审批被质量门阻断；携带结构化 quality 供 API/UI 展示。"""
@@ -215,11 +215,12 @@ def review_action(conn: sqlite3.Connection, card_id: str, action: str, *,
     conn.execute(
         "UPDATE repo_knowledge SET review_at=?, updated_at=? WHERE id=?",
         (review_at, now_iso(), card_id))
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (actor, card.get("source_task_id"), f"knowledge.review.{action}",
-         jdumps({"card_id": card_id, "review_at": review_at}), now_iso()))
+    ledger.emit_audit(
+        conn, role_slug=actor,
+        task_id=card.get("source_task_id"),
+        action=f"knowledge.review.{action}",
+        payload=jdumps({"card_id": card_id, "review_at": review_at}),
+        now=now_iso())
     conn.commit()
     return {**repo_knowledge.get(conn, card_id), "review_at": review_at}
 

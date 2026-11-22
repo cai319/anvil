@@ -621,13 +621,14 @@ def record_context_return(conn: sqlite3.Connection, *, switched_run_id: str,
 def _audit_context_return(conn: sqlite3.Connection, run: dict,
                           action: str, reason: str) -> None:
     try:
-        conn.execute(
-            "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-            "VALUES (?,?,?,?,?)",
-            (run.get("role_slug"), run.get("task_id"), action,
-             jdumps({"run_id": run.get("id"),
+        ledger.emit_audit(
+            conn, role_slug=run.get("role_slug"),
+            task_id=run.get("task_id"),
+            action=action,
+            payload=jdumps({"run_id": run.get("id"),
                      "target": run.get("context_return_run_id"),
-                     "reason": reason}), now_iso()))
+                     "reason": reason}),
+            now=now_iso())
     except Exception:  # noqa: BLE001 —— 审计失败不阻断状态收敛
         pass
 

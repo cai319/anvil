@@ -36,6 +36,63 @@ def test_emit_and_query_task_events(tmp_path):
     assert activity["step_id"] == "S1"
 
 
+def test_emit_activity_writes_ledger_and_projection(tmp_path):
+    conn = connect(str(tmp_path / "a.db"))
+    _task(conn)
+    aid = ledger.emit_activity(
+        conn, task_id="T1", role_slug="dev", kind="comment",
+        payload={"body": "hello"}, now="2026-01-01T00:00:00+00:00")
+    assert aid > 0
+    activity = conn.execute("SELECT * FROM activities WHERE id=?", (aid,)).fetchone()
+    assert activity["task_id"] == "T1"
+    assert activity["role_slug"] == "dev"
+    assert activity["event_id"] is not None
+    event = conn.execute(
+        "SELECT * FROM events WHERE id=?", (activity["event_id"],)).fetchone()
+    assert event["event_type"] == "message.comment"
+    assert event["ts"] == "2026-01-01T00:00:00+00:00"
+    # 已有 event_id 的投影不会被 backfill 再写一条。
+    assert ledger.backfill(conn) == 0
+
+
+def test_emit_audit_writes_ledger_and_projection(tmp_path):
+    conn = connect(str(tmp_path / "au.db"))
+    _task(conn)
+    audit_id = ledger.emit_audit(
+        conn, role_slug="human", task_id="T1", action="task.assign_existing",
+        payload={"roles": ["dev"]})
+    assert audit_id > 0
+    row = conn.execute("SELECT * FROM audit WHERE id=?", (audit_id,)).fetchone()
+    assert row["action"] == "task.assign_existing"
+    event = conn.execute(
+        "SELECT * FROM events WHERE source='audit' AND source_id=?",
+        (audit_id,)).fetchone()
+    assert event is not None
+    assert event["event_type"] == "audit.task.assign_existing"
+    assert event["task_id"] == "T1"
+    assert ledger.backfill(conn) == 0
+
+
+def test_no_direct_activity_or_audit_writes_outside_ledger():
+    """P0.5 单写者不变量：activities/audit/events 只允许 ledger 直写。"""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "backend" / "anvil"
+    ledger_path = root / "services" / "ledger.py"
+    offenders: list[str] = []
+    for path in root.rglob("*.py"):
+        if path == ledger_path:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for marker in ("INSERT INTO activities", "INSERT INTO audit",
+                       "INSERT INTO events", "INSERT OR IGNORE INTO events"):
+            if marker in text:
+                offenders.append(f"{path.relative_to(root)}: {marker}")
+    assert offenders == [], (
+        "direct writes must go through services.ledger.emit*/emit_activity/"
+        "emit_audit:\n" + "\n".join(offenders))
+
+
 def test_backfill_activities_and_audit_once(tmp_path):
     conn = connect(str(tmp_path / "b.db"))
     _task(conn)

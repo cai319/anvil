@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { api, isOnboardingRole, type BoardDraft, type Delegation, type FindingSummary, type KnowledgeKind, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Run, type Task, type TaskDispatch, type TaskKnowledge, type TaskLeases, type TaskRoleState, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight, type WorkspaceKnowledge } from "../api/client";
+import { api, isOnboardingRole, type BoardDraft, type Delegation, type FindingSummary, type KnowledgeKind, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Run, type Task, type TaskChild, type TaskDispatch, type TaskKnowledge, type TaskLeases, type TaskRoleState, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight, type WorkspaceKnowledge } from "../api/client";
 import { useLiveRefresh } from "../useLiveRefresh";
 import {
   AUTHORITY_LABEL,
@@ -53,27 +53,99 @@ const RUN_LABEL: Record<string, string> = {
   suspended: "等待唤醒",
 };
 
-type DelegationState = {
+type ChildState = {
   label: string;
   cls: "todo" | "in_progress" | "in_review" | "done" | "closed";
 };
 
-function delegationState(d: Delegation): DelegationState {
-  if (d.status === "done") return { label: "已完成", cls: "done" };
-  if (d.status === "closed") return { label: "已取消", cls: "closed" };
-  if (d.status === "in_review") return { label: "待验收", cls: "in_review" };
-  if (d.run_status === "failed" || d.run_status === "abandoned")
+/** 委派/派遣共用同一套状态词表；差异只在待验收/待回切等关系语义。 */
+function childState(c: TaskChild): ChildState {
+  if (c.relation_type === "dispatch" && c.return_pending)
+    return { label: "待回切", cls: "in_progress" };
+  if (c.status === "done") return { label: "已完成", cls: "done" };
+  if (c.status === "closed")
+    return { label: c.relation_type === "delegation" ? "已取消" : "已终止", cls: "closed" };
+  if (c.status === "in_review")
+    return { label: c.relation_type === "delegation" ? "待验收" : "待评审", cls: "in_review" };
+  if (c.run_status === "failed" || c.run_status === "abandoned")
     return { label: "异常", cls: "closed" };
-  if (d.run_status === "running") return { label: "进行中", cls: "in_progress" };
-  if (d.run_status === "created" || d.run_status === "projecting")
+  if (c.run_status === "running") return { label: "进行中", cls: "in_progress" };
+  if (c.run_status === "created" || c.run_status === "projecting")
     return { label: "排队中", cls: "in_progress" };
-  if (d.status === "in_progress") return { label: "进行中", cls: "in_progress" };
+  if (c.status === "in_progress") return { label: "进行中", cls: "in_progress" };
   return { label: "待认领", cls: "todo" };
 }
 
-function DelegationCard({ d, onChanged }: { d: Delegation; onChanged: () => void }) {
+/** 旧后端（无 /children 端点）时的兼容投影，待服务端重启后自然退场。 */
+function childFromDelegation(d: Delegation): TaskChild {
+  return {
+    relation_type: "delegation",
+    relation_id: null,
+    task_id: d.id,
+    title: d.title,
+    status: d.status,
+    type: d.type,
+    assignee: d.assignee,
+    assignees: d.assignees ?? [],
+    created_by: d.created_by,
+    parent_step_id: d.parent_step_id,
+    step_title: d.step_title,
+    due_at: d.due_at,
+    acceptance: d.acceptance ?? [],
+    scope_paths: d.scope_paths ?? [],
+    description: d.description,
+    submitted_summary: d.submitted_summary,
+    run_id: d.run_id,
+    run_status: d.run_status,
+    run_failure_class: d.run_failure_class,
+    blocking: true,
+    dispatch_status: null,
+    return_pending: false,
+    return_context_key: null,
+    returned_at: null,
+    created_at: d.created_at,
+    updated_at: d.updated_at,
+    raw: d,
+  };
+}
+
+function childFromDispatch(d: TaskDispatch): TaskChild {
+  return {
+    relation_type: "dispatch",
+    relation_id: d.id,
+    task_id: d.target_task_id,
+    title: d.target_title || d.target_task_id,
+    status: (d.target_status as Task["status"]) || "todo",
+    type: "dispatch",
+    assignee: d.target_role,
+    assignees: d.target_role ? [d.target_role] : [],
+    created_by: d.requested_by
+      ? (d.requested_by === "human" ? "human" : `agent:${d.requested_by}`)
+      : null,
+    parent_step_id: d.source_step_id,
+    step_title: null,
+    due_at: null,
+    acceptance: [],
+    scope_paths: [],
+    description: null,
+    submitted_summary: null,
+    run_id: null,
+    run_status: null,
+    run_failure_class: null,
+    blocking: false,
+    dispatch_status: d.status,
+    return_pending: d.status === "return_ready" || d.status === "returning",
+    return_context_key: d.return_context_key,
+    returned_at: d.returned_at,
+    created_at: d.created_at,
+    updated_at: d.updated_at,
+    raw: d,
+  };
+}
+
+function ChildTaskCard({ c, onChanged }: { c: TaskChild; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
-  const state = delegationState(d);
+  const state = childState(c);
 
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true);
@@ -86,12 +158,12 @@ function DelegationCard({ d, onChanged }: { d: Delegation; onChanged: () => void
   };
 
   const nudge = () => {
-    if (!d.assignee) return;
-    void run(() => api.mentionTask(d.id, d.assignee!, "催办：请同步委派进展"));
+    if (!c.assignee) return;
+    void run(() => api.mentionTask(c.task_id, c.assignee!, "催办：请同步子任务进展"));
   };
 
   const accept = () => {
-    void run(() => api.acceptDelegation(d.id));
+    void run(() => api.acceptDelegation(c.task_id));
   };
 
   const reject = async () => {
@@ -104,7 +176,7 @@ function DelegationCard({ d, onChanged }: { d: Delegation; onChanged: () => void
       danger: true,
     });
     if (!feedback) return;
-    void run(() => api.rejectDelegation(d.id, feedback));
+    void run(() => api.rejectDelegation(c.task_id, feedback));
   };
 
   const cancel = async () => {
@@ -115,44 +187,57 @@ function DelegationCard({ d, onChanged }: { d: Delegation; onChanged: () => void
       danger: true,
     });
     if (!ok) return;
-    void run(() => api.cancelTask(d.id));
+    void run(() => api.cancelTask(c.task_id));
   };
 
-  // 只有绑定父 step 的委派工单才有验收/打回语义；普通历史子任务不显示。
-  const canAccept = Boolean(d.parent_step_id) && d.status === "in_review";
-  const canCancel = d.status === "todo" || d.status === "in_progress";
-  const delegator = d.created_by?.startsWith("agent:")
-    ? d.created_by.slice("agent:".length)
-    : (d.created_by || "—");
-  const owner = d.assignee || (d.assignees?.length ? d.assignees.join("、") : "无人认领");
+  const isDelegation = c.relation_type === "delegation";
+  // 只有绑定父 step 的委派工单才有验收/打回语义。
+  const canAccept = isDelegation && Boolean(c.parent_step_id) && c.status === "in_review";
+  const canCancel = isDelegation && (c.status === "todo" || c.status === "in_progress");
+  const requester = c.created_by?.startsWith("agent:")
+    ? c.created_by.slice("agent:".length)
+    : (c.created_by || "—");
+  const owner = c.assignee || (c.assignees?.length ? c.assignees.join("、") : "无人认领");
 
   return (
     <div className={`delegation-card delegation-${state.cls}`}>
       <div className="delegation-head">
-        <a className="delegation-title" href={`/tasks/${d.id}`}>{d.title}</a>
+        <a className="delegation-title" href={`/tasks/${c.task_id}`}>{c.title}</a>
+        <span className={`chip relation-${c.relation_type}`}>
+          {isDelegation ? "委派" : "派遣"}
+        </span>
         <span className={`status status-${state.cls}`}>{state.label}</span>
-        {d.run_failure_class && (
-          <span className="badge badge-in_progress" title="失败分类">{d.run_failure_class}</span>
+        {c.run_failure_class && (
+          <span className="badge badge-in_progress" title="失败分类">{c.run_failure_class}</span>
         )}
       </div>
       <div className="delegation-meta">
-        <span>{delegator} → {owner}</span>
-        <span>{d.step_title || "未关联步骤"}</span>
-        <span>截止：{d.due_at ? formatDateTime(d.due_at) : "未设置"}</span>
-        {d.created_at && <span className="muted">{formatClock(d.created_at)}</span>}
+        <span>{requester} → {owner}</span>
+        <span>{c.step_title || "未关联步骤"}</span>
+        {isDelegation ? (
+          <span>截止：{c.due_at ? formatDateTime(c.due_at) : "未设置"}</span>
+        ) : (
+          c.dispatch_status && (
+            <span>派遣：{DISPATCH_STATUS_LABEL[c.dispatch_status] ?? c.dispatch_status}</span>
+          )
+        )}
+        {c.created_at && <span className="muted">{formatClock(c.created_at)}</span>}
       </div>
-      {d.acceptance?.length > 0 && (
-        <div className="delegation-acceptance">验收：{d.acceptance.join("；")}</div>
+      {c.acceptance?.length > 0 && (
+        <div className="delegation-acceptance">验收：{c.acceptance.join("；")}</div>
       )}
-      {d.scope_paths?.length > 0 && (
-        <div className="muted">scope：{d.scope_paths.join("、")}</div>
+      {c.scope_paths?.length > 0 && (
+        <div className="muted">scope：{c.scope_paths.join("、")}</div>
       )}
-      {d.submitted_summary && (
-        <div className="delegation-result">结果：{d.submitted_summary}</div>
+      {c.submitted_summary && (
+        <div className="delegation-result">结果：{c.submitted_summary}</div>
+      )}
+      {!isDelegation && c.return_context_key && (
+        <div className="muted mono" title="完成后回切的上下文">回切：{c.return_context_key}</div>
       )}
       <div className="delegation-actions">
-        <a href={`/tasks/${d.id}`}>打开详情</a>
-        {d.assignee && (
+        <a href={`/tasks/${c.task_id}`}>{isDelegation ? "打开详情" : "打开派遣任务"}</a>
+        {c.assignee && (
           <button className="small" disabled={busy} onClick={nudge}>催办</button>
         )}
         {canAccept && (
@@ -164,6 +249,7 @@ function DelegationCard({ d, onChanged }: { d: Delegation; onChanged: () => void
         {canCancel && (
           <button className="small danger" disabled={busy} onClick={cancel}>取消</button>
         )}
+        {c.returned_at && <span className="muted">已回切 {formatClock(c.returned_at)}</span>}
       </div>
     </div>
   );
@@ -173,45 +259,6 @@ const DISPATCH_STATUS_LABEL: Record<string, string> = {
   open: "进行中", return_ready: "待回切", returning: "回切中",
   returned: "已回切", no_return: "不回切", cancelled: "已取消",
 };
-const TASK_STATUS_LABEL: Record<string, string> = {
-  todo: "待办", in_progress: "进行中", in_review: "待评审",
-  done: "完成", closed: "已终止",
-};
-
-function DispatchCard({ d }: { d: TaskDispatch }) {
-  const statusCls = d.status === "returned"
-    ? "done"
-    : d.status === "no_return" || d.status === "cancelled" ? "closed" : "in_progress";
-  return (
-    <div className="delegation-card">
-      <div className="delegation-head">
-        <a className="delegation-title" href={`/tasks/${d.target_task_id}`}>
-          {d.target_title || d.target_task_id}
-        </a>
-        <span className={`status status-${statusCls}`}>
-          {DISPATCH_STATUS_LABEL[d.status] || d.status}
-        </span>
-        {d.source_slice_key && <span className="chip">切片 {d.source_slice_key}</span>}
-      </div>
-      <div className="delegation-meta">
-        <span>{d.requested_by || "human"} → {d.target_role || "—"}</span>
-        {d.target_status && (
-          <span>任务状态：{TASK_STATUS_LABEL[d.target_status] ?? d.target_status}</span>
-        )}
-        {d.return_context_key && (
-          <span className="muted mono" title="完成后回切的上下文">
-            回切：{d.return_context_key}
-          </span>
-        )}
-        {d.created_at && <span className="muted">{formatClock(d.created_at)}</span>}
-      </div>
-      <div className="delegation-actions">
-        <a href={`/tasks/${d.target_task_id}`}>打开派遣任务</a>
-        {d.returned_at && <span className="muted">已回切 {formatClock(d.returned_at)}</span>}
-      </div>
-    </div>
-  );
-}
 
 function DraftParticipants({ draftId }: { draftId: string }) {
   const [data, setData] = useState<{
@@ -1074,6 +1121,7 @@ export function TaskDetail({ id }: { id: string }) {
   const [reviewStep, setReviewStep] = useState<WorkflowStep | null>(null);
   const [delegations, setDelegations] = useState<Delegation[]>([]);
   const [dispatches, setDispatches] = useState<TaskDispatch[]>([]);
+  const [children, setChildren] = useState<TaskChild[]>([]);
   const [plannerActive, setPlannerActive] = useState(false);
   const [runs, setRuns] = useState<Run[]>([]);
   const [wfView, setWfView] = useState<"graph" | "list">("graph");
@@ -1113,11 +1161,31 @@ export function TaskDetail({ id }: { id: string }) {
     return () => { alive = false; };
   }, [displayWorkflow?.id, displayWorkflow?.updated_at]);
 
-  const refreshDelegations = () =>
-    api.listTaskDelegations(id).then(setDelegations).catch(() => setDelegations([]));
-
-  const refreshDispatches = () =>
-    api.listDispatches(id).then(setDispatches).catch(() => setDispatches([]));
+  /** 统一子任务投影；旧后端无 /children 时回退到两个旧端点。 */
+  const refreshChildren = () => {
+    const apply = (items: TaskChild[]) => {
+      setChildren(items);
+      setDelegations(items
+        .filter((c) => c.relation_type === "delegation")
+        .map((c) => c.raw as Delegation));
+      setDispatches(items
+        .filter((c) => c.relation_type === "dispatch")
+        .map((c) => c.raw as TaskDispatch));
+    };
+    return api.listTaskChildrenUnified(id)
+      .then((res) => apply(res.items))
+      .catch(() => Promise.all([
+        api.listTaskDelegations(id).catch(() => []),
+        api.listDispatches(id).catch(() => []),
+      ]).then(([delegationRows, dispatchRows]) => {
+        setDelegations(delegationRows);
+        setDispatches(dispatchRows);
+        setChildren([
+          ...delegationRows.map(childFromDelegation),
+          ...dispatchRows.map(childFromDispatch),
+        ]);
+      }));
+  };
 
   const refreshDrafts = () =>
     api.listDrafts(id).then(setDrafts).catch(() => setDrafts([]));
@@ -1184,8 +1252,7 @@ export function TaskDetail({ id }: { id: string }) {
     setDescOverflow(false);
     refresh();
     refreshWorkflow();
-    refreshDelegations();
-    refreshDispatches();
+    refreshChildren();
     refreshRoleStates();
     api.listRoles().then(setRoles).catch(() => {});
     api.listWorkflowTemplates(undefined, "active").then((list) => {
@@ -1197,8 +1264,8 @@ export function TaskDetail({ id }: { id: string }) {
 
   useLiveRefresh(
     () => Promise.all([
-      refresh(), refreshWorkflow(), refreshDelegations(),
-      refreshDispatches(), refreshDrafts(), refreshRoleStates(),
+      refresh(), refreshWorkflow(), refreshChildren(),
+      refreshDrafts(), refreshRoleStates(),
     ]),
     {
       enabled: !gone,
@@ -1636,7 +1703,10 @@ export function TaskDetail({ id }: { id: string }) {
   const renderStepRow = (st: WorkflowStep) => {
     const tone = statusTone(st.status);
     const label = STATUS_META[st.status].label;
-    const stepDelegations = delegations.filter((d) => d.parent_step_id === st.step_id);
+    const stepChildren = children.filter((c) => c.parent_step_id === st.step_id);
+    // 门禁只看委派：派遣是非阻塞软关联，不参与父 step 收口。
+    const stepDelegations = stepChildren.filter((c) => c.relation_type === "delegation");
+    const stepDispatches = stepChildren.filter((c) => c.relation_type === "dispatch");
     const openDelegations = stepDelegations.filter(
       (d) => d.status !== "done" && d.status !== "closed");
     const reviewPending = openDelegations.some((d) => d.status === "in_review");
@@ -1669,6 +1739,11 @@ export function TaskDetail({ id }: { id: string }) {
                 委派 {stepDelegations.length}
               </span>
             )}
+            {stepDispatches.length > 0 && (
+              <span className="badge wf-gate" title="本步骤发起的派遣任务（不阻塞）">
+                派遣 {stepDispatches.length}
+              </span>
+            )}
             {st.status === "running" && openDelegations.length > 0 && (
               <span className="badge wf-gate"
                 title={reviewPending
@@ -1689,13 +1764,15 @@ export function TaskDetail({ id }: { id: string }) {
             </div>
           )}
           {st.summary && <div className="muted wf-summary">{st.summary}</div>}
-          {stepDelegations.length > 0 && (
+          {stepChildren.length > 0 && (
             <div className="wf-delegations">
-              {stepDelegations.map((d) => {
-                const s = delegationState(d);
+              {stepChildren.map((c) => {
+                const s = childState(c);
                 return (
-                  <a key={d.id} href={`/tasks/${d.id}`} className="muted">
-                    {d.title} <span className={`status status-${s.cls}`}>{s.label}</span>
+                  <a key={`${c.relation_type}:${c.task_id}`} href={`/tasks/${c.task_id}`}
+                    className="muted">
+                    {c.relation_type === "dispatch" && <span className="chip">派遣</span>}
+                    {c.title} <span className={`status status-${s.cls}`}>{s.label}</span>
                   </a>
                 );
               })}
@@ -1908,8 +1985,8 @@ export function TaskDetail({ id }: { id: string }) {
           </button>
         )}
         <button className={`tab ${tab === "subtasks" ? "active" : ""}`} onClick={() => selectTab("subtasks")}>
-          委派/派遣任务 {(delegations.length + dispatches.length) > 0 && (
-            <span className="tab-count">{delegations.length + dispatches.length}</span>
+          委派/派遣任务 {(children.length) > 0 && (
+            <span className="tab-count">{children.length}</span>
           )}
         </button>
         <button className={`tab ${tab === "runtime" ? "active" : ""}`} onClick={() => selectTab("runtime")}>
@@ -2673,30 +2750,37 @@ export function TaskDetail({ id }: { id: string }) {
       )}
 
       {tab === "subtasks" && (() => {
-        const groups = new Map<string, { title: string; items: Delegation[] }>();
-        for (const d of delegations) {
-          const key = d.parent_step_id || "__none__";
-          const title = d.step_title || "未关联步骤";
+        const groups = new Map<string, { title: string; items: TaskChild[] }>();
+        for (const c of children) {
+          const key = c.parent_step_id || "__none__";
+          const title = c.step_title || "未关联步骤";
           const group = groups.get(key) ?? { title, items: [] };
-          group.items.push(d);
+          group.items.push(c);
           groups.set(key, group);
         }
-        const pending = delegations.filter(
-          (d) => d.status !== "done" && d.status !== "closed").length;
-        const waiting = delegations.filter((d) => d.status === "in_review").length;
+        const delegationCount = children.filter(
+          (c) => c.relation_type === "delegation").length;
+        const dispatchCount = children.filter(
+          (c) => c.relation_type === "dispatch").length;
+        const pending = children.filter(
+          (c) => c.status !== "done" && c.status !== "closed").length;
+        const waiting = children.filter(
+          (c) => c.relation_type === "delegation" && c.status === "in_review").length;
+        const returning = children.filter((c) => c.return_pending).length;
         return (
           <div className="delegations">
             <div className="delegation-summary">
-              <strong>委派 {delegations.length}</strong>
+              <strong>子任务 {children.length}</strong>
+              <span> · 委派 {delegationCount}</span>
+              <span> · 派遣 {dispatchCount}</span>
               {pending > 0 && <span> · 未完成 {pending}</span>}
               {waiting > 0 && <span> · 待验收 {waiting}</span>}
-              {pending > 0 && (
-                <span className="muted"> · 父 step 提交前需完成</span>
-              )}
+              {returning > 0 && <span> · 待回切 {returning}</span>}
             </div>
-            {delegations.length === 0 && (
+            {children.length === 0 && (
               <p className="muted">
-                当前任务没有委派。需要另一个角色独立完成一块工作时，在 step 中创建委派工单；
+                当前任务没有委派或派遣子任务。委派用于另一个角色独立完成一块工作，
+                会阻塞父 step 并需验收；派遣为独立上下文的非阻塞任务，完成后按回切状态处理。
                 并行只读探索优先用运行时 subagent。
               </p>
             )}
@@ -2705,28 +2789,20 @@ export function TaskDetail({ id }: { id: string }) {
                 <h3 className="delegation-group-title">
                   {group.title} <span className="muted">{group.items.length}</span>
                 </h3>
-                {group.items.map((d) => (
-                  <DelegationCard
-                    key={d.id}
-                    d={d}
-                    onChanged={() => { void refreshDelegations(); }}
+                {group.items.map((c) => (
+                  <ChildTaskCard
+                    key={`${c.relation_type}:${c.task_id}`}
+                    c={c}
+                    onChanged={() => { void refreshChildren(); }}
                   />
                 ))}
               </section>
             ))}
-            <section className="delegation-group">
-              <h3 className="delegation-group-title">
-                派遣任务 <span className="muted">{dispatches.length}</span>
-              </h3>
+            {delegationCount > 0 && (
               <p className="muted">
-                人工派遣请在会话中 @目标角色（路由判定为独立工作时）；这里只展示和追踪已创建的派遣任务
-                （含来源切片、目标角色与回切状态）。
+                委派在父 step 提交前需全部完成；派遣不阻塞、不共享对话。
               </p>
-              {dispatches.length === 0 && (
-                <p className="muted">还没有派遣任务。</p>
-              )}
-              {dispatches.map((d) => <DispatchCard key={d.id} d={d} />)}
-            </section>
+            )}
           </div>
         );
       })()}
