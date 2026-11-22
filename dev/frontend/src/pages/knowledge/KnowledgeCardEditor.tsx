@@ -38,7 +38,8 @@ export function KnowledgeCardEditor({
   const [tags, setTags] = useState((card.tags || []).join(", "));
   const [authority, setAuthority] = useState<string>(
     "authority" in card ? (card.authority || "reference") : "reference");
-  const [quality, setQuality] = useState<QualityReport | undefined>(card.quality);
+  const [quality, setQuality] = useState<QualityReport | undefined>(
+    card.quality ?? undefined);
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);

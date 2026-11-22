@@ -542,6 +542,133 @@ class FindingSchemaOut(BaseModel):
     required: list[str] = Field(default_factory=list)
 
 
+KnowledgeKindLiteral = Literal[
+    "convention", "workflow", "role_requirement", "decision", "insight",
+    "task_finding", "personal_lesson"]
+KnowledgeAuthorityLiteral = Literal["normative", "reference"]
+KnowledgeStatusLiteral = Literal[
+    "draft", "proposed", "approved", "rejected", "deprecated", "expired"]
+TaskKnowledgeStatusLiteral = Literal["active", "proposed", "archived"]
+
+
+class QualityDimensionsOut(BaseModel):
+    evidence: int = 0
+    scenario: int = 0
+    effect: int = 0
+    readability: int = 0
+
+
+class QualityReportOut(BaseModel):
+    score: int = 0
+    grade: str = "D"
+    blocking: list[str] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    dimensions: QualityDimensionsOut = Field(default_factory=QualityDimensionsOut)
+    readable: bool = False
+    checked_at: str | None = None
+    gate_version: int = 1
+    legacy: bool = False
+    resolved_fields: dict[str, Any] = Field(default_factory=dict)
+    llm: dict[str, Any] | None = None
+
+
+class TaskKnowledgeOut(BaseModel):
+    id: str
+    task_id: str
+    task_title: str | None = None
+    task_status: str | None = None
+    workspace_id: str | None = None
+    workspace_name: str | None = None
+    task_archived_at: str | None = None
+    hit_count: int = 0
+    last_hit_at: str | None = None
+    parent_task_id: str | None = None
+    source_subtask_id: str | None = None
+    origin: Literal["task", "subtask"]
+    kind: KnowledgeKindLiteral
+    title: str
+    tldr: str
+    body_md: str
+    fields: dict[str, Any] = Field(default_factory=dict)
+    tags: list[str] = Field(default_factory=list)
+    source_role: str | None = None
+    status: TaskKnowledgeStatusLiteral
+    completeness: float = 0.0
+    quality: QualityReportOut | None = None
+    legacy: bool = False
+    repo_id: str | None = None
+    repo_key: str | None = None
+    path: str | None = None
+    source_event: str | None = None
+    version: int = 1
+    content_hash: str | None = None
+    review_at: str | None = None
+    quality_score: int | None = None
+    quality_checked_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class WorkspaceKnowledgeOut(BaseModel):
+    id: str
+    workspace_id: str
+    workspace_name: str | None = None
+    repo: str | None = None
+    repo_id: str | None = None
+    kind: KnowledgeKindLiteral
+    authority: KnowledgeAuthorityLiteral
+    title: str
+    tldr: str
+    body_md: str
+    fields: dict[str, Any] = Field(default_factory=dict)
+    tags: list[str] = Field(default_factory=list)
+    source_task_id: str | None = None
+    source_subtask_id: str | None = None
+    source_knowledge: list[Any] = Field(default_factory=list)
+    owner: str | None = None
+    related: list[str] = Field(default_factory=list)
+    supersedes_id: str | None = None
+    content_hash: str | None = None
+    status: KnowledgeStatusLiteral
+    version: int = 1
+    origin: Literal["human", "agent", "system"]
+    created_by: str | None = None
+    created_at: str
+    updated_at: str
+    approved_at: str | None = None
+    approved_by: str | None = None
+    expires_at: str | None = None
+    review_at: str | None = None
+    conflicts: list[str] = Field(default_factory=list)
+    completeness: float = 0.0
+    quality: QualityReportOut | None = None
+    legacy: bool = False
+    hit_count: int = 0
+    last_hit_at: str | None = None
+    is_expired: bool = False
+    freshness: float = 0.0
+    template_version: int | None = None
+    quality_score: int | None = None
+    quality_checked_at: str | None = None
+
+
+class WorkspaceKnowledgePageOut(BaseModel):
+    items: list[WorkspaceKnowledgeOut] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 0
+    offset: int = 0
+    has_more: bool = False
+
+
+class TaskKnowledgePageOut(BaseModel):
+    items: list[TaskKnowledgeOut] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 0
+    offset: int = 0
+    has_more: bool = False
+
+
 class DelegationOut(BaseModel):
     """委派工单：声明前端/CLI 使用的稳定字段；其余 task 列透传。"""
     model_config = ConfigDict(extra="allow")

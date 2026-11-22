@@ -1135,34 +1135,18 @@ export interface Participant {
   joined_at: string;
 }
 
-export type KnowledgeKind =
-  | "convention" | "workflow" | "role_requirement" | "decision" | "insight"
-  | "task_finding" | "personal_lesson";
-export type KnowledgeAuthority = "normative" | "reference";
-export type KnowledgeStatus =
-  | "draft" | "proposed" | "approved" | "rejected" | "deprecated" | "expired";
+export type KnowledgeKind = Schemas["TaskKnowledgeOut"]["kind"];
+export type KnowledgeAuthority = Schemas["WorkspaceKnowledgeOut"]["authority"];
+export type KnowledgeStatus = Schemas["WorkspaceKnowledgeOut"]["status"];
 
-export interface QualityDimensions {
-  evidence: number;
-  scenario: number;
-  effect: number;
-  readability: number;
-}
+export type QualityDimensions = Required<Schemas["QualityDimensionsOut"]>;
 
-export interface QualityReport {
-  score: number;
-  grade: "A" | "B" | "C" | "D" | string;
-  blocking: string[];
-  missing: string[];
-  warnings: string[];
+export type QualityReport = Required<
+  Omit<Schemas["QualityReportOut"], "dimensions">
+> & {
   dimensions: QualityDimensions;
-  readable: boolean;
-  checked_at?: string | null;
-  gate_version?: number;
-  legacy?: boolean;
-  resolved_fields?: Record<string, string | null>;
-  llm?: Record<string, unknown> | null;
-}
+  grade: "A" | "B" | "C" | "D" | string;
+};
 
 /** 主题知识库注册表条目（管理页）。 */
 export interface TopicRepo {
@@ -1220,42 +1204,11 @@ export interface RepoCard {
   updated_at: string;
 }
 
-export interface WorkspaceKnowledge {
-  id: string;
-  workspace_id: string;
-  workspace_name?: string | null;
-  repo: string | null;
-  kind: KnowledgeKind;
-  authority: KnowledgeAuthority;
-  title: string;
-  tldr: string;
-  body_md: string;
-  fields: Record<string, unknown>;
-  tags: string[];
-  source_task_id: string | null;
-  source_subtask_id: string | null;
-  owner: string | null;
-  related: string[];
-  supersedes_id: string | null;
-  status: KnowledgeStatus;
-  version: number;
-  origin: "human" | "agent" | "system";
-  created_by: string | null;
-  created_at: string;
-  updated_at: string;
-  approved_at: string | null;
-  approved_by: string | null;
-  expires_at: string | null;
-  review_at: string | null;
-  conflicts: string[];
-  completeness: number;
-  quality?: QualityReport;
-  legacy?: boolean;
-  hit_count?: number;
-  last_hit_at?: string | null;
-  is_expired?: boolean;
-  freshness?: number;
-}
+export type WorkspaceKnowledge = Required<
+  Omit<Schemas["WorkspaceKnowledgeOut"], "quality">
+> & {
+  quality?: QualityReport | null;
+};
 
 export interface KnowledgeCardCheck {
   errors: string[];
@@ -1275,37 +1228,11 @@ export interface KnowledgeReview {
   total: number;
 }
 
-export interface TaskKnowledge {
-  id: string;
-  task_id: string;
-  task_title?: string | null;
-  task_status?: string | null;
-  workspace_id?: string | null;
-  workspace_name?: string | null;
-  task_archived_at?: string | null;
-  hit_count?: number;
-  last_hit_at?: string | null;
-  parent_task_id: string | null;
-  source_subtask_id: string | null;
-  origin: "task" | "subtask";
-  kind: KnowledgeKind;
-  title: string;
-  tldr: string;
-  body_md: string;
-  fields: Record<string, unknown>;
-  tags: string[];
-  source_role: string | null;
-  status: "active" | "proposed" | "archived";
-  completeness?: number;
-  quality?: QualityReport;
-  legacy?: boolean;
-  repo_id?: string | null;
-  repo_key?: string | null;
-  path?: string | null;
-  source_event?: string | null;
-  created_at: string;
-  updated_at: string;
-}
+export type TaskKnowledge = Required<
+  Omit<Schemas["TaskKnowledgeOut"], "quality">
+> & {
+  quality?: QualityReport | null;
+};
 
 export interface KnowledgePage<T> {
   items: T[];

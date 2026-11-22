@@ -5278,6 +5278,74 @@ export interface components {
             /** Risk */
             risk?: string | null;
         };
+        /** QualityDimensionsOut */
+        QualityDimensionsOut: {
+            /**
+             * Evidence
+             * @default 0
+             */
+            evidence: number;
+            /**
+             * Scenario
+             * @default 0
+             */
+            scenario: number;
+            /**
+             * Effect
+             * @default 0
+             */
+            effect: number;
+            /**
+             * Readability
+             * @default 0
+             */
+            readability: number;
+        };
+        /** QualityReportOut */
+        QualityReportOut: {
+            /**
+             * Score
+             * @default 0
+             */
+            score: number;
+            /**
+             * Grade
+             * @default D
+             */
+            grade: string;
+            /** Blocking */
+            blocking?: string[];
+            /** Missing */
+            missing?: string[];
+            /** Warnings */
+            warnings?: string[];
+            dimensions?: components["schemas"]["QualityDimensionsOut"];
+            /**
+             * Readable
+             * @default false
+             */
+            readable: boolean;
+            /** Checked At */
+            checked_at?: string | null;
+            /**
+             * Gate Version
+             * @default 1
+             */
+            gate_version: number;
+            /**
+             * Legacy
+             * @default false
+             */
+            legacy: boolean;
+            /** Resolved Fields */
+            resolved_fields?: {
+                [key: string]: unknown;
+            };
+            /** Llm */
+            llm?: {
+                [key: string]: unknown;
+            } | null;
+        };
         /** ReviewEvidenceOut */
         ReviewEvidenceOut: {
             /** Id */
@@ -5798,6 +5866,124 @@ export interface components {
              */
             issue_board_enabled: boolean;
         };
+        /** TaskKnowledgeOut */
+        TaskKnowledgeOut: {
+            /** Id */
+            id: string;
+            /** Task Id */
+            task_id: string;
+            /** Task Title */
+            task_title?: string | null;
+            /** Task Status */
+            task_status?: string | null;
+            /** Workspace Id */
+            workspace_id?: string | null;
+            /** Workspace Name */
+            workspace_name?: string | null;
+            /** Task Archived At */
+            task_archived_at?: string | null;
+            /**
+             * Hit Count
+             * @default 0
+             */
+            hit_count: number;
+            /** Last Hit At */
+            last_hit_at?: string | null;
+            /** Parent Task Id */
+            parent_task_id?: string | null;
+            /** Source Subtask Id */
+            source_subtask_id?: string | null;
+            /**
+             * Origin
+             * @enum {string}
+             */
+            origin: "task" | "subtask";
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "convention" | "workflow" | "role_requirement" | "decision" | "insight" | "task_finding" | "personal_lesson";
+            /** Title */
+            title: string;
+            /** Tldr */
+            tldr: string;
+            /** Body Md */
+            body_md: string;
+            /** Fields */
+            fields?: {
+                [key: string]: unknown;
+            };
+            /** Tags */
+            tags?: string[];
+            /** Source Role */
+            source_role?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "active" | "proposed" | "archived";
+            /**
+             * Completeness
+             * @default 0
+             */
+            completeness: number;
+            quality?: components["schemas"]["QualityReportOut"] | null;
+            /**
+             * Legacy
+             * @default false
+             */
+            legacy: boolean;
+            /** Repo Id */
+            repo_id?: string | null;
+            /** Repo Key */
+            repo_key?: string | null;
+            /** Path */
+            path?: string | null;
+            /** Source Event */
+            source_event?: string | null;
+            /**
+             * Version
+             * @default 1
+             */
+            version: number;
+            /** Content Hash */
+            content_hash?: string | null;
+            /** Review At */
+            review_at?: string | null;
+            /** Quality Score */
+            quality_score?: number | null;
+            /** Quality Checked At */
+            quality_checked_at?: string | null;
+            /** Created At */
+            created_at: string;
+            /** Updated At */
+            updated_at: string;
+        };
+        /** TaskKnowledgePageOut */
+        TaskKnowledgePageOut: {
+            /** Items */
+            items?: components["schemas"]["TaskKnowledgeOut"][];
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+            /**
+             * Limit
+             * @default 0
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
+        };
         /** TaskOut */
         TaskOut: {
             /** Id */
@@ -6290,6 +6476,145 @@ export interface components {
             lease_expires_at?: string | null;
             /** Lease Fence */
             lease_fence?: number | null;
+        };
+        /** WorkspaceKnowledgeOut */
+        WorkspaceKnowledgeOut: {
+            /** Id */
+            id: string;
+            /** Workspace Id */
+            workspace_id: string;
+            /** Workspace Name */
+            workspace_name?: string | null;
+            /** Repo */
+            repo?: string | null;
+            /** Repo Id */
+            repo_id?: string | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "convention" | "workflow" | "role_requirement" | "decision" | "insight" | "task_finding" | "personal_lesson";
+            /**
+             * Authority
+             * @enum {string}
+             */
+            authority: "normative" | "reference";
+            /** Title */
+            title: string;
+            /** Tldr */
+            tldr: string;
+            /** Body Md */
+            body_md: string;
+            /** Fields */
+            fields?: {
+                [key: string]: unknown;
+            };
+            /** Tags */
+            tags?: string[];
+            /** Source Task Id */
+            source_task_id?: string | null;
+            /** Source Subtask Id */
+            source_subtask_id?: string | null;
+            /** Source Knowledge */
+            source_knowledge?: unknown[];
+            /** Owner */
+            owner?: string | null;
+            /** Related */
+            related?: string[];
+            /** Supersedes Id */
+            supersedes_id?: string | null;
+            /** Content Hash */
+            content_hash?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "draft" | "proposed" | "approved" | "rejected" | "deprecated" | "expired";
+            /**
+             * Version
+             * @default 1
+             */
+            version: number;
+            /**
+             * Origin
+             * @enum {string}
+             */
+            origin: "human" | "agent" | "system";
+            /** Created By */
+            created_by?: string | null;
+            /** Created At */
+            created_at: string;
+            /** Updated At */
+            updated_at: string;
+            /** Approved At */
+            approved_at?: string | null;
+            /** Approved By */
+            approved_by?: string | null;
+            /** Expires At */
+            expires_at?: string | null;
+            /** Review At */
+            review_at?: string | null;
+            /** Conflicts */
+            conflicts?: string[];
+            /**
+             * Completeness
+             * @default 0
+             */
+            completeness: number;
+            quality?: components["schemas"]["QualityReportOut"] | null;
+            /**
+             * Legacy
+             * @default false
+             */
+            legacy: boolean;
+            /**
+             * Hit Count
+             * @default 0
+             */
+            hit_count: number;
+            /** Last Hit At */
+            last_hit_at?: string | null;
+            /**
+             * Is Expired
+             * @default false
+             */
+            is_expired: boolean;
+            /**
+             * Freshness
+             * @default 0
+             */
+            freshness: number;
+            /** Template Version */
+            template_version?: number | null;
+            /** Quality Score */
+            quality_score?: number | null;
+            /** Quality Checked At */
+            quality_checked_at?: string | null;
+        };
+        /** WorkspaceKnowledgePageOut */
+        WorkspaceKnowledgePageOut: {
+            /** Items */
+            items?: components["schemas"]["WorkspaceKnowledgeOut"][];
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+            /**
+             * Limit
+             * @default 0
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
         };
         /** WorkspaceRefOut */
         WorkspaceRefOut: {
@@ -8295,7 +8620,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["TaskKnowledgeOut"][];
                 };
             };
             /** @description Validation Error */
@@ -8335,7 +8660,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["TaskKnowledgeOut"];
                 };
             };
             /** @description Validation Error */
@@ -8444,7 +8769,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["TaskKnowledgeOut"];
                 };
             };
             /** @description Validation Error */
@@ -12621,7 +12946,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WorkspaceKnowledgePageOut"];
                 };
             };
             /** @description Validation Error */
@@ -12725,7 +13050,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["TaskKnowledgePageOut"];
                 };
             };
             /** @description Validation Error */
@@ -13930,7 +14255,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WorkspaceKnowledgeOut"][];
                 };
             };
             /** @description Validation Error */
@@ -13970,7 +14295,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WorkspaceKnowledgeOut"];
                 };
             };
             /** @description Validation Error */
@@ -14078,7 +14403,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WorkspaceKnowledgeOut"];
                 };
             };
             /** @description Validation Error */

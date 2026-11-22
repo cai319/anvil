@@ -11,8 +11,8 @@ from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import (
     ClaimIn, CommentIn, DelegationOut, DepIn, ReviewIn, SubmitIn, TaskChildOut,
-    TaskChildrenOut, TaskDispatchOut, TaskIn, TaskOut, TaskPatch,
-    TaskRoleStatesBatchOut, TaskRoleStatesOut,
+    TaskChildrenOut, TaskDispatchOut, TaskIn, TaskKnowledgeOut, TaskOut,
+    TaskPatch, TaskRoleStatesBatchOut, TaskRoleStatesOut,
 )
 from ..services import knowledge_quality, ledger, repo_catalog
 from ..services.tasks import ConflictError
@@ -382,7 +382,7 @@ def explain_task_knowledge(tid: str, role: str | None = None,
         raise HTTPException(status_code=404, detail="task not found")
 
 
-@router.get("/{tid}/knowledge")
+@router.get("/{tid}/knowledge", response_model=list[TaskKnowledgeOut])
 def list_task_knowledge(tid: str, include_subtasks: bool = False, deep: bool = False,
                         conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     task = services.tasks.get(conn, tid)
@@ -396,7 +396,7 @@ def list_task_knowledge(tid: str, include_subtasks: bool = False, deep: bool = F
         raise HTTPException(status_code=404, detail="task not found")
 
 
-@router.post("/{tid}/knowledge", status_code=201)
+@router.post("/{tid}/knowledge", status_code=201, response_model=TaskKnowledgeOut)
 def create_task_knowledge(tid: str, body: dict, conn=Depends(get_db),
                           auth: Auth = Depends(get_auth)):
     is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
@@ -458,7 +458,7 @@ def approve_task_knowledge(tid: str, kid: str, conn=Depends(get_db),
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.patch("/{tid}/knowledge/{kid}")
+@router.patch("/{tid}/knowledge/{kid}", response_model=TaskKnowledgeOut)
 def update_task_knowledge(tid: str, kid: str, body: dict,
                           conn=Depends(get_db),
                           auth: Auth = Depends(require_human)):
