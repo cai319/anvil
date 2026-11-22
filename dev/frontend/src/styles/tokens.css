@@ -78,6 +78,7 @@
   /* 记录列表里的长正文：比普通正文略小，避免长内容喧宾夺主。 */
   --fs-record: clamp(14px, 0.32vw + 9.4px, 22px);
   --fs-h2: clamp(18px, 0.42vw + 12px, 28px);
+  --fs-h3: clamp(16px, 0.34vw + 11px, 22px);
   --fs-h1: clamp(24px, 0.6vw + 15.4px, 40px);
 
   /* 侧栏单独放大：分组标题与导航项是主要阅读入口。 */
