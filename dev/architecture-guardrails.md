@@ -15,6 +15,7 @@
 | durable work item 读取 | `services.work_items.list_items` | `tests/test_work_items.py` |
 | Prompt 协议与 run 分类 | `graph/render.py` 常量 + `nodes._run_prompt_kind/_protocols_for_run` | `tests/test_prompt_snapshot.py` |
 | 前端状态词汇 | `src/statusVocabulary.ts`（task/run/dispatch）+ `roleStatus.statusByKey` | `tsc --noEmit` + `npm run build` |
+| API 契约（已覆盖部分） | `frontend/src/api/schema.d.ts`（由 OpenAPI 生成） | `npm run dump:api && npm run gen:api` + `tsc` |
 
 ## 禁止事项
 
@@ -39,6 +40,17 @@
 | 镜像状态字段 | 0（`dispatch_status` 已派生） | 0 |
 
 超出预算的新增需要在本文件记录例外与回收计划。
+
+## P1.12 说明：OpenAPI 契约现状
+
+- 生成链路：`backend/dump_openapi.py` → `frontend/openapi.json`（gitignore）→
+  `npm run gen:api` → `src/api/schema.d.ts`。
+- 已接入生成类型：`TaskStatus`、`Role`（RoleOut）、`Runtime`（RuntimeOut）。
+- 阻塞点：后端 249 条路径仅 32 个 schema，多数端点只返回 dict；`TaskOut` 的
+  嵌套字段仍是 `object`。要删除其余手写契约，必须先给 GET 端点补
+  `response_model` 与嵌套 Pydantic 模型（属于独立的后端契约工程）。
+- 新增/修改返回体时优先补 `response_model`，再跑生成脚本；手写类型只用于
+  前端视图模型与后端尚未建模的响应。
 
 ## P0.7 清理记录
 

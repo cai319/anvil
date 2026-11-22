@@ -33,11 +33,18 @@ export interface TaskRoleStatusSummary {
   run_statuses: Record<string, { status: string; started_at: string | null }>;
 }
 
+import type { components } from "./schema";
+
+type Schemas = components["schemas"];
+
+/** 任务状态：由后端 OpenAPI（TaskStatus）生成，避免前后端词表漂移。 */
+export type TaskStatus = Schemas["TaskStatus"];
+
 export interface Task {
   id: string;
   title: string;
   type: string | null;
-  status: "todo" | "in_progress" | "in_review" | "done" | "closed";
+  status: TaskStatus;
   priority: unknown;
   tags: string[];
   repo: string | null;
@@ -270,15 +277,7 @@ export interface FindingSchema {
   required: string[];
 }
 
-export interface Runtime {
-  id: string;
-  display_name: string;
-  executable_path: string;
-  detected_version: string | null;
-  status: string;
-  last_probe_at: string | null;
-  last_probe_log: string | null;
-}
+export type Runtime = Schemas["RuntimeOut"];
 
 export interface FeatureFlag {
   key: string;
@@ -292,17 +291,7 @@ export interface FeatureFlag {
   overridden: boolean;
 }
 
-export interface Role {
-  slug: string;
-  display_name: string;
-  avatar?: string | null;
-  avatar_color?: string | null;
-  home_path: string;
-  enabled: boolean;
-  created_at: string;
-  updated_at: string;
-  definition?: Record<string, unknown>;
-}
+export type Role = Schemas["RoleOut"];
 
 export interface RoleTaskContext {
   context_key?: string | null;
