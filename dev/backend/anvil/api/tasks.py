@@ -9,7 +9,10 @@ from fastapi.responses import JSONResponse
 
 from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
-from ..schemas import ClaimIn, CommentIn, DepIn, ReviewIn, SubmitIn, TaskIn, TaskOut, TaskPatch
+from ..schemas import (
+    ClaimIn, CommentIn, DepIn, ReviewIn, SubmitIn, TaskChildOut, TaskChildrenOut,
+    TaskIn, TaskOut, TaskPatch, TaskRoleStatesBatchOut, TaskRoleStatesOut,
+)
 from ..services import knowledge_quality, ledger, repo_catalog
 from ..services.tasks import ConflictError
 from ..util import jdumps, now_iso
@@ -317,7 +320,7 @@ def task_status_summary(task_ids: str = Query(default=""), conn=Depends(get_db),
     return out
 
 
-@router.get("/role-states")
+@router.get("/role-states", response_model=TaskRoleStatesBatchOut)
 def task_role_states_batch(task_ids: str = Query(...), conn=Depends(get_db),
                            auth: Auth = Depends(get_auth)):
     """批量角色状态（Lobby/列表页）；按任务读取权限过滤。"""
@@ -336,7 +339,7 @@ def task_role_states_batch(task_ids: str = Query(...), conn=Depends(get_db),
     return {"tasks": tasks}
 
 
-@router.get("/{tid}/role-states")
+@router.get("/{tid}/role-states", response_model=TaskRoleStatesOut)
 def task_role_states(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """任务内角色状态（服务端单一推导）；前端只做标签/颜色映射。"""
     access.assert_task_read(conn, auth, tid)
@@ -875,7 +878,7 @@ def list_task_subagents(tid: str, status: str | None = None, limit: int = 100,
         conn, task_id=tid, status=status, limit=limit)
 
 
-@router.get("/{tid}/children")
+@router.get("/{tid}/children", response_model=TaskChildrenOut)
 def list_children(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """委派/派遣子任务的统一投影（relation_type 区分行为，字段归一）。"""
     _assert_session_task(conn, auth, tid)

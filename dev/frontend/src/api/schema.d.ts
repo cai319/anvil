@@ -5352,6 +5352,97 @@ export interface components {
              */
             limit: number;
         };
+        /** TaskChildOut */
+        TaskChildOut: {
+            /**
+             * Relation Type
+             * @enum {string}
+             */
+            relation_type: "delegation" | "dispatch";
+            /** Relation Id */
+            relation_id?: string | null;
+            /** Task Id */
+            task_id: string;
+            /** Title */
+            title?: string | null;
+            status?: components["schemas"]["TaskStatus"] | null;
+            /** Type */
+            type?: string | null;
+            /** Assignee */
+            assignee?: string | null;
+            /** Assignees */
+            assignees?: string[];
+            /** Created By */
+            created_by?: string | null;
+            /** Parent Step Id */
+            parent_step_id?: string | null;
+            /** Step Title */
+            step_title?: string | null;
+            /** Due At */
+            due_at?: string | null;
+            /** Acceptance */
+            acceptance?: string[];
+            /** Scope Paths */
+            scope_paths?: string[];
+            /** Description */
+            description?: string | null;
+            /** Submitted Summary */
+            submitted_summary?: string | null;
+            /** Run Id */
+            run_id?: string | null;
+            /** Run Status */
+            run_status?: string | null;
+            /** Run Failure Class */
+            run_failure_class?: string | null;
+            /**
+             * Blocking
+             * @default false
+             */
+            blocking: boolean;
+            /** Dispatch Status */
+            dispatch_status?: string | null;
+            /**
+             * Return Pending
+             * @default false
+             */
+            return_pending: boolean;
+            /** Return Context Key */
+            return_context_key?: string | null;
+            /** Returned At */
+            returned_at?: string | null;
+            /** Created At */
+            created_at?: string | null;
+            /** Updated At */
+            updated_at?: string | null;
+            /** Raw */
+            raw?: {
+                [key: string]: unknown;
+            };
+        };
+        /** TaskChildrenCountsOut */
+        TaskChildrenCountsOut: {
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+            /**
+             * Delegation
+             * @default 0
+             */
+            delegation: number;
+            /**
+             * Dispatch
+             * @default 0
+             */
+            dispatch: number;
+        };
+        /** TaskChildrenOut */
+        TaskChildrenOut: {
+            /** Items */
+            items?: components["schemas"]["TaskChildOut"][];
+            counts?: components["schemas"]["TaskChildrenCountsOut"];
+        };
         /** TaskIn */
         TaskIn: {
             /** Id */
@@ -5557,6 +5648,45 @@ export interface components {
             submitted_at?: string | null;
             /** Release Requested At */
             release_requested_at?: string | null;
+        };
+        /** TaskRoleStateOut */
+        TaskRoleStateOut: {
+            /** Role Slug */
+            role_slug: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "working" | "closed" | "done" | "rework" | "failed" | "queued" | "retry" | "waiting_human" | "not_involved" | "released" | "return_pending" | "idle" | "todo";
+            /**
+             * Queued
+             * @default 0
+             */
+            queued: number;
+            /**
+             * Working Here
+             * @default false
+             */
+            working_here: boolean;
+            /**
+             * Busy Elsewhere
+             * @default false
+             */
+            busy_elsewhere: boolean;
+        };
+        /** TaskRoleStatesBatchOut */
+        TaskRoleStatesBatchOut: {
+            /** Tasks */
+            tasks?: {
+                [key: string]: components["schemas"]["TaskRoleStateOut"][];
+            };
+        };
+        /** TaskRoleStatesOut */
+        TaskRoleStatesOut: {
+            /** Task Id */
+            task_id: string;
+            /** Roles */
+            roles?: components["schemas"]["TaskRoleStateOut"][];
         };
         /**
          * TaskStatus
@@ -7654,7 +7784,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["TaskRoleStatesBatchOut"];
                 };
             };
             /** @description Validation Error */
@@ -7688,7 +7818,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["TaskRoleStatesOut"];
                 };
             };
             /** @description Validation Error */
@@ -8787,7 +8917,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["TaskChildrenOut"];
                 };
             };
             /** @description Validation Error */

@@ -455,6 +455,68 @@ class TaskOut(BaseModel):
     archived_at: str | None = None
 
 
+class TaskRoleStateOut(BaseModel):
+    role_slug: str
+    state: Literal[
+        "working", "closed", "done", "rework", "failed", "queued", "retry",
+        "waiting_human", "not_involved", "released", "return_pending", "idle",
+        "todo",
+    ]
+    queued: int = 0
+    working_here: bool = False
+    busy_elsewhere: bool = False
+
+
+class TaskRoleStatesOut(BaseModel):
+    task_id: str
+    roles: list[TaskRoleStateOut] = Field(default_factory=list)
+
+
+class TaskRoleStatesBatchOut(BaseModel):
+    tasks: dict[str, list[TaskRoleStateOut]] = Field(default_factory=dict)
+
+
+class TaskChildrenCountsOut(BaseModel):
+    total: int = 0
+    delegation: int = 0
+    dispatch: int = 0
+
+
+class TaskChildOut(BaseModel):
+    relation_type: Literal["delegation", "dispatch"]
+    relation_id: str | None = None
+    task_id: str
+    title: str | None = None
+    status: TaskStatus | None = None
+    type: str | None = None
+    assignee: str | None = None
+    assignees: list[str] = Field(default_factory=list)
+    created_by: str | None = None
+    parent_step_id: str | None = None
+    step_title: str | None = None
+    due_at: str | None = None
+    acceptance: list[str] = Field(default_factory=list)
+    scope_paths: list[str] = Field(default_factory=list)
+    description: str | None = None
+    submitted_summary: str | None = None
+    run_id: str | None = None
+    run_status: str | None = None
+    run_failure_class: str | None = None
+    blocking: bool = False
+    dispatch_status: str | None = None
+    return_pending: bool = False
+    return_context_key: str | None = None
+    returned_at: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaskChildrenOut(BaseModel):
+    items: list[TaskChildOut] = Field(default_factory=list)
+    counts: TaskChildrenCountsOut = Field(default_factory=TaskChildrenCountsOut)
+
+
 class ClaimIn(BaseModel):
     paths: list[str] | None = None
 

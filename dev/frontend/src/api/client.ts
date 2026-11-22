@@ -56,35 +56,9 @@ export interface Delegation {
 }
 
 /** 委派/派遣统一子任务投影（GET /tasks/{id}/children）。 */
-export interface TaskChild {
-  relation_type: "delegation" | "dispatch";
-  relation_id: string | null;
-  task_id: string;
-  title: string;
-  status: Task["status"];
-  type: string | null;
-  assignee: string | null;
-  assignees: string[];
-  created_by: string | null;
-  parent_step_id: string | null;
-  step_title: string | null;
-  due_at: string | null;
-  acceptance: string[];
-  scope_paths: string[];
-  description: string | null;
-  submitted_summary: string | null;
-  run_id: string | null;
-  run_status: string | null;
-  run_failure_class: string | null;
-  blocking: boolean;
-  dispatch_status: string | null;
-  return_pending: boolean;
-  return_context_key: string | null;
-  returned_at: string | null;
-  created_at: string;
-  updated_at: string;
+export type TaskChild = Required<Omit<Schemas["TaskChildOut"], "raw">> & {
   raw: Delegation | TaskDispatch;
-}
+};
 
 export interface TaskChildren {
   items: TaskChild[];
@@ -263,13 +237,7 @@ export interface SubagentRecord {
   interrupt_reason: string | null;
 }
 
-export interface TaskRoleState {
-  role_slug: string;
-  state: string;
-  queued: number;
-  working_here: boolean;
-  busy_elsewhere: boolean;
-}
+export type TaskRoleState = Required<Schemas["TaskRoleStateOut"]>;
 
 export interface RoleRuntimeStatus {
   role_slug: string;
