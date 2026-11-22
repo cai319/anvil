@@ -4841,6 +4841,47 @@ export interface components {
             /** Content */
             content: string;
         };
+        /** KnowledgeRepoBindingOut */
+        KnowledgeRepoBindingOut: {
+            /** Repo */
+            repo: string;
+            /** Source */
+            source: string;
+            /** Status */
+            status: string;
+            /**
+             * Confidence
+             * @default 0
+             */
+            confidence: number;
+            /**
+             * Score
+             * @default 0
+             */
+            score: number;
+            /** Matched Tags */
+            matched_tags?: string[];
+            /** Reason */
+            reason?: string | null;
+            /**
+             * Scope
+             * @default shared
+             */
+            scope: string;
+            /** Repo Id */
+            repo_id?: string | null;
+            /** Path */
+            path?: string | null;
+            /**
+             * Is Primary
+             * @default false
+             */
+            is_primary: boolean;
+            /** Created At */
+            created_at?: string | null;
+            /** Updated At */
+            updated_at?: string | null;
+        };
         /** KnowledgeRepoIn */
         KnowledgeRepoIn: {
             /** Repo */
@@ -4953,6 +4994,19 @@ export interface components {
                 [key: string]: unknown;
             } | null;
         };
+        /** PlanSeedOut */
+        PlanSeedOut: {
+            /** Template Id */
+            template_id?: string | null;
+            /** Version */
+            version?: number | null;
+            /** Name */
+            name?: string | null;
+            /** Set By */
+            set_by?: string | null;
+            /** Set At */
+            set_at?: string | null;
+        };
         /** ProposalIn */
         ProposalIn: {
             /** Field */
@@ -5045,6 +5099,94 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /** RunOut */
+        RunOut: {
+            /** Id */
+            id: string;
+            /** Role Slug */
+            role_slug: string;
+            /** Task Id */
+            task_id?: string | null;
+            status: components["schemas"]["RunStatus"];
+            /** Profile Snapshot */
+            profile_snapshot?: string | null;
+            /** Worktree Path */
+            worktree_path?: string | null;
+            /** Native Session Id */
+            native_session_id?: string | null;
+            /** Log Path */
+            log_path?: string | null;
+            /** Prompt */
+            prompt?: string | null;
+            /** Started At */
+            started_at?: string | null;
+            /** Ended At */
+            ended_at?: string | null;
+            /** Step Id */
+            step_id?: string | null;
+            /** Workflow Id */
+            workflow_id?: string | null;
+            /** Timeout Seconds */
+            timeout_seconds?: number | null;
+            /** Failure Class */
+            failure_class?: string | null;
+            /**
+             * Context Reset Count
+             * @default 0
+             */
+            context_reset_count: number;
+            /**
+             * Context Rotation Count
+             * @default 0
+             */
+            context_rotation_count: number;
+            /** Slice Key */
+            slice_key?: string | null;
+            /** Wake Note */
+            wake_note?: string | null;
+            /** Dispatch Id */
+            dispatch_id?: string | null;
+            /** Origin */
+            origin?: string | null;
+            /** Context Return Context Key */
+            context_return_context_key?: string | null;
+            /** Context Return Run Id */
+            context_return_run_id?: string | null;
+            /** Context Return After Turn */
+            context_return_after_turn?: number | null;
+            /** Context Returned At */
+            context_returned_at?: string | null;
+            /**
+             * Recovery Count
+             * @default 0
+             */
+            recovery_count: number;
+            /** Next Retry At */
+            next_retry_at?: string | null;
+            /** Recovered By */
+            recovered_by?: string | null;
+            /** Recovery Of Run Id */
+            recovery_of_run_id?: string | null;
+            /**
+             * Recovery Exhausted
+             * @default 0
+             */
+            recovery_exhausted: number;
+            /**
+             * Context Return Attempts
+             * @default 0
+             */
+            context_return_attempts: number;
+            /** Context Return Last Attempt At */
+            context_return_last_attempt_at?: string | null;
+            /** Context Return Armed At */
+            context_return_armed_at?: string | null;
+        };
+        /**
+         * RunStatus
+         * @enum {string}
+         */
+        RunStatus: "created" | "projecting" | "running" | "submitted" | "reviewing" | "suspended" | "completed" | "failed" | "abandoned";
         /** RuntimeIn */
         RuntimeIn: {
             /** Id */
@@ -5233,16 +5375,10 @@ export interface components {
             source_repo?: string | null;
             /** Knowledge Mode */
             knowledge_mode?: string | null;
-            /** Task Workspace */
-            task_workspace?: {
-                [key: string]: unknown;
-            } | null;
+            task_workspace?: components["schemas"]["TaskWorkspaceOut"] | null;
             /** Workspace Id */
             workspace_id?: string | null;
-            /** Workspace */
-            workspace?: {
-                [key: string]: unknown;
-            } | null;
+            workspace?: components["schemas"]["WorkspaceRefOut"] | null;
             /** Base Branch */
             base_branch?: string | null;
             /** Scope Paths */
@@ -5262,14 +5398,9 @@ export interface components {
             plan_first: boolean;
             /** Planner */
             planner?: string | null;
-            /** Plan Seed */
-            plan_seed?: {
-                [key: string]: unknown;
-            } | null;
+            plan_seed?: components["schemas"]["PlanSeedOut"] | null;
             /** Role Claims */
-            role_claims?: {
-                [key: string]: unknown;
-            }[];
+            role_claims?: components["schemas"]["TaskRoleClaimOut"][];
             /** Lease Expires At */
             lease_expires_at?: string | null;
             /** Claimed At */
@@ -5301,9 +5432,7 @@ export interface components {
             /** Depends On */
             depends_on?: string[];
             /** Knowledge Repos */
-            knowledge_repos?: {
-                [key: string]: unknown;
-            }[];
+            knowledge_repos?: components["schemas"]["KnowledgeRepoBindingOut"][];
             /**
              * Knowledge Binding Locked
              * @default false
@@ -5355,11 +5484,41 @@ export interface components {
             /** Issue Board Enabled */
             issue_board_enabled?: boolean | null;
         };
+        /** TaskRoleClaimOut */
+        TaskRoleClaimOut: {
+            /** Role Slug */
+            role_slug: string;
+            /** Status */
+            status: string;
+            /** Summary */
+            summary?: string | null;
+            /** Run Id */
+            run_id?: string | null;
+            /** Claimed At */
+            claimed_at?: string | null;
+            /** Lease Expires At */
+            lease_expires_at?: string | null;
+            /** Submitted At */
+            submitted_at?: string | null;
+            /** Release Requested At */
+            release_requested_at?: string | null;
+        };
         /**
          * TaskStatus
          * @enum {string}
          */
         TaskStatus: "todo" | "in_progress" | "in_review" | "done" | "closed";
+        /** TaskWorkspaceOut */
+        TaskWorkspaceOut: {
+            /** Source Repo */
+            source_repo?: string | null;
+            /** Path */
+            path?: string | null;
+            /** Kind */
+            kind?: string | null;
+            /** Status */
+            status?: string | null;
+        };
         /** ToolsIn */
         ToolsIn: {
             /** Preset */
@@ -5383,6 +5542,15 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /** WorkspaceRefOut */
+        WorkspaceRefOut: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Repo */
+            repo?: string | null;
         };
     };
     responses: never;
@@ -14069,7 +14237,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["RunOut"][];
                 };
             };
             /** @description Validation Error */
@@ -14141,7 +14309,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["RunOut"];
                 };
             };
             /** @description Validation Error */

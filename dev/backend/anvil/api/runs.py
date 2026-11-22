@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..platform import factory
+from ..schemas import RunOut
 from ..util import ConflictError, now_iso
 from . import access
 
@@ -54,7 +55,7 @@ def start_run(body: dict, request: Request, conn=Depends(get_db),
     return run
 
 
-@router.get("/runs")
+@router.get("/runs", response_model=list[RunOut])
 def list_runs(role_slug: str | None = None, task_id: str | None = None,
               active: bool = False, conn=Depends(get_db),
               auth: Auth = Depends(get_auth)):
@@ -81,7 +82,7 @@ def list_runs(role_slug: str | None = None, task_id: str | None = None,
     return runs
 
 
-@router.get("/runs/{rid}")
+@router.get("/runs/{rid}", response_model=RunOut)
 def get_run(rid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     run = services.runs.get_run(conn, rid)
     if run is None:

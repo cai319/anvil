@@ -1,16 +1,10 @@
+import type { components } from "./schema";
+
 const BASE = "/api/v1";
 
-export interface KnowledgeRepoBinding {
-  repo: string;
-  source: "auto" | "cindy" | "human" | "inherited" | "agent";
-  status: "applied" | "suggested" | "dismissed";
-  confidence: number;
-  score: number;
-  matched_tags: string[];
-  reason: string | null;
-  created_at?: string;
-  updated_at?: string;
-}
+type Schemas = components["schemas"];
+
+export type KnowledgeRepoBinding = Schemas["KnowledgeRepoBindingOut"];
 
 export interface KnowledgeRepoProfile {
   repo: string;
@@ -33,73 +27,10 @@ export interface TaskRoleStatusSummary {
   run_statuses: Record<string, { status: string; started_at: string | null }>;
 }
 
-import type { components } from "./schema";
-
-type Schemas = components["schemas"];
-
 /** 任务状态：由后端 OpenAPI（TaskStatus）生成，避免前后端词表漂移。 */
 export type TaskStatus = Schemas["TaskStatus"];
 
-export interface Task {
-  id: string;
-  title: string;
-  type: string | null;
-  status: TaskStatus;
-  priority: unknown;
-  tags: string[];
-  repo: string | null;
-  source_repo?: string | null;
-  knowledge_mode?: "shared" | "local" | "temp" | null;
-  task_workspace?: {
-    path: string; kind: string; status: string;
-    source_repo: string | null;
-  } | null;
-  workspace_id?: string | null;
-  workspace?: { id: string; name: string; repo: string | null } | null;
-  archived_at?: string | null;
-  base_branch?: string | null;
-  knowledge_repos?: KnowledgeRepoBinding[];
-  knowledge_binding_locked?: boolean;
-  knowledge_binding_state?: "applied" | "suggested" | "needs_cindy" | "fallback" | "locked" | "off";
-  scope_paths: string[];
-  description: string | null;
-  acceptance: string[];
-  assignee: string | null;
-  assignees: string[];
-  plan_first: boolean;
-  planner: string | null;
-  plan_seed?: {
-    template_id: string;
-    version: number;
-    name?: string;
-    set_by?: string;
-    set_at?: string;
-  } | null;
-  role_claims: {
-    role_slug: string;
-    status: "pending" | "working" | "submitted" | "released" | "approved";
-    summary: string | null;
-    run_id: string | null;
-    claimed_at: string | null;
-    lease_expires_at: string | null;
-    submitted_at: string | null;
-  }[];
-  depends_on: string[];
-  parent_id: string | null;
-  parent_step_id?: string | null;
-  source_task_id?: string | null;
-  source_slice_key?: string | null;
-  source_step_id?: string | null;
-  requested_by?: string | null;
-  dispatch_status?: "none" | "open" | "return_ready" | "returning" | "returned" |
-    "no_return" | "cancelled" | null;
-  dispatch_reason?: string | null;
-  due_at?: string | null;
-  issue_board_enabled?: boolean;
-  reviewer_roles?: string[];
-  created_at: string;
-  updated_at: string;
-}
+export type Task = Required<Schemas["TaskOut"]>;
 
 export interface Delegation {
   id: string;
@@ -1621,28 +1552,7 @@ export type RunStatus =
   | "abandoned"
   | "suspended";
 
-export interface Run {
-  id: string;
-  role_slug: string;
-  task_id: string | null;
-  status: RunStatus;
-  native_session_id: string | null;
-  log_path: string | null;
-  worktree_path: string | null;
-  profile_snapshot: string | null;
-  prompt: string | null;
-  timeout_seconds: number | null;
-  failure_class: string | null;
-  slice_key?: string | null;
-  origin?: string | null;
-  dispatch_id?: string | null;
-  wake_note?: string | null;
-  context_return_context_key?: string | null;
-  context_return_after_turn?: number;
-  context_returned_at?: string | null;
-  started_at: string | null;
-  ended_at: string | null;
-}
+export type Run = Required<Schemas["RunOut"]>;
 
 export interface TaskDispatch {
   id: string;

@@ -844,9 +844,11 @@ def test_role_busy_on_another_task_blocks_new_step(conn):
 
 def test_advance_is_serialized(conn):
     """scheduler 与 API 同时 advance 时，同一步骤只能被 starter 拉起一次。"""
+    db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
     wf = wf_service.create_workflow(conn, "T1", {
         "steps": [{"id": "S1", "title": "基线", "role": "pm", "depends_on": []}]
     })
+    conn.commit()
     started: list[str] = []
     barrier = threading.Barrier(2)
 
@@ -857,7 +859,12 @@ def test_advance_is_serialized(conn):
 
     def run():
         barrier.wait()
-        wf_service.advance(conn, wf["id"], starter=starter)
+        # 每个线程独立连接：真实 scheduler/API 也是各自 open_conn。
+        other = connect(db_path)
+        try:
+            wf_service.advance(other, wf["id"], starter=starter)
+        finally:
+            other.close()
 
     threads = [threading.Thread(target=run) for _ in range(2)]
     for t in threads:

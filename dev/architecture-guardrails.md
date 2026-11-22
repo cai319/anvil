@@ -45,7 +45,9 @@
 
 - 生成链路：`backend/dump_openapi.py` → `frontend/openapi.json`（gitignore）→
   `npm run gen:api` → `src/api/schema.d.ts`。
-- 已接入生成类型：`TaskStatus`、`Role`（RoleOut）、`Runtime`（RuntimeOut）。
+- 已接入生成类型：`TaskStatus`、`Role`（RoleOut）、`Runtime`（RuntimeOut）、
+  `Task`（TaskOut）、`Run`（RunOut）、`KnowledgeRepoBinding`。
+- 契约回归：`tests/api/test_contract_models.py` 锁定 Task/Run 嵌套字段不被裁剪。
 - 阻塞点：后端 249 条路径仅 32 个 schema，多数端点只返回 dict；`TaskOut` 的
   嵌套字段仍是 `object`。要删除其余手写契约，必须先给 GET 端点补
   `response_model` 与嵌套 Pydantic 模型（属于独立的后端契约工程）。

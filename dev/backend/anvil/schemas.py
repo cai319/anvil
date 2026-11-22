@@ -158,6 +158,90 @@ class TaskPatch(BaseModel):
     issue_board_enabled: bool | None = None
 
 
+class TaskWorkspaceOut(BaseModel):
+    source_repo: str | None = None
+    path: str | None = None
+    kind: str | None = None
+    status: str | None = None
+
+
+class WorkspaceRefOut(BaseModel):
+    id: str
+    name: str
+    repo: str | None = None
+
+
+class TaskRoleClaimOut(BaseModel):
+    role_slug: str
+    status: str
+    summary: str | None = None
+    run_id: str | None = None
+    claimed_at: str | None = None
+    lease_expires_at: str | None = None
+    submitted_at: str | None = None
+    release_requested_at: str | None = None
+
+
+class PlanSeedOut(BaseModel):
+    template_id: str | None = None
+    version: int | None = None
+    name: str | None = None
+    set_by: str | None = None
+    set_at: str | None = None
+
+
+class KnowledgeRepoBindingOut(BaseModel):
+    repo: str
+    source: str
+    status: str
+    confidence: float = 0.0
+    score: float = 0.0
+    matched_tags: list[str] = Field(default_factory=list)
+    reason: str | None = None
+    scope: str = "shared"
+    repo_id: str | None = None
+    path: str | None = None
+    is_primary: bool = False
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class RunOut(BaseModel):
+    id: str
+    role_slug: str
+    task_id: str | None = None
+    status: RunStatus
+    profile_snapshot: str | None = None
+    worktree_path: str | None = None
+    native_session_id: str | None = None
+    log_path: str | None = None
+    prompt: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    step_id: str | None = None
+    workflow_id: str | None = None
+    timeout_seconds: int | None = None
+    failure_class: str | None = None
+    context_reset_count: int = 0
+    context_rotation_count: int = 0
+    slice_key: str | None = None
+    wake_note: str | None = None
+    dispatch_id: str | None = None
+    origin: str | None = None
+    context_return_context_key: str | None = None
+    context_return_run_id: str | None = None
+    context_return_after_turn: int | None = None
+    context_returned_at: str | None = None
+    recovery_count: int = 0
+    next_retry_at: str | None = None
+    recovered_by: str | None = None
+    recovery_of_run_id: str | None = None
+    recovery_exhausted: int = 0
+    context_return_attempts: int = 0
+    context_return_last_attempt_at: str | None = None
+    context_return_armed_at: str | None = None
+
+
 class TaskOut(BaseModel):
     id: str
     title: str
@@ -168,9 +252,9 @@ class TaskOut(BaseModel):
     repo: str | None = None
     source_repo: str | None = None
     knowledge_mode: str | None = None
-    task_workspace: dict[str, Any] | None = None
+    task_workspace: TaskWorkspaceOut | None = None
     workspace_id: str | None = None
-    workspace: dict[str, Any] | None = None
+    workspace: WorkspaceRefOut | None = None
     base_branch: str | None = None
     scope_paths: list[str] = Field(default_factory=list)
     description: str | None = None
@@ -179,8 +263,8 @@ class TaskOut(BaseModel):
     assignees: list[str] = Field(default_factory=list)
     plan_first: bool = False
     planner: str | None = None
-    plan_seed: dict[str, Any] | None = None
-    role_claims: list[dict[str, Any]] = Field(default_factory=list)
+    plan_seed: PlanSeedOut | None = None
+    role_claims: list[TaskRoleClaimOut] = Field(default_factory=list)
     lease_expires_at: str | None = None
     claimed_at: str | None = None
     created_by: str | None = None
@@ -196,7 +280,7 @@ class TaskOut(BaseModel):
     dispatch_reason_json: Any = None
     due_at: str | None = None
     depends_on: list[str] = Field(default_factory=list)
-    knowledge_repos: list[dict[str, Any]] = Field(default_factory=list)
+    knowledge_repos: list[KnowledgeRepoBindingOut] = Field(default_factory=list)
     knowledge_binding_locked: bool = False
     knowledge_binding_state: str | None = None
     issue_board_enabled: bool = False
