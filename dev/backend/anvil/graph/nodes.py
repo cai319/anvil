@@ -496,6 +496,50 @@ def _continuation_header(conn: sqlite3.Connection, run: dict) -> str:
     return "\n".join(lines)
 
 
+def _run_prompt_kind(conn: sqlite3.Connection, run: dict,
+                     task: dict | None = None) -> str:
+    """判定 run 的 prompt 类型（唯一分类入口）。
+
+    findings | step | planning | reply | task；顺序即优先级。
+    """
+    prompt = run.get("prompt") or ""
+    if prompt.startswith("[anvil:findings]"):
+        return "findings"
+    if run.get("step_id"):
+        return "step"
+    from ..services import planning as planning_service
+    if prompt.startswith(planning_service.PLAN_MARKER):
+        return "planning"
+    if prompt.startswith("[anvil:reply]"):
+        return "reply"
+    # 工作流任务上的非步骤 run = 被 @ 的会话回复（包括历史遗留无标记的 run）。
+    if run.get("task_id"):
+        from ..services import workflow as workflow_service
+        try:
+            if workflow_service.get_for_task(conn, run["task_id"]) is not None:
+                return "reply"
+        except Exception:  # noqa: BLE001
+            pass
+    return "task"
+
+
+def _protocols_for_run(conn: sqlite3.Connection, run: dict,
+                       task: dict | None, kind: str) -> str:
+    """按 run 类型返回协议块（CLAUDE.md 投影与 prompt 注入共用同一来源）。"""
+    if kind == "findings":
+        return render.FINDING_PROTOCOL
+    if kind == "step":
+        parts = [render.STEP_PROTOCOL]
+        if _is_finding_reviewer(conn, task, run.get("role_slug")):
+            parts.append(render.STEP_FINDING_PROTOCOL)
+        return "\n\n".join(parts)
+    if kind == "planning":
+        return render.PLANNING_PROTOCOL + "\n\n" + render.REVISION_PROTOCOL
+    if kind == "reply":
+        return render.REPLY_PROTOCOL
+    return render.PROTOCOL
+
+
 def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> str:
     """按 run 类型选择协议：
     - 工作流步骤：步骤说明 + 最近会话（含 @ 反馈）+ STEP_PROTOCOL
@@ -504,13 +548,15 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
     - 普通任务：任务协议
     """
     prompt = run.get("prompt") or ""
-    if prompt.startswith("[anvil:findings]"):
+    kind = _run_prompt_kind(conn, run, task)
+    if kind == "findings":
         body = prompt[len("[anvil:findings]"):].strip()
         head = "\n".join(p for p in ((task or {}).get("title"),
                                      (task or {}).get("description")) if p)
         return _with_wake_note(
-            run, "\n\n".join(p for p in (head, body, render.FINDING_PROTOCOL) if p))
-    if run.get("step_id"):
+            run, "\n\n".join(p for p in (
+                head, body, _protocols_for_run(conn, run, task, kind)) if p))
+    if kind == "step":
         from ..services import agent_inbox
         task_id = run.get("task_id")
         parts = [_continuation_header(conn, run), prompt]
@@ -531,35 +577,25 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
         hint = _knowledge_hint(conn, run, task)
         if hint:
             parts.append(hint)
-        parts.append(render.STEP_PROTOCOL)
-        if _is_finding_reviewer(conn, task, run.get("role_slug")):
-            parts.append(render.STEP_FINDING_PROTOCOL)
+        parts.append(_protocols_for_run(conn, run, task, kind))
         return _with_wake_note(run, "\n\n".join(p for p in parts if p))
-    # 规划 run（Cindy / planner）：不能因为任务已有 workflow 就被误判为回复。
-    from ..services import planning as planning_service
-    if prompt.startswith(planning_service.PLAN_MARKER):
+    if kind == "planning":
+        # 规划 run（Cindy / planner）：不能因为任务已有 workflow 就被误判为回复。
+        from ..services import planning as planning_service
         body = prompt[len(planning_service.PLAN_MARKER):].strip()
         base = _prompt(task, _conversation_transcript(
             conn, run.get("task_id"), task_wide=True), body, protocol=None)
         hint = _knowledge_hint(conn, run, task)
         return _with_wake_note(run, "\n\n".join(p for p in (base, hint) if p))
-    # 工作流任务上的非步骤 run = 被 @ 的会话回复（包括历史遗留无标记的 run），
-    # 一律用 REPLY_PROTOCOL，避免误 claim/submit 任务。
-    is_reply = prompt.startswith("[anvil:reply]")
-    if not is_reply and run.get("task_id"):
-        from ..services import workflow as workflow_service
-        try:
-            is_reply = workflow_service.get_for_task(conn, run["task_id"]) is not None
-        except Exception:  # noqa: BLE001
-            is_reply = False
-    if is_reply:
+    if kind == "reply":
         body = prompt[len("[anvil:reply]"):].strip() if prompt.startswith("[anvil:reply]") else prompt
         recent = _recent_transcript(
             conn, run.get("task_id"), slice_key=run.get("slice_key"))
         head = "\n".join(p for p in ((task or {}).get("title"), (task or {}).get("description")) if p)
         parts = [head, body or "你在任务会话中被 @，请阅读最近会话并回复。",
                  ("## 最近会话\n" + recent) if recent else "",
-                 _knowledge_hint(conn, run, task), render.REPLY_PROTOCOL]
+                 _knowledge_hint(conn, run, task),
+                 _protocols_for_run(conn, run, task, kind)]
         return _with_wake_note(run, "\n\n".join(p for p in parts if p))
     hint = _knowledge_hint(conn, run, task)
     body = prompt + ("\n\n" + hint if hint else "")
@@ -570,25 +606,9 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
 
 def _protocol_for_run(conn: sqlite3.Connection, run: dict) -> str:
     """投影到 CLAUDE.md 的协议必须与 run 类型一致（步骤/问题板/规划/回复/普通任务）。"""
-    prompt = run.get("prompt") or ""
     task = tasks_service.get(conn, run["task_id"]) if run.get("task_id") else None
-    if prompt.startswith("[anvil:findings]"):
-        return render.FINDING_PROTOCOL
-    if run.get("step_id"):
-        if _is_finding_reviewer(conn, task, run.get("role_slug")):
-            return render.STEP_PROTOCOL + "\n\n" + render.STEP_FINDING_PROTOCOL
-        return render.STEP_PROTOCOL
-    from ..services import planning as planning_service
-    if prompt.startswith(planning_service.PLAN_MARKER):
-        return render.PLANNING_PROTOCOL + "\n\n" + render.REVISION_PROTOCOL
-    is_reply = prompt.startswith("[anvil:reply]")
-    if not is_reply and run.get("task_id"):
-        from ..services import workflow as workflow_service
-        try:
-            is_reply = workflow_service.get_for_task(conn, run["task_id"]) is not None
-        except Exception:  # noqa: BLE001
-            is_reply = False
-    return render.REPLY_PROTOCOL if is_reply else render.PROTOCOL
+    kind = _run_prompt_kind(conn, run, task)
+    return _protocols_for_run(conn, run, task, kind)
 
 
 def _render_invocation(conn: sqlite3.Connection, run: dict, task: dict | None,

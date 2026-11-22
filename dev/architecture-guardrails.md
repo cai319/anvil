@@ -13,6 +13,7 @@
 | 角色状态 | `services.role_state.derive_task_role_state`（API 输出） | `tests/test_role_state.py` |
 | 子任务视图 | `services.child_tasks.list_children`（delegation/dispatch 归一） | `tests/test_child_tasks.py` |
 | durable work item 读取 | `services.work_items.list_items` | `tests/test_work_items.py` |
+| Prompt 协议与 run 分类 | `graph/render.py` 常量 + `nodes._run_prompt_kind/_protocols_for_run` | `tests/test_prompt_snapshot.py` |
 
 ## 禁止事项
 
