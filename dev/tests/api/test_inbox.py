@@ -180,7 +180,7 @@ async def test_inbox_lesson_keeps_full_title_and_review_meta(client, seeded):
     assert item["meta"]["lesson"]["ready"] is True
     assert item["meta"]["lesson"]["submission_errors"] == []
 
-    detail = await client.get(f"/api/v1/lessons/{lid}", headers=auth_headers())
+    detail = await client.get(f"/api/v1/lessons/{lid}", headers=auth_headers("pm"))
     assert detail.status_code == 200
     assert detail.json()["fields"]["trigger_point"] == "读取校验结果时"
 

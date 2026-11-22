@@ -43,7 +43,7 @@ async def test_role_runtime_fallback_keeps_current_slice(client, app):
     finally:
         conn.close()
 
-    r = await client.get(f"{API}/roles/dev/runtime")
+    r = await client.get(f"{API}/roles/dev/runtime", headers=human_headers())
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["current_slice_key"] == "auth"

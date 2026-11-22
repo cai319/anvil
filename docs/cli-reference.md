@@ -34,7 +34,8 @@ pip install --force-reinstall <anvil-cli-wheel-or-sdist>
 | 环境变量 | 作用 |
 |---|---|
 | `ANVIL_ENDPOINT` | 后端地址，默认 `http://127.0.0.1:7317` |
-| `ANVIL_TOKEN` | 会话 token；Agent 使用运行时注入的 run token |
+| `ANVIL_TOKEN` | 会话 token；Agent 使用运行时注入的 run token，人类可显式设置 |
+| `ANVIL_TOKEN_FILE` | 人类 token 文件路径；未设置时依次读取 `data/auth-token`、`~/.config/Anvil/token` |
 | `ANVIL_AGENT_SLUG` | 角色 slug；缺失时 CLI 以 human 身份调用 |
 | `ANVIL_TASK_ID` | 当前任务 id；多数任务/步骤命令的默认 target |
 | `ANVIL_RUN_ID` | 当前 run id（由运行时注入，用于 stale-run 围栏） |

@@ -34,7 +34,8 @@ from pathlib import Path
 
 from .. import config
 from ..db import open_conn
-from ..util import decode_child_output, force_utf8_stdio, jdumps, jloads, now_iso
+from ..util import (decode_child_output, force_utf8_stdio, jdumps, jloads, now_iso,
+                    scrub_agent_env)
 
 # 不泄漏给子进程的编排器会话变量（与 platform/darwin.py 保持一致）。
 # 注意：不能按 `CLAUDE_CODE_` 前缀整片剥离——该命名空间里还有自动压缩窗口、
@@ -57,8 +58,10 @@ class _DeliveryError(RuntimeError):
 
 
 def _clean_env(extra: dict[str, str]) -> dict[str, str]:
-    merged = {k: v for k, v in os.environ.items() if k not in _SESSION_ENV_KEYS}
-    merged.update(extra)
+    # 继承环境里不能带人类认证；extra 只允许注入角色自己的运行级 ANVIL_TOKEN。
+    base = {k: v for k, v in os.environ.items() if k not in _SESSION_ENV_KEYS}
+    merged = scrub_agent_env(base, allow_run_token=False)
+    merged.update(scrub_agent_env(extra, allow_run_token=True))
     # Windows 默认按系统 ANSI/OEM 代码页输出；强制 Python 子进程使用 UTF-8，
     # 避免角色/tool 输出的中文在 stdout 日志里变成乱码。必须覆盖继承值：
     # 父环境或 runtime env 里的 PYTHONIOENCODING=gbk 会让 setdefault 失效。

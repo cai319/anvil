@@ -1,6 +1,7 @@
 """FastAPI dependencies: DB connection + session auth."""
 from __future__ import annotations
 
+import hmac
 import os
 import sqlite3
 from dataclasses import dataclass
@@ -21,8 +22,8 @@ class Auth:
     test_bypass: bool = False    # ANVIL_TEST_AUTH 旁路；不代表真实 Agent 身份
 
 
-# 本地单用户模式下的共享 token。显式设置 ANVIL_AUTH_TOKEN 后只接受该值。
-_SHARED_DEFAULT_TOKENS = {"anvil", "anvil-web"}
+# 不再接受公开默认 token；人类 token 由 config.resolve_auth_token() 生成或显式配置。
+# 运行级 session token 仍然有效，但只代表其绑定角色。
 
 
 def _session_row(request: Request, token: str):
@@ -37,15 +38,13 @@ def _session_row(request: Request, token: str):
 
 
 def token_is_valid(request: Request, token: str | None) -> bool:
-    """所有 API 请求的统一 token 校验：运行级 session 或人类共享 token。"""
+    """所有 API 请求的统一 token 校验：运行级 session 或人类 secret。"""
     if not token:
         return False
     row = _session_row(request, token)
     if row is not None:
         return not (row["expires_at"] and row["expires_at"] < now_iso())
-    if config.AUTH_TOKEN:
-        return token == config.AUTH_TOKEN
-    return token in _SHARED_DEFAULT_TOKENS
+    return bool(config.AUTH_TOKEN) and hmac.compare_digest(token, config.AUTH_TOKEN)
 
 
 def get_db(request: Request):

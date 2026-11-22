@@ -6,7 +6,7 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **前端**：React + TypeScript + Vite
 - **Agent CLI**：`anvil`，Agent 在自己的工具循环里调用它上报状态
 - **地址**：`http://127.0.0.1:7317`（仅回环）
-- **当前版本**：v1.46.0（知识入库必须条款、智能补全、任务完成自动收割）
+- **当前版本**：v1.47.0（HITL 认证隔离、对象级授权、状态机与知识收割加固）
 
 > 架构、数据模型、工作流引擎与实现细节见 [design.md](design.md)。
 
@@ -375,7 +375,8 @@ anvil knowledge card-validate --file card.json --for-approval
 |---|---|---|
 | `ANVIL_HOST` / `ANVIL_PORT` | `127.0.0.1` / `7317` | 监听地址/端口 |
 | `ANVIL_DATA_DIR` | `<项目根>/data` | 数据根目录 |
-| `ANVIL_AUTH_TOKEN` | 空 | 设置后 `X-Anvil-Session` 必须匹配 |
+| `ANVIL_AUTH_TOKEN` | 自动生成 | 人类共享 secret；显式设置时必须 ≥16 位随机字符（弱 token 会拒绝启动） |
+| `ANVIL_AUTH_TOKEN_FILE` | `<data>/auth-token` | 人类 token 文件路径；未显式设置时首次启动生成 0600 随机 secret |
 | `ANVIL_DEFAULT_RUNTIME` | `claude-code` | 默认运行时 |
 | `ANVIL_DEFAULT_PERMISSION_MODE` | `bypassPermissions` | 角色默认权限模式 |
 | `ANVIL_PERSISTENT_RUNTIME` | `auto` | `auto`/`1`/`0`：常驻会话开关 |
@@ -568,7 +569,7 @@ Remove-Item -Recurse -Force dev\dist, dev\build -ErrorAction SilentlyContinue
 | `anvil init` 提示后端未启动 | 先启动 `python run_server.py` |
 | 运行时 `missing` | 检查 CLI 是否在 PATH；Windows 优先原生 `.exe`；重新扫描运行时 |
 | 角色一直“等待授权” | 检查 `ANVIL_DEFAULT_PERMISSION_MODE` 与运行日志 |
-| 401 | 检查 `ANVIL_AUTH_TOKEN` / `X-Anvil-Session` |
+| 401 | 检查人类 token：默认在 `data/auth-token`（或 `ANVIL_AUTH_TOKEN`）；Web 首次打开需粘贴该 token 完成配对，CLI 会自动读取同一文件 |
 | 403 | 该操作只接受自然人身份；Agent 改用 `mention --to human` 或 `action prepare` |
 | Agent 调不到 `anvil` | 后端与 CLI 装在同一个 venv；运行时允许 `Bash(anvil:*)` |
 | 上下文/模型窗口不对 | `anvil whoami --json` 查看 `model_id`/窗口；配置 `ANVIL_MODEL_CONTEXT_WINDOWS` 或角色 `model_pool` |
@@ -619,9 +620,14 @@ anvil init
 
 - Anvil 面向本机单用户：默认只监听 `127.0.0.1`；不要暴露到公网。
 - **不要把 `data/` 提交到 Git**：其中包含数据库、token、角色记忆和日志；仓库已通过 `.gitignore` 忽略。
-- 非回环访问必须设置 `ANVIL_AUTH_TOKEN`；未设置时仅接受本机默认共享 token。
-  设置后，Web 构建需提供 `VITE_ANVIL_TOKEN`，或在浏览器 localStorage 写入
-  `anvil-session`；CLI 设置 `ANVIL_TOKEN`。
+- 人类认证使用每安装随机 secret：未显式设置 `ANVIL_AUTH_TOKEN` 时，首次启动生成
+  `data/auth-token`（0600）。Web 首次打开会要求粘贴该 token（或构建时提供
+  `VITE_ANVIL_TOKEN`，或写入 localStorage `anvil-session`）；CLI 从 `ANVIL_TOKEN`、
+  `ANVIL_TOKEN_FILE` 或 `data/auth-token` 自动读取。
+- 人类 secret 不会注入 Agent 子进程环境；Agent 只持有绑定角色/任务的运行级 session
+  token，不能调用审批、删除、运行时/MCP 配置等 HITL 端点。若 Agent 与 Anvil 使用同一
+  OS 用户且能读取 `data/auth-token`，仍需独立用户/容器形成强隔离。
+- Web/API 响应带 `X-Frame-Options: DENY` 与 `Content-Security-Policy: frame-ancestors 'none'`。
 - 运行时/MCP 的注册、探测与 health，以及角色创建、workspace 合并等操作只接受自然人身份。
 - 数据库每天自动备份到 `data/backups/anvil-YYYYMMDD.db`，默认保留 7 天。
 - 怀疑 token 泄漏时执行：
@@ -658,6 +664,7 @@ anvil init
 - [docs/v1.45.0-release.md](docs/v1.45.0-release.md)：v1.45.0 协作方式判断、角色一致性与 D1–D4 收尾
 - [docs/v1.45.1-release.md](docs/v1.45.1-release.md)：v1.45.1 角色删除关闭委派、dispatch 通知补投与 subagent 幽灵收尾
 - [docs/v1.45.2-release.md](docs/v1.45.2-release.md)：v1.45.2 收件箱委派验收、审批参与者预览与评测实跑
+- [docs/v1.47.0-release.md](docs/v1.47.0-release.md)：v1.47.0 HITL 认证隔离、对象级授权、workflow CAS 与知识收割加固
 - [docs/v1.46.0-release.md](docs/v1.46.0-release.md)：v1.46.0 知识入库必须条款、智能补全、任务完成自动收割与弹窗冻结
 - [docs/workflow-revision.md](docs/workflow-revision.md)：运行中 workflow 的增量修订（安全变更不重启任务）
 - [docs/operations.md](docs/operations.md)：打包、备份/迁移/重置、卸载

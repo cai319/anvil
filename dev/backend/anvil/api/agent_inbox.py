@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from .. import services
 from ..deps import Auth, get_auth, get_db
+from . import access
 
 router = APIRouter()
 
@@ -23,9 +24,13 @@ def _current_run_context(conn, auth: Auth) -> tuple[str | None, str | None]:
 def check_inbox(task_id: str | None = None, limit: int = 30,
                 slice_key: str | None = None, task_wide: bool = False,
                 conn=Depends(get_db), auth: Auth = Depends(get_auth)):
-    if not auth.role:
+    if not auth.role or auth.role == "human":
         raise HTTPException(status_code=400, detail="agent session required")
     auth_task, auth_slice = _current_run_context(conn, auth)
+    if auth.task_id:
+        if task_id and task_id != auth.task_id:
+            raise HTTPException(status_code=403, detail="session is bound to another task")
+        task_id = auth.task_id
     if not task_id:
         task_id = auth_task
         if not task_id:
@@ -37,6 +42,7 @@ def check_inbox(task_id: str | None = None, limit: int = 30,
             task_id = row["task_id"] if row else None
     if not task_id:
         raise HTTPException(status_code=422, detail="task_id is required")
+    access.assert_task_read(conn, auth, task_id)
     if not task_wide and slice_key is None and task_id == auth_task:
         slice_key = auth_slice
     if task_wide:
@@ -55,10 +61,14 @@ def check_inbox(task_id: str | None = None, limit: int = 30,
 
 @router.post("/me/inbox/commit")
 def commit_inbox(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
-    if not auth.role:
+    if not auth.role or auth.role == "human":
         raise HTTPException(status_code=400, detail="agent session required")
     auth_task, auth_slice = _current_run_context(conn, auth)
     task_id = str(body.get("task_id") or "")
+    if auth.task_id:
+        if task_id and task_id != auth.task_id:
+            raise HTTPException(status_code=403, detail="session is bound to another task")
+        task_id = auth.task_id
     if not task_id:
         task_id = auth_task or ""
     if not task_id:
@@ -77,6 +87,7 @@ def commit_inbox(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth
     up_to = int(body.get("up_to") or 0)
     if not task_id or up_to <= 0:
         raise HTTPException(status_code=422, detail="task_id and up_to are required")
+    access.assert_task_read(conn, auth, task_id)
     cursor = services.agent_inbox.commit(
         conn, auth.role, task_id, up_to, slice_key=slice_key)
     return {"task_id": task_id, "slice_key": slice_key, "cursor": cursor}

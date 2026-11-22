@@ -881,6 +881,8 @@ def spawn_node(state: dict, config) -> dict:
         run = _run(conn, run_id)
         if not run or run.get("native_session_id"):
             return {}  # 已 spawn（重入守卫）
+        if run["status"] not in ("created", "projecting"):
+            return {}  # 已被终止/推进的 run 不允许再拉起（防复活终态）
         role = roles_service.get(conn, run["role_slug"]) or {}
         task = _task(conn, run.get("task_id"))
         effective = _effective(conn, run)
@@ -904,8 +906,10 @@ def spawn_node(state: dict, config) -> dict:
                     runtime_id=runtime_id, workspace_path=ws_path)
             except Exception:  # noqa: BLE001 —— 无法拉起/投递即失败
                 logger.exception("persistent spawn failed for run %s", run_id)
-                runs_service.set_status(conn, run_id, "failed", ended_at=now_iso(),
-                                        failure_class="spawn_error")
+                runs_service.set_status(
+                    conn, run_id, "failed", ended_at=now_iso(),
+                    failure_class="spawn_error",
+                    from_statuses=("created", "projecting"))
                 return {}
             if delivery.get("error"):
                 logger.warning("persistent delivery failed for run %s: %s",
@@ -913,7 +917,15 @@ def spawn_node(state: dict, config) -> dict:
                 return {}
             runs_service.mark_spawned(conn, run_id, f"rs:{run['role_slug']}",
                                       timeout_seconds=timeout)
-            runs_service.set_status(conn, run_id, "running")
+            if not runs_service.set_status(
+                    conn, run_id, "running",
+                    from_statuses=("created", "projecting")):
+                # 并发终止已经赢得竞态：清理刚投递的会话，不能复活终态 run。
+                try:
+                    daemon_service.get_manager().clear_run(run["role_slug"], run_id)
+                except Exception:  # noqa: BLE001
+                    pass
+                runs_service.set_native_session(conn, run_id, None)
             return {}
         try:
             executable, args, cwd, env, timeout = _render_invocation(
@@ -928,12 +940,22 @@ def spawn_node(state: dict, config) -> dict:
                 result = pm.spawn(executable, args, cwd, env)
         except Exception:  # noqa: BLE001 —— 无法拉起子进程即失败，不做静默降级
             logger.exception("spawn failed for run %s", run_id)
-            runs_service.set_status(conn, run_id, "failed", ended_at=now_iso(),
-                                    failure_class="spawn_error")
+            runs_service.set_status(
+                conn, run_id, "failed", ended_at=now_iso(),
+                failure_class="spawn_error",
+                from_statuses=("created", "projecting"))
             return {}
         # P0-1/P0-2：写会话+冻结超时+重置 started_at（续跑重新计时），再置 running
         runs_service.mark_spawned(conn, run_id, result.native_session_id, timeout_seconds=timeout)
-        runs_service.set_status(conn, run_id, "running")
+        if not runs_service.set_status(
+                conn, run_id, "running",
+                from_statuses=("created", "projecting")):
+            # 并发终止已把 run 置为终态：结束刚拉起的进程，避免孤儿烧钱。
+            try:
+                factory.get_platform()[0].terminate(result.native_session_id)
+            except Exception:  # noqa: BLE001
+                pass
+            runs_service.set_native_session(conn, run_id, None)
         conn.execute("UPDATE runs SET wake_note=NULL WHERE id=?", (run_id,))
         conn.commit()
         return {}

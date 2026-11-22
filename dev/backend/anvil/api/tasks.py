@@ -53,6 +53,9 @@ def _resume_after_review(request: Request, conn, tid: str, approve: bool) -> Non
 def create_task(body: TaskIn, conn=Depends(get_db),
                 auth: Auth = Depends(get_auth)):
     is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
+    if auth.task_id and body.parent_id and body.parent_id != auth.task_id:
+        raise HTTPException(
+            status_code=403, detail="session is bound to another task")
     if is_real_agent:
         if body.issue_board_enabled:
             raise HTTPException(
@@ -255,22 +258,32 @@ def list_tasks(status: str | None = Query(default=None), assignee: str | None = 
                parent_id: str | None = Query(default=None),
                include_archived: bool = Query(default=False),
                archived_only: bool = Query(default=False),
-               conn=Depends(get_db)):
-    return services.tasks.list_all(conn, status=status, assignee=assignee,
-                                   workspace_id=workspace_id, type=type, tag=tag,
-                                   parent_id=parent_id,
-                                   include_archived=include_archived,
-                                   archived_only=archived_only)
+               conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    tasks = services.tasks.list_all(conn, status=status, assignee=assignee,
+                                    workspace_id=workspace_id, type=type, tag=tag,
+                                    parent_id=parent_id,
+                                    include_archived=include_archived,
+                                    archived_only=archived_only)
+    if access.is_agent(auth):
+        if auth.task_id:
+            tasks = [t for t in tasks if t["id"] == auth.task_id]
+        else:
+            tasks = [t for t in tasks
+                     if access.can_task_read(conn, auth, t["id"])]
+    return tasks
 
 
 @router.get("/status-summary")
-def task_status_summary(task_ids: str = Query(default=""), conn=Depends(get_db)):
+def task_status_summary(task_ids: str = Query(default=""), conn=Depends(get_db),
+                        auth: Auth = Depends(get_auth)):
     """大厅/任务卡用的批量角色状态源：当前 workflow + 每角色最近一次 run。
 
     只返回展示所需字段；前端 taskRoleState 需要 workflow（失败/返工/等待人工）和
     最近 run（包括 completed/failed 等终态），不能只依赖 active runs。
     """
     ids = [x.strip() for x in task_ids.split(",") if x.strip()][:200]
+    if access.is_agent(auth):
+        ids = [tid for tid in ids if access.can_task_read(conn, auth, tid)]
     if not ids:
         return []
     out = []
@@ -306,10 +319,11 @@ def task_status_summary(task_ids: str = Query(default=""), conn=Depends(get_db))
 
 
 @router.get("/{tid}", response_model=TaskOut)
-def get_task(tid: str, conn=Depends(get_db)):
+def get_task(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     t = services.tasks.get(conn, tid)
     if t is None:
         raise HTTPException(status_code=404, detail="task not found")
+    access.assert_task_read(conn, auth, tid)
     return t
 
 
@@ -320,9 +334,11 @@ def explain_task_knowledge(tid: str, role: str | None = None,
     task = services.tasks.get(conn, tid)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
+    access.assert_task_read(conn, auth, tid)
     is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
-    if is_real_agent and not services.tasks.is_task_participant(conn, tid, auth.role):
-        raise HTTPException(status_code=403, detail="agent is not a participant of this task")
+    if is_real_agent and role and role != auth.role:
+        raise HTTPException(
+            status_code=403, detail="agent can only explain its own role context")
     try:
         return services.context_explain.explain_task(
             conn, tid, role=role or (auth.role if is_real_agent else None))
@@ -336,16 +352,7 @@ def list_task_knowledge(tid: str, include_subtasks: bool = False, deep: bool = F
     task = services.tasks.get(conn, tid)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
-    is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
-    if is_real_agent:
-        allowed = (
-            services.tasks.is_task_participant(conn, tid, auth.role)
-            or task.get("planner") == auth.role
-            or services.roles.is_onboarding(conn, auth.role)
-        )
-        if not allowed:
-            raise HTTPException(
-                status_code=403, detail="agent is not a participant of this task")
+    access.assert_task_read(conn, auth, tid)
     try:
         return services.task_knowledge.list_for_task(
             conn, tid, include_subtasks=include_subtasks, deep=deep)
@@ -357,6 +364,8 @@ def list_task_knowledge(tid: str, include_subtasks: bool = False, deep: bool = F
 def create_task_knowledge(tid: str, body: dict, conn=Depends(get_db),
                           auth: Auth = Depends(get_auth)):
     is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
+    if is_real_agent:
+        access.assert_task_read(conn, auth, tid)
     participant = (not is_real_agent
                    or services.tasks.is_task_participant(conn, tid, auth.role))
     # Cindy 作为知识收割者可为非参与任务写 proposed 任务知识；不能直接写 active。
@@ -451,6 +460,8 @@ def promote_task_knowledge(tid: str, kid: str, body: dict,
     if not repo:
         raise HTTPException(status_code=422, detail="repo is required")
     is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
+    if is_real_agent:
+        access.assert_task_read(conn, auth, tid)
     if is_real_agent and auth.role != card.get("source_role"):
         raise HTTPException(status_code=403, detail="agent did not author this card")
     try:
@@ -506,7 +517,16 @@ def task_config_snapshot(tid: str, conn=Depends(get_db),
     if services.tasks.get(conn, tid) is None:
         raise HTTPException(status_code=404, detail="task not found")
     access.assert_task_read(conn, auth, tid)
-    return services.tasks.task_config_snapshot(conn, tid)
+    payload = services.tasks.task_config_snapshot(conn, tid)
+    if access.is_agent(auth):
+        # 角色 system_prompt 属于角色私有配置；任务快照只保留执行所需字段。
+        snapshot = payload.get("snapshot")
+        if isinstance(snapshot, dict):
+            for key in ("projection", "effective"):
+                block = snapshot.get(key)
+                if isinstance(block, dict):
+                    block.pop("system_prompt", None)
+    return payload
 
 
 @router.get("/{tid}/bids")
@@ -799,7 +819,8 @@ def submit_task(tid: str, body: SubmitIn, request: Request, conn=Depends(get_db)
 def review_task(tid: str, body: ReviewIn, request: Request, conn=Depends(get_db),
                 auth: Auth = Depends(require_human)):
     try:
-        result = services.tasks.review(conn, tid, body.approve, auth.role)
+        result = services.tasks.review(
+            conn, tid, body.approve, auth.role, feedback=body.feedback)
     except LookupError:
         raise HTTPException(status_code=404, detail="task not found")
     except ConflictError as exc:
@@ -897,10 +918,11 @@ def context_note_task(tid: str, body: dict, conn=Depends(get_db),
     """写 task-wide 系统备注，供未来 slice/step 带入上下文；不唤醒任何角色。"""
     _assert_session_task(conn, auth, tid)
     role = auth.role or "human"
-    if role != "human" and not auth.test_bypass:
+    if role != "human":
         allowed = (
             services.tasks.is_task_participant(conn, tid, role)
-            or services.context_router.is_participant(conn, tid, role))
+            or services.context_router.is_participant(conn, tid, role)
+            or services.roles.is_onboarding(conn, role))
         if not allowed:
             raise HTTPException(
                 status_code=403, detail="role is not a participant of this task")

@@ -71,7 +71,14 @@ def list_runs(role_slug: str | None = None, task_id: str | None = None,
         else:
             role_slug = auth.role
     statuses = list(services.runs.ACTIVE_RUN_STATUSES) if active else None
-    return services.runs.list_runs(conn, role_slug=role_slug, task_id=task_id, statuses=statuses)
+    runs = services.runs.list_runs(
+        conn, role_slug=role_slug, task_id=task_id, statuses=statuses)
+    if access.is_agent(auth) and not auth.task_id:
+        # 角色级 token 可能跨任务；只返回仍有参与关系的任务 run，避免历史跨任务泄漏。
+        runs = [run for run in runs
+                if not run.get("task_id")
+                or access.can_task_read(conn, auth, str(run["task_id"]))]
+    return runs
 
 
 @router.get("/runs/{rid}")
@@ -318,6 +325,10 @@ def release_run(rid: str, conn=Depends(get_db), auth: Auth = Depends(require_hum
 def context_manifest(rid: str, kind: str | None = None,
                      conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """本次 run 的 CIC/投影上下文清单（只含来源/预算元数据，不含正文）。"""
+    run = services.runs.get_run(conn, rid)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    access.assert_run_read(conn, auth, run)
     rows = services.context_manifest.list_for_run(conn, rid, kind=kind)
     if not rows:
         raise HTTPException(status_code=404, detail="context manifest not found")

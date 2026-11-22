@@ -50,3 +50,54 @@ def test_delete_task_snapshots_knowledge_before_cleanup(tmp_path, monkeypatch):
     assert audit is not None
     assert '"consolidated_roles": ["dev"]' in audit["payload_json"]
     conn.close()
+
+
+def test_force_delete_clears_child_delegation_scope_and_runtime_rows(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(daemon_service, "get_manager", lambda: None)
+    conn = connect(str(tmp_path / "delete2.db"))
+    parent = tasks_service.create(conn, title="父任务")
+    tid = parent["id"]
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO tasks (id,title,status,parent_id,parent_step_id,"
+        "parent_workflow_id,parent_execution_no,created_at,updated_at) "
+        "VALUES ('T-CHILD','子任务','todo',?,?,?,?,?,?)",
+        (tid, "S1", "WF-OLD", 1, now, now))
+    conn.execute(
+        "INSERT INTO runs (id, role_slug, task_id, status, started_at) "
+        "VALUES ('R-LEASE','dev',?,'running',?)", (tid, now))
+    conn.execute(
+        "INSERT INTO leases (id, resource_type, resource_key, holder, run_id, "
+        "acquired_at) VALUES ('L-1','step','S1','dev','R-LEASE',?)", (now,))
+    conn.execute(
+        "INSERT INTO wake_requests (task_id, role_slug, reason, note, created_at) "
+        "VALUES (?, 'dev', 'x', 'x', ?)", (tid, now))
+    conn.execute(
+        "INSERT INTO events (ts, event_type, task_id) VALUES (?, 'x', ?)",
+        (now, tid))
+    conn.execute(
+        "INSERT INTO context_manifests (role_slug, task_id, kind, budget_chars, "
+        "total_chars, created_at) VALUES ('dev', ?, 'cic', 1, 0, ?)", (tid, now))
+    conn.execute(
+        "INSERT INTO action_cards (id, role_slug, task_id, kind, created_at) "
+        "VALUES ('A-1','dev',?,'task.cancel',?)", (tid, now))
+    conn.commit()
+
+    assert tasks_service.delete(conn, tid, force=True) is True
+
+    child = conn.execute(
+        "SELECT parent_id, parent_step_id, parent_workflow_id, "
+        "parent_execution_no FROM tasks WHERE id='T-CHILD'").fetchone()
+    assert child["parent_id"] is None
+    assert child["parent_step_id"] is None
+    assert child["parent_workflow_id"] is None
+    assert child["parent_execution_no"] is None
+    for table, column in (
+        ("wake_requests", "task_id"), ("events", "task_id"),
+        ("context_manifests", "task_id"), ("action_cards", "task_id"),
+    ):
+        assert conn.execute(
+            f"SELECT 1 FROM {table} WHERE {column}=?", (tid,)).fetchone() is None
+    assert conn.execute("SELECT 1 FROM leases WHERE id='L-1'").fetchone() is None
+    conn.close()

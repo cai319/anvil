@@ -370,11 +370,24 @@ async function json<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-// 本地共享 token（首启配置；agent 面端点轻校验用）。
-// 生产设置了 ANVIL_AUTH_TOKEN 时，用 VITE_ANVIL_TOKEN 构建或写入 localStorage 覆盖。
+// 人类 token 由首次启动配对/设置页写入 localStorage；不再提供公开默认 token。
 const ENV_TOKEN = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_ANVIL_TOKEN;
-const STORED_TOKEN = typeof localStorage !== "undefined" ? localStorage.getItem("anvil-session") : null;
-const SESSION = ENV_TOKEN || STORED_TOKEN || "anvil-web";
+
+export function getSessionToken(): string {
+  if (ENV_TOKEN) return ENV_TOKEN;
+  if (typeof localStorage === "undefined") return "";
+  return localStorage.getItem("anvil-session") || "";
+}
+
+export function setSessionToken(token: string): void {
+  if (typeof localStorage !== "undefined") {
+    localStorage.setItem("anvil-session", token.trim());
+  }
+}
+
+export function clearSessionToken(): void {
+  if (typeof localStorage !== "undefined") localStorage.removeItem("anvil-session");
+}
 
 const nativeFetch = typeof window !== "undefined" ? window.fetch.bind(window) : fetch;
 
@@ -383,7 +396,8 @@ function authFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Re
   const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
   if (url.startsWith(BASE)) {
     const headers = new Headers(init.headers || {});
-    if (!headers.has("X-Anvil-Session")) headers.set("X-Anvil-Session", SESSION);
+    const token = getSessionToken();
+    if (!headers.has("X-Anvil-Session") && token) headers.set("X-Anvil-Session", token);
     if (!headers.has("X-Anvil-Role")) headers.set("X-Anvil-Role", "human");
     init = { ...init, headers };
   }
@@ -391,7 +405,9 @@ function authFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Re
 }
 
 function req(method: string, path: string, body?: unknown, role?: string): Promise<Response> {
-  const headers: Record<string, string> = { "Content-Type": "application/json", "X-Anvil-Session": SESSION };
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const token = getSessionToken();
+  if (token) headers["X-Anvil-Session"] = token;
   if (role) headers["X-Anvil-Role"] = role;
   return authFetch(`${BASE}${path}`, {
     method,
@@ -2302,9 +2318,11 @@ type EventListener = (ev: AnvilEvent) => void;
 let sharedES: EventSource | null = null;
 const listeners = new Set<EventListener>();
 
-function ensureEventSource(): EventSource {
+function ensureEventSource(): EventSource | null {
   if (sharedES) return sharedES;
-  const es = new EventSource(`${BASE}/events?token=${encodeURIComponent(SESSION)}`);
+  const token = getSessionToken();
+  if (!token) return null;
+  const es = new EventSource(`${BASE}/events?token=${encodeURIComponent(token)}`);
   es.onmessage = (e) => {
     try {
       const ev = JSON.parse(e.data) as AnvilEvent;
@@ -2318,7 +2336,7 @@ function ensureEventSource(): EventSource {
 }
 
 export function subscribeEvents(onEvent: EventListener): () => void {
-  ensureEventSource();
+  if (!ensureEventSource()) return () => {};
   listeners.add(onEvent);
   return () => {
     listeners.delete(onEvent);

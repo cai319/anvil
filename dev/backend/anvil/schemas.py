@@ -218,6 +218,7 @@ class SubmitIn(BaseModel):
 
 class ReviewIn(BaseModel):
     approve: bool
+    feedback: str | None = None
 
 
 class FindingIn(BaseModel):

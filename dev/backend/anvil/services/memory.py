@@ -864,6 +864,11 @@ def _lesson_row(row, conn: sqlite3.Connection | None = None) -> dict:
     d["submission_errors"] = knowledge_card.submission_errors(
         "insight", d["title"], d["tldr"], content, d["fields"])
     d["ready"] = not d["submission_errors"]
+    # 历史已批准但不达标：标记 legacy（保留数据与补全入口，排除自动注入）。
+    d["legacy"] = bool(
+        str(d.get("status") or "") == "approved" and not d["ready"])
+    if d["legacy"]:
+        d["quality"]["legacy"] = True
     if conn is not None:
         # 已批准的历史知识只要满足入库标准就视为补全完成；
         # 待审仍保留“可入库”提示（无 completion），由前端展示。
@@ -1019,6 +1024,7 @@ def reject_lesson(conn: sqlite3.Connection, lid: str) -> dict | None:
     row = conn.execute("SELECT * FROM lessons WHERE id=?", (lid,)).fetchone()
     if row is None:
         return None
+    knowledge_completion.cancel(conn, "lesson", lid)
     conn.execute("UPDATE lessons SET status='rejected' WHERE id=?", (lid,))
     conn.commit()
     _invalidate_repo_catalog()
@@ -1026,6 +1032,7 @@ def reject_lesson(conn: sqlite3.Connection, lid: str) -> dict | None:
 
 
 def delete_lesson(conn: sqlite3.Connection, lid: str) -> bool:
+    knowledge_completion.cancel(conn, "lesson", lid)
     cur = conn.execute("DELETE FROM lessons WHERE id=?", (lid,))
     conn.commit()
     _invalidate_repo_catalog()
@@ -1055,7 +1062,11 @@ def shared_lessons(conn: sqlite3.Connection, tags: list[str] | None = None,
         item_tags = {str(t).lower() for t in jloads(r["tags_json"], [])}
         if wanted and item_tags and not (wanted & item_tags):
             continue
-        out.append(_lesson_row(r, conn))
+        item = _lesson_row(r, conn)
+        # 历史不完整知识标记 legacy、保留数据，但不进入自动注入；补全达标后恢复。
+        if not item.get("ready"):
+            continue
+        out.append(item)
         if len(out) >= limit:
             break
     return out
@@ -1065,13 +1076,20 @@ def shared_lessons(conn: sqlite3.Connection, tags: list[str] | None = None,
 
 def _safe_repo(repo: str) -> str:
     """repo 名称来自 API/Agent，限制为单段安全字符，避免路径穿越。"""
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", repo or "shared")
+    from ..util import safe_component
+    return safe_component(repo or "shared", fallback="shared", max_len=120)
 
 
 def _lesson_path(repo: str) -> Path:
     if repo in (None, "", "shared"):
         return config.DATA_DIR / "shared" / "lessons.md"
-    return config.REPOS_DIR / _safe_repo(repo) / ".anvil" / "shared" / "lessons.md"
+    root = Path(config.REPOS_DIR).resolve()
+    path = (root / _safe_repo(repo) / ".anvil" / "shared" / "lessons.md").resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("lesson path escapes repos root") from exc
+    return path
 
 
 def _append_lesson_file(repo: str, content: str, tags: list[str], source_task: str | None) -> None:

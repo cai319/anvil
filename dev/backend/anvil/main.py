@@ -127,8 +127,14 @@ def _cleanup_orphans(conn) -> None:
         conn.execute("DELETE FROM workflows WHERE id=?", (wf["id"],))
     for table in ("task_deps", "task_assignees", "task_role_claims", "task_knowledge_repos",
                   "task_reviewers", "task_finding_boards", "task_findings",
-                  "task_finding_submissions"):
-        conn.execute(f"DELETE FROM {table} WHERE task_id NOT IN (SELECT id FROM tasks)")
+                  "task_finding_submissions", "gate_packets", "decisions",
+                  "workflow_dossiers", "context_manifests", "wake_requests",
+                  "action_cards", "events"):
+        conn.execute(f"DELETE FROM {table} WHERE task_id IS NOT NULL "
+                     "AND task_id NOT IN (SELECT id FROM tasks)")
+    conn.execute(
+        "DELETE FROM leases WHERE run_id IS NOT NULL "
+        "AND run_id NOT IN (SELECT id FROM runs)")
     conn.execute(
         "DELETE FROM task_deps WHERE depends_on NOT IN (SELECT id FROM tasks)")
     conn.execute(
@@ -159,8 +165,8 @@ class _LocalTokenMiddleware(BaseHTTPMiddleware):
     - `X-Anvil-Session`（默认）
     - `?token=` 仅用于 SSE `/api/v1/events`（EventSource 无法自定义 header）
 
-    有效 token = 未过期的运行级 session，或人类共享 token（`ANVIL_AUTH_TOKEN`；
-    未设置时只接受 `anvil` / `anvil-web`）。测试旁路 `ANVIL_TEST_AUTH=1` 下跳过。
+    有效 token = 未过期的运行级 session，或安装级人类 secret（`ANVIL_AUTH_TOKEN`
+    或 data/auth-token）。测试旁路 `ANVIL_TEST_AUTH=1` 下跳过。
     """
 
     async def dispatch(self, request, call_next):
@@ -185,6 +191,19 @@ class _LocalTokenMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """本地 UI/API 的通用防点击劫持与 MIME 嗅探头。"""
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault(
+            "Content-Security-Policy", "frame-ancestors 'none'")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        return response
+
+
 def create_app(cfg: dict | None = None) -> FastAPI:
     cfg = cfg or {}
     path = _db_path(cfg.get("db_url"))
@@ -195,6 +214,14 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             data_dir.chmod(0o700)
         except OSError:
             pass
+    # 人类 token：显式 env 或安装级随机 secret；Agent 子进程环境会剥离该值。
+    _test_auth = (bool(cfg.get("test_auth"))
+                  or os.environ.get("ANVIL_TEST_AUTH") == "1")
+    if _test_auth:
+        # 测试旁路不需要落盘 token，避免污染真实 data/auth-token。
+        config.AUTH_TOKEN = config.AUTH_TOKEN or "test-human-token"
+    else:
+        config.AUTH_TOKEN = config.resolve_auth_token()
     _init = connect(path)
     # 功能开关覆盖持久化在 settings；每次启动重新应用到 config。
     features_service.apply_overrides(_init)
@@ -289,6 +316,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     app = FastAPI(title="Anvil", version=VERSION, lifespan=lifespan)
     app.state.db_path = path
     app.state.test_auth = test_auth
+    app.state.auth_token = config.AUTH_TOKEN
     app.state.graph_db_path = graph_db_path
     app.state.checkpointer = checkpointer
     app.state.graph = graph
@@ -297,6 +325,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     app.state.scheduler_enabled = scheduler_enabled
 
     app.add_middleware(_LocalTokenMiddleware)
+    app.add_middleware(_SecurityHeadersMiddleware)
     # 访问日志必须在鉴权外层，才能记录 401/403 等用户操作结果。
     app.add_middleware(AccessLogMiddleware)
 

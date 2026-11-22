@@ -9,6 +9,7 @@ import json
 import locale
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -413,9 +414,32 @@ def _usage_error(message: str, hint: str | None = None) -> None:
     raise typer.Exit(2)
 
 ENDPOINT = os.environ.get("ANVIL_ENDPOINT", "http://127.0.0.1:7317")
-# 手动运行时（未注入 ANVIL_TOKEN）也带一个非空 session 头，满足本地轻校验；
-# 配置了 ANVIL_AUTH_TOKEN 的环境需显式设置 ANVIL_TOKEN。
-TOKEN = os.environ.get("ANVIL_TOKEN", "") or "anvil"
+
+
+def _read_token_file() -> str:
+    """人类 CLI 的可选 token 文件；Agent 由 ANVIL_TOKEN 注入运行级 token。"""
+    candidates = []
+    if os.environ.get("ANVIL_TOKEN_FILE"):
+        candidates.append(Path(os.environ["ANVIL_TOKEN_FILE"]))
+    if os.environ.get("ANVIL_DATA_DIR"):
+        candidates.append(Path(os.environ["ANVIL_DATA_DIR"]) / "auth-token")
+    # 源码/打包安装的项目根 data/auth-token（与后端默认 DATA_DIR 一致）。
+    candidates.append(
+        Path(__file__).resolve().parents[2].parent / "data" / "auth-token")
+    candidates.append(Path.cwd() / "data" / "auth-token")
+    candidates.append(Path.home() / ".config" / "Anvil" / "token")
+    for candidate in candidates:
+        try:
+            value = candidate.expanduser().read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    return ""
+
+
+# 不再使用公开默认 token；Agent 靠 ANVIL_TOKEN，人类可用 env 或 token 文件。
+TOKEN = os.environ.get("ANVIL_TOKEN", "").strip() or _read_token_file()
 AGENT_SLUG = os.environ.get("ANVIL_AGENT_SLUG", "")
 DEFAULT_TASK = os.environ.get("ANVIL_TASK_ID", "")
 
@@ -465,6 +489,12 @@ def _server_hint(status: int) -> str | None:
 
 
 def _call(method: str, path: str, body: Any = None, params: dict | None = None) -> Any:
+    if not TOKEN:
+        typer.echo("error: 未配置 Anvil token", err=True)
+        typer.echo(
+            "hint: Agent 使用后端注入的 ANVIL_TOKEN；人类可设置 ANVIL_TOKEN 或把 token "
+            "写入 ~/.config/Anvil/token（数据目录 auth-token）。", err=True)
+        raise typer.Exit(2)
     try:
         with _client() as c:
             r = c.request(method, path, json=body, params=params, headers=_headers())

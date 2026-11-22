@@ -67,8 +67,9 @@ netstat -ano | findstr :7317
 
 ### Q8. 写操作返回 `401 missing X-Anvil-Session`
 
-- Web：确认请求经由本应用页面发出；若设置了 `ANVIL_AUTH_TOKEN`，按 [9.3 节](#93-鉴权) 配置浏览器 token；
-- CLI：设置 `ANVIL_TOKEN`；默认空 token 时 CLI 会自动带 `X-Anvil-Session: anvil`。
+- Web：首次打开会要求粘贴人类 token；token 默认在 `data/auth-token`（或 `ANVIL_AUTH_TOKEN`）。
+- CLI：优先读取 `ANVIL_TOKEN`，其次 `ANVIL_TOKEN_FILE`、`data/auth-token`、
+  `~/.config/Anvil/token`；不再使用公开默认 token。
 
 ### Q9. 审批/删除操作返回 403
 

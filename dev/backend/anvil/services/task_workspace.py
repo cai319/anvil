@@ -69,7 +69,13 @@ def _root() -> Path:
 def path_for(task_id: str) -> Path:
     """任务工作空间目录；`__global__` 用于 reminder/直聊等无任务运行。"""
     key = str(task_id or GLOBAL_TASK_KEY)
-    return _root() / knowledge.task_path_segment(key)
+    root = _root().resolve()
+    path = (root / knowledge.task_path_segment(key)).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("task workspace path escapes its root") from exc
+    return path
 
 
 def _row(row: sqlite3.Row | None) -> dict | None:

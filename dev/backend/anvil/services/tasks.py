@@ -15,7 +15,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .. import config
-from ..util import ConflictError, jdumps, jloads, new_id, now_iso, read_text_file
+from ..util import (ConflictError, jdumps, jloads, new_id, now_iso, read_text_file,
+                    validate_component_id)
 from . import (governance, knowledge, knowledge_binding, ledger, repo_catalog,
                task_workspace, wake as wake_service, workspace)
 
@@ -124,6 +125,10 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
            issue_board_enabled: bool = False,
            commit: bool = True) -> dict:
     tid = id or new_id()
+    try:
+        tid = validate_component_id(tid, label="task id")
+    except ValueError as exc:
+        raise ConflictError(str(exc)) from exc
     if str(tid).startswith("__") or "::slice::" in str(tid):
         # `__global__` 是角色上下文槽保留 key；`::slice::` 是 context key 分隔符。
         raise ConflictError(f"task id {tid!r} is reserved")
@@ -842,7 +847,8 @@ def _submit_locked(conn: sqlite3.Connection, tid: str, *, summary: str | None = 
                     "updated_at=? WHERE task_id=? AND role_slug=?",
                     (summary, now, now, tid, role))
         cur = conn.execute(
-            "UPDATE tasks SET status='done', lease_expires_at=NULL, updated_at=? "
+            "UPDATE tasks SET status='done', lease_expires_at=NULL, "
+            "review_rejected_at=NULL, updated_at=? "
             "WHERE id=? AND status='in_progress'", (now, tid))
         if cur.rowcount != 1:
             raise ConflictError(
@@ -890,7 +896,8 @@ def _submit_locked(conn: sqlite3.Connection, tid: str, *, summary: str | None = 
 
         # 全部提交（或人工收口）→ 任务进入评审
         cur = conn.execute(
-            "UPDATE tasks SET status='in_review', lease_expires_at=NULL, updated_at=? "
+            "UPDATE tasks SET status='in_review', lease_expires_at=NULL, "
+            "review_rejected_at=NULL, updated_at=? "
             "WHERE id=? AND status='in_progress'", (now, tid))
         if cur.rowcount != 1:
             raise ConflictError(
@@ -907,7 +914,7 @@ def _submit_locked(conn: sqlite3.Connection, tid: str, *, summary: str | None = 
         return get(conn, tid)  # type: ignore[return-value]
 
     cur = conn.execute(
-        "UPDATE tasks SET status='in_review', updated_at=? "
+        "UPDATE tasks SET status='in_review', review_rejected_at=NULL, updated_at=? "
         "WHERE id=? AND status='in_progress'", (now, tid))
     if cur.rowcount != 1:
         raise ConflictError(
@@ -924,7 +931,9 @@ def _submit_locked(conn: sqlite3.Connection, tid: str, *, summary: str | None = 
     return get(conn, tid)  # type: ignore[return-value]
 
 
-def review(conn: sqlite3.Connection, tid: str, approve: bool, role: str | None = None) -> dict:
+def review(conn: sqlite3.Connection, tid: str, approve: bool,
+           role: str | None = None, *, feedback: str | None = None,
+           notify_rework: bool = True, notify_parent: bool = True) -> dict:
     t = get(conn, tid)
     if t is None:
         raise LookupError(tid)
@@ -957,14 +966,17 @@ def review(conn: sqlite3.Connection, tid: str, approve: bool, role: str | None =
         from . import findings as findings_service
         findings_service.assert_ready_for_task_review(conn, tid)
     new_status = "done" if approve else "in_progress"
-    lease = None if approve else t.get("lease_expires_at")
     now = now_iso()
+    # 驳回后重新起租：角色若始终不返工，治理 tick 仍能回收任务；返工 run 存活时
+    # `_run_liveness` 会续租，不会误回收。
+    lease = (None if approve else
+             (datetime.now(timezone.utc) + timedelta(seconds=LEASE_SECONDS)).isoformat())
     conn.execute("BEGIN IMMEDIATE")
     try:
         cur = conn.execute(
-            "UPDATE tasks SET status=?, lease_expires_at=?, updated_at=? "
-            "WHERE id=? AND status='in_review'",
-            (new_status, lease, now, tid))
+            "UPDATE tasks SET status=?, lease_expires_at=?, review_rejected_at=?, "
+            "updated_at=? WHERE id=? AND status='in_review'",
+            (new_status, lease, None if approve else now, now, tid))
         if cur.rowcount != 1:
             raise ConflictError(
                 f"task {tid} state changed; refresh before reviewing")
@@ -976,18 +988,29 @@ def review(conn: sqlite3.Connection, tid: str, approve: bool, role: str | None =
             # 驳回：已提交的角色回到 working，可重新派发/继续修改
             conn.execute(
                 "UPDATE task_role_claims SET status='working', submitted_at=NULL, "
-                "updated_at=? WHERE task_id=? AND status='submitted'", (now, tid))
-        _audit(conn, role, tid, "review", {"approve": approve})
+                "lease_expires_at=?, updated_at=? "
+                "WHERE task_id=? AND status='submitted'", (lease, now, tid))
+        _audit(conn, role, tid, "review", {
+            "approve": approve,
+            **({"feedback": feedback[:2000]} if feedback else {}),
+        })
         conn.commit()
     except BaseException:
         conn.rollback()
         raise
     if approve:
+        # 最终评审通过后，任务内不再有活跃执行；避免 suspended run/session 永久残留。
+        _complete_runs(conn, tid)
+        conn.commit()
         try:
             from . import dispatch as dispatch_service
             dispatch_service.on_task_done(conn, tid)
         except Exception:  # noqa: BLE001 —— 回切状态失败不阻断评审
             pass
+        if notify_parent and t.get("parent_step_id"):
+            _wake_parent_after_delegation(conn, t, role)
+    elif notify_rework:
+        _notify_task_rework(conn, t, role, feedback)
     try:
         from . import experience_capture
         if approve:
@@ -999,6 +1022,42 @@ def review(conn: sqlite3.Connection, tid: str, approve: bool, role: str | None =
     if approve:
         notify_downstream(conn, tid)  # 完成后 @提及下游角色，触发交接
     return get(conn, tid)  # type: ignore[return-value]
+
+
+def _notify_task_rework(conn: sqlite3.Connection, task: dict, reviewer: str | None,
+                        feedback: str | None) -> None:
+    """最终评审驳回：唤醒 assignees/负责人返工；review_rejected_at 阻止调度器回弹。"""
+    message = (feedback or "").strip() or "人工最终评审驳回，请按评审意见返工后重新提交。"
+    targets = list(dict.fromkeys(
+        [r for r in (task.get("assignees") or []) if r]
+        + ([task["assignee"]] if task.get("assignee") else [])))
+    for target in targets:
+        mention(conn, task["id"], reviewer or "human", target,
+                f"最终评审驳回：{message[:1000]}")
+        wake_service.enqueue(
+            conn, task_id=task["id"], role_slug=target,
+            reason="task.review_rejected",
+            note=(f"[最终评审驳回] 任务 {task['id']} 已回到 in_progress。"
+                  f"评审意见：{message[:1000]}。请按意见返工后重新 "
+                  "`anvil task submit`；不要重复 claim。"))
+    if not targets:
+        mention(conn, task["id"], reviewer or "human", "human",
+                f"最终评审驳回，但任务没有 assignee；请指定返工角色。{message[:800]}")
+    conn.commit()
+
+
+def _wake_parent_after_delegation(conn: sqlite3.Connection, task: dict,
+                                  actor: str | None) -> None:
+    parent = _parent_step_target(conn, task)
+    if parent is None:
+        return
+    wake_service.enqueue(
+        conn, task_id=parent["task_id"], role_slug=parent["role_slug"],
+        workflow_id=parent["workflow_id"], step_id=parent["step_id"],
+        reason="delegation.accepted",
+        note=(f"[委派已解除] 子任务 {task['id']} 已验收通过；父步骤 "
+              f"{parent['step_id']} 的委派门已释放，继续推进并提交。"))
+    conn.commit()
 
 
 def _require_delegation(t: dict) -> None:
@@ -1014,7 +1073,7 @@ def accept_delegation(conn: sqlite3.Connection, tid: str, actor: str | None) -> 
     if t is None:
         raise LookupError(tid)
     _require_delegation(t)
-    review(conn, tid, True, actor)
+    review(conn, tid, True, actor, notify_parent=False)
     created = str(t.get("created_by") or "")
     delegator = created[len("agent:"):] if created.startswith("agent:") else ""
     if delegator and actor != delegator:
@@ -1045,7 +1104,7 @@ def reject_delegation(conn: sqlite3.Connection, tid: str, actor: str | None,
     if t is None:
         raise LookupError(tid)
     _require_delegation(t)
-    review(conn, tid, False, actor)
+    review(conn, tid, False, actor, feedback=feedback, notify_rework=False)
     if t.get("assignee"):
         mention(conn, tid, actor or "system", t["assignee"],
                 f"委派打回：{feedback}")
@@ -1179,7 +1238,7 @@ def reopen(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict:
         status = "in_review"
     cur = conn.execute(
         "UPDATE tasks SET status=?, assignee=NULL, claimed_at=NULL, "
-        "lease_expires_at=NULL, archived_at=NULL, updated_at=? "
+        "lease_expires_at=NULL, archived_at=NULL, review_rejected_at=NULL, updated_at=? "
         "WHERE id=? AND status='closed'", (status, now_iso(), tid))
     if cur.rowcount != 1:
         raise ConflictError(f"task {tid} state changed; refresh before reopening")
@@ -1431,12 +1490,38 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
                 except Exception:  # noqa: BLE001
                     pass
     if children and force:
-        conn.execute("UPDATE tasks SET parent_id=NULL WHERE parent_id=?", (tid,))
+        # 强制删除只解除父子关系；委派来源字段也必须同时清空，否则子任务会永远
+        # 挂在一个不存在的 parent_step/workflow 上（委派门永远无法释放）。
+        conn.execute(
+            "UPDATE tasks SET parent_id=NULL, parent_step_id=NULL, "
+            "parent_workflow_id=NULL, parent_execution_no=NULL "
+            "WHERE parent_id=?", (tid,))
 
     # 任务删除时一并清掉其 workflow，避免孤儿步骤继续被调度器推进。
-    for wf in conn.execute("SELECT id FROM workflows WHERE task_id=?", (tid,)).fetchall():
-        conn.execute("DELETE FROM workflow_steps WHERE workflow_id=?", (wf["id"],))
-        conn.execute("DELETE FROM workflows WHERE id=?", (wf["id"],))
+    workflow_ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM workflows WHERE task_id=?", (tid,)).fetchall()]
+    step_ids: list[str] = []
+    for wf_id in workflow_ids:
+        step_ids.extend(r["step_id"] for r in conn.execute(
+            "SELECT step_id FROM workflow_steps WHERE workflow_id=?",
+            (wf_id,)).fetchall())
+    conn.execute("DELETE FROM gate_packets WHERE task_id=?", (tid,))
+    conn.execute("DELETE FROM decisions WHERE task_id=?", (tid,))
+    conn.execute("DELETE FROM workflow_dossiers WHERE task_id=?", (tid,))
+    for wf_id in workflow_ids:
+        conn.execute("DELETE FROM workflow_steps WHERE workflow_id=?", (wf_id,))
+        conn.execute("DELETE FROM workflows WHERE id=?", (wf_id,))
+    for step_id in step_ids:
+        conn.execute(
+            "DELETE FROM leases WHERE resource_type='step' AND resource_key=?",
+            (step_id,))
+    conn.execute(
+        "DELETE FROM leases WHERE run_id IN (SELECT id FROM runs WHERE task_id=?)",
+        (tid,))
+    conn.execute("DELETE FROM context_manifests WHERE task_id=?", (tid,))
+    conn.execute("DELETE FROM wake_requests WHERE task_id=?", (tid,))
+    conn.execute("DELETE FROM action_cards WHERE task_id=?", (tid,))
+    conn.execute("DELETE FROM events WHERE task_id=?", (tid,))
     # 观测记录随任务清理（含 task_id 为空、仅 run 归属的历史行）。
     conn.execute(
         "DELETE FROM run_subagents WHERE task_id=? OR run_id IN "

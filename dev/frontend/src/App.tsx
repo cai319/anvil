@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { api, subscribeEvents } from "./api/client";
+import { api, getSessionToken, setSessionToken, subscribeEvents } from "./api/client";
 import { installLinkInterceptor, setRouteListener } from "./router";
 import { APP_VERSION } from "./version";
 import { Icon, type IconName } from "./components/Icon";
@@ -251,8 +251,54 @@ function InboxBadge() {
   return <span className="nav-badge">{count}</span>;
 }
 
+function TokenGate({ onSaved }: { onSaved: () => void }) {
+  const [value, setValue] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const save = () => {
+    const token = value.trim();
+    if (!token) {
+      setError("请粘贴后端生成的 human token");
+      return;
+    }
+    setSessionToken(token);
+    onSaved();
+    window.location.reload();
+  };
+  return (
+    <div className="session" style={{ maxWidth: 640, margin: "12vh auto" }}>
+      <div className="card">
+        <h1>连接 Anvil</h1>
+        <p className="muted">
+          首次使用需要人类 token。它由后端启动时生成，默认在数据目录的
+          <code> auth-token</code> 文件中（或由 <code>ANVIL_AUTH_TOKEN</code> 显式指定）。
+          Agent 运行 token 不能用于此页面。
+        </p>
+        <label className="field">
+          <span>Human token</span>
+          <input
+            autoFocus
+            type="password"
+            value={value}
+            onChange={(e) => { setValue(e.target.value); setError(null); }}
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+              if (e.key === "Enter") save();
+            }}
+            placeholder="粘贴 auth-token 内容"
+          />
+        </label>
+        {error && <p className="error">{error}</p>}
+        <div className="card-actions">
+          <button className="primary" onClick={save} disabled={!value.trim()}>保存并连接</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const { route, navKey } = useRoute();
+  const [authenticated, setAuthenticated] = useState(() => Boolean(getSessionToken()));
   const [sidebarCollapsed, setSidebarCollapsed] = useState(initialSidebarCollapsed);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const menuRef = useRef<HTMLButtonElement>(null);
@@ -284,6 +330,10 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [drawerOpen]);
+
+  if (!authenticated) {
+    return <TokenGate onSaved={() => setAuthenticated(true)} />;
+  }
 
   const active = activeHref(route);
   const pageKey = `${navKey}`;

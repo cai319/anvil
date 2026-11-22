@@ -81,8 +81,9 @@ def get_runtime(rid: str, conn=Depends(get_db)):
 
 
 @router.get("/{rid}/definition")
-def get_runtime_definition(rid: str, conn=Depends(get_db)):
-    """返回运行时的 YAML 原文与来源，供 UI 编辑。"""
+def get_runtime_definition(rid: str, conn=Depends(get_db),
+                           auth: Auth = Depends(require_human)):
+    """返回运行时的 YAML 原文与来源，供 UI 编辑；可能含 MCP env，仅 human 可读。"""
     if services.runtime.get(conn, rid) is None:
         raise HTTPException(status_code=404, detail="runtime not found")
     definition = services.runtime.load_definitions().get(rid)

@@ -23,7 +23,7 @@ from .platform import factory
 from .services import board as board_service
 from .services import daemon as daemon_service
 from .services import dispatch as dispatch_service
-from .services import (governance, knowledge_completion, leases,
+from .services import (governance, knowledge_completion, knowledge_harvest, leases,
                        runs as runs_service, tasks as tasks_service)
 from .services import wake as wake_service
 from .services import workflow as workflow_service
@@ -89,6 +89,10 @@ class Scheduler:
             ("flush_wake_requests", lambda: self._flush_wake_requests(conn)),
             ("reap_revision_drafts",
              lambda: board_service.reap_stale_revision_drafts(conn)),
+            ("reconcile_knowledge_completion",
+             lambda: knowledge_completion.reconcile(conn)),
+            ("backfill_knowledge_harvest",
+             lambda: knowledge_harvest.backfill(conn)),
             ("finalize_ready_tasks", lambda: self._finalize_ready_tasks(conn)),
             ("resolve_dispatch_returns", lambda: dispatch_service.resolve_dispatch_returns(
                 conn, lambda rid, ev: self._pump(rid, ev))),
@@ -98,6 +102,8 @@ class Scheduler:
                 conn, lambda rid, ev: self._pump(rid, ev))),
             ("recover_failed_runs", lambda: self._recover_failed_runs(conn)),
             ("pump_created", lambda: self._pump_created(conn)),
+            ("repair_terminal_task_runs",
+             lambda: self._repair_terminal_task_runs(conn)),
             ("monitor", lambda: self._monitor(conn)),
             ("clear_terminal_role_runs", lambda: self._clear_terminal_role_runs(conn)),
             ("reap_interrupted_subagents",
@@ -459,7 +465,8 @@ class Scheduler:
         rows = conn.execute(
             "SELECT DISTINCT w.task_id FROM workflows w "
             "JOIN tasks t ON t.id=w.task_id "
-            "WHERE w.status='done' AND t.status IN ('in_progress','todo')"
+            "WHERE w.status='done' AND t.status IN ('in_progress','todo') "
+            "AND t.review_rejected_at IS NULL"
         ).fetchall()
         for row in rows:
             try:
@@ -974,6 +981,34 @@ class Scheduler:
         if changed:
             conn.commit()
 
+    def _repair_terminal_task_runs(self, conn) -> None:
+        """任务已 done/closed 但仍有活跃 run → 收尾，避免 suspended 永久残留。"""
+        rows = conn.execute(
+            "SELECT r.id, r.role_slug, t.status AS task_status "
+            "FROM runs r JOIN tasks t ON t.id=r.task_id "
+            "WHERE t.status IN ('done','closed') "
+            "AND r.status NOT IN ('completed','failed','abandoned')"
+        ).fetchall()
+        changed = False
+        for row in rows:
+            target = "completed" if row["task_status"] == "done" else "abandoned"
+            if not runs_service.set_status(
+                    conn, row["id"], target, ended_at=now_iso(),
+                    from_statuses=("created", "projecting", "running",
+                                   "suspended", "submitted", "reviewing")):
+                continue
+            try:
+                mgr = daemon_service.get_manager()
+                if mgr is not None:
+                    mgr.clear_run(row["role_slug"], row["id"])
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "clear terminal run state failed role=%s run=%s",
+                    row["role_slug"], row["id"])
+            changed = True
+        if changed:
+            conn.commit()
+
     def _reap_dead_runs(self, conn) -> None:
         """常驻进程已死但 run 仍 running → 宽限期后转 suspended。
 
@@ -1028,7 +1063,9 @@ class Scheduler:
                 except Exception:  # noqa: BLE001
                     pass
             from .services import runs as runs_service
-            runs_service.set_status(conn, row["id"], "suspended")
+            if not runs_service.set_status(
+                    conn, row["id"], "suspended", from_statuses=("running",)):
+                continue
             try:
                 mgr.clear_current(row["role_slug"], row["id"])
             except Exception:  # noqa: BLE001
@@ -1079,8 +1116,10 @@ class Scheduler:
         ).fetchall()
         for row in rows:
             dispatch_service.clear_inbound_context_returns(conn, row["id"])
-            runs_service.set_status(conn, row["id"], "failed", ended_at=now_iso(),
-                                    failure_class="orphaned_step_run")
+            runs_service.set_status(
+                conn, row["id"], "failed", ended_at=now_iso(),
+                failure_class="orphaned_step_run",
+                from_statuses=("created", "projecting", "running", "suspended"))
 
     def _reap_stalled_phases(self, conn) -> None:
         """run 卡在 projecting（编排器在 project→spawn 之间崩溃）→ 周期自愈。
@@ -1097,7 +1136,8 @@ class Scheduler:
                 continue
             if row["native_session_id"]:
                 from .services import runs as runs_service
-                runs_service.set_status(conn, row["id"], "running")
+                runs_service.set_status(
+                    conn, row["id"], "running", from_statuses=("projecting",))
                 continue
             self._pump(row["id"], "wake")  # 失败下一轮 tick 继续尝试
 

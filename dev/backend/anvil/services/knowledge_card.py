@@ -221,6 +221,8 @@ def evaluate_quality(kind: str, title: str, tldr: str, body_md: str,
             missing.append(canonical)
             blocking.append(canonical)
     for key in REQUIRED_FIELDS.get(kind, ()):
+        if key == "counterexamples" and _has_value(fields.get("exclusions")):
+            continue
         if not _has_value(fields.get(key)) and key not in missing:
             missing.append(key)
             blocking.append(key)
@@ -317,7 +319,10 @@ def completeness(kind: str, fields: dict | None) -> float:
     required = REQUIRED_FIELDS.get(kind, ())
     if not required:
         return 1.0 if normalize_fields(fields) else 0.0
-    present = sum(1 for key in required if _has_value((fields or {}).get(key)))
+    present = sum(
+        1 for key in required
+        if _has_value((fields or {}).get(key))
+        or (key == "counterexamples" and _has_value((fields or {}).get("exclusions"))))
     return round(present / len(required), 4)
 
 
@@ -331,6 +336,8 @@ def validate_card(kind: str, fields: dict | None, *, for_approval: bool = False)
         return {"errors": errors, "warnings": warnings, "completeness": 0.0}
     if for_approval:
         for key in REQUIRED_FIELDS.get(kind, ()):
+            if key == "counterexamples" and _has_value(fields.get("exclusions")):
+                continue  # “不适用/反例”与“反例”同义，提交前必须条款也一致
             if not _has_value(fields.get(key)):
                 errors.append(f"missing required field: {key} ({FIELD_LABELS.get(key, key)})")
     text = " ".join(

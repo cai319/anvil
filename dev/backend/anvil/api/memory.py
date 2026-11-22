@@ -452,14 +452,34 @@ def fill_role_knowledge(note_id: str, body: dict, role: str | None = None,
     if actor not in ("human", role_slug) and not auth.test_bypass:
         raise HTTPException(
             status_code=403, detail="only the owning role or human can fill this knowledge")
+    row = _role_note_row(conn, role_slug, note_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="knowledge not found")
+    if row["kind"] != "task_snapshot":
+        # 必须条款：补全提交必须一次满足；部分字段仍不完整 → 422，不标记“完成”。
+        fields = {
+            **jloads(row["fields_json"], {}),
+            **(body.get("fields") or {}),
+        }
+        errors = services.knowledge_card.submission_errors(
+            row["kind"] or "note",
+            str(body.get("title", row["title"]) or ""),
+            str(body.get("tldr", row["tldr"]) or ""),
+            str(body.get("content", row["content"]) or ""),
+            fields, strict_kind=False)
+        if errors:
+            raise HTTPException(
+                status_code=422,
+                detail="知识格式不合法：" + "；".join(errors))
     try:
         updated = _update_role_note(conn, role_slug, note_id, body, source="agent")
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if updated is None:
         raise HTTPException(status_code=404, detail="knowledge not found")
-    services.knowledge_completion.complete(
-        conn, "role_note", note_id, role_slug=role_slug)
+    if updated.get("ready") is not False:
+        services.knowledge_completion.complete(
+            conn, "role_note", note_id, role_slug=role_slug)
     conn.commit()
     return services.knowledge.get_knowledge(
         conn, role_slug, note_id, include_task_scope=True)
@@ -571,8 +591,12 @@ def write_instruction(body: InstructionIn, conn=Depends(get_db), auth: Auth = De
 
 
 @router.get("/proposals")
-def list_proposals(status: str | None = None, conn=Depends(get_db)):
-    return services.memory.list_proposals(conn, status)
+def list_proposals(status: str | None = None, conn=Depends(get_db),
+                   auth: Auth = Depends(get_auth)):
+    proposals = services.memory.list_proposals(conn, status)
+    if auth.role and auth.role != "human":
+        proposals = [p for p in proposals if p.get("role_slug") == auth.role]
+    return proposals
 
 
 @router.post("/proposals", status_code=201)
@@ -603,10 +627,23 @@ def reject_proposal(pid: str, conn=Depends(get_db), auth: Auth = Depends(require
     return p
 
 
+def _visible_lesson(lesson: dict, auth: Auth) -> bool:
+    if not auth.role or auth.role == "human":
+        return True
+    if str(lesson.get("status") or "") == "approved":
+        return True
+    # 待审/已驳回只能作者本人或 human 看到，避免跨任务泄漏经验内容。
+    return str(lesson.get("source_role") or "") == auth.role
+
+
 @router.get("/lessons")
 def list_lessons(status: str | None = None, repo: str | None = None,
-                 q: str | None = None, conn=Depends(get_db)):
-    return services.memory.list_lessons(conn, status, repo, q)
+                 q: str | None = None, conn=Depends(get_db),
+                 auth: Auth = Depends(get_auth)):
+    lessons = services.memory.list_lessons(conn, status, repo, q)
+    if auth.role and auth.role != "human":
+        lessons = [lesson for lesson in lessons if _visible_lesson(lesson, auth)]
+    return lessons
 
 
 @router.post("/lessons/pending", status_code=201)
@@ -623,15 +660,20 @@ def propose_lesson(body: LessonIn, conn=Depends(get_db),
 
 
 @router.get("/lessons/pending")
-def list_pending_lessons(conn=Depends(get_db)):
-    return services.memory.list_lessons(conn, status="pending")
+def list_pending_lessons(conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    lessons = services.memory.list_lessons(conn, status="pending")
+    if auth.role and auth.role != "human":
+        lessons = [lesson for lesson in lessons if _visible_lesson(lesson, auth)]
+    return lessons
 
 
 @router.get("/lessons/{lid}")
-def get_lesson(lid: str, conn=Depends(get_db)):
+def get_lesson(lid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     lesson = services.memory.get_lesson(conn, lid)
     if lesson is None:
         raise HTTPException(status_code=404, detail="lesson not found")
+    if not _visible_lesson(lesson, auth):
+        raise HTTPException(status_code=403, detail="agent cannot read this lesson")
     return lesson
 
 
@@ -732,6 +774,9 @@ def fill_lesson(lid: str, body: dict, conn=Depends(get_db),
     if actor not in ("human", lesson.get("source_role")) and not auth.test_bypass:
         raise HTTPException(
             status_code=403, detail="only the harvesting role or human can fill this lesson")
+    if (auth.task_id and lesson.get("source_task")
+            and auth.task_id != lesson["source_task"]):
+        raise HTTPException(status_code=403, detail="session is bound to another task")
     if lesson["status"] not in ("pending", "approved"):
         raise HTTPException(
             status_code=409, detail="only pending/approved lessons can be filled")
@@ -759,6 +804,27 @@ def fill_lesson(lid: str, body: dict, conn=Depends(get_db),
 @router.put("/lessons/{lid}")
 def update_lesson(lid: str, body: dict, conn=Depends(get_db),
                   auth: Auth = Depends(require_human)):
+    existing = services.memory.get_lesson(conn, lid)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="lesson not found")
+    if existing["status"] == "approved":
+        # 完整已批准知识只读；只有历史不完整（legacy）知识允许原地补全，
+        # 且补全结果必须一次满足必须条款，不能把已批准内容改成不完整状态。
+        if existing.get("ready"):
+            raise HTTPException(
+                status_code=409,
+                detail="approved lessons are immutable; create a new pending lesson to revise")
+        fields = {**(existing.get("fields") or {}), **(body.get("fields") or {})}
+        errors = services.knowledge_card.submission_errors(
+            "insight",
+            str(body.get("title", existing.get("title")) or ""),
+            str(body.get("tldr", existing.get("tldr")) or ""),
+            str(body.get("content", existing.get("content")) or ""),
+            fields)
+        if errors:
+            raise HTTPException(
+                status_code=422,
+                detail="知识格式不合法：" + "；".join(errors))
     lesson = services.memory.update_lesson(
         conn, lid, content=body.get("content"), tags=body.get("tags"),
         repo=body.get("repo"), title=body.get("title"), tldr=body.get("tldr"),

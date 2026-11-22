@@ -274,7 +274,7 @@
 
 #### ACC-I1 五子棋场景驱动 4 角色完整闭环 【脚本 P0】
 - 脚本：`dev/scripts/e2e_gomoku.py`（角色感知 demo agent 用 `data/demo-agent.sh`）。
-- 前置：后端启动（`ANVIL_AUTH_TOKEN=dev-secret`），`anvil` CLI 已装（`pip install -e dev/agentcli`），`data/repos/gomoku` 已 git init。
+- 前置：后端启动（`ANVIL_AUTH_TOKEN=anvil-local-dev-secret-2026`），`anvil` CLI 已装（`pip install -e dev/agentcli`），`data/repos/gomoku` 已 git init。
 - 场景：PM 拆「实现一个五子棋小程序」为 设计→开发→测试 三条依赖任务；逐任务派发到 designer/developer/tester 三个角色。
 - 步骤：`python3 scripts/e2e_gomoku.py`。
 - 预期（脚本自动断言 + 人工关卡）：

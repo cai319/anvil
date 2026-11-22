@@ -708,3 +708,22 @@ cd frontend && npm run build         # tsc + vite build
   冻结，仅中间 body 滚动。
 - 全量：**1005 passed / 63 skipped**；前端 `npm run build` 通过。
 - 发布说明：`docs/v1.46.0-release.md`。
+
+## 安全边界、对象级授权与状态机加固（2026-11-22，v1.47.0）
+
+- **HITL 认证隔离**：移除公开默认 token；每安装生成 `data/auth-token`（0600）或显式
+  `ANVIL_AUTH_TOKEN`；Agent 子进程剥离人类凭据；Web TokenGate 首次配对；SSE human-only；
+  安全响应头。
+- **对象级授权**：任务/run/workflow/replay/board/inbox/role/runtime/MCP/频道与主题知识
+  全部校验参与范围；run token 强制任务绑定；MCP env 永不返回；runtime YAML 仅 human；
+  repo catalog 对 Agent 隐藏任务样本；Agent 仅见已批准卡与自己的待审内容。
+- **状态机**：评审驳回写 `review_rejected_at` 并唤醒返工、不回弹；评审通过收尾 run；
+  submit/escalate/terminate/reaper/spawn 增加 lifecycle lock + 状态 CAS；委派清理限定
+  execution；删除任务清理 parent 委派字段及 workflow 关联资源；scheduler 修复终态任务 run。
+- **知识正确性**：legacy 不完整知识排除自动注入；角色补全必须条款校验；exclusions 别名；
+  补全 job 去重/终态不可回退/TTL 对账/删除清理；Cindy 禁用时收割提醒保持 pending；
+  频道收割限长与 422/409；主题卡晋升补字段；任务知识 version 生效；知识文件与 DB 同步。
+- **路径与 prompt**：任务/仓库/频道路径安全化与 containment；收割 prompt 命令参数
+  `shlex.quote`，不可信标题单行截断。
+- 全量：**1032 passed / 63 skipped**；前端 `npm run build` 通过。
+- 发布说明：`docs/v1.47.0-release.md`。

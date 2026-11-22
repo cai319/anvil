@@ -50,6 +50,40 @@ def _assert_approved_quality(card: dict) -> None:
             + "; ".join(quality["blocking"]))
 
 
+_CHANNEL_KINDS = {"convention", "decision", "workflow", "insight", "role_requirement"}
+
+
+def _adapted_channel_fields(kind: str, fields: dict, title: str,
+                            tldr: str, source_task_id: str | None) -> dict:
+    """把不适合频道卡类型的字段补齐为 insight 必填字段（保持旧字段不动）。"""
+    out = dict(fields or {})
+    if kind != "insight":
+        return out
+
+    def fill(key: str, value: object) -> None:
+        if not str(out.get(key) or "").strip():
+            out[key] = value
+
+    fill("observation",
+         out.get("task_context") or out.get("finding") or tldr or title)
+    fill("lesson",
+         out.get("finding") or out.get("rule") or out.get("decision") or title)
+    fill("applicability",
+         out.get("reuse_scope") or out.get("scope") or out.get("use_when") or "")
+    fill("counterexamples",
+         out.get("exclusions") or out.get("exceptions") or "暂无已知反例")
+    fill("evidence",
+         out.get("verification") or out.get("evidence")
+         or (f"任务 {source_task_id}" if source_task_id else "来源主题知识卡"))
+    fill("use_when",
+         out.get("applicability") or out.get("reuse_scope")
+         or out.get("scope") or out.get("use_when") or "")
+    fill("expected_effect",
+         out.get("outcome") or out.get("consequences")
+         or "复用该知识，减少同类任务的重复探索。")
+    return out
+
+
 def repo_card_to_channel(conn: sqlite3.Connection, card_id: str,
                          workspace_id: str, *, actor: str = "human") -> dict:
     """主题知识库已批准卡 → Channel 知识草稿。"""
@@ -59,15 +93,18 @@ def repo_card_to_channel(conn: sqlite3.Connection, card_id: str,
     if card.get("status") != "approved":
         raise ConflictError("only approved repo cards can be harvested")
     _assert_approved_quality(card)
+    source_kind = str(card.get("kind") or "insight")
+    kind = source_kind if source_kind in _CHANNEL_KINDS else "insight"
+    fields = _adapted_channel_fields(
+        kind, card.get("fields") or {}, card.get("title") or "",
+        card.get("tldr") or "", card.get("source_task_id"))
     return workspace_knowledge.create(
         conn, workspace_id,
         title=card.get("title") or "",
         tldr=card.get("tldr") or "",
-        kind=card.get("kind") if card.get("kind") in {
-            "convention", "decision", "workflow", "insight", "role_requirement"}
-        else "insight",
+        kind=kind,
         authority=card.get("authority") or "reference",
-        fields=card.get("fields") or {},
+        fields=fields,
         tags=card.get("tags") or [],
         source_task_id=card.get("source_task_id"),
         owner=actor,

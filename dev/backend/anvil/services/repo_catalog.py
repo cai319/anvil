@@ -27,12 +27,25 @@ _CACHE: dict[str, tuple[float, dict]] = {}
 
 
 def repo_key(name: str | None) -> str:
-    """repo 的 canonical key：basename、去 .git、casefold、空白/下划线→-。"""
+    """repo 的 canonical key：basename、去 .git、casefold、空白/下划线→-。
+
+    点段（`.`/`..`）或空值映射为带 hash 的安全段，不能作为路径穿越。
+    """
+    from ..util import safe_component
+
     text = unicodedata.normalize("NFKC", str(name or "")).strip().replace("\\", "/")
     text = text.rstrip("/").split("/")[-1]
     if text.endswith(".git"):
         text = text[:-4]
-    return re.sub(r"[\s_]+", "-", text.casefold()).strip("-")
+    key = re.sub(r"[\s_]+", "-", text.casefold()).strip("-")
+    if not key:
+        return ""
+    # 普通主题名保持既有 canonical key；只有点段/分隔符才走安全化，避免
+    # 重命名历史主题（如 C++）导致绑定失效。
+    if (key in (".", "..") or not key.strip(".")
+            or "/" in key or "\\" in key or "\x00" in key):
+        return safe_component(key, fallback="repo", max_len=64)
+    return key
 
 
 def display_repo(name: str | None) -> str:

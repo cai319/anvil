@@ -11,9 +11,10 @@ import queue
 import threading
 import time
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
+from ..deps import Auth, get_auth
 from ..util import now_iso
 
 router = APIRouter()
@@ -37,7 +38,10 @@ def publish(topic: str, payload: dict | None = None) -> None:
 
 
 @router.get("/events")
-async def events():
+async def events(auth: Auth = Depends(get_auth)):
+    # 事件流包含全任务/角色活动；只给人类 UI，Agent 通过自己的 run 日志/收件箱取数。
+    if auth.role != "human":
+        raise HTTPException(status_code=403, detail="events stream is human-only")
     q: queue.Queue = queue.Queue()
     with _guard:
         _subscribers.add(q)

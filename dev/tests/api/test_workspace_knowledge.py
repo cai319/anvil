@@ -28,14 +28,24 @@ async def _seed(client):
     await client.post(f"{API}/roles", json=role_payload())
 
 
-async def _workspace(client, *, repo="repo-a", knowledge_repo="kb-a"):
+async def _workspace(client, *, repo="repo-a", knowledge_repo="kb-a",
+                     members: bool = True):
     r = await client.post(
         f"{API}/workspaces",
         json={"name": "main", "repo": repo, "knowledge_repo": knowledge_repo},
         headers=human_headers(),
     )
     assert r.status_code == 201, r.text
-    return r.json()
+    ws = r.json()
+    if members:
+        # 频道知识写入需要频道成员写权限（或频道内任务参与关系）。
+        for role in ("qa-role", "agent-role"):
+            await client.post(
+                f"{API}/workspaces/{ws['id']}/members",
+                json={"role_slug": role, "access": "write"},
+                headers=human_headers(),
+            )
+    return ws
 
 
 def _agent_headers(app, role: str = "qa-role", token: str = "kb-agent-token") -> dict:
@@ -128,6 +138,30 @@ async def test_incomplete_agent_submission_is_rejected(client, app):
     assert "知识格式不合法" in detail
     assert "examples" in detail and "expected_effect" in detail
     assert "evidence" in detail
+
+
+async def test_exclusions_alias_satisfies_approval_gate(client, app):
+    """提交时 exclusions 可替代 counterexamples，审批门禁必须使用同一别名。"""
+    await _seed(client)
+    ws = await _workspace(client)
+    fields = {
+        "observation": "观察", "lesson": "结论", "applicability": "同类任务",
+        "exclusions": "自编译环境不适用", "evidence": "测试证据",
+        "use_when": "同类任务", "expected_effect": "减少误判",
+    }
+    created = await client.post(
+        f"{API}/workspaces/{ws['id']}/knowledge",
+        json={"title": "别名审批", "tldr": "exclusions 也是反例。",
+              "kind": "insight", "fields": fields},
+        headers=_agent_headers(app))
+    assert created.status_code == 201, created.text
+    card = created.json()
+    approved = await client.post(
+        f"{API}/workspaces/{ws['id']}/knowledge/{card['id']}/approve",
+        json={"expected_version": card["version"]},
+        headers=human_headers())
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "approved"
 
 
 async def test_legacy_incomplete_card_blocked_at_approval(client, app):
@@ -592,3 +626,39 @@ async def test_list_filters(client):
         )
     ).json()
     assert {c["kind"] for c in approved} == {"convention", "decision"}
+
+
+async def test_agent_cannot_write_another_workspace_knowledge(client, app):
+    await _seed(client)
+    ws_a = await _workspace(client, repo="repo-a", knowledge_repo="kb-a")
+    ws_b = await _workspace(client, repo="repo-b", knowledge_repo="kb-b",
+                            members=False)
+    await client.post(
+        f"{API}/tasks", headers=human_headers(),
+        json=task_payload(id_="T-WS-A", workspace_id=ws_a["id"],
+                          assignees=["qa-role"]))
+    await client.post(
+        f"{API}/tasks", headers=human_headers(),
+        json=task_payload(id_="T-WS-B", workspace_id=ws_b["id"], assignees=[]))
+    agent = _agent_headers(app)
+    body = {
+        "title": "跨频道知识", "tldr": "不应写入其他频道", "kind": "convention",
+        "fields": FULL_CONVENTION,
+    }
+    assert (await client.post(
+        f"{API}/workspaces/{ws_b['id']}/knowledge", json=body,
+        headers=agent)).status_code == 403
+    assert (await client.post(
+        f"{API}/workspaces/{ws_a['id']}/knowledge", json=body,
+        headers=agent)).status_code == 201
+
+    # 非参与的 done 任务也不能被 harvest
+    conn = sqlite3.connect(app.state.db_path)
+    try:
+        conn.execute("UPDATE tasks SET status='done' WHERE id='T-WS-B'")
+        conn.commit()
+    finally:
+        conn.close()
+    assert (await client.post(
+        f"{API}/workspaces/{ws_b['id']}/knowledge/harvest",
+        json={"task_id": "T-WS-B"}, headers=agent)).status_code == 403

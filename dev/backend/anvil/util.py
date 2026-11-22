@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import codecs
+import hashlib
 import json
 import locale
 import os
+import re
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +28,46 @@ def now_iso() -> str:
 
 def new_id() -> str:
     return str(uuid.uuid4())
+
+
+_AGENT_SECRET_ENV_KEYS = {
+    "ANVIL_AUTH_TOKEN", "ANVIL_AUTH_TOKEN_FILE", "ANVIL_TEST_AUTH",
+    "ANVIL_HUMAN_TOKEN", "ANVIL_SESSION",
+}
+
+
+def scrub_agent_env(env: dict[str, str], *, allow_run_token: bool = False) -> dict[str, str]:
+    """剥离编排器的人类认证变量；Agent 只能拿到自己的运行级 ANVIL_TOKEN。"""
+    out: dict[str, str] = {}
+    for key, value in env.items():
+        key_text = str(key)
+        if key_text in _AGENT_SECRET_ENV_KEYS:
+            continue
+        if key_text == "ANVIL_TOKEN" and not allow_run_token:
+            continue
+        out[key_text] = value
+    return out
+
+
+def safe_component(value: Any, *, fallback: str = "item", max_len: int = 64) -> str:
+    """把用户提供的 id/名称变成单段安全目录名；拒绝点段并加短 hash 防碰撞。"""
+    raw = str(value or "")
+    text = unicodedata.normalize("NFKC", raw).strip()
+    safe = re.sub(r"[^\w.+-]", "_", text)[:max_len]
+    if safe in ("", ".", "..") or not safe.strip("."):
+        safe = fallback
+    if safe != raw:
+        safe = f"{safe[:max_len]}-{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:8]}"
+    return safe
+
+
+def validate_component_id(value: Any, *, label: str = "id") -> str:
+    """入口 id 校验：拒绝绝对/穿越/空 id（调用方仍应使用 safe_component 做路径段）。"""
+    text = str(value or "").strip()
+    if (not text or text in (".", "..") or "/" in text or "\\" in text
+            or "\x00" in text or not text.strip(".")):
+        raise ValueError(f"invalid {label}")
+    return text
 
 
 def jdumps(obj: Any) -> str:

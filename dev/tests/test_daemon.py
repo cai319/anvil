@@ -1502,3 +1502,21 @@ def test_delivery_render_failure_preserves_wake_note(env):
     assert conn.execute(
         "SELECT 1 FROM audit WHERE action='delivery.render_failed' LIMIT 1"
     ).fetchone() is not None
+
+
+def test_agent_env_strips_human_auth(monkeypatch):
+    """Agent 子进程只能拿到运行级 ANVIL_TOKEN，不能继承 human token。"""
+    from anvil.services import daemon as daemon_service
+
+    monkeypatch.setenv("ANVIL_AUTH_TOKEN", "human-secret")
+    monkeypatch.setenv("ANVIL_TOKEN", "inherited-run-token")
+    monkeypatch.setenv("ANVIL_TEST_AUTH", "1")
+    env = daemon_service._clean_env({
+        "ANVIL_TOKEN": "run-token",
+        "ANVIL_AUTH_TOKEN": "runtime-human-secret",
+        "FOO": "bar",
+    })
+    assert env["ANVIL_TOKEN"] == "run-token"
+    assert env["FOO"] == "bar"
+    assert "ANVIL_AUTH_TOKEN" not in env
+    assert "ANVIL_TEST_AUTH" not in env

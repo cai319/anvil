@@ -362,7 +362,7 @@ async def test_write_requires_session_header(tmp_path, monkeypatch):
         missing = await c.post(f"{API}/tasks", json={"id": "T-A", "title": "x"})
         assert missing.status_code == 401
         ok = await c.post(f"{API}/tasks", json={"id": "T-A", "title": "x"},
-                          headers={"X-Anvil-Session": "anvil-web"})
+                          headers={"X-Anvil-Session": auth_app.state.auth_token})
         assert ok.status_code == 201
 
 
