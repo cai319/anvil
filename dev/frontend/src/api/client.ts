@@ -1,16 +1,10 @@
+import type { components } from "./schema";
+
 const BASE = "/api/v1";
 
-export interface KnowledgeRepoBinding {
-  repo: string;
-  source: "auto" | "cindy" | "human" | "inherited" | "agent";
-  status: "applied" | "suggested" | "dismissed";
-  confidence: number;
-  score: number;
-  matched_tags: string[];
-  reason: string | null;
-  created_at?: string;
-  updated_at?: string;
-}
+type Schemas = components["schemas"];
+
+export type KnowledgeRepoBinding = Schemas["KnowledgeRepoBindingOut"];
 
 export interface KnowledgeRepoProfile {
   repo: string;
@@ -33,129 +27,25 @@ export interface TaskRoleStatusSummary {
   run_statuses: Record<string, { status: string; started_at: string | null }>;
 }
 
-export interface Task {
-  id: string;
-  title: string;
-  type: string | null;
-  status: "todo" | "in_progress" | "in_review" | "done" | "closed";
-  priority: unknown;
-  tags: string[];
-  repo: string | null;
-  source_repo?: string | null;
-  knowledge_mode?: "shared" | "local" | "temp" | null;
-  task_workspace?: {
-    path: string; kind: string; status: string;
-    source_repo: string | null;
-  } | null;
-  workspace_id?: string | null;
-  workspace?: { id: string; name: string; repo: string | null } | null;
-  archived_at?: string | null;
-  base_branch?: string | null;
-  knowledge_repos?: KnowledgeRepoBinding[];
-  knowledge_binding_locked?: boolean;
-  knowledge_binding_state?: "applied" | "suggested" | "needs_cindy" | "fallback" | "locked" | "off";
-  scope_paths: string[];
-  description: string | null;
-  acceptance: string[];
-  assignee: string | null;
-  assignees: string[];
-  plan_first: boolean;
-  planner: string | null;
-  plan_seed?: {
-    template_id: string;
-    version: number;
-    name?: string;
-    set_by?: string;
-    set_at?: string;
-  } | null;
-  role_claims: {
-    role_slug: string;
-    status: "pending" | "working" | "submitted" | "released" | "approved";
-    summary: string | null;
-    run_id: string | null;
-    claimed_at: string | null;
-    lease_expires_at: string | null;
-    submitted_at: string | null;
-  }[];
-  depends_on: string[];
-  parent_id: string | null;
-  parent_step_id?: string | null;
-  source_task_id?: string | null;
-  source_slice_key?: string | null;
-  source_step_id?: string | null;
-  requested_by?: string | null;
-  dispatch_status?: "none" | "open" | "return_ready" | "returning" | "returned" |
-    "no_return" | "cancelled" | null;
-  dispatch_reason?: string | null;
-  due_at?: string | null;
-  issue_board_enabled?: boolean;
-  reviewer_roles?: string[];
-  created_at: string;
-  updated_at: string;
+/** 任务状态：由后端 OpenAPI（TaskStatus）生成，避免前后端词表漂移。 */
+export type TaskStatus = Schemas["TaskStatus"];
+
+export type Task = Required<Schemas["TaskOut"]>;
+
+export type Delegation = Required<Schemas["DelegationOut"]>;
+
+export type TaskChild = Required<Omit<Schemas["TaskChildOut"], "raw">> & {
+  raw: Delegation | TaskDispatch;
+};
+
+export interface TaskChildren {
+  items: TaskChild[];
+  counts: { total: number; delegation: number; dispatch: number };
 }
 
-export interface Delegation {
-  id: string;
-  title: string;
-  type: string | null;
-  status: Task["status"];
-  parent_id: string;
-  parent_step_id: string | null;
-  step_title: string | null;
-  created_by: string | null;
-  assignee: string | null;
-  assignees: string[];
-  acceptance: string[];
-  scope_paths: string[];
-  description: string | null;
-  due_at: string | null;
-  run_id: string | null;
-  run_status: string | null;
-  run_failure_class: string | null;
-  submitted_summary: string | null;
-  created_at: string;
-  updated_at: string;
-}
+export type FindingStatus = Schemas["FindingOut"]["status"];
 
-export type FindingStatus =
-  | "draft" | "submitted" | "confirmed" | "false_positive" | "changes_requested";
-
-export interface Finding {
-  id: string;
-  task_id: string;
-  author_role: string;
-  workflow_id: string | null;
-  step_id: string | null;
-  run_id: string | null;
-  title: string;
-  risk_type: string;
-  severity: string;
-  module: string;
-  function_name: string;
-  file_path: string;
-  line_numbers: string;
-  preconditions: string;
-  reasoning_chain: string;
-  risk_description: string;
-  attack_path: string;
-  trigger_point: string;
-  poc_status: string;
-  poc: string;
-  fix_priority: string;
-  fix_suggestion: string;
-  confidence: number;
-  status: FindingStatus;
-  decided_by: string | null;
-  decided_at: string | null;
-  decision_note: string | null;
-  version: number;
-  created_at: string;
-  updated_at: string;
-  submitted_at: string | null;
-  external_id?: string | number | null;
-  external_source?: string | null;
-  external_submitted_at?: string | null;
-}
+export type Finding = Required<Schemas["FindingOut"]>;
 
 export type FindingInput = Partial<Omit<Finding,
   "id" | "task_id" | "author_role" | "status" | "version" |
@@ -188,61 +78,20 @@ export interface FindingExportResult {
   failed: { finding_id: string; error: string }[];
 }
 
-export interface FindingBoard {
-  task_id: string;
-  status: "in_progress" | "completed";
-  summary: string | null;
-  created_at: string;
-  completed_by: string | null;
-  completed_at: string | null;
-  reopened_by: string | null;
-  reopened_at: string | null;
-  updated_at: string;
-}
+export type FindingBoard = Required<Schemas["FindingBoardOut"]>;
 
-export interface FindingSummary {
-  task_id: string;
-  task_status: string;
+export type FindingSummary = Required<
+  Omit<Schemas["FindingSummaryOut"], "board" | "items">
+> & {
   board: FindingBoard;
-  reviewers: string[];
-  counts: Record<FindingStatus | string, number>;
-  severity_counts: Record<string, number>;
-  total: number;
-  pending: number;
-  can_complete: boolean;
-  all_decided: boolean;
   items?: Finding[];
-}
+};
 
-export interface FindingFieldSpec {
-  key: string;
-  label: string;
-  required?: boolean;
-  max?: number;
-  enum?: Record<string, string>;
-  enum_labels?: Record<string, string>;
-  int?: boolean;
-}
+export type FindingFieldSpec = Required<Schemas["FindingFieldSpecOut"]>;
 
-export interface FindingSchema {
-  fields: FindingFieldSpec[];
-  risk_types: Record<string, string>;
-  severities: Record<string, string>;
-  fix_priorities: Record<string, string>;
-  poc_statuses: Record<string, string>;
-  statuses: string[];
-  required: string[];
-}
+export type FindingSchema = Required<Schemas["FindingSchemaOut"]>;
 
-export interface Runtime {
-  id: string;
-  display_name: string;
-  executable_path: string;
-  detected_version: string | null;
-  status: string;
-  last_probe_at: string | null;
-  last_probe_log: string | null;
-}
+export type Runtime = Schemas["RuntimeOut"];
 
 export interface FeatureFlag {
   key: string;
@@ -256,100 +105,15 @@ export interface FeatureFlag {
   overridden: boolean;
 }
 
-export interface Role {
-  slug: string;
-  display_name: string;
-  avatar?: string | null;
-  avatar_color?: string | null;
-  home_path: string;
-  enabled: boolean;
-  created_at: string;
-  updated_at: string;
-  definition?: Record<string, unknown>;
-}
+export type Role = Schemas["RoleOut"];
 
-export interface RoleTaskContext {
-  context_key?: string | null;
-  task_id: string | null;
-  slice_key?: string | null;
-  slice_title?: string | null;
-  task_title: string;
-  task_status: string | null;
-  has_session: boolean;
-  session_id: string;
-  context_tokens: number;
-  last_active_at: string | null;
-  status: string;
-  cwd: string | null;
-  workspace_path: string | null;
-}
+export type RoleTaskContext = Required<Schemas["RoleTaskContextOut"]>;
 
-export interface SubagentRecord {
-  id: string;
-  run_id: string;
-  role_slug: string;
-  task_id: string | null;
-  tool_use_id: string;
-  tool_name: string | null;
-  subagent_type: string | null;
-  description: string | null;
-  prompt_summary: string | null;
-  status: "running" | "completed" | "interrupted" | string;
-  started_at: string;
-  ended_at: string | null;
-  result_summary: string | null;
-  context_available: number;
-  proc_generation: number | null;
-  native_session_id: string | null;
-  parent_tool_use_id: string | null;
-  slice_key: string | null;
-  step_id: string | null;
-  interrupt_reason: string | null;
-}
+export type SubagentRecord = Required<Schemas["SubagentRecordOut"]>;
 
-export interface RoleRuntimeStatus {
-  role_slug: string;
-  alive: boolean;
-  status: "dead" | "idle" | "busy" | string;
-  busy_since: string | null;
-  current_task_id: string | null;
-  current_task: { id: string; title: string; status: string | null } | null;
-  current_run_id: string | null;
-  current_run_status?: string | null;
-  current_run_failure_class?: string | null;
-  current_step_id: string | null;
-  current_slice_key?: string | null;
-  context_key?: string | null;
-  context_task_id: string | null;
-  context_slice_key?: string | null;
-  queue_len: number;
-  queue_global_count?: number;
-  queue_tasks: {
-    id: string; title: string; status: string | null; count: number;
-    ahead_count?: number;
-  }[];
-  queue_contexts?: {
-    task_id: string | null; slice_key: string | null; count: number;
-    ahead_count?: number;
-  }[];
-  busy_scope?: "task" | "global" | null;
-  contexts: RoleTaskContext[];
-  switching?: boolean;
-  active_subagents?: {
-    tool_use_id: string;
-    tool_name?: string | null;
-    subagent_type?: string | null;
-    description?: string | null;
-    prompt_summary?: string | null;
-    status?: string | null;
-    started_at?: string | null;
-    ended_at?: string | null;
-    result_summary?: string | null;
-    context_available?: number;
-  }[];
-  context_tokens: number;
-  model_id: string | null;
-}
+export type TaskRoleState = Required<Schemas["TaskRoleStateOut"]>;
+
+export type RoleRuntimeStatus = Required<Schemas["RoleRuntimeStatusOut"]>;
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -432,6 +196,12 @@ export const api = {
     return authFetch(`${BASE}/tasks${suffix}`).then((r) => json<Task[]>(r));
   },
   getTask: (id: string): Promise<Task> => authFetch(`${BASE}/tasks/${id}`).then((r) => json<Task>(r)),
+  getTaskRoleStates: (id: string): Promise<{ task_id: string; roles: TaskRoleState[] }> =>
+    authFetch(`${BASE}/tasks/${id}/role-states`)
+      .then((r) => json<{ task_id: string; roles: TaskRoleState[] }>(r)),
+  getTaskRoleStatesBatch: (ids: string[]): Promise<{ tasks: Record<string, TaskRoleState[]> }> =>
+    authFetch(`${BASE}/tasks/role-states?task_ids=${encodeURIComponent(ids.join(","))}`)
+      .then((r) => json<{ tasks: Record<string, TaskRoleState[]> }>(r)),
   createTask: (title: string, opts?: {
     description?: string; assignees?: string[]; plan_first?: boolean; planner?: string;
     plan_seed?: { template_id: string; version: number; name?: string } | null;
@@ -581,6 +351,9 @@ export const api = {
   listTaskDelegations: (taskId: string): Promise<Delegation[]> =>
     authFetch(`${BASE}/tasks/${encodeURIComponent(taskId)}/delegations`)
       .then((r) => json<Delegation[]>(r)),
+  listTaskChildrenUnified: (taskId: string): Promise<TaskChildren> =>
+    authFetch(`${BASE}/tasks/${encodeURIComponent(taskId)}/children`)
+      .then((r) => json<TaskChildren>(r)),
   acceptDelegation: (id: string): Promise<Task> =>
     req("POST", `/tasks/${id}/delegation/accept`, {}).then((r) => json<Task>(r)),
   rejectDelegation: (id: string, feedback: string): Promise<Task> =>
@@ -1285,34 +1058,18 @@ export interface Participant {
   joined_at: string;
 }
 
-export type KnowledgeKind =
-  | "convention" | "workflow" | "role_requirement" | "decision" | "insight"
-  | "task_finding" | "personal_lesson";
-export type KnowledgeAuthority = "normative" | "reference";
-export type KnowledgeStatus =
-  | "draft" | "proposed" | "approved" | "rejected" | "deprecated" | "expired";
+export type KnowledgeKind = Schemas["TaskKnowledgeOut"]["kind"];
+export type KnowledgeAuthority = Schemas["WorkspaceKnowledgeOut"]["authority"];
+export type KnowledgeStatus = Schemas["WorkspaceKnowledgeOut"]["status"];
 
-export interface QualityDimensions {
-  evidence: number;
-  scenario: number;
-  effect: number;
-  readability: number;
-}
+export type QualityDimensions = Required<Schemas["QualityDimensionsOut"]>;
 
-export interface QualityReport {
-  score: number;
-  grade: "A" | "B" | "C" | "D" | string;
-  blocking: string[];
-  missing: string[];
-  warnings: string[];
+export type QualityReport = Required<
+  Omit<Schemas["QualityReportOut"], "dimensions">
+> & {
   dimensions: QualityDimensions;
-  readable: boolean;
-  checked_at?: string | null;
-  gate_version?: number;
-  legacy?: boolean;
-  resolved_fields?: Record<string, string | null>;
-  llm?: Record<string, unknown> | null;
-}
+  grade: "A" | "B" | "C" | "D" | string;
+};
 
 /** 主题知识库注册表条目（管理页）。 */
 export interface TopicRepo {
@@ -1370,42 +1127,11 @@ export interface RepoCard {
   updated_at: string;
 }
 
-export interface WorkspaceKnowledge {
-  id: string;
-  workspace_id: string;
-  workspace_name?: string | null;
-  repo: string | null;
-  kind: KnowledgeKind;
-  authority: KnowledgeAuthority;
-  title: string;
-  tldr: string;
-  body_md: string;
-  fields: Record<string, unknown>;
-  tags: string[];
-  source_task_id: string | null;
-  source_subtask_id: string | null;
-  owner: string | null;
-  related: string[];
-  supersedes_id: string | null;
-  status: KnowledgeStatus;
-  version: number;
-  origin: "human" | "agent" | "system";
-  created_by: string | null;
-  created_at: string;
-  updated_at: string;
-  approved_at: string | null;
-  approved_by: string | null;
-  expires_at: string | null;
-  review_at: string | null;
-  conflicts: string[];
-  completeness: number;
-  quality?: QualityReport;
-  legacy?: boolean;
-  hit_count?: number;
-  last_hit_at?: string | null;
-  is_expired?: boolean;
-  freshness?: number;
-}
+export type WorkspaceKnowledge = Required<
+  Omit<Schemas["WorkspaceKnowledgeOut"], "quality">
+> & {
+  quality?: QualityReport | null;
+};
 
 export interface KnowledgeCardCheck {
   errors: string[];
@@ -1425,37 +1151,11 @@ export interface KnowledgeReview {
   total: number;
 }
 
-export interface TaskKnowledge {
-  id: string;
-  task_id: string;
-  task_title?: string | null;
-  task_status?: string | null;
-  workspace_id?: string | null;
-  workspace_name?: string | null;
-  task_archived_at?: string | null;
-  hit_count?: number;
-  last_hit_at?: string | null;
-  parent_task_id: string | null;
-  source_subtask_id: string | null;
-  origin: "task" | "subtask";
-  kind: KnowledgeKind;
-  title: string;
-  tldr: string;
-  body_md: string;
-  fields: Record<string, unknown>;
-  tags: string[];
-  source_role: string | null;
-  status: "active" | "proposed" | "archived";
-  completeness?: number;
-  quality?: QualityReport;
-  legacy?: boolean;
-  repo_id?: string | null;
-  repo_key?: string | null;
-  path?: string | null;
-  source_event?: string | null;
-  created_at: string;
-  updated_at: string;
-}
+export type TaskKnowledge = Required<
+  Omit<Schemas["TaskKnowledgeOut"], "quality">
+> & {
+  quality?: QualityReport | null;
+};
 
 export interface KnowledgePage<T> {
   items: T[];
@@ -1579,52 +1279,9 @@ export type RunStatus =
   | "abandoned"
   | "suspended";
 
-export interface Run {
-  id: string;
-  role_slug: string;
-  task_id: string | null;
-  status: RunStatus;
-  native_session_id: string | null;
-  log_path: string | null;
-  worktree_path: string | null;
-  profile_snapshot: string | null;
-  prompt: string | null;
-  timeout_seconds: number | null;
-  failure_class: string | null;
-  slice_key?: string | null;
-  origin?: string | null;
-  dispatch_id?: string | null;
-  wake_note?: string | null;
-  context_return_context_key?: string | null;
-  context_return_after_turn?: number;
-  context_returned_at?: string | null;
-  started_at: string | null;
-  ended_at: string | null;
-}
+export type Run = Required<Schemas["RunOut"]>;
 
-export interface TaskDispatch {
-  id: string;
-  source_task_id: string;
-  source_workflow_id: string | null;
-  source_step_id: string | null;
-  source_slice_key: string | null;
-  requester_run_id: string | null;
-  requested_by: string | null;
-  target_task_id: string;
-  target_role: string | null;
-  target_title?: string | null;
-  target_status?: string | null;
-  return_context_key: string | null;
-  return_run_id: string | null;
-  return_step_id: string | null;
-  reason_code: string;
-  reason_json: string;
-  status: "open" | "return_ready" | "returning" | "returned" | "no_return" | "cancelled";
-  attempts: number;
-  returned_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
+export type TaskDispatch = Required<Schemas["TaskDispatchOut"]>;
 
 export interface AnvilEvent {
   topic: string;
@@ -1785,164 +1442,38 @@ export interface StepPacketResponse {
   };
 }
 
-export interface WorkflowStep {
-  workflow_id: string;
-  step_id: string;
-  title: string;
+export type WorkflowStep = Required<Schemas["WorkflowStepOut"]> & {
   role_slug: string;
-  instructions: string | null;
-  depends_on: string[];
-  acceptance: string[];
-  gate: boolean;
-  reviewer: string | null;
-  contract: string | null;
-  kind?: "task" | "decision" | "plan_slices" | "external";
-  on_reject?: string[];
-  max_rework?: number;
-  rework_count?: number;
-  feedback?: string | null;
-  source_step_id?: string | null;
-  slice_key?: string | null;
-  plan_json?: string | null;
-  decision_authority?: DecisionAuthority | "";
-  risk_level?: "normal" | "high" | "critical";
-  reversible?: boolean;
-  escalate?: string[];
-  decision_question?: string | null;
-  decision_options?: { id?: string; label?: string; decision: string; requires_note?: boolean }[];
-  evidence_required?: boolean;
-  subagent_hint?: boolean;
-  evidence?: ReviewEvidence[];
-  packet_id?: string | null;
-  submitted_at?: string | null;
-  scope_paths?: string[];
-  lease_id?: string | null;
-  fence_token?: number;
-  lease_holder?: string | null;
-  lease_expires_at?: string | null;
-  lease_fence?: number | null;
-  failure_reason: string | null;
-  recovery_count?: number;
-  next_retry_at?: string | null;
-  run_status?: string | null;
-  status: "pending" | "running" | "submitted" | "approved" | "rejected" | "failed" | "skipped";
-  run_id: string | null;
-  summary: string | null;
-  started_at: string | null;
-  ended_at: string | null;
-  updated_at: string;
-}
+};
 
-export interface Workflow {
-  id: string;
-  task_id: string;
-  status: "running" | "done" | "failed" | "terminated";
-  definition: {
-    feedback_rules?: string[];
-    verification?: { cell: string; method: string; verifier_role?: string }[];
-  };
+export type Workflow = Required<Omit<Schemas["WorkflowOut"], "steps">> & {
   steps: WorkflowStep[];
-  created_at: string;
-  updated_at: string;
-  execution_no?: number;
-  previous_workflow_id?: string | null;
-  termination_reason?: string | null;
-  terminated_at?: string | null;
-  weight?: WorkflowWeight;
-  weight_source?: string;
-  weight_reason?: string | null;
-  definition_hash?: string | null;
-  finished_at?: string | null;
-  pending_revision?: {
-    draft_id: string;
-    impact?: RevisionImpact;
-    created_by?: string;
-  } | null;
-}
+};
 
 export type WorkflowWeight = "light" | "standard" | "strict";
 
-export interface WorkflowMetrics {
-  workflow_id: string;
-  task_id: string;
-  execution_no: number;
-  status: Workflow["status"];
-  weight: WorkflowWeight;
-  weight_source: string;
-  created_at: string | null;
-  finished_at: string | null;
-  duration_seconds: number;
-  active_duration_seconds: number;
-  steps: {
-    total: number;
-    done: number;
-    running: number;
-    submitted: number;
-    failed: number;
-    max_depth: number;
-    parallel_roles: number;
-    generated_slices: number;
+export type WorkflowMetrics = Required<
+  Omit<Schemas["WorkflowMetricsOut"],
+    "steps" | "gates" | "decisions" | "waiting" | "evidence" | "tokens">
+> & {
+  steps: Required<Schemas["WorkflowMetricsStepsOut"]> & {
     by_status: Record<string, number>;
   };
-  gates: { total: number; pending: number };
-  decisions: {
-    total: number;
-    recorded?: number;
-    legacy?: number;
-    human: number;
-    human_reviews?: number;
-    human_interventions?: number;
-    rejected: number;
-    pending_human: number;
-    rework_rate: number;
-  };
-  waiting: {
-    human_seconds: number;
-    pending_human_seconds: number;
-    excluded_seconds?: number;
-    active_seconds?: number;
-  };
-  evidence: { packets: number };
-  tokens: {
-    input_tokens?: number;
-    output_tokens?: number;
-    cache_read_tokens?: number;
-    cache_creation_tokens?: number;
-    total_tokens?: number;
-    records?: number;
-    task_input_tokens?: number;
-    task_output_tokens?: number;
-    task_cache_read_tokens?: number;
-    task_cache_creation_tokens?: number;
-    task_total_tokens?: number;
-    task_records?: number;
-  };
-}
+  gates: Required<Schemas["WorkflowMetricsGatesOut"]>;
+  decisions: Required<Schemas["WorkflowMetricsDecisionsOut"]>;
+  waiting: Required<Schemas["WorkflowMetricsWaitingOut"]>;
+  evidence: Required<Schemas["WorkflowMetricsEvidenceOut"]>;
+  tokens: Required<Schemas["WorkflowMetricsTokensOut"]>;
+};
 
-export interface WorkflowGraphNode {
-  step_id: string;
-  title: string;
-  role_slug: string;
-  depends_on: string[];
-  kind: string;
-  gate: boolean;
-  decision_authority: string;
-  status?: string;
-  run_id?: string | null;
-  slice_key?: string | null;
-  source_step_id?: string | null;
-  rework_count?: number;
-  origin: string;
-}
+export type WorkflowGraphNode = Required<Schemas["WorkflowGraphNodeOut"]>;
 
-export interface WorkflowGraphResponse {
-  mode: "planned" | "actual" | "diff";
-  workflow_id: string;
+export type WorkflowGraphResponse = Omit<Schemas["WorkflowGraphOut"], "nodes" | "added" | "missing" | "changed"> & {
   nodes?: WorkflowGraphNode[];
   added?: WorkflowGraphNode[];
   missing?: WorkflowGraphNode[];
   changed?: { step_id: string; field: string; planned: unknown; actual: unknown }[];
-}
+};
 
 export interface WorkflowDossier {
   workflow: Record<string, unknown>;
@@ -1957,36 +1488,9 @@ export interface WorkflowDossier {
   generated_at: string;
 }
 
-export interface LeaseRecord {
-  id: string;
-  resource_type: "step" | "slice" | "path" | "task";
-  resource_key: string;
-  holder_type: string;
-  holder: string | null;
-  run_id: string | null;
-  fence: number;
-  status: "active" | "released" | "expired";
-  acquired_at: string;
-  renewed_at: string | null;
-  expires_at: string | null;
-  meta_json?: string;
-}
-
-export interface TaskLeaseStep {
-  workflow_id: string;
-  step_id: string;
-  status: string;
-  lease_id: string | null;
-  fence_token: number;
-  holder: string | null;
-  expires_at: string | null;
-  lease_status: string | null;
-}
-
-export interface TaskLeases {
-  paths: LeaseRecord[];
-  steps: TaskLeaseStep[];
-}
+export type LeaseRecord = Required<Schemas["LeaseRecordOut"]>;
+export type TaskLeaseStep = Required<Schemas["TaskLeaseStepOut"]>;
+export type TaskLeases = Required<Schemas["TaskLeasesOut"]>;
 
 export interface TaskWeightResult {
   task_id: string;
@@ -1997,28 +1501,7 @@ export interface TaskWeightResult {
   running_weight: WorkflowWeight | null;
 }
 
-export interface WorkflowHistoryItem {
-  id: string;
-  task_id: string;
-  status: Workflow["status"];
-  created_by: string | null;
-  created_at: string;
-  updated_at: string;
-  termination_reason: string | null;
-  terminated_at: string | null;
-  previous_workflow_id: string | null;
-  execution_no: number;
-  template_id: string | null;
-  template_version: number | null;
-  step_count: number;
-  approved_count: number | null;
-  weight?: WorkflowWeight;
-  weight_source?: string;
-  weight_reason?: string | null;
-  definition_hash?: string | null;
-  finished_at?: string | null;
-  metrics?: WorkflowMetrics;
-}
+export type WorkflowHistoryItem = Required<Schemas["WorkflowHistoryOut"]>;
 
 export interface TemplateRoleSlot {
   key: string;
@@ -2180,49 +1663,16 @@ export interface BoardDraft {
   created_at: string;
 }
 
-export interface TimelineEvent {
-  key: string;
-  ts: string;
-  kind: string;
-  role: string | null;
-  task_id: string | null;
-  run_id: string | null;
-  seq?: number | null;
-  workflow_id?: string | null;
-  step_id?: string | null;
-  slice_key?: string | null;
-  execution_no?: number | null;
-  payload: Record<string, unknown>;
-}
+export type TimelineEvent = Required<Schemas["TimelineEventOut"]>;
 
-export interface ContextManifestBlock {
-  name?: string | null;
-  layer?: string | null;
-  kind?: string | null;
-  scope?: string | null;
-  tags?: string[];
-  score?: number | null;
-  chars?: number;
-  injected?: boolean;
-  reason?: string | null;
-  source_ids?: string[];
-  priority?: number;
-  order?: number;
-}
+export type ContextManifestBlock = Required<Schemas["ContextManifestBlockOut"]>;
 
-export interface ContextManifest {
-  id: number;
-  run_id?: string | null;
-  role_slug: string;
-  task_id?: string | null;
-  slice_key?: string | null;
-  kind: string;
-  budget_chars: number;
-  total_chars: number;
+export type ContextManifest = Required<
+  Omit<Schemas["ContextManifestOut"], "blocks" | "omitted">
+> & {
   blocks: ContextManifestBlock[];
   omitted: ContextManifestBlock[];
-  created_at: string;
-}
+};
 
 export interface Reminder {
   id: string;

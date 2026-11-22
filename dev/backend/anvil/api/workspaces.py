@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
+from ..schemas import WorkspaceKnowledgeOut
 from . import access
 from ..util import now_iso, read_text_file
 
@@ -131,7 +132,7 @@ def remove_participant(ws_id: str, role_slug: str, conn=Depends(get_db),
 # ---- 频道知识（知识卡） ---------------------------------------------------
 
 
-@router.get("/workspaces/{ws_id}/knowledge")
+@router.get("/workspaces/{ws_id}/knowledge", response_model=list[WorkspaceKnowledgeOut])
 def list_workspace_knowledge(ws_id: str, status: str | None = None,
                              kind: str | None = None, sort: str | None = None,
                              conn=Depends(get_db), auth: Auth = Depends(get_auth)):
@@ -159,7 +160,7 @@ def review_workspace_knowledge(ws_id: str, conn=Depends(get_db),
     return services.workspace_knowledge.review_candidates(conn, ws_id)
 
 
-@router.post("/workspaces/{ws_id}/knowledge", status_code=201)
+@router.post("/workspaces/{ws_id}/knowledge", status_code=201, response_model=WorkspaceKnowledgeOut)
 def create_workspace_knowledge(ws_id: str, body: dict, conn=Depends(get_db),
                                auth: Auth = Depends(get_auth)):
     is_real_agent = bool(auth.role and auth.role != "human" and not auth.test_bypass)
@@ -205,7 +206,7 @@ def _workspace_knowledge_or_404(conn, ws_id: str, kid: str) -> dict:
     return card
 
 
-@router.patch("/workspaces/{ws_id}/knowledge/{kid}")
+@router.patch("/workspaces/{ws_id}/knowledge/{kid}", response_model=WorkspaceKnowledgeOut)
 def update_workspace_knowledge(ws_id: str, kid: str, body: dict,
                                conn=Depends(get_db),
                                auth: Auth = Depends(require_human)):

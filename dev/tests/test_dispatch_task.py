@@ -333,3 +333,46 @@ def test_dispatch_notification_failure_can_retry(env, monkeypatch):
         "SELECT result_notified_at FROM task_dispatches WHERE id=?",
         (d["id"],)).fetchone()
     assert row["result_notified_at"]
+
+
+def test_task_dispatch_status_is_derived_from_dispatch_record(env):
+    """task_dispatches.status 是唯一权威；tasks.dispatch_status 不得再作为镜像读取。"""
+    conn = env
+    source = tasks_service.create(
+        conn, title="来源任务", assignee="qa", assignees=["qa", "dev"])
+    target = dispatch.create_dispatch(
+        conn, source_task_id=source["id"], target_role="dev",
+        message="派生状态", requester="qa")["task"]
+    conn.execute(
+        "UPDATE task_dispatches SET status='return_ready' WHERE target_task_id=?",
+        (target["id"],))
+    conn.commit()
+
+    fresh = tasks_service.get(conn, target["id"])
+    assert fresh["dispatch_status"] == "return_ready"
+
+
+def test_task_dispatch_status_none_without_dispatch_record(env):
+    conn = env
+    task = tasks_service.create(conn, title="普通任务")
+    # 模拟旧镜像列残留；没有 dispatch record 时必须以记录为准，返回 none。
+    conn.execute("UPDATE tasks SET dispatch_status='open' WHERE id=?", (task["id"],))
+    conn.commit()
+
+    assert tasks_service.get(conn, task["id"])["dispatch_status"] == "none"
+
+
+def test_list_all_derives_dispatch_status(env):
+    conn = env
+    source = tasks_service.create(
+        conn, title="来源任务", assignee="qa", assignees=["qa", "dev"])
+    target = dispatch.create_dispatch(
+        conn, source_task_id=source["id"], target_role="dev",
+        message="列表派生", requester="qa")["task"]
+    conn.execute(
+        "UPDATE task_dispatches SET status='returned' WHERE target_task_id=?",
+        (target["id"],))
+    conn.commit()
+
+    tasks = {t["id"]: t for t in tasks_service.list_all(conn)}
+    assert tasks[target["id"]]["dispatch_status"] == "returned"

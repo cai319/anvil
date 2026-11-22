@@ -1,12 +1,15 @@
 {
   "name": "anvil-frontend",
   "private": true,
-  "version": "1.47.1",
+  "version": "1.48.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "dump:api": "../.venv/bin/python ../backend/dump_openapi.py openapi.json",
+    "gen:api": "openapi-typescript openapi.json -o src/api/schema.d.ts",
+    "gen:api:live": "openapi-typescript http://127.0.0.1:7317/openapi.json -o src/api/schema.d.ts"
   },
   "dependencies": {
     "@xyflow/react": "^12.12.0",
@@ -17,6 +20,7 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "openapi-typescript": "^7.13.0",
     "typescript": "^5.6.3",
     "vite": "^5.4.11"
   }

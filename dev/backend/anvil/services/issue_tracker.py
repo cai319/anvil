@@ -23,7 +23,7 @@ import httpx
 from .. import config
 from ..logging_setup import proxy_snapshot, sanitize_proxy, system_proxy_snapshot
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
-from . import findings, governance, utility
+from . import findings, governance, ledger, utility
 
 SETTING_URL = "issue_tracker.url"
 SETTING_FIELD_MAX = "issue_tracker.field_max_chars"
@@ -54,10 +54,12 @@ class IssueTrackerTimeout(IssueTrackerError):
 
 def _audit(conn: sqlite3.Connection, actor: str, task_id: str | None,
            action: str, payload: dict) -> None:
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (actor, task_id, action, jdumps(payload), now_iso()))
+    ledger.emit_audit(
+        conn, role_slug=actor,
+        task_id=task_id,
+        action=action,
+        payload=jdumps(payload),
+        now=now_iso())
 
 
 def _field_max_chars(conn: sqlite3.Connection) -> int:

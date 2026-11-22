@@ -2,21 +2,17 @@ import { useEffect, useRef, useState } from "react";
 import {
   api,
   type ContextManifest, type Role, type RoleRuntimeStatus, type Run, type SubagentRecord,
-  type Task, type TaskDispatch, type TimelineEvent, type Workflow,
+  type Task, type TaskDispatch, type TaskRoleState, type TimelineEvent, type Workflow,
 } from "../api/client";
 import { useLiveRefresh } from "../useLiveRefresh";
-import { taskRoleState } from "../roleStatus";
+import { roleStatusFromServer, taskRoleState } from "../roleStatus";
 import { formatClock, formatShort } from "../time";
 import { HEADER_ONLY_RUN_LOG_HINT, isHeaderOnlyRunLog } from "../runLog";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { Icon } from "../components/Icon";
+import { runStatusLabel } from "../statusVocabulary";
 
 /** 任务详情「子任务」页签：每个参与角色当前的会话状态 + 执行日志 + 历史上下文。 */
-
-const RUN_LABEL: Record<string, string> = {
-  created: "已创建", projecting: "准备中", running: "运行中", submitted: "已提交",
-  reviewing: "评审中", completed: "已完成", failed: "失败", abandoned: "已放弃", suspended: "等待唤醒",
-};
 
 function describeEvent(ev: TimelineEvent): string {
   const p = ev.payload ?? {};
@@ -29,17 +25,21 @@ function describeEvent(ev: TimelineEvent): string {
     case "submit": return `提交：${p.summary ?? ""}`;
     case "review": return p.approve ? "评审通过" : "评审驳回";
     case "claim": return "认领任务";
-    case "run": return `运行状态：${RUN_LABEL[String(p.status)] ?? p.status}`;
+    case "run": return `运行状态：${runStatusLabel(String(p.status))}`;
     default: return ev.kind;
   }
 }
 
-export function RoleSessions({ task, roles, workflow, dispatches = [], relatedTaskIds = [], focus = null }: {
+export function RoleSessions({
+  task, roles, workflow, dispatches = [], relatedTaskIds = [], roleStates = {},
+  focus = null,
+}: {
   task: Task;
   roles: Role[];
   workflow?: Workflow | null;
   dispatches?: TaskDispatch[];
   relatedTaskIds?: string[];
+  roleStates?: Record<string, TaskRoleState>;
   focus?: { role: string; sliceKey: string | null } | null;
 }) {
   const [runs, setRuns] = useState<Run[]>([]);
@@ -61,7 +61,7 @@ export function RoleSessions({ task, roles, workflow, dispatches = [], relatedTa
       : (task.role_claims ?? []).map((c) => c.role_slug)),
     ...(task.planner ? [task.planner] : []),
     ...((workflow?.steps ?? []).map((s) => s.role_slug)),
-  ])).filter(Boolean);
+  ])).filter((s): s is string => Boolean(s));
   const slugKey = slugs.join(",");
 
   const lastLogAtRef = useRef(0);
@@ -229,16 +229,22 @@ export function RoleSessions({ task, roles, workflow, dispatches = [], relatedTa
         const returnPending = dispatches.some(
           (d) => d.target_role === slug
             && (d.status === "return_ready" || d.status === "returning"));
-        let state = taskRoleState({
-          task,
-          role: slug,
-          runtime: rt,
-          workflow,
-          relatedTaskIds,
-          sliceKey: wfSlice,
-          runStatus: run?.status ?? null,
-          returnPending,
-        });
+        const serverState = roleStates[slug];
+        let state = serverState
+          ? roleStatusFromServer({
+              ...serverState,
+              currentStepId: rt?.current_step_id,
+            })
+          : taskRoleState({
+              task,
+              role: slug,
+              runtime: rt,
+              workflow,
+              relatedTaskIds,
+              sliceKey: wfSlice,
+              runStatus: run?.status ?? null,
+              returnPending,
+            });
         if (!rt) {
           state = {
             ...state, key: "loading", label: "加载中", tone: "gray",
@@ -288,7 +294,7 @@ export function RoleSessions({ task, roles, workflow, dispatches = [], relatedTa
                 <span className="rs-run muted">{detail}</span>
               ) : run ? (
                 <span className="rs-run muted">
-                  {RUN_LABEL[run.status] ?? run.status} · {formatClock(run.started_at)}
+                  {runStatusLabel(run.status)} · {formatClock(run.started_at)}
                 </span>
               ) : (
                 <span className="rs-run muted">{runsLoaded ? "尚无会话" : "加载中…"}</span>
@@ -349,7 +355,7 @@ export function RoleSessions({ task, roles, workflow, dispatches = [], relatedTa
               <div className="rs-detail">
                 <div className="rs-detail-meta">
                   <span className="mono">run {run.id.slice(0, 8)}</span>
-                  <span className={`status status-${run.status}`}>{RUN_LABEL[run.status] ?? run.status}</span>
+                  <span className={`status status-${run.status}`}>{runStatusLabel(run.status)}</span>
                   {run.failure_class && <span className="badge badge-in_progress">{run.failure_class}</span>}
                   <a href={`/runs/${run.id}`}>打开完整会话页 <Icon name="chevron-right" size={12} /></a>
                 </div>

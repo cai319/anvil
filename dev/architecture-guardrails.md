@@ -1,0 +1,92 @@
+# 架构护栏与复杂度预算（P0.8）
+
+本文件约束后续改动，避免状态/队列/事件继续扩散。违反下列规则的改动必须先补
+单写者函数与不变量测试，否则不合并。
+
+## 单写者规则
+
+| 事实 | 唯一写者 | 不变量测试 |
+|---|---|---|
+| `tasks.status` | `services.tasks.transition_task` | `tests/test_task_transition.py` |
+| `dispatch_status` | 派生视图（`_attach_dispatch_status`），不落库 | `tests/test_task_transition.py` / `tests/test_dispatch_task.py` |
+| `activities` / `audit` / `events` | `services.ledger.emit_*` | `tests/test_event_ledger.py` |
+| 角色状态 | `services.role_state.derive_task_role_state`（API 输出） | `tests/test_role_state.py` |
+| 子任务视图 | `services.child_tasks.list_children`（delegation/dispatch 归一） | `tests/test_child_tasks.py` |
+| durable work item 读取 | `services.work_items.list_items` | `tests/test_work_items.py` |
+| Prompt 协议与 run 分类 | `graph/render.py` 常量 + `nodes._run_prompt_kind/_protocols_for_run` | `tests/test_prompt_snapshot.py` |
+| 前端状态词汇 | `src/statusVocabulary.ts`（task/run/dispatch）+ `roleStatus.statusByKey` | `tsc --noEmit` + `npm run build` |
+| API 契约（已覆盖部分） | `frontend/src/api/schema.d.ts`（由 OpenAPI 生成） | `npm run dump:api && npm run gen:api` + `tsc` |
+
+## 禁止事项
+
+- 禁止业务模块直接 `INSERT INTO activities` / `INSERT INTO audit` / `INSERT INTO events`；
+  必须走 `services.ledger`。
+- 禁止新增 `tasks` 上的状态镜像列（如 `dispatch_status`）；需要查询时派生。
+- 禁止绕过 `transition_task` 写 `tasks.status`；静态守卫见 `tests/test_task_transition.py`。
+- 禁止删除/改写 `events` 的历史行；状态表仍是权威，events 只追加。
+- 新增持久状态列必须同时提供：单写者函数、CAS/幂等语义、不变量测试。
+
+## 复杂度预算（当前 → 目标）
+
+| 指标 | 当前 | 目标 |
+|---|---:|---:|
+| 持久状态家族 | ~30 | ≤18（P0 后） |
+| 状态 token | 61 | ≤40 |
+| `workflow.py` LOC | 75（门面；最大子模块 1,618） | ≤2,500/文件 ✅ P1.9 |
+| `daemon.py` LOC | 165（门面+核心；最大子模块 1,100） | ≤2,000/文件 ✅ P1.10 |
+| `TaskDetail.tsx` LOC | 1,831（已拆 7 个组件） | ≤1,500（剩余 chat/workflow 面板） |
+| scheduler 阶段 | 10 个域（22 阶段，顺序锁定） | ≤12 ✅ P1.14 |
+| 前端状态映射 | 1 份/实体（task/run/dispatch/role/step） | 保持 |
+| 镜像状态字段 | 0（`dispatch_status` 已派生） | 0 |
+
+超出预算的新增需要在本文件记录例外与回收计划。
+
+## P1.12 说明：OpenAPI 契约现状
+
+- 生成链路：`backend/dump_openapi.py` → `frontend/openapi.json`（gitignore）→
+  `npm run gen:api` → `src/api/schema.d.ts`。
+- 已接入生成类型：`TaskStatus`、`Role`、`Runtime`、`Task`、`Run`、
+  `KnowledgeRepoBinding`、`Workflow`、`WorkflowStep`、`WorkflowHistoryItem`、
+  `TaskChild`、`TaskRoleState`、`Delegation`、`TaskDispatch`、`Finding`、
+  `FindingBoard`、`FindingSummary`、`FindingSchema`、`TaskKnowledge`、
+  `WorkspaceKnowledge`、`QualityReport`、`TimelineEvent`、`TaskLeases`、
+  `RoleRuntimeStatus`、`RoleTaskContext`、`WorkflowMetrics`、`WorkflowGraphResponse`、
+  `SubagentRecord`、`ContextManifest`。
+- 已补响应模型：Task 嵌套（workspace/role_claims/plan_seed/knowledge_repos）、
+  RunOut、WorkflowOut/StepOut/HistoryOut（含 definition/evidence/decision_options）。
+- 契约回归：`tests/api/test_contract_models.py` 锁定 Task/Run 嵌套字段不被裁剪。
+- 阻塞点：后端 249 条路径仅 32 个 schema，多数端点只返回 dict；`TaskOut` 的
+  嵌套字段仍是 `object`。要删除其余手写契约，必须先给 GET 端点补
+  `response_model` 与嵌套 Pydantic 模型（属于独立的后端契约工程）。
+- 仍保留的手写类型：BoardDraft/InboxDraftMeta（planner 自由 JSON tree）、
+  WorkflowTemplate 族（模板 definition/layout）、TopicRepo/RepoCard 等管理视图；
+  这些属于灵活载荷或前端视图模型，暂不强建模。
+- 新增/修改返回体时优先补 `response_model`，再跑生成脚本；手写类型只用于
+  前端视图模型与后端尚未建模的响应。
+
+## P2.15 Raft 借鉴收口
+
+- Pull inbox：`services.agent_inbox.check/commit` + CLI `anvil inbox check|commit` 已具备；
+  冷唤醒 CIC 新增「未读消息（拉模式）」摘要，只给未读数与拉取/确认指令。
+- Held draft：评论/@ 已支持 `expect_activity_id`，过期返回 409 held + 新内容，
+  `force=true` 知情越过；人类消息不受影响。
+- CIC 冷唤醒预算：`ANVIL_CIC_COLD_BUDGET_CHARS`（默认 32000 字符）可配，
+  并写入 `context_manifests.budget_chars`。
+
+## P2 范围决定（2026-11-22）
+
+- P2.15（Raft：pull inbox / held draft / CIC 冷唤醒预算）已完成。
+- P2.16–P2.18 **不实施**：DeepSeek 不可变 Mandate/准入、OpenAI OS 沙箱与
+  approval 分离。owner 判断这些方向对 Anvil 当前“单机单用户多角色运行时”
+  价值有限，不作为参考方向；后续不再主动提议。
+- P1.12 剩余灵活载荷（BoardDraft tree、模板 definition、知识管理视图）保持手写，
+  仅在有稳定契约需求时再建模。
+
+## P0.7 清理记录
+
+- 删除 `cost_ledger` 建表：旧美元成本账本已无读写，Token 统计见 `token_usage`。
+- 删除 `repo_split_map` 建表与迁移写入：一次性迁移日志无读取方；迁移效果由
+  `task_workspaces` / `task_knowledge_repos` 验证。
+- 保留 legacy step 状态 `rejected`：历史数据仍可能出现，读路径（retry/restart）
+  继续兼容；新写入不再产生该状态。
+- 保留 one-shot 运行时路径：仍是流式协议不可用时的回退，不是 dead code。

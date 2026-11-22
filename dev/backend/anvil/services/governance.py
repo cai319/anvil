@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
+from . import ledger
 
 # 四层闸门的默认值（design §5.6）。仅当 settings 中显式写入时覆盖。
 DEFAULT_MAX_PARALLEL_SYSTEM = 6
@@ -150,10 +151,11 @@ def tick(conn: sqlite3.Connection, force: bool = False, dispatch: bool = True,
         if _run_liveness(conn, tid):
             _renew_lease(conn, now, tid)
             continue
-        conn.execute(
-            "UPDATE tasks SET status='todo', assignee=NULL, claimed_at=NULL, lease_expires_at=NULL, updated_at=? WHERE id=?",
-            (now, tid),
-        )
+        from . import tasks as tasks_service
+        tasks_service.transition_task(
+            conn, tid, "todo",
+            fields={"assignee": None, "claimed_at": None, "lease_expires_at": None},
+            now=now)
         _terminate_runs(conn, tid)  # 回收前终止仍存活的子进程（防孤儿烧钱）
         from . import runs as runs_service
         for run in conn.execute(
@@ -197,10 +199,12 @@ def tick(conn: sqlite3.Connection, force: bool = False, dispatch: bool = True,
                 "UPDATE tasks SET assignee=?, updated_at=? WHERE id=?",
                 (other["role_slug"] if other else None, now, c["task_id"]),
             )
-        conn.execute(
-            "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) VALUES (?,?,?,?,?)",
-            (c["role_slug"], c["task_id"], "lease_expired", jdumps({}), now),
-        )
+        ledger.emit_audit(
+            conn, role_slug=c["role_slug"],
+            task_id=c["task_id"],
+            action="lease_expired",
+            payload=jdumps({}),
+            now=now)
 
     _cleaner_check(conn)
 
@@ -237,11 +241,12 @@ def tick(conn: sqlite3.Connection, force: bool = False, dispatch: bool = True,
                         woken += 1
                         woke = True
                 if not woke:
-                    conn.execute(
-                        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) VALUES (?,?,?,?,?)",
-                        (None, t["id"], "starvation",
-                         jdumps({"reason": "assigned roles blocked by governance gates"}), now),
-                    )
+                    ledger.emit_audit(
+                        conn, role_slug=None,
+                        task_id=t["id"],
+                        action="starvation",
+                        payload=jdumps({"reason": "assigned roles blocked by governance gates"}),
+                        now=now)
                     starved += 1
                 continue
             if plans_only and not config.AUTO_DISPATCH:
@@ -252,10 +257,12 @@ def tick(conn: sqlite3.Connection, force: bool = False, dispatch: bool = True,
                     woken += 1
             else:
                 # 饥饿升级：无 eligible agent → 审计告警
-                conn.execute(
-                    "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) VALUES (?,?,?,?,?)",
-                    (None, t["id"], "starvation", jdumps({"reason": "no eligible agent"}), now),
-                )
+                ledger.emit_audit(
+                    conn, role_slug=None,
+                    task_id=t["id"],
+                    action="starvation",
+                    payload=jdumps({"reason": "no eligible agent"}),
+                    now=now)
                 starved += 1
     conn.commit()
     return {"reclaimed": len(rows), "woken": woken, "starved": starved, "reminders_fired": fired}
@@ -436,10 +443,12 @@ def _wake(conn: sqlite3.Connection, role: str, task_id: str) -> bool:
     if existing:
         return False
     runs_service.create_run(conn, role, task_id)
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) VALUES (?,?,?,?,?)",
-        (role, task_id, "wake", jdumps({"hint": task_id}), now_iso()),
-    )
+    ledger.emit_audit(
+        conn, role_slug=role,
+        task_id=task_id,
+        action="wake",
+        payload=jdumps({"hint": task_id}),
+        now=now_iso())
     return True
 
 

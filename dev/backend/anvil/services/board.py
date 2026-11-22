@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
+from . import ledger
 
 DRAFT_KINDS = {"tasks", "workflow", "workflow_revision", "role_suggestion"}
 
@@ -292,12 +293,12 @@ def update_draft(conn: sqlite3.Connection, did: str, tree: dict,
         "tree_json=? WHERE id=?",
         (goal, workspace_id, jdumps(tree), did),
     )
-    conn.execute(
-        "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (source_task, by, "comment",
-         jdumps({"body": "人工在模板工作台更新了工作流草案，等待审批。"}), now_iso()),
-    )
+    ledger.emit_activity(
+        conn, task_id=source_task,
+        role_slug=by,
+        kind="comment",
+        payload=jdumps({"body": "人工在模板工作台更新了工作流草案，等待审批。"}),
+        now=now_iso())
     conn.commit()
     return get_draft(conn, did)  # type: ignore[return-value]
 
@@ -478,12 +479,12 @@ def _approve_assignee_authorization(conn: sqlite3.Connection, draft: dict,
     conn.execute("UPDATE board_drafts SET status='approved', decided_at=? WHERE id=?",
                  (now, draft["id"]))
     task_id = task["id"]
-    conn.execute(
-        "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (task_id, "human", "comment",
-         jdumps({"body": f"已批准角色追加：{summary}。由 planner 创建/绑定。"}), now),
-    )
+    ledger.emit_activity(
+        conn, task_id=task_id,
+        role_slug="human",
+        kind="comment",
+        payload=jdumps({"body": f"已批准角色追加：{summary}。由 planner 创建/绑定。"}),
+        now=now)
     creator = str(draft.get("created_by") or "").strip()
     if creator.startswith("agent:"):
         creator = creator[6:]
@@ -581,12 +582,12 @@ def _approve_role_suggestion(conn: sqlite3.Connection, draft: dict,
 
     now = now_iso()
     summary = "、".join(bind)
-    conn.execute(
-        "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (task_id, "human", "comment",
-         jdumps({"body": f"已批准角色建议，创建/绑定：{summary}。"}), now),
-    )
+    ledger.emit_activity(
+        conn, task_id=task_id,
+        role_slug="human",
+        kind="comment",
+        payload=jdumps({"body": f"已批准角色建议，创建/绑定：{summary}。"}),
+        now=now)
     cur = conn.execute(
         "UPDATE board_drafts SET status='approved', decided_at=? "
         "WHERE id=? AND status='pending'", (now, draft["id"]))
@@ -693,13 +694,12 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
                 restart_note=restart_note, draft_id=did, sync_participants=True)
             n = len((draft.get("tree") or {}).get("steps") or []) or 1
             action = "终止旧执行并重新开始" if running else "开始执行"
-            conn.execute(
-                "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (draft["source_task"], "human", "comment",
-                 jdumps({"body": f"已批准工作流（{n} 个步骤），{action}。"}),
-                 now_iso()),
-            )
+            ledger.emit_activity(
+                conn, task_id=draft["source_task"],
+                role_slug="human",
+                kind="comment",
+                payload=jdumps({"body": f"已批准工作流（{n} 个步骤），{action}。"}),
+                now=now_iso())
             landed.append(did)
             continue
         if kind == "role_suggestion":
@@ -717,18 +717,17 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
         _land_tree(conn, root, parent_id=draft.get("source_task"),
                    workspace_id=draft.get("workspace_id"), defaults=root)
         if draft.get("source_task"):
-            conn.execute(
-                "UPDATE tasks SET status='in_progress', updated_at=? WHERE id=? AND status='todo'",
-                (now_iso(), draft["source_task"]),
-            )
+            from . import tasks as tasks_service
+            tasks_service.transition_task(
+                conn, draft["source_task"], "in_progress",
+                from_statuses=("todo",), now=now_iso())
             n = len((draft.get("tree") or {}).get("children") or []) or 1
-            conn.execute(
-                "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (draft["source_task"], "human", "comment",
-                 jdumps({"body": f"已批准工作流草案（{n} 个子任务），子任务已落板并按依赖自动执行。"}),
-                 now_iso()),
-            )
+            ledger.emit_activity(
+                conn, task_id=draft["source_task"],
+                role_slug="human",
+                kind="comment",
+                payload=jdumps({"body": f"已批准工作流草案（{n} 个子任务），子任务已落板并按依赖自动执行。"}),
+                now=now_iso())
         cur = conn.execute(
             "UPDATE board_drafts SET status='approved', decided_at=? "
             "WHERE id=? AND status='pending'", (now_iso(), did))
@@ -775,23 +774,24 @@ def reject(conn: sqlite3.Connection, draft_id: str, by: str = "human",
                 blocked = "no_roles"
                 sender = roles_service.notification_sender(
                     conn, task_id, draft.get("created_by"))
-                conn.execute(
-                    "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
-                    "VALUES (?,?,?,?,?)",
-                    (task_id, sender, "mention", jdumps({
+                ledger.emit_activity(
+                    conn, task_id=task_id,
+                    role_slug=sender,
+                    kind="mention",
+                    payload=jdumps({
                         "target": "human",
                         "message": "角色建议已被拒绝，但任务当前没有可用角色；"
                                    "请先创建/绑定至少一个角色后重新派发。",
                         "event": "role_suggestion_rejected",
-                    }), now),
-                )
+                    }),
+                    now=now)
         if feedback:
-            conn.execute(
-                "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (task_id, "human", "comment",
-                 jdumps({"body": f"角色建议被驳回：{feedback}"}), now),
-            )
+            ledger.emit_activity(
+                conn, task_id=task_id,
+                role_slug="human",
+                kind="comment",
+                payload=jdumps({"body": f"角色建议被驳回：{feedback}"}),
+                now=now)
         tree = draft.get("tree") or {}
         if str(tree.get("apply_mode") or "") == "authorize":
             creator = str(draft.get("created_by") or "").strip()
@@ -813,12 +813,12 @@ def reject(conn: sqlite3.Connection, draft_id: str, by: str = "human",
         if creator.startswith("agent:"):
             creator = creator[6:]
         if feedback:
-            conn.execute(
-                "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (task_id, "human", "comment",
-                 jdumps({"body": f"{label}被驳回：{feedback}"}), now),
-            )
+            ledger.emit_activity(
+                conn, task_id=task_id,
+                role_slug="human",
+                kind="comment",
+                payload=jdumps({"body": f"{label}被驳回：{feedback}"}),
+                now=now)
         if creator:
             tasks_service.mention(
                 conn, task_id, "human", creator,

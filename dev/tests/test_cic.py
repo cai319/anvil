@@ -255,3 +255,56 @@ def test_extract_usage_fallbacks():
         "cache_read_input_tokens": 7, "cache_creation_input_tokens": 1,
     }
     assert extract_turn_usage({"usage": {"input_tokens": 5, "output_tokens": 2}})["output_tokens"] == 2
+
+
+def test_cic_cold_budget_is_configurable(tmp_path, monkeypatch):
+    """Raft 借鉴：冷唤醒首屏有独立字符预算，并记录在上下文清单。"""
+    data = tmp_path / "data"
+    (data / "agents" / "dev").mkdir(parents=True)
+    monkeypatch.setattr(config, "DATA_DIR", data)
+    monkeypatch.setattr(config, "AGENTS_DIR", data / "agents")
+    monkeypatch.setattr(config, "CIC_COLD_BUDGET_CHARS", 4000)
+
+    db_path = str(tmp_path / "t.db")
+    conn = connect(db_path)
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO tasks (id,title,status,created_at,updated_at) "
+        "VALUES ('T1','预算任务','in_progress',?,?)", (now, now))
+    conn.commit()
+    memory.write_note(
+        conn, "dev", "knowledge/T1/snap.md",
+        "SNAPSHOTHEADUNIQUE\n" + ("快照" * 8000), kind="task_snapshot",
+        scope="task", task_id="T1")
+    tasks_service.comment(conn, "T1", "pm", "MSG:" + "长消息" * 2000)
+
+    cic = DaemonManager(db_path, enabled=False)._build_cic(conn, "dev", "T1")
+    assert len(cic) <= 4000
+    manifest = conn.execute(
+        "SELECT budget_chars FROM context_manifests WHERE kind='cic' "
+        "ORDER BY id DESC LIMIT 1").fetchone()
+    assert manifest is not None and manifest["budget_chars"] == 4000
+    conn.close()
+
+
+def test_cic_cold_wake_mentions_pull_inbox(tmp_path, monkeypatch):
+    """冷唤醒只给摘要；明确告诉角色用拉模式读取完整未读。"""
+    data = tmp_path / "data"
+    (data / "agents" / "dev").mkdir(parents=True)
+    monkeypatch.setattr(config, "DATA_DIR", data)
+    monkeypatch.setattr(config, "AGENTS_DIR", data / "agents")
+
+    db_path = str(tmp_path / "t.db")
+    conn = connect(db_path)
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO tasks (id,title,status,created_at,updated_at) "
+        "VALUES ('T1','拉取任务','in_progress',?,?)", (now, now))
+    conn.commit()
+    tasks_service.comment(conn, "T1", "pm", "需要你处理的反馈")
+
+    cic = DaemonManager(db_path, enabled=False)._build_cic(conn, "dev", "T1")
+    assert "## 未读消息（拉模式）" in cic
+    assert "anvil inbox check --task T1" in cic
+    assert "anvil inbox commit --task T1" in cic
+    conn.close()

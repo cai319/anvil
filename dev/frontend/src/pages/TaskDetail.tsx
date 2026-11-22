@@ -1,480 +1,39 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { api, isOnboardingRole, type BoardDraft, type Delegation, type FindingSummary, type KnowledgeKind, type KnowledgeRepoBinding, type KnowledgeRepoProfile, type Role, type Run, type Task, type TaskDispatch, type TaskKnowledge, type TaskLeases, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate, type WorkflowWeight, type WorkspaceKnowledge } from "../api/client";
+import { api, isOnboardingRole, type BoardDraft, type Delegation, type FindingSummary, type Role, type Run, type Task, type TaskChild, type TaskDispatch, type TaskLeases, type TaskRoleState, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate } from "../api/client";
 import { useLiveRefresh } from "../useLiveRefresh";
-import {
-  AUTHORITY_LABEL,
-  KNOWLEDGE_CARD_FIELDS,
-  KNOWLEDGE_QUALITY_FIELDS,
-  KNOWLEDGE_KINDS,
-  KNOWLEDGE_KIND_LABEL,
-} from "../knowledgeCard";
 import { UNBOUND_CHANNEL_VIEW } from "../channelView";
 import { RoleSessions } from "./RoleSessions";
 import { WorkflowGraph } from "./WorkflowGraph";
-import { taskRoleState } from "../roleStatus";
-import { formatClock, formatDateTime, formatDuration } from "../time";
+import { roleStatusFromServer, taskRoleState } from "../roleStatus";
+import { formatClock, formatDateTime } from "../time";
 import { useRoleRuntimes } from "../useRoleRuntimes";
 import { usePanelLayout } from "../usePanelLayout";
 import { STATUS_META, isDynamicStep, summarizeLoops, type LoopSummary } from "../workflowGroups";
 import { RoleAvatar } from "../components/RoleAvatar";
+import { TaskHeader } from "../components/TaskHeader";
+import { SubtasksPanel } from "../components/SubtasksPanel";
+import { WorkflowSummary } from "../components/WorkflowSummary";
+import { WorkflowWeightDialog } from "../components/WorkflowWeightDialog";
+import { DraftParticipants } from "../components/DraftParticipants";
+import {
+  ChannelKnowledgePanel, KNOWLEDGE_MODE_LABEL, KnowledgeRepoPanel,
+  TaskKnowledgePanel,
+} from "../components/TaskKnowledgePanels";
+import {
+  TASK_STATUS_META, runStatusLabel,
+} from "../statusVocabulary";
+import {
+  childFromDelegation, childFromDispatch, childState,
+} from "../components/ChildTaskCard";
+import { WEIGHT_META } from "../components/WorkflowWeightDialog";
 import { Icon } from "../components/Icon";
 import { confirmDialog, promptDialog } from "../components/dialogs";
 import { GateReviewDrawer } from "../components/GateReviewDrawer";
 import { TaskFindingBoard } from "./TaskFindingBoard";
-import { KnowledgeDetailModal } from "./knowledge/KnowledgeDetail";
 
 const stepAuthority = (st: WorkflowStep): "ai" | "human" | "joint" =>
   st.decision_authority
   || (st.gate ? "human" : st.kind === "decision" ? "ai" : "human");
-
-const WEIGHT_META: Record<WorkflowWeight, { label: string; hint: string }> = {
-  light: { label: "轻量", hint: "小范围、可逆、少量角色" },
-  standard: { label: "标准", hint: "默认流程强度" },
-  strict: { label: "严格", hint: "高风险、证据必填、关键节点人工确认" },
-};
-
-const STATUS_LABEL: Record<Task["status"], string> = {
-  todo: "待办",
-  in_progress: "进行中",
-  in_review: "待评审",
-  done: "完成",
-  closed: "已终止",
-};
-
-const RUN_LABEL: Record<string, string> = {
-  created: "已创建",
-  projecting: "准备中",
-  running: "运行中",
-  submitted: "已提交",
-  reviewing: "评审中",
-  completed: "已完成",
-  failed: "失败",
-  abandoned: "已放弃",
-  suspended: "等待唤醒",
-};
-
-type DelegationState = {
-  label: string;
-  cls: "todo" | "in_progress" | "in_review" | "done" | "closed";
-};
-
-function delegationState(d: Delegation): DelegationState {
-  if (d.status === "done") return { label: "已完成", cls: "done" };
-  if (d.status === "closed") return { label: "已取消", cls: "closed" };
-  if (d.status === "in_review") return { label: "待验收", cls: "in_review" };
-  if (d.run_status === "failed" || d.run_status === "abandoned")
-    return { label: "异常", cls: "closed" };
-  if (d.run_status === "running") return { label: "进行中", cls: "in_progress" };
-  if (d.run_status === "created" || d.run_status === "projecting")
-    return { label: "排队中", cls: "in_progress" };
-  if (d.status === "in_progress") return { label: "进行中", cls: "in_progress" };
-  return { label: "待认领", cls: "todo" };
-}
-
-function DelegationCard({ d, onChanged }: { d: Delegation; onChanged: () => void }) {
-  const [busy, setBusy] = useState(false);
-  const state = delegationState(d);
-
-  const run = async (action: () => Promise<unknown>) => {
-    setBusy(true);
-    try {
-      await action();
-      onChanged();
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const nudge = () => {
-    if (!d.assignee) return;
-    void run(() => api.mentionTask(d.id, d.assignee!, "催办：请同步委派进展"));
-  };
-
-  const accept = () => {
-    void run(() => api.acceptDelegation(d.id));
-  };
-
-  const reject = async () => {
-    const feedback = await promptDialog({
-      title: "打回委派",
-      message: "请说明需要负责人返工的问题。",
-      input: { label: "打回原因", multiline: true },
-      inputRequired: true,
-      confirmLabel: "打回",
-      danger: true,
-    });
-    if (!feedback) return;
-    void run(() => api.rejectDelegation(d.id, feedback));
-  };
-
-  const cancel = async () => {
-    const ok = await confirmDialog({
-      title: "取消委派？",
-      message: "取消后视为该委派已解除，父 step 会被自动唤醒继续；子任务保留审计但不再参与门禁。",
-      confirmLabel: "取消委派",
-      danger: true,
-    });
-    if (!ok) return;
-    void run(() => api.cancelTask(d.id));
-  };
-
-  // 只有绑定父 step 的委派工单才有验收/打回语义；普通历史子任务不显示。
-  const canAccept = Boolean(d.parent_step_id) && d.status === "in_review";
-  const canCancel = d.status === "todo" || d.status === "in_progress";
-  const delegator = d.created_by?.startsWith("agent:")
-    ? d.created_by.slice("agent:".length)
-    : (d.created_by || "—");
-  const owner = d.assignee || (d.assignees?.length ? d.assignees.join("、") : "无人认领");
-
-  return (
-    <div className={`delegation-card delegation-${state.cls}`}>
-      <div className="delegation-head">
-        <a className="delegation-title" href={`/tasks/${d.id}`}>{d.title}</a>
-        <span className={`status status-${state.cls}`}>{state.label}</span>
-        {d.run_failure_class && (
-          <span className="badge badge-in_progress" title="失败分类">{d.run_failure_class}</span>
-        )}
-      </div>
-      <div className="delegation-meta">
-        <span>{delegator} → {owner}</span>
-        <span>{d.step_title || "未关联步骤"}</span>
-        <span>截止：{d.due_at ? formatDateTime(d.due_at) : "未设置"}</span>
-        {d.created_at && <span className="muted">{formatClock(d.created_at)}</span>}
-      </div>
-      {d.acceptance?.length > 0 && (
-        <div className="delegation-acceptance">验收：{d.acceptance.join("；")}</div>
-      )}
-      {d.scope_paths?.length > 0 && (
-        <div className="muted">scope：{d.scope_paths.join("、")}</div>
-      )}
-      {d.submitted_summary && (
-        <div className="delegation-result">结果：{d.submitted_summary}</div>
-      )}
-      <div className="delegation-actions">
-        <a href={`/tasks/${d.id}`}>打开详情</a>
-        {d.assignee && (
-          <button className="small" disabled={busy} onClick={nudge}>催办</button>
-        )}
-        {canAccept && (
-          <button className="small" disabled={busy} onClick={accept}>通过验收</button>
-        )}
-        {canAccept && (
-          <button className="small" disabled={busy} onClick={reject}>打回</button>
-        )}
-        {canCancel && (
-          <button className="small danger" disabled={busy} onClick={cancel}>取消</button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-const DISPATCH_STATUS_LABEL: Record<string, string> = {
-  open: "进行中", return_ready: "待回切", returning: "回切中",
-  returned: "已回切", no_return: "不回切", cancelled: "已取消",
-};
-const TASK_STATUS_LABEL: Record<string, string> = {
-  todo: "待办", in_progress: "进行中", in_review: "待评审",
-  done: "完成", closed: "已终止",
-};
-
-function DispatchCard({ d }: { d: TaskDispatch }) {
-  const statusCls = d.status === "returned"
-    ? "done"
-    : d.status === "no_return" || d.status === "cancelled" ? "closed" : "in_progress";
-  return (
-    <div className="delegation-card">
-      <div className="delegation-head">
-        <a className="delegation-title" href={`/tasks/${d.target_task_id}`}>
-          {d.target_title || d.target_task_id}
-        </a>
-        <span className={`status status-${statusCls}`}>
-          {DISPATCH_STATUS_LABEL[d.status] || d.status}
-        </span>
-        {d.source_slice_key && <span className="chip">切片 {d.source_slice_key}</span>}
-      </div>
-      <div className="delegation-meta">
-        <span>{d.requested_by || "human"} → {d.target_role || "—"}</span>
-        {d.target_status && (
-          <span>任务状态：{TASK_STATUS_LABEL[d.target_status] ?? d.target_status}</span>
-        )}
-        {d.return_context_key && (
-          <span className="muted mono" title="完成后回切的上下文">
-            回切：{d.return_context_key}
-          </span>
-        )}
-        {d.created_at && <span className="muted">{formatClock(d.created_at)}</span>}
-      </div>
-      <div className="delegation-actions">
-        <a href={`/tasks/${d.target_task_id}`}>打开派遣任务</a>
-        {d.returned_at && <span className="muted">已回切 {formatClock(d.returned_at)}</span>}
-      </div>
-    </div>
-  );
-}
-
-function DraftParticipants({ draftId }: { draftId: string }) {
-  const [data, setData] = useState<{
-    add: string[]; missing: string[];
-  } | null>(null);
-  useEffect(() => {
-    api.getDraftParticipants(draftId).then(setData).catch(() => {});
-  }, [draftId]);
-  if (!data || (!data.add.length && !data.missing.length)) return null;
-  return (
-    <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-      {data.add.length > 0 && <>将新增参与者：{data.add.join("、")}</>}
-      {data.add.length > 0 && data.missing.length > 0 && " · "}
-      {data.missing.length > 0 && (
-        <>human 指定角色未安排，需补进 workflow：{data.missing.join("、")}</>
-      )}
-    </div>
-  );
-}
-
-function WorkflowWeightDialog({ taskId, current, onClose, onApplied }: {
-  taskId: string;
-  current: Workflow | null;
-  onClose: () => void;
-  onApplied: (workflow?: Workflow) => void;
-}) {
-  const [weight, setWeight] = useState<WorkflowWeight>(current?.weight || "standard");
-  const [reason, setReason] = useState(current?.weight_reason || "");
-  const [result, setResult] = useState<Awaited<ReturnType<typeof api.setTaskWorkflowWeight>> | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const running = current?.status === "running";
-
-  const save = async () => {
-    setBusy(true); setError(null);
-    try {
-      const out = await api.setTaskWorkflowWeight(taskId, weight, reason);
-      setResult(out);
-      if (!out.requires_restart) {
-        onApplied();
-        onClose();
-      }
-    } catch (e) { setError(String(e)); }
-    finally { setBusy(false); }
-  };
-
-  const restart = async () => {
-    const ok = await confirmDialog({
-      title: "重新开始工作流执行？",
-      message: "将终止当前执行并创建新的执行。旧执行、步骤和产物保留在历史中，"
-        + "不会中途替换。",
-      confirmLabel: "终止并重跑",
-      danger: true,
-    });
-    if (!ok) return;
-    setBusy(true); setError(null);
-    try {
-      const wf = await api.restartTaskWorkflow(
-        taskId, reason.trim() || "人工调整流程强度后重新执行");
-      onApplied(wf);
-      onClose();
-    } catch (e) { setError(String(e)); }
-    finally { setBusy(false); }
-  };
-
-  const clear = async () => {
-    setBusy(true); setError(null);
-    try {
-      const out = await api.clearTaskWorkflowWeight(taskId);
-      setResult(out);
-      if (!out.requires_restart) {
-        onApplied();
-        onClose();
-      }
-    } catch (e) { setError(String(e)); }
-    finally { setBusy(false); }
-  };
-
-  return (
-    <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal wf-weight-modal modal-flex" role="dialog" aria-modal="true">
-        <div className="modal-head">
-          <h2>调整流程强度</h2>
-          <button className="modal-close" onClick={onClose} aria-label="关闭">
-            <Icon name="x" size={14} />
-          </button>
-        </div>
-        <div className="modal-flex-body">
-        {error && <p className="error">{error}</p>}
-        <p className="muted">
-          当前执行：{current?.weight ? WEIGHT_META[current.weight].label : "未设置"}
-          {current?.weight_source ? `（${current.weight_source}）` : ""}
-          {running ? " · 运行中，修改只对下一次执行生效" : ""}
-        </p>
-        <div className="wf-weight-options">
-          {(Object.keys(WEIGHT_META) as WorkflowWeight[]).map((key) => (
-            <label key={key} className={`wf-weight-option ${weight === key ? "is-active" : ""}`}>
-              <input type="radio" name="wf-weight" checked={weight === key}
-                onChange={() => setWeight(key)} />
-              <strong>{WEIGHT_META[key].label}</strong>
-              <span className="muted">{WEIGHT_META[key].hint}</span>
-            </label>
-          ))}
-        </div>
-        <label className="field">
-          <span>选择依据（可选）</span>
-          <input value={reason} onChange={(e) => setReason(e.target.value)}
-            placeholder="例如：仅文档改动，可逆；或涉及支付，必须严格" />
-        </label>
-        {result?.requires_restart && (
-          <div className="wf-weight-restart-note">
-            <p>
-              已保存为下一次执行使用。当前第 {result.running_execution_no} 次执行仍为
-              {result.running_weight ? WEIGHT_META[result.running_weight].label : "原强度"}。
-              需要立即生效时，可终止并重新执行。
-            </p>
-            <button className="small danger" disabled={busy} onClick={restart}>
-              终止并重新执行
-            </button>
-          </div>
-        )}
-        </div>
-        <div className="modal-actions">
-          {current?.weight_source === "human" && (
-            <button className="small" disabled={busy} onClick={clear}>清除人工设置</button>
-          )}
-          <button className="small" disabled={busy} onClick={onClose}>取消</button>
-          <button className="primary" disabled={busy} onClick={save}>
-            {busy ? "保存中…" : "保存"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/** 工作流概览：状态、完成度、步骤状态计数，规则/验证矩阵默认收起。 */
-function WorkflowSummary({ workflow, taskStatus, metrics, diff }: {
-  workflow: Workflow;
-  taskStatus: Task["status"];
-  metrics: WorkflowMetrics | null;
-  diff: WorkflowGraphResponse | null;
-}) {
-  const total = workflow.steps.length;
-  const approved = workflow.steps.filter((s) => s.status === "approved").length;
-  const percent = total ? Math.round((approved / total) * 100) : 0;
-  const stateLabel = workflow.status === "done"
-    ? (taskStatus === "done" ? "已完成" : "已完成 · 等待最终评审")
-    : workflow.status === "running" ? "推进中"
-      : workflow.status === "terminated" ? "已终止 · 历史执行" : "已失败";
-  const counts = (Object.keys(STATUS_META) as WorkflowStep["status"][])
-    .map((status) => ({
-      status,
-      count: workflow.steps.filter((s) => s.status === status).length,
-    }))
-    .filter(({ status, count }) => count > 0 && status !== "approved");
-  const feedbackRules = workflow.definition?.feedback_rules ?? [];
-  const verification = workflow.definition?.verification ?? [];
-
-  return (
-    <div className={`wf-summary is-${workflow.status}`}>
-      <div className="wf-summary-main">
-        <span className="wf-summary-state">{stateLabel}</span>
-        {workflow.pending_revision && (
-          <span className="chip" title={workflow.pending_revision.impact?.summary || "待审批的增量修订"}>
-            待审修订
-          </span>
-        )}
-        {workflow.weight && (
-          <span className={`wf-weight is-${workflow.weight}`}
-            title={workflow.weight_reason || WEIGHT_META[workflow.weight].hint}>
-            {WEIGHT_META[workflow.weight].label}
-            <small>{workflow.weight_source === "human" ? "人工" : ""}</small>
-          </span>
-        )}
-        <div className="wf-summary-progress">
-          <span className="wf-summary-bar"><i style={{ width: `${percent}%` }} /></span>
-          <span className="wf-summary-count"><strong>{approved}</strong> / {total} 步完成</span>
-        </div>
-        <div className="wf-summary-pills">
-          {counts.map(({ status, count }) => (
-            <span key={status} className="wf-summary-pill" style={{ color: STATUS_META[status].color }}>
-              <i style={{ background: STATUS_META[status].color }} />
-              {STATUS_META[status].label} {count}
-            </span>
-          ))}
-        </div>
-      </div>
-      {metrics && (
-        <div className="wf-metrics">
-          <span title="最大依赖深度">深度 {metrics.steps.max_depth}</span>
-          <span title="workflow 创建到完成/终止">耗时 {formatDuration(metrics.duration_seconds)}</span>
-          <span title="扣除纯等待人工介入的时间">
-            有效 {formatDuration(metrics.active_duration_seconds
-              ?? Math.max(0, metrics.duration_seconds
-                - (metrics.waiting.excluded_seconds ?? 0)))}
-          </span>
-          <span title="人工审核门">审核门 {metrics.gates.total}（待 {metrics.gates.pending}）</span>
-          <span title="决策与返工">决策 {metrics.decisions.total} · 打回 {metrics.decisions.rejected}</span>
-          <span title="没有角色在推进、纯等待人工审核的时长（区间去重）">
-            人工等待 {formatDuration(metrics.waiting.excluded_seconds
-              ?? (metrics.waiting.human_seconds + metrics.waiting.pending_human_seconds))}
-          </span>
-          <span title="仅 workflow 步骤关联 run 的 Token 总量（输入 + 输出 + 缓存读取 + 缓存写入）">
-            Token {(metrics.tokens.total_tokens
-              ?? (metrics.tokens.input_tokens ?? 0) + (metrics.tokens.output_tokens ?? 0)
-            ).toLocaleString("en-US")}
-          </span>
-          {metrics.steps.generated_slices > 0 && (
-            <span>切片 {metrics.steps.generated_slices} 步</span>
-          )}
-          {diff && (
-            <details className="wf-diff">
-              <summary>
-                计划 vs 实际：新增 {(diff.added?.length ?? 0)} · 变更 {(diff.changed?.length ?? 0)}
-              </summary>
-              <div className="wf-diff-list">
-                {(diff.added ?? []).length === 0 && <span className="muted">没有计划外节点。</span>}
-                {(diff.added ?? []).map((n) => (
-                  <span key={n.step_id} className="wf-diff-item">
-                    + <span className="mono">{n.step_id}</span> {n.title}
-                    {n.source_step_id ? `（由 ${n.source_step_id} 展开）` : ""}
-                  </span>
-                ))}
-                {(diff.changed ?? []).map((c, i) => (
-                  <span key={`${c.step_id}-${c.field}-${i}`} className="wf-diff-item">
-                    ~ <span className="mono">{c.step_id}</span> {c.field}：
-                    {String(c.planned)} → {String(c.actual)}
-                  </span>
-                ))}
-              </div>
-            </details>
-          )}
-        </div>
-      )}
-      {(feedbackRules.length > 0 || verification.length > 0) && (
-        <details className="wf-summary-rules">
-          <summary>
-            <Icon className="wf-summary-chevron" name="chevron-right" size={12} />
-            规则与验证
-            <span className="muted">反馈 {feedbackRules.length} · 验证 {verification.length}</span>
-          </summary>
-          <div className="wf-summary-rules-body">
-            {feedbackRules.length > 0 && (
-              <p className="muted">反馈路径：{feedbackRules.join("；")}</p>
-            )}
-            {verification.length > 0 && (
-              <div className="wf-matrix">
-                <span className="muted">验证矩阵：</span>
-                {verification.map((v, i) => (
-                  <span key={i} className="wf-matrix-cell">
-                    <strong>{v.cell}</strong> · {v.method}
-                    {v.verifier_role ? ` · ${v.verifier_role}` : ""}
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
-        </details>
-      )}
-    </div>
-  );
-}
 
 // 系统伪发送者：workflow 引擎/系统通知不是真实 Agent 角色。
 const SYSTEM_SENDERS: Record<string, string> = {
@@ -551,7 +110,7 @@ function describe(
     case "starvation":
       return { text: "饥饿升级（无角色可认领）" };
     case "run":
-      return { text: `运行状态：${RUN_LABEL[String(p.status)] ?? p.status}`, runStatus: String(p.status) };
+      return { text: `运行状态：${runStatusLabel(String(p.status))}`, runStatus: String(p.status) };
     case "step": {
       const status = String(p.status ?? "");
       const label: Record<string, string> = {
@@ -601,424 +160,6 @@ const TL_FILTERS = [
   { key: "review", label: "评审" },
 ] as const;
 
-const REPO_SOURCE_LABEL: Record<string, string> = {
-  auto: "自动",
-  cindy: "Cindy",
-  human: "人工",
-  inherited: "继承",
-  agent: "Agent",
-};
-
-const KNOWLEDGE_MODE_LABEL: Record<string, string> = {
-  shared: "主题知识库",
-  local: "任务级知识库",
-  temp: "临时知识空间",
-};
-
-const REPO_STATE_HINT: Record<string, string> = {
-  applied: "已按任务标签/文本自动关联。",
-  suggested: "低置信度建议，确认后才会参与检索。",
-  needs_cindy: "任务还没有标签，启动后由 Cindy 识别。",
-  fallback: "未匹配到主题知识库，回退到任务级/临时知识空间 + shared。",
-  locked: "已人工固定，自动识别和 Cindy 不会覆盖。",
-  off: "知识仓库功能已关闭。",
-};
-
-function KnowledgeRepoPanel({ task, onChanged }: { task: Task; onChanged: () => void }) {
-  const [repos, setRepos] = useState<KnowledgeRepoBinding[]>(task.knowledge_repos ?? []);
-  const [locked, setLocked] = useState(Boolean(task.knowledge_binding_locked));
-  const [state, setState] = useState<string | null>(task.knowledge_binding_state ?? null);
-  const [scope, setScope] = useState<string[] | null>(null);
-  const [catalog, setCatalog] = useState<KnowledgeRepoProfile[]>([]);
-  const [editing, setEditing] = useState(false);
-  const [selected, setSelected] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const apply = useCallback((payload: {
-    locked?: boolean; state?: string | null; repos?: KnowledgeRepoBinding[];
-    scope?: { repos: string[] | null };
-  }) => {
-    if (payload.repos) setRepos(payload.repos);
-    if (payload.locked !== undefined) setLocked(Boolean(payload.locked));
-    if (payload.state !== undefined) setState(payload.state);
-    if (payload.scope) setScope(payload.scope.repos);
-  }, []);
-
-  const repoKey = JSON.stringify(task.knowledge_repos ?? []);
-  useEffect(() => {
-    setRepos(task.knowledge_repos ?? []);
-    setLocked(Boolean(task.knowledge_binding_locked));
-    setState(task.knowledge_binding_state ?? null);
-  }, [repoKey, task.knowledge_binding_locked, task.knowledge_binding_state]);
-
-  useEffect(() => {
-    setRepos(task.knowledge_repos ?? []);
-    setLocked(Boolean(task.knowledge_binding_locked));
-    setState(task.knowledge_binding_state ?? null);
-    api.getTaskKnowledgeRepos(task.id)
-      .then((d) => apply(d))
-      .catch(() => {});
-    api.listKnowledgeRepos()
-      .then((d) => setCatalog(d.repos ?? []))
-      .catch(() => setCatalog([]));
-  }, [task.id, apply]);
-
-  const run = async (fn: () => Promise<unknown>) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await fn();
-      onChanged();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const visible = repos.filter((r) => r.status !== "dismissed");
-  const applied = visible.filter((r) => r.status === "applied");
-  const suggested = visible.filter((r) => r.status === "suggested");
-
-  return (
-    <>
-      <h3 className="side-h">知识主题</h3>
-      <div className="repo-panel">
-        {visible.length === 0 && (
-          <p className="muted hint">{REPO_STATE_HINT[state ?? ""] ?? "尚未关联主题知识库。"}</p>
-        )}
-        <div className="repo-chips">
-          {[...applied, ...suggested].map((r) => (
-            <span
-              key={`${r.repo}-${r.status}`}
-              className={`repo-chip repo-${r.status}`}
-              title={r.reason ?? undefined}
-            >
-              <span className="repo-chip-name">{r.repo}</span>
-              <span className="repo-chip-meta">
-                {REPO_SOURCE_LABEL[r.source] ?? r.source}
-                {r.status === "suggested" ? " · 建议" : ""}
-              </span>
-              {r.status === "suggested" && (
-                <span className="repo-chip-actions">
-                  <button type="button" disabled={busy}
-                    onClick={() => run(async () => {
-                      const d = await api.acceptTaskKnowledgeRepo(task.id, r.repo) as {
-                        locked: boolean; state: string; repos: KnowledgeRepoBinding[]; scope: { repos: string[] | null };
-                      };
-                      apply(d);
-                    })}>采纳</button>
-                  <button type="button" disabled={busy}
-                    onClick={() => run(async () => {
-                      const d = await api.dismissTaskKnowledgeRepo(task.id, r.repo) as {
-                        locked: boolean; state: string; repos: KnowledgeRepoBinding[]; scope: { repos: string[] | null };
-                      };
-                      apply(d);
-                    })}>忽略</button>
-                </span>
-              )}
-            </span>
-          ))}
-        </div>
-        {state && (
-          <p className="muted hint">
-            {REPO_STATE_HINT[state] ?? state}
-            {scope?.length ? ` 检索范围：${scope.join("、")}。` : ""}
-          </p>
-        )}
-        {locked && <p className="repo-lock">已人工固定</p>}
-        {!editing ? (
-          <div className="repo-actions">
-            <button type="button" className="small" disabled={busy}
-              onClick={() => {
-                setSelected(applied.map((r) => r.repo));
-                setEditing(true);
-              }}>编辑</button>
-            <button type="button" className="small" disabled={busy}
-              onClick={() => run(async () => {
-                const d = await api.reautoTaskKnowledgeRepos(task.id) as {
-                  locked: boolean; state: string | null; repos: KnowledgeRepoBinding[]; scope: { repos: string[] | null };
-                };
-                apply(d);
-              })}>重新识别</button>
-          </div>
-        ) : (
-          <div className="repo-editor">
-            <select
-              multiple
-              value={selected}
-              onChange={(e) => setSelected(
-                Array.from(e.currentTarget.selectedOptions).map((o) => o.value))}
-            >
-              {catalog.map((p) => (
-                <option key={p.key} value={p.repo}>{p.repo}</option>
-              ))}
-            </select>
-            <div className="repo-actions">
-              <button type="button" className="small" disabled={busy}
-                onClick={() => run(async () => {
-                  const next = await api.patchTask(task.id, {
-                    knowledge_repos: selected.map((repo) => ({ repo })),
-                  });
-                  setRepos(next.knowledge_repos ?? []);
-                  setLocked(Boolean(next.knowledge_binding_locked));
-                  setState(next.knowledge_binding_state ?? null);
-                  setEditing(false);
-                })}>保存并固定</button>
-              <button type="button" className="small" disabled={busy}
-                onClick={() => setEditing(false)}>取消</button>
-            </div>
-          </div>
-        )}
-        {error && <p className="error">{error}</p>}
-      </div>
-    </>
-  );
-}
-
-/** 绑定频道的任务显示已批准频道知识：约定为“约束”，其余为“参考”。 */
-function ChannelKnowledgePanel({ task, onChanged }: { task: Task; onChanged: () => void }) {
-  const [cards, setCards] = useState<WorkspaceKnowledge[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [detail, setDetail] = useState<WorkspaceKnowledge | null>(null);
-  const workspaceId = task.workspace_id ?? null;
-
-  const load = useCallback(() => {
-    if (!workspaceId) {
-      setCards([]);
-      return;
-    }
-    api.listWorkspaceKnowledge(workspaceId, { status: "approved" })
-      .then(setCards)
-      .catch(() => setCards([]));
-  }, [workspaceId]);
-
-  useEffect(() => {
-    load();
-    setNote(null);
-    setError(null);
-  }, [load, task.id]);
-
-  const harvest = async () => {
-    if (!workspaceId) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const card = await api.harvestWorkspaceKnowledge(workspaceId, task.id);
-      setNote(card.status === "approved"
-        ? "已收割到频道知识。"
-        : "已生成频道知识草稿，等待人工批准。");
-      load();
-      onChanged();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const terminal = task.status === "done" || task.status === "closed";
-  return (
-    <>
-      <h3 className="side-h">频道知识</h3>
-      {!workspaceId ? (
-        <p className="muted hint">
-          任务未归属频道，不注入频道约定。{" "}
-          <a href={`/channels?channel=${UNBOUND_CHANNEL_VIEW}`}>查看未绑定任务</a>
-        </p>
-      ) : (
-        <div className="channel-knowledge-panel">
-          {cards.length === 0 && <p className="muted hint">频道暂无已批准知识。</p>}
-          <ul className="side-list channel-knowledge-list">
-            {cards.map((k) => (
-              <li key={k.id} title={k.tldr}>
-                <span className={`authority-badge authority-${k.authority}`}>
-                  {AUTHORITY_LABEL[k.authority]}
-                </span>
-                <span className="channel-knowledge-title">{k.title}</span>
-                <small className="muted">{KNOWLEDGE_KIND_LABEL[k.kind] ?? k.kind}</small>
-                <button type="button" className="small" onClick={() => setDetail(k)}>
-                  详情
-                </button>
-              </li>
-            ))}
-          </ul>
-          {terminal && (
-            <button type="button" className="small" disabled={busy} onClick={harvest}>
-              {busy ? "收割中…" : "收割到频道"}
-            </button>
-          )}
-          {note && <p className="muted hint">{note}</p>}
-          {error && <p className="error">{error}</p>}
-          {detail && (
-            <KnowledgeDetailModal
-              heading="频道知识详情"
-              title={detail.title}
-              kind={detail.kind}
-              tldr={detail.tldr}
-              fields={detail.fields}
-              body={detail.body_md}
-              quality={detail.quality}
-              meta={[
-                { label: "约束力", value: AUTHORITY_LABEL[detail.authority] ?? detail.authority },
-                { label: "类型", value: KNOWLEDGE_KIND_LABEL[detail.kind] ?? detail.kind },
-                { label: "版本", value: `v${detail.version}` },
-                { label: "标签", value: detail.tags.length ? detail.tags.join("、") : "无" },
-                { label: "来源任务", value: detail.source_task_id || "—" },
-                { label: "复核", value: detail.review_at || "—" },
-              ]}
-              onClose={() => setDetail(null)}
-            />
-          )}
-        </div>
-      )}
-    </>
-  );
-}
-
-/** 任务共享知识：任务参与角色共享；子任务来源显式标记。 */
-function TaskKnowledgePanel({ task }: { task: Task }) {
-  const [cards, setCards] = useState<TaskKnowledge[]>([]);
-  const [open, setOpen] = useState(false);
-  const [kind, setKind] = useState<KnowledgeKind>("task_finding");
-  const [title, setTitle] = useState("");
-  const [tldr, setTldr] = useState("");
-  const [fields, setFields] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [detail, setDetail] = useState<TaskKnowledge | null>(null);
-
-  const load = useCallback(
-    () => api.listTaskKnowledge(task.id, true).then(setCards).catch(() => setCards([])),
-    [task.id],
-  );
-
-  useEffect(() => { load(); }, [load]);
-  useEffect(() => { setFields({}); }, [kind]);
-
-  const submit = async () => {
-    if (!title.trim() || !tldr.trim()) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.createTaskKnowledge(task.id, {
-        title: title.trim(),
-        tldr: tldr.trim(),
-        kind,
-        fields: Object.fromEntries(
-          Object.entries(fields).filter(([, v]) => String(v || "").trim())
-        ),
-      });
-      setTitle("");
-      setTldr("");
-      setFields({});
-      setOpen(false);
-      load();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const remove = async (kid: string) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.deleteTaskKnowledge(task.id, kid);
-      load();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <>
-      <h3 className="side-h">任务共享知识</h3>
-      <div className="task-knowledge-panel">
-        {cards.length === 0 && <p className="muted hint">暂无任务知识。</p>}
-        <ul className="side-list task-knowledge-list">
-          {cards.map((k) => (
-            <li key={k.id}>
-              <span className="channel-knowledge-title">{k.title}</span>
-              <small className="muted">
-                {KNOWLEDGE_KIND_LABEL[k.kind] ?? k.kind}
-                {k.source_subtask_id ? ` · 来自子任务 ${k.source_subtask_id}` : " · 任务共享"}
-              </small>
-              <span className="muted">{k.tldr}</span>
-              <button type="button" className="small" onClick={() => setDetail(k)}>
-                详情
-              </button>
-              <button type="button" className="small danger" disabled={busy}
-                onClick={() => remove(k.id)}>删除</button>
-            </li>
-          ))}
-        </ul>
-        {open ? (
-          <div className="channel-meta-form">
-            <label>标题
-              <input value={title} onChange={(e) => setTitle(e.target.value)} />
-            </label>
-            <label>TL;DR
-              <input value={tldr} onChange={(e) => setTldr(e.target.value)} />
-            </label>
-            <label>类型
-              <select value={kind} onChange={(e) => setKind(e.target.value as KnowledgeKind)}>
-                {KNOWLEDGE_KINDS.map((k) => (
-                  <option key={k} value={k}>{KNOWLEDGE_KIND_LABEL[k]}</option>
-                ))}
-              </select>
-            </label>
-            <p className="muted hint">
-              知识提交前必须条款：标题、TLDR 与该类型全部必填字段必须完整；
-              缺失会被服务端拒绝（422）。
-            </p>
-            {[...KNOWLEDGE_QUALITY_FIELDS,
-              ...KNOWLEDGE_CARD_FIELDS[kind]].map((f) => (
-              <label key={f.key}>{f.label}
-                <textarea rows={2} value={fields[f.key] || ""}
-                  onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })} />
-              </label>
-            ))}
-            <div className="toolbar">
-              <button type="button" className="primary" disabled={busy || !title.trim() || !tldr.trim()}
-                onClick={submit}>写入任务知识</button>
-              <button type="button" className="small" onClick={() => setOpen(false)}>取消</button>
-            </div>
-          </div>
-        ) : (
-          <button type="button" className="small" onClick={() => setOpen(true)}>添加任务知识</button>
-        )}
-        {error && <p className="error">{error}</p>}
-        {detail && (
-          <KnowledgeDetailModal
-            heading="任务知识详情"
-            title={detail.title}
-            kind={detail.kind}
-            tldr={detail.tldr}
-            fields={detail.fields}
-            body={detail.body_md}
-            quality={detail.quality}
-            meta={[
-              { label: "类型", value: KNOWLEDGE_KIND_LABEL[detail.kind] ?? detail.kind },
-              { label: "状态", value: detail.status },
-              { label: "标签", value: detail.tags.length ? detail.tags.join("、") : "无" },
-              { label: "来源角色", value: detail.source_role || "—" },
-              { label: "子任务", value: detail.source_subtask_id || "—" },
-              { label: "命中", value: `${detail.hit_count ?? 0} 次` },
-            ]}
-            onClose={() => setDetail(null)}
-          />
-        )}
-      </div>
-    </>
-  );
-}
 
 type TaskTab = "chat" | "workflow" | "findings" | "subtasks" | "runtime";
 
@@ -1074,11 +215,13 @@ export function TaskDetail({ id }: { id: string }) {
   const [reviewStep, setReviewStep] = useState<WorkflowStep | null>(null);
   const [delegations, setDelegations] = useState<Delegation[]>([]);
   const [dispatches, setDispatches] = useState<TaskDispatch[]>([]);
+  const [children, setChildren] = useState<TaskChild[]>([]);
   const [plannerActive, setPlannerActive] = useState(false);
   const [runs, setRuns] = useState<Run[]>([]);
   const [wfView, setWfView] = useState<"graph" | "list">("graph");
   const [seedTemplates, setSeedTemplates] = useState<WorkflowTemplate[]>([]);
   const [seedId, setSeedId] = useState("");
+  const [roleStates, setRoleStates] = useState<Record<string, TaskRoleState>>({});
   const [busy, setBusy] = useState(false);
   const { slugs: liveSlugs, runtimes: roleRuntimes } = useRoleRuntimes(task);
   const panel = usePanelLayout({ storageKey: "task" });
@@ -1112,14 +255,39 @@ export function TaskDetail({ id }: { id: string }) {
     return () => { alive = false; };
   }, [displayWorkflow?.id, displayWorkflow?.updated_at]);
 
-  const refreshDelegations = () =>
-    api.listTaskDelegations(id).then(setDelegations).catch(() => setDelegations([]));
-
-  const refreshDispatches = () =>
-    api.listDispatches(id).then(setDispatches).catch(() => setDispatches([]));
+  /** 统一子任务投影；旧后端无 /children 时回退到两个旧端点。 */
+  const refreshChildren = () => {
+    const apply = (items: TaskChild[]) => {
+      setChildren(items);
+      setDelegations(items
+        .filter((c) => c.relation_type === "delegation")
+        .map((c) => c.raw as Delegation));
+      setDispatches(items
+        .filter((c) => c.relation_type === "dispatch")
+        .map((c) => c.raw as TaskDispatch));
+    };
+    return api.listTaskChildrenUnified(id)
+      .then((res) => apply(res.items))
+      .catch(() => Promise.all([
+        api.listTaskDelegations(id).catch(() => []),
+        api.listDispatches(id).catch(() => []),
+      ]).then(([delegationRows, dispatchRows]) => {
+        setDelegations(delegationRows);
+        setDispatches(dispatchRows);
+        setChildren([
+          ...delegationRows.map(childFromDelegation),
+          ...dispatchRows.map(childFromDispatch),
+        ]);
+      }));
+  };
 
   const refreshDrafts = () =>
     api.listDrafts(id).then(setDrafts).catch(() => setDrafts([]));
+
+  const refreshRoleStates = () =>
+    api.getTaskRoleStates(id).then((res) => {
+      setRoleStates(Object.fromEntries(res.roles.map((r) => [r.role_slug, r])));
+    }).catch(() => setRoleStates({}));
 
   const refresh = () =>
     Promise.all([api.getTask(id), api.getTaskTimeline(id), api.listTaskRuns(id)])
@@ -1178,8 +346,8 @@ export function TaskDetail({ id }: { id: string }) {
     setDescOverflow(false);
     refresh();
     refreshWorkflow();
-    refreshDelegations();
-    refreshDispatches();
+    refreshChildren();
+    refreshRoleStates();
     api.listRoles().then(setRoles).catch(() => {});
     api.listWorkflowTemplates(undefined, "active").then((list) => {
       setSeedTemplates(list.filter((item) => item.published_version
@@ -1190,8 +358,8 @@ export function TaskDetail({ id }: { id: string }) {
 
   useLiveRefresh(
     () => Promise.all([
-      refresh(), refreshWorkflow(), refreshDelegations(),
-      refreshDispatches(), refreshDrafts(),
+      refresh(), refreshWorkflow(), refreshChildren(),
+      refreshDrafts(), refreshRoleStates(),
     ]),
     {
       enabled: !gone,
@@ -1357,16 +525,22 @@ export function TaskDetail({ id }: { id: string }) {
     const returnPending = dispatches.some(
       (d) => d.target_role === slug
         && (d.status === "return_ready" || d.status === "returning"));
-    let state = taskRoleState({
-      task,
-      role: slug,
-      runtime: rt,
-      workflow,
-      relatedTaskIds,
-      sliceKey: wfSlice,
-      runStatus: latestRun?.status ?? null,
-      returnPending,
-    });
+    const serverState = roleStates[slug];
+    let state = serverState
+      ? roleStatusFromServer({
+          ...serverState,
+          currentStepId: rt?.current_step_id,
+        })
+      : taskRoleState({
+          task,
+          role: slug,
+          runtime: rt,
+          workflow,
+          relatedTaskIds,
+          sliceKey: wfSlice,
+          runStatus: latestRun?.status ?? null,
+          returnPending,
+        });
     if (!rt) {
       state = {
         ...state, key: "loading", label: "加载中", tone: "gray",
@@ -1623,7 +797,10 @@ export function TaskDetail({ id }: { id: string }) {
   const renderStepRow = (st: WorkflowStep) => {
     const tone = statusTone(st.status);
     const label = STATUS_META[st.status].label;
-    const stepDelegations = delegations.filter((d) => d.parent_step_id === st.step_id);
+    const stepChildren = children.filter((c) => c.parent_step_id === st.step_id);
+    // 门禁只看委派：派遣是非阻塞软关联，不参与父 step 收口。
+    const stepDelegations = stepChildren.filter((c) => c.relation_type === "delegation");
+    const stepDispatches = stepChildren.filter((c) => c.relation_type === "dispatch");
     const openDelegations = stepDelegations.filter(
       (d) => d.status !== "done" && d.status !== "closed");
     const reviewPending = openDelegations.some((d) => d.status === "in_review");
@@ -1656,6 +833,11 @@ export function TaskDetail({ id }: { id: string }) {
                 委派 {stepDelegations.length}
               </span>
             )}
+            {stepDispatches.length > 0 && (
+              <span className="badge wf-gate" title="本步骤发起的派遣任务（不阻塞）">
+                派遣 {stepDispatches.length}
+              </span>
+            )}
             {st.status === "running" && openDelegations.length > 0 && (
               <span className="badge wf-gate"
                 title={reviewPending
@@ -1676,13 +858,15 @@ export function TaskDetail({ id }: { id: string }) {
             </div>
           )}
           {st.summary && <div className="muted wf-summary">{st.summary}</div>}
-          {stepDelegations.length > 0 && (
+          {stepChildren.length > 0 && (
             <div className="wf-delegations">
-              {stepDelegations.map((d) => {
-                const s = delegationState(d);
+              {stepChildren.map((c) => {
+                const s = childState(c);
                 return (
-                  <a key={d.id} href={`/tasks/${d.id}`} className="muted">
-                    {d.title} <span className={`status status-${s.cls}`}>{s.label}</span>
+                  <a key={`${c.relation_type}:${c.task_id}`} href={`/tasks/${c.task_id}`}
+                    className="muted">
+                    {c.relation_type === "dispatch" && <span className="chip">派遣</span>}
+                    {c.title} <span className={`status status-${s.cls}`}>{s.label}</span>
                   </a>
                 );
               })}
@@ -1800,50 +984,7 @@ export function TaskDetail({ id }: { id: string }) {
       </div>
 
       {/* 头部 */}
-      <div className="session-head">
-        <div className="session-title">
-          <h1>{task.title}</h1>
-          <span className={`status status-${task.status}`}>{STATUS_LABEL[task.status]}</span>
-          {task.archived_at && <span className="chip">已归档</span>}
-          {task.source_task_id && (
-            <a className="chip" href={`/tasks/${task.source_task_id}`}
-              title="派遣子任务的来源任务（parent_id 指向来源 task）">
-              来自任务 {task.source_task_id.slice(0, 8)}
-              {task.source_slice_key ? ` / 切片 ${task.source_slice_key}` : ""}
-            </a>
-          )}
-          {task.dispatch_status && task.dispatch_status !== "none" && (
-            <span className="chip">
-              {DISPATCH_STATUS_LABEL[task.dispatch_status] || task.dispatch_status}
-            </span>
-          )}
-        </div>
-        <div className="session-meta">
-          {task.workspace ? (
-            <a className="session-meta-item"
-              href={`/channels?channel=${encodeURIComponent(task.workspace.id)}&tab=knowledge`}
-              title="打开频道知识">
-              <Icon name="hash" /> {task.workspace.name}
-            </a>
-          ) : (
-            <a className="session-meta-item"
-              href={`/channels?channel=${UNBOUND_CHANNEL_VIEW}`}
-              title="查看未绑定频道的任务">
-              <Icon name="hash" /> 未归属频道
-            </a>
-          )}
-          {task.assignee && (
-            <span className="session-meta-item"><Icon name="user" /> {task.assignee}</span>
-          )}
-          {task.assignees?.length > 0 ? (
-            <span className="session-meta-item"><Icon name="users" /> {task.assignees.join("、")}</span>
-          ) : !task.assignee ? (
-            <span className="muted">未指派</span>
-          ) : null}
-          {task.tags?.length > 0 && <span className="muted">#{task.tags.join(" #")}</span>}
-          <span className="muted mono">{task.id}</span>
-        </div>
-      </div>
+      <TaskHeader task={task} />
 
       {/* 待评审横幅（HITL 醒目提示） */}
       {task.status === "in_review" && (() => {
@@ -1895,8 +1036,8 @@ export function TaskDetail({ id }: { id: string }) {
           </button>
         )}
         <button className={`tab ${tab === "subtasks" ? "active" : ""}`} onClick={() => selectTab("subtasks")}>
-          委派/派遣任务 {(delegations.length + dispatches.length) > 0 && (
-            <span className="tab-count">{delegations.length + dispatches.length}</span>
+          委派/派遣任务 {(children.length) > 0 && (
+            <span className="tab-count">{children.length}</span>
           )}
         </button>
         <button className={`tab ${tab === "runtime" ? "active" : ""}`} onClick={() => selectTab("runtime")}>
@@ -2236,7 +1377,7 @@ export function TaskDetail({ id }: { id: string }) {
                           </span>
                         </>
                       )}
-                      {d.runStatus && <span className={`status status-${d.runStatus}`}>{RUN_LABEL[d.runStatus]}</span>}
+                      {d.runStatus && <span className={`status status-${d.runStatus}`}>{runStatusLabel(d.runStatus)}</span>}
                     </div>
                     <div className="thread-text">
                       {d.mention ? (
@@ -2350,7 +1491,7 @@ export function TaskDetail({ id }: { id: string }) {
           </div>
           <dl className="task-meta">
             <dt>状态</dt>
-            <dd><span className={`status status-${task.status}`}>{STATUS_LABEL[task.status]}</span></dd>
+            <dd><span className={`status status-${task.status}`}>{TASK_STATUS_META[task.status].label}</span></dd>
             <dt>领队</dt>
             <dd>
               {task.assignee
@@ -2601,7 +1742,7 @@ export function TaskDetail({ id }: { id: string }) {
                         </span>
                         {item.metrics && (
                           <span className="muted">
-                            决策 {item.metrics.decisions.total} · 打回 {item.metrics.decisions.rejected}
+                            决策 {item.metrics.decisions?.total ?? 0} · 打回 {item.metrics.decisions?.rejected ?? 0}
                           </span>
                         )}
                         {item.termination_reason && (
@@ -2659,66 +1800,11 @@ export function TaskDetail({ id }: { id: string }) {
         </div>
       )}
 
-      {tab === "subtasks" && (() => {
-        const groups = new Map<string, { title: string; items: Delegation[] }>();
-        for (const d of delegations) {
-          const key = d.parent_step_id || "__none__";
-          const title = d.step_title || "未关联步骤";
-          const group = groups.get(key) ?? { title, items: [] };
-          group.items.push(d);
-          groups.set(key, group);
-        }
-        const pending = delegations.filter(
-          (d) => d.status !== "done" && d.status !== "closed").length;
-        const waiting = delegations.filter((d) => d.status === "in_review").length;
-        return (
-          <div className="delegations">
-            <div className="delegation-summary">
-              <strong>委派 {delegations.length}</strong>
-              {pending > 0 && <span> · 未完成 {pending}</span>}
-              {waiting > 0 && <span> · 待验收 {waiting}</span>}
-              {pending > 0 && (
-                <span className="muted"> · 父 step 提交前需完成</span>
-              )}
-            </div>
-            {delegations.length === 0 && (
-              <p className="muted">
-                当前任务没有委派。需要另一个角色独立完成一块工作时，在 step 中创建委派工单；
-                并行只读探索优先用运行时 subagent。
-              </p>
-            )}
-            {Array.from(groups.entries()).map(([key, group]) => (
-              <section key={key} className="delegation-group">
-                <h3 className="delegation-group-title">
-                  {group.title} <span className="muted">{group.items.length}</span>
-                </h3>
-                {group.items.map((d) => (
-                  <DelegationCard
-                    key={d.id}
-                    d={d}
-                    onChanged={() => { void refreshDelegations(); }}
-                  />
-                ))}
-              </section>
-            ))}
-            <section className="delegation-group">
-              <h3 className="delegation-group-title">
-                派遣任务 <span className="muted">{dispatches.length}</span>
-              </h3>
-              <p className="muted">
-                人工派遣请在会话中 @目标角色（路由判定为独立工作时）；这里只展示和追踪已创建的派遣任务
-                （含来源切片、目标角色与回切状态）。
-              </p>
-              {dispatches.length === 0 && (
-                <p className="muted">还没有派遣任务。</p>
-              )}
-              {dispatches.map((d) => <DispatchCard key={d.id} d={d} />)}
-            </section>
-          </div>
-        );
-      })()}
+      {tab === "subtasks" && (
+        <SubtasksPanel items={children} onChanged={() => { void refreshChildren(); }} />
+      )}
 
-      {tab === "runtime" && <RoleSessions task={task} roles={roles} workflow={workflow} dispatches={dispatches} relatedTaskIds={relatedTaskIds} focus={runtimeFocus} />}
+      {tab === "runtime" && <RoleSessions task={task} roles={roles} workflow={workflow} dispatches={dispatches} relatedTaskIds={relatedTaskIds} roleStates={roleStates} focus={runtimeFocus} />}
       </div>
       {reviewStep && workflow && (
         <GateReviewDrawer

@@ -220,16 +220,6 @@ CREATE TABLE IF NOT EXISTS knowledge_captures (
     UNIQUE(task_id, trigger, trigger_key)
 );
 
--- 旧 tasks.repo（执行仓库）→ 知识主题/任务 workspace 的迁移映射，支持回滚。
-CREATE TABLE IF NOT EXISTS repo_split_map (
-    task_id     TEXT PRIMARY KEY,
-    old_repo    TEXT,
-    new_repo    TEXT,
-    source_repo TEXT,
-    rule        TEXT NOT NULL,
-    migrated_at TEXT NOT NULL
-);
-
 -- 工作流（Cindy 生成，属于一个高层 Task）：步骤状态机，步骤不是独立 task 行。
 -- 跨角色可并行；同一角色的多个步骤由引擎串行调度。
 CREATE TABLE IF NOT EXISTS workflows (
@@ -422,16 +412,7 @@ CREATE TABLE IF NOT EXISTS token_usage (
     recorded_at           TEXT NOT NULL
 );
 
--- DEPRECATED: 旧版美元成本账本；不再写入/展示。Token 统计见 token_usage。
-CREATE TABLE IF NOT EXISTS cost_ledger (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    role_slug   TEXT,
-    task_id     TEXT,
-    run_id      TEXT,
-    usd         REAL NOT NULL,
-    source      TEXT NOT NULL,  -- reported|estimated
-    recorded_at TEXT NOT NULL
-);
+-- cost_ledger 已移除：Token 统计只看 token_usage；旧库中的历史表不再读写。
 
 CREATE TABLE IF NOT EXISTS activities (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2578,12 +2559,6 @@ def _migrate_repo_split_v1(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "UPDATE task_knowledge_repos SET is_primary=0 "
                 "WHERE task_id=? AND repo<>?", (tid, primary))
-        conn.execute(
-            "INSERT OR REPLACE INTO repo_split_map "
-            "(task_id, old_repo, new_repo, source_repo, rule, migrated_at) "
-            "VALUES (?,?,?,?,?,?)",
-            (tid, old, primary, source_repo, rule, now),
-        )
     _set_setting(conn, "schema.repo_split_v1", "1")
     conn.commit()
 

@@ -5,18 +5,7 @@ import { formatClock, formatDateTime, parseTime, useNow } from "../time";
 import { Icon } from "../components/Icon";
 import { confirmDialog } from "../components/dialogs";
 import { HEADER_ONLY_RUN_LOG_HINT, isHeaderOnlyRunLog } from "../runLog";
-
-const RUN_LABEL: Record<string, string> = {
-  created: "已创建",
-  projecting: "准备中",
-  running: "运行中",
-  submitted: "已提交",
-  reviewing: "评审中",
-  completed: "已完成",
-  failed: "失败",
-  abandoned: "已放弃",
-  suspended: "等待唤醒",
-};
+import { runStatusLabel } from "../statusVocabulary";
 
 function fmtDuration(start: string | null, end: string | null, now = Date.now()): string {
   const a = parseTime(start);
@@ -74,7 +63,7 @@ export function RunSession({ id }: { id: string }) {
             title={run.status === "projecting"
               ? "正在把角色说明、任务上下文、知识库和工具配置写入工作区"
               : undefined}
-          >{RUN_LABEL[run.status] ?? run.status}</span>
+          >{runStatusLabel(run.status)}</span>
           {run.failure_class && (
             <span className="badge badge-in_progress" title="失败分类（P0-4）">{run.failure_class}</span>
           )}
@@ -146,9 +135,9 @@ export function RunSession({ id }: { id: string }) {
         <ul className="run-timeline">
           {timeline.map((e) => (
             <li key={e.key}>
-              <span className={`status status-${String(e.payload.status)}`}>{RUN_LABEL[String(e.payload.status)] ?? e.payload.status}</span>
+              <span className={`status status-${String(e.payload.status)}`}>{runStatusLabel(String(e.payload.status))}</span>
               <span className="mono muted">{formatClock(e.ts)}</span>
-              {e.payload.prev ? <span className="muted">由 {RUN_LABEL[String(e.payload.prev)] ?? e.payload.prev}</span> : null}
+              {e.payload.prev ? <span className="muted">由 {runStatusLabel(String(e.payload.prev))}</span> : null}
             </li>
           ))}
         </ul>

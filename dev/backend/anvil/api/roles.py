@@ -10,8 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
-from ..schemas import RoleIn, RoleOut, ToolsIn
-from ..services import tokens as tokens_service, utility
+from ..schemas import RoleIn, RoleOut, RoleRuntimeStatusOut, ToolsIn
+from ..services import ledger, tokens as tokens_service, utility
 from ..util import ConflictError
 from . import access
 
@@ -227,12 +227,12 @@ def expand_role(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth)
                                      definition=definition)
     except ConflictError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (auth.role, None, "role_expand",
-         __import__("json").dumps({"slug": slug, "brief": brief}, ensure_ascii=False),
-         now_iso()))
+    ledger.emit_audit(
+        conn, role_slug=auth.role,
+        task_id=None,
+        action="role_expand",
+        payload=__import__("json").dumps({"slug": slug, "brief": brief}, ensure_ascii=False),
+        now=now_iso())
     task_id = body.get("task_id")
     if task_id and services.tasks.get(conn, task_id) is not None:
         services.tasks.comment(conn, task_id, auth.role,
@@ -279,7 +279,7 @@ def list_roles(conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     return roles
 
 
-@router.get("/roles/runtime")
+@router.get("/roles/runtime", response_model=list[RoleRuntimeStatusOut])
 def list_role_runtimes(conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """所有角色的运行时状态；任务大厅据此判断角色忙在哪张任务卡上。"""
     if access.is_agent(auth):
@@ -475,7 +475,7 @@ def role_metrics(slug: str, conn=Depends(get_db),
     }
 
 
-@router.get("/roles/{slug}/runtime")
+@router.get("/roles/{slug}/runtime", response_model=RoleRuntimeStatusOut)
 def role_runtime(slug: str, conn=Depends(get_db),
                  auth: Auth = Depends(get_auth)):
     """角色当前运行时：进程忙闲、正在处理的任务、队列、所有任务上下文槽。

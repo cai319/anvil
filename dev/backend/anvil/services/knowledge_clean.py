@@ -15,7 +15,7 @@ import sqlite3
 
 from .. import config
 from ..util import ConflictError, jdumps, jloads, now_iso
-from . import knowledge_card, knowledge_quality, repo_knowledge, utility
+from . import knowledge_card, knowledge_quality, ledger, repo_knowledge, utility
 
 PROMPT_VERSION = "knowledge-clean-v1"
 _MAX_SOURCE_CHARS = 12000
@@ -229,13 +229,14 @@ def apply_preview(conn: sqlite3.Connection, card_id: str, cleaned: dict, *,
         quality_extra=quality_extra,
         actor=actor,
     )
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (actor, card.get("source_task_id"), "knowledge.clean.apply",
-         jdumps({"table": "repo_knowledge", "card_id": card_id,
+    ledger.emit_audit(
+        conn, role_slug=actor,
+        task_id=card.get("source_task_id"),
+        action="knowledge.clean.apply",
+        payload=jdumps({"table": "repo_knowledge", "card_id": card_id,
                  "prompt_version": PROMPT_VERSION,
-                 "runtime_id": cleaned.get("runtime_id")}), now_iso()))
+                 "runtime_id": cleaned.get("runtime_id")}),
+        now=now_iso())
     conn.commit()
     return updated
 

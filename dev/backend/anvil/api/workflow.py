@@ -5,6 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 
 from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
+from ..schemas import (
+    TaskLeasesOut, WorkflowGraphOut, WorkflowHistoryOut, WorkflowMetricsOut,
+    WorkflowOut,
+)
 from ..services.tasks import ConflictError
 from ..services import dossier as dossier_service
 from ..services import leases as lease_service
@@ -31,7 +35,7 @@ def _attach_pending_revision(conn, wf: dict) -> dict:
     return wf
 
 
-@router.get("/tasks/{tid}/workflow")
+@router.get("/tasks/{tid}/workflow", response_model=WorkflowOut)
 def get_task_workflow(tid: str, conn=Depends(get_db),
                       auth: Auth = Depends(get_auth)):
     access.assert_task_read(conn, auth, tid)
@@ -41,7 +45,7 @@ def get_task_workflow(tid: str, conn=Depends(get_db),
     return _attach_pending_revision(conn, wf)
 
 
-@router.get("/tasks/{tid}/workflows")
+@router.get("/tasks/{tid}/workflows", response_model=list[WorkflowHistoryOut])
 def list_task_workflows(tid: str, conn=Depends(get_db),
                         auth: Auth = Depends(get_auth)):
     """任务的执行历史；旧执行保留为 terminated，不覆盖。"""
@@ -49,7 +53,7 @@ def list_task_workflows(tid: str, conn=Depends(get_db),
     return services.workflow.list_for_task(conn, tid)
 
 
-@router.get("/workflows/{wid}")
+@router.get("/workflows/{wid}", response_model=WorkflowOut)
 def get_workflow(wid: str, conn=Depends(get_db),
                  auth: Auth = Depends(get_auth)):
     wf = _assert_workflow_task(conn, wid, auth)
@@ -57,7 +61,7 @@ def get_workflow(wid: str, conn=Depends(get_db),
     return _attach_pending_revision(conn, wf)
 
 
-@router.get("/workflows/{wid}/metrics")
+@router.get("/workflows/{wid}/metrics", response_model=WorkflowMetricsOut)
 def get_metrics(wid: str, conn=Depends(get_db),
                 auth: Auth = Depends(get_auth)):
     _assert_workflow_task(conn, wid, auth)
@@ -67,7 +71,7 @@ def get_metrics(wid: str, conn=Depends(get_db),
         raise HTTPException(status_code=404, detail="workflow not found")
 
 
-@router.get("/workflows/{wid}/graph")
+@router.get("/workflows/{wid}/graph", response_model=WorkflowGraphOut)
 def get_graph(wid: str, mode: str = "actual", conn=Depends(get_db),
               auth: Auth = Depends(get_auth)):
     _assert_workflow_task(conn, wid, auth)
@@ -152,7 +156,7 @@ def download_replay_log(tid: str, conn=Depends(get_db),
         headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
-@router.get("/tasks/{tid}/leases")
+@router.get("/tasks/{tid}/leases", response_model=TaskLeasesOut)
 def list_leases(tid: str, conn=Depends(get_db),
                 auth: Auth = Depends(get_auth)):
     access.assert_task_read(conn, auth, tid)

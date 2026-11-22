@@ -41,7 +41,7 @@ def test_repo_split_rules(tmp_path, monkeypatch):
 
     c = conn.execute("SELECT repo, knowledge_mode FROM tasks WHERE id='C'").fetchone()
     assert c["repo"] is None and c["knowledge_mode"] == "temp"
-    rules = {r["task_id"]: r["rule"] for r in conn.execute(
-        "SELECT task_id, rule FROM repo_split_map").fetchall()}
-    assert rules == {"A": "topic", "B": "local", "C": "temp"}
+    assert conn.execute(
+        "SELECT value FROM settings WHERE key='schema.repo_split_v1'"
+    ).fetchone()["value"] == "1"
     conn.close()

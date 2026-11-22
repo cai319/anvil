@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
+from ..services import ledger
 from ..services import tokens as tokens_service
 from ..services import wake as wake_service
 from ..schemas import InstructionIn, LessonIn, MemoryAppendIn, NoteWriteIn, ProposalIn
@@ -119,12 +120,12 @@ def reset_my_session(body: dict, request: Request, conn=Depends(get_db),
         role, cic=True, task_id=task_id, slice_key=run.get("slice_key"))
     services.runs.set_native_session(conn, run["id"], None)
     services.runs.set_status(conn, run["id"], "created")
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (role, task_id, "session.reset_context",
-         jdumps({"run_id": run["id"], "reason": reason}), now_iso()),
-    )
+    ledger.emit_audit(
+        conn, role_slug=role,
+        task_id=task_id,
+        action="session.reset_context",
+        payload=jdumps({"run_id": run["id"], "reason": reason}),
+        now=now_iso())
     conn.commit()
     rewoken = False
     orch = getattr(request.app.state, "orchestrator", None)

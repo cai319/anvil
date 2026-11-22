@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..platform import factory
+from ..schemas import ContextManifestOut, RunOut, SubagentRecordOut
 from ..util import ConflictError, now_iso
 from . import access
 
@@ -54,7 +55,7 @@ def start_run(body: dict, request: Request, conn=Depends(get_db),
     return run
 
 
-@router.get("/runs")
+@router.get("/runs", response_model=list[RunOut])
 def list_runs(role_slug: str | None = None, task_id: str | None = None,
               active: bool = False, conn=Depends(get_db),
               auth: Auth = Depends(get_auth)):
@@ -81,7 +82,7 @@ def list_runs(role_slug: str | None = None, task_id: str | None = None,
     return runs
 
 
-@router.get("/runs/{rid}")
+@router.get("/runs/{rid}", response_model=RunOut)
 def get_run(rid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     run = services.runs.get_run(conn, rid)
     if run is None:
@@ -100,7 +101,7 @@ def run_timeline(rid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth))
     return services.runs.run_timeline(conn, rid)
 
 
-@router.get("/runs/{rid}/subagents")
+@router.get("/runs/{rid}/subagents", response_model=list[SubagentRecordOut])
 def run_subagents(rid: str, status: str | None = None, limit: int = 100,
                   conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """该 run 的运行时子代理观测记录（只读；Anvil 不管理其状态机）。"""
@@ -321,7 +322,7 @@ def release_run(rid: str, conn=Depends(get_db), auth: Auth = Depends(require_hum
     return None
 
 
-@router.get("/runs/{rid}/context-manifest")
+@router.get("/runs/{rid}/context-manifest", response_model=list[ContextManifestOut])
 def context_manifest(rid: str, kind: str | None = None,
                      conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """本次 run 的 CIC/投影上下文清单（只含来源/预算元数据，不含正文）。"""

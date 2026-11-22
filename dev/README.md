@@ -123,6 +123,7 @@ runtime 是否支持 subagent。设计见
 
 ## 最近版本
 
+- `../docs/v1.48.0-release.md` — 状态单写者、子任务统一投影、OpenAPI 契约、CIC 冷唤醒
 - `../docs/v1.47.1-release.md` — 实时刷新与 spawn 状态机修复、系统备注归属、workflow 子代理标记
 - `../docs/v1.47.0-release.md` — HITL 认证隔离、对象级授权、workflow CAS、知识收割加固
 - `../docs/v1.46.0-release.md` — 知识入库必须条款、智能补全、任务完成自动收割、弹窗冻结

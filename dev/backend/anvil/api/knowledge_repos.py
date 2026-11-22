@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..deps import Auth, get_auth, get_db, require_human
+from ..schemas import TaskKnowledgePageOut, WorkspaceKnowledgePageOut
 from ..services import (knowledge_card, knowledge_clean, knowledge_quality,
                         knowledge_repos, knowledge_stats, repo_catalog,
                         repo_knowledge, task_knowledge, utility,
@@ -18,7 +19,7 @@ _KNOWLEDGE_STATUSES = {"draft", "proposed", "approved", "rejected", "deprecated"
 _TASK_KNOWLEDGE_STATUSES = {"active", "proposed", "archived"}
 
 
-@router.get("/cards")
+@router.get("/cards", response_model=WorkspaceKnowledgePageOut)
 def list_knowledge_cards(
     status: str | None = None, kind: str | None = None,
     workspace_id: str | None = None, q: str | None = None,
@@ -48,7 +49,7 @@ def knowledge_library_stats(
     return knowledge_stats.library_stats(conn)
 
 
-@router.get("/task-cards")
+@router.get("/task-cards", response_model=TaskKnowledgePageOut)
 def list_task_knowledge_cards(
     status: str | None = None, workspace_id: str | None = None,
     q: str | None = None, limit: int = 200, offset: int = 0,

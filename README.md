@@ -6,7 +6,7 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **前端**：React + TypeScript + Vite
 - **Agent CLI**：`anvil`，Agent 在自己的工具循环里调用它上报状态
 - **地址**：`http://127.0.0.1:7317`（仅回环）
-- **当前版本**：v1.47.1（实时刷新修复、spawn 状态机修复、workflow 子代理标记）
+- **当前版本**：v1.48.0（状态单写者、子任务统一投影、OpenAPI 契约、CIC 冷唤醒）
 
 > 架构、数据模型、工作流引擎与实现细节见 [design.md](design.md)。
 
@@ -384,6 +384,7 @@ anvil knowledge card-validate --file card.json --for-approval
 | `ANVIL_RESET_SESSION_ON_FAILURE` | `1` | 非零退出后丢弃旧 session |
 | `ANVIL_CIC_THRESHOLD_TOKENS` | `0` | 冷唤醒阈值；`0`=按模型窗口自动，`>0`=绝对覆盖 |
 | `ANVIL_CIC_RESET_RATIO` | `0.8` | 自动 CIC 阈值占模型窗口比例 |
+| `ANVIL_CIC_COLD_BUDGET_CHARS` | `32000` | 冷唤醒 CIC 首屏字符预算；其余内容走拉模式 |
 | `ANVIL_CONTEXT_HINT_RATIO` | `0.5` | 上下文提示阈值占模型窗口比例 |
 | `ANVIL_CONTEXT_HARD_RESET_RATIO` | `0.9` | 单轮内上下文达到窗口比例时主动换会话；`0`=关闭 |
 | `ANVIL_CONTEXT_OUTPUT_RESERVE` | `32000` | 硬阈值预留的响应额度（API 上限为 input+max_tokens） |
@@ -664,6 +665,7 @@ anvil init
 - [docs/v1.45.0-release.md](docs/v1.45.0-release.md)：v1.45.0 协作方式判断、角色一致性与 D1–D4 收尾
 - [docs/v1.45.1-release.md](docs/v1.45.1-release.md)：v1.45.1 角色删除关闭委派、dispatch 通知补投与 subagent 幽灵收尾
 - [docs/v1.45.2-release.md](docs/v1.45.2-release.md)：v1.45.2 收件箱委派验收、审批参与者预览与评测实跑
+- [docs/v1.48.0-release.md](docs/v1.48.0-release.md)：v1.48.0 状态单写者、子任务统一投影、OpenAPI 契约、CIC 冷唤醒
 - [docs/v1.47.1-release.md](docs/v1.47.1-release.md)：v1.47.1 实时刷新与 spawn 状态机修复、系统备注归属、workflow 子代理标记
 - [docs/v1.47.0-release.md](docs/v1.47.0-release.md)：v1.47.0 HITL 认证隔离、对象级授权、workflow CAS 与知识收割加固
 - [docs/v1.46.0-release.md](docs/v1.46.0-release.md)：v1.46.0 知识入库必须条款、智能补全、任务完成自动收割与弹窗冻结

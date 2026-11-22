@@ -6,7 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import (
-    FindingCompleteIn, FindingDecisionIn, FindingIn, FindingPatch, ReviewersIn,
+    FindingCompleteIn, FindingDecisionIn, FindingIn, FindingOut, FindingPatch,
+    FindingSchemaOut, FindingSummaryOut, ReviewersIn,
 )
 from ..services import findings as findings_service
 from ..services.tasks import ConflictError
@@ -108,13 +109,13 @@ def _wake_finding_reviewer(request: Request, conn, tid: str, role: str,
             pass
 
 
-@router.get("/tasks/{tid}/findings/schema")
+@router.get("/tasks/{tid}/findings/schema", response_model=FindingSchemaOut)
 def finding_schema(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     access.assert_task_read(conn, auth, tid)
     return findings_service.schema()
 
 
-@router.get("/tasks/{tid}/findings/summary")
+@router.get("/tasks/{tid}/findings/summary", response_model=FindingSummaryOut)
 def finding_summary(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     access.assert_task_read(conn, auth, tid)
     try:
@@ -151,7 +152,7 @@ def reopen_finding_board(tid: str, body: FindingDecisionIn, request: Request,
     return board
 
 
-@router.get("/tasks/{tid}/findings")
+@router.get("/tasks/{tid}/findings", response_model=list[FindingOut])
 def list_findings(tid: str, status: str | None = None, severity: str | None = None,
                   risk_type: str | None = None, q: str | None = None,
                   limit: int = 500, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
@@ -213,7 +214,7 @@ def external_submit_finding(tid: str, fid: str, conn=Depends(get_db),
     return finding
 
 
-@router.post("/tasks/{tid}/findings", status_code=201)
+@router.post("/tasks/{tid}/findings", status_code=201, response_model=FindingOut)
 def create_finding(tid: str, body: FindingIn, conn=Depends(get_db),
                    auth: Auth = Depends(get_auth)):
     access.assert_task_read(conn, auth, tid)
@@ -228,7 +229,7 @@ def create_finding(tid: str, body: FindingIn, conn=Depends(get_db),
     return finding
 
 
-@router.get("/tasks/{tid}/findings/{fid}")
+@router.get("/tasks/{tid}/findings/{fid}", response_model=FindingOut)
 def get_finding(tid: str, fid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     access.assert_task_read(conn, auth, tid)
     finding = findings_service.get_finding(conn, fid, tid)
@@ -237,7 +238,7 @@ def get_finding(tid: str, fid: str, conn=Depends(get_db), auth: Auth = Depends(g
     return finding
 
 
-@router.patch("/tasks/{tid}/findings/{fid}")
+@router.patch("/tasks/{tid}/findings/{fid}", response_model=FindingOut)
 def update_finding(tid: str, fid: str, body: FindingPatch, conn=Depends(get_db),
                    auth: Auth = Depends(get_auth)):
     access.assert_task_read(conn, auth, tid)
@@ -251,7 +252,7 @@ def update_finding(tid: str, fid: str, body: FindingPatch, conn=Depends(get_db),
     return finding
 
 
-@router.post("/tasks/{tid}/findings/{fid}/submit")
+@router.post("/tasks/{tid}/findings/{fid}/submit", response_model=FindingOut)
 def submit_finding(tid: str, fid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     access.assert_task_read(conn, auth, tid)
     _reviewer(conn, auth, tid)
@@ -263,7 +264,7 @@ def submit_finding(tid: str, fid: str, conn=Depends(get_db), auth: Auth = Depend
     return finding
 
 
-@router.post("/tasks/{tid}/findings/{fid}/confirm")
+@router.post("/tasks/{tid}/findings/{fid}/confirm", response_model=FindingOut)
 def confirm_finding(tid: str, fid: str, body: FindingDecisionIn,
                     conn=Depends(get_db), auth: Auth = Depends(require_human)):
     access.assert_task_read(conn, auth, tid)
@@ -276,7 +277,7 @@ def confirm_finding(tid: str, fid: str, body: FindingDecisionIn,
     return finding
 
 
-@router.post("/tasks/{tid}/findings/{fid}/false-positive")
+@router.post("/tasks/{tid}/findings/{fid}/false-positive", response_model=FindingOut)
 def false_positive_finding(tid: str, fid: str, body: FindingDecisionIn,
                            conn=Depends(get_db), auth: Auth = Depends(require_human)):
     access.assert_task_read(conn, auth, tid)
@@ -289,7 +290,7 @@ def false_positive_finding(tid: str, fid: str, body: FindingDecisionIn,
     return finding
 
 
-@router.post("/tasks/{tid}/findings/{fid}/request-changes")
+@router.post("/tasks/{tid}/findings/{fid}/request-changes", response_model=FindingOut)
 def request_finding_changes(tid: str, fid: str, body: FindingDecisionIn, request: Request,
                             conn=Depends(get_db), auth: Auth = Depends(require_human)):
     access.assert_task_read(conn, auth, tid)
@@ -304,7 +305,7 @@ def request_finding_changes(tid: str, fid: str, body: FindingDecisionIn, request
     return finding
 
 
-@router.post("/tasks/{tid}/findings/{fid}/reopen")
+@router.post("/tasks/{tid}/findings/{fid}/reopen", response_model=FindingOut)
 def reopen_finding(tid: str, fid: str, body: FindingDecisionIn, request: Request,
                    conn=Depends(get_db), auth: Auth = Depends(require_human)):
     access.assert_task_read(conn, auth, tid)

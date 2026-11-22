@@ -13,6 +13,7 @@ import sqlite3
 from copy import deepcopy
 
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
+from . import ledger
 from . import roles as roles_service
 from . import tasks as tasks_service
 from . import workflow as workflow_service
@@ -883,12 +884,14 @@ def apply_to_task(conn: sqlite3.Connection, task_id: str, tid: str,
         enforce_role_coverage=not acknowledge_uncovered,
         restart_running=restart_running, restart_reason=restart_reason,
         restart_note=restart_note)
-    conn.execute(
-        "INSERT INTO activities (task_id, role_slug, kind, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (task_id, "human", "comment", jdumps({
+    ledger.emit_activity(
+        conn, task_id=task_id,
+        role_slug="human",
+        kind="comment",
+        payload=jdumps({
             "body": f"已套用工作流模板「{template['name']}」v{ver['version']}。"
-        }), now_iso()))
+        }),
+        now=now_iso())
     conn.commit()
     return {"mode": "direct", "workflow": wf}
 

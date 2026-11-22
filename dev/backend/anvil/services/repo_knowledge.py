@@ -19,7 +19,7 @@ from pathlib import Path
 from .. import config
 from ..util import (ConflictError, jdumps, jloads, new_id, now_iso,
                     read_text_file)
-from . import knowledge, knowledge_card, knowledge_quality, knowledge_repos
+from . import knowledge, knowledge_card, knowledge_quality, knowledge_repos, ledger
 
 
 def repo_dir(repo_id: str) -> Path:
@@ -308,13 +308,14 @@ def approve(conn: sqlite3.Connection, card_id: str, *,
     assert approved is not None
     path = _write_card_file(approved["repo_id"], approved, "approved")
     _snapshot(conn, card_id, version, approved, actor)
-    conn.execute(
-        "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (actor, approved.get("source_task_id"), "knowledge.approve",
-         jdumps({"table": "repo_knowledge", "card_id": card_id,
+    ledger.emit_audit(
+        conn, role_slug=actor,
+        task_id=approved.get("source_task_id"),
+        action="knowledge.approve",
+        payload=jdumps({"table": "repo_knowledge", "card_id": card_id,
                  "repo_id": approved.get("repo_id"),
-                 "quality_score": quality["score"]}), now))
+                 "quality_score": quality["score"]}),
+        now=now)
     if commit:
         conn.commit()
     return {**approved, "path": path}

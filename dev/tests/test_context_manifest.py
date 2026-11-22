@@ -50,3 +50,26 @@ def test_cic_manifest_records_sources_without_cross_task_leak(conn, tmp_path):
     assert all("TA" not in (blk.get("source_ids") or []) for blk in b["blocks"])
     # 角色级知识可以跨任务出现，但 manifest 必须标注 scope=role。
     assert any(blk.get("scope") in ("role", "role_or_task") for blk in b["blocks"])
+
+
+def test_context_manifest_accepts_integer_source_ids():
+    """回归：CIC 块的 source_ids 可能是活动 id（整数），响应契约必须接受。"""
+    from anvil.schemas import ContextManifestOut
+
+    manifest = ContextManifestOut.model_validate({
+        "id": 1,
+        "run_id": "R1",
+        "role_slug": "dev",
+        "task_id": "T1",
+        "slice_key": None,
+        "kind": "cic",
+        "budget_chars": 32000,
+        "total_chars": 10,
+        "blocks": [{
+            "name": "recent_messages", "kind": "messages", "chars": 10,
+            "source_ids": [10484, "knowledge-1"],
+        }],
+        "omitted": [],
+        "created_at": "2026-11-22T00:00:00+00:00",
+    })
+    assert manifest.blocks[0].source_ids == [10484, "knowledge-1"]

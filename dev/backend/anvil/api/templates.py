@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..util import ConflictError
+from ..services import ledger
 from ..services import templates as template_service
 
 router = APIRouter()
@@ -16,15 +17,16 @@ router = APIRouter()
 def _audit(conn: sqlite3.Connection, request: Request, action: str, payload: dict) -> None:
     from ..util import jdumps, now_iso
     try:
-        conn.execute(
-            "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) "
-            "VALUES (?,?,?,?,?)",
-            ("human", None, action, jdumps({
+        ledger.emit_audit(
+            conn, role_slug="human",
+            task_id=None,
+            action=action,
+            payload=jdumps({
                 **payload,
                 "client": request.client.host if request.client else None,
                 "user_agent": request.headers.get("user-agent"),
-            }), now_iso()),
-        )
+            }),
+            now=now_iso())
         conn.commit()
     except Exception:  # noqa: BLE001
         pass

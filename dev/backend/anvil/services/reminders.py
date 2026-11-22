@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime, timedelta
 
 from ..util import ConflictError, jdumps, now_iso
+from . import ledger
 
 
 def _parse_field(field: str, lo: int, hi: int) -> set[int]:
@@ -228,10 +229,12 @@ def fire_due_reminders(conn: sqlite3.Connection, now: datetime | None = None) ->
                 conn.execute("UPDATE reminders SET status='error' WHERE id=?", (r["id"],))
             continue
         create_reminder_run(conn, role, r["prompt"] or "定时提醒")
-        conn.execute(
-            "INSERT INTO audit (role_slug, task_id, action, payload_json, created_at) VALUES (?,?,?,?,?)",
-            (role, None, "reminder", jdumps({"reminder_id": r["id"], "prompt": r["prompt"]}), now_iso()),
-        )
+        ledger.emit_audit(
+            conn, role_slug=role,
+            task_id=None,
+            action="reminder",
+            payload=jdumps({"reminder_id": r["id"], "prompt": r["prompt"]}),
+            now=now_iso())
         if r["kind"] == "cron" and r["cron_expr"]:
             try:
                 nxt = next_cron_fire(r["cron_expr"], now_dt)
