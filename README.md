@@ -642,6 +642,7 @@ anvil init
 > 内部规划、设计与实现状态文档仅本地保留，不随仓库发布。
 
 - [docs/cli-reference.md](docs/cli-reference.md)：CLI 命令、参数、规则、错误处理与示例
+- [dev/README.md](dev/README.md)：开发者入口（源码结构、本地开发与测试）
 - [docs/issue-board.md](docs/issue-board.md)：问题板（安全 findings）字段、状态机与提交/确认流程
 - [docs/v1.40.0-release.md](docs/v1.40.0-release.md)：v1.40.0 任务上下文隔离、分层知识库、质量门与 LLM 清洗变更方案
 - [docs/v1.41.0-release.md](docs/v1.41.0-release.md)：v1.41.0 问题板外部问题跟踪提交
