@@ -41,6 +41,17 @@ export function riskLabel(schema: FindingSchema | null, value: string): string {
   return schema?.risk_types?.[value] || value || "未分类";
 }
 
+// 静默刷新时用于判断 finding 是否真的变化。外部提交不递增 version，必须单列比较。
+const FINDING_REFRESH_KEYS = [
+  "id", "task_id", "version", "updated_at", "status",
+  "submitted_at", "decided_by", "decided_at", "decision_note",
+  "external_id", "external_source", "external_submitted_at",
+] as const satisfies readonly (keyof Finding)[];
+
+function findingUnchanged(prev: Finding, next: Finding): boolean {
+  return FINDING_REFRESH_KEYS.every((key) => prev[key] === next[key]);
+}
+
 const ENTRY_SEPARATORS = /[；;：:，,。.]/;
 const ENTRY_NUMBERS: Record<string, number> = {
   一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5,
@@ -156,13 +167,28 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
   const [busy, setBusy] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const openedAtRef = useRef(Date.now());
+  const loadedKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     let alive = true;
-    setFinding(null);
+    const key = `${taskId}:${findingId}`;
+    const isNewTarget = loadedKeyRef.current !== key;
+    loadedKeyRef.current = key;
+    if (isNewTarget) {
+      setFinding(null);
+      setError(null);
+    }
     api.getFinding(taskId, findingId)
-      .then((f) => { if (alive) setFinding(f); })
-      .catch((e) => { if (alive) setError(String(e)); });
+      .then((next) => {
+        if (!alive) return;
+        setFinding((prev) => (
+          prev && findingUnchanged(prev, next) ? prev : next
+        ));
+        setError(null);
+      })
+      .catch((e) => {
+        if (alive) setError(String(e));
+      });
     return () => { alive = false; };
   }, [taskId, findingId, reloadKey]);
 
