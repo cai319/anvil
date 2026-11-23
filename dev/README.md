@@ -123,6 +123,7 @@ runtime 是否支持 subagent。设计见
 
 ## 最近版本
 
+- `../docs/v1.48.2-release.md` — finding 确认弹窗加固与外部编号徽标统一
 - `../docs/v1.48.1-release.md` — 问题板确认弹窗与主题知识库视觉修复
 - `../docs/v1.48.0-release.md` — 状态单写者、子任务统一投影、OpenAPI 契约、CIC 冷唤醒
 - `../docs/v1.47.1-release.md` — 实时刷新与 spawn 状态机修复、系统备注归属、workflow 子代理标记

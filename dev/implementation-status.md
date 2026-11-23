@@ -771,3 +771,10 @@ cd frontend && npm run build         # tsc + vite build
 - **主题知识库**：左侧主题卡改为深色导航卡（黄边/竖条选中态）；知识卡改为独立纸张卡；纸面 chip/badge/status-closed/muted 补齐高对比配色；展开按钮移入页脚并为正文提供全宽纸面阅读区。
 - **验证**：前端 `tsc` + `build` 通过；无头 Chrome 1512×982 与 768px 验证导航、卡片、展开/收起、窄屏换行与无横向滚动；CDP 拦截接口注入样例卡，未写数据库；其他知识页签回归通过。
 - 发布说明：`docs/v1.48.1-release.md`。
+
+## finding 确认弹窗加固与徽标尺寸统一（2026-11-23，v1.48.2）
+
+- **确认弹窗**：遮罩守卫 400ms→900ms，并忽略双击产生的 `detail > 1` 第二下，覆盖 Windows 慢速双击；DialogHost 挂载前请求缓冲；备注输入支持 Enter。
+- **徽标**：`外部 #xx` 改用 `.finding-tag`，`.finding-status` 行高对齐；状态/标签/外部编号统一 10px、`2px 7px`、18px 高。
+- **验证**：无头 Chrome 验证慢速双击/第二次单击不关闭弹窗，超时后遮罩正常关闭；数据库副本调用 `confirm_finding` 成功，排除数据库重构因素。
+- 发布说明：`docs/v1.48.2-release.md`。
