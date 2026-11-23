@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useLiveRefresh } from "../../useLiveRefresh";
 import {
   api,
@@ -9,6 +9,7 @@ import {
   type TopicRepo,
 } from "../../api/client";
 import { EmptyState } from "../../components/ui";
+import { Icon } from "../../components/Icon";
 import {
   AUTHORITY_LABEL,
   KNOWLEDGE_KIND_LABEL,
@@ -76,6 +77,7 @@ function RepoCardRow({ card, selected, busy, channels, llmEnabled,
 }) {
   const [channel, setChannel] = useState("");
   const [open, setOpen] = useState(false);
+  const bodyId = useId();
   const reviewDue = Boolean(card.review_at
     && card.review_at.slice(0, 10) <= new Date().toISOString().slice(0, 10));
   return (
@@ -118,17 +120,16 @@ function RepoCardRow({ card, selected, busy, channels, llmEnabled,
           </span>
           <span className="knowledge-record-tldr">{card.tldr}</span>
           <QualityWarnings quality={card.quality} />
-          <button type="button" className="knowledge-record-toggle"
-            onClick={() => setOpen((v) => !v)}>
-            {open ? "收起知识卡" : "查看完整知识卡"}
-          </button>
-          {open && (
-            <div className="knowledge-record-body">
-              <KnowledgeFieldList kind={card.kind} fields={card.fields} />
-              <pre>{card.body_md}</pre>
-            </div>
-          )}
         </div>
+      </div>
+      <div className="knowledge-record-foot">
+        <button type="button" className="knowledge-record-toggle"
+          aria-expanded={open} aria-controls={open ? bodyId : undefined}
+          onClick={() => setOpen((v) => !v)}>
+          <Icon name={open ? "chevron-up" : "chevron-down"} size={13}
+            className="knowledge-record-toggle-icon" aria-hidden="true" />
+          <span>{open ? "收起知识卡" : "查看完整知识卡"}</span>
+        </button>
         <span className="knowledge-record-actions">
           {card.status === "proposed" && (
             <>
@@ -177,6 +178,12 @@ function RepoCardRow({ card, selected, busy, channels, llmEnabled,
           )}
         </span>
       </div>
+      {open && (
+        <div className="knowledge-record-body" id={bodyId}>
+          <KnowledgeFieldList kind={card.kind} fields={card.fields} />
+          <pre>{card.body_md}</pre>
+        </div>
+      )}
     </li>
   );
 }
@@ -195,6 +202,7 @@ function TaskQueueRow({ card, selected, busy, repos, promote, onToggle,
   onPromoteTarget: (repo: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const bodyId = useId();
   return (
     <li className="knowledge-record">
       <div className="knowledge-record-head">
@@ -222,17 +230,16 @@ function TaskQueueRow({ card, selected, busy, repos, promote, onToggle,
           </span>
           <span className="knowledge-record-tldr">{card.tldr}</span>
           <QualityWarnings quality={card.quality} />
-          <button type="button" className="knowledge-record-toggle"
-            onClick={() => setOpen((v) => !v)}>
-            {open ? "收起知识卡" : "查看完整知识卡"}
-          </button>
-          {open && (
-            <div className="knowledge-record-body">
-              <KnowledgeFieldList kind={card.kind} fields={card.fields} />
-              <pre>{card.body_md}</pre>
-            </div>
-          )}
         </div>
+      </div>
+      <div className="knowledge-record-foot">
+        <button type="button" className="knowledge-record-toggle"
+          aria-expanded={open} aria-controls={open ? bodyId : undefined}
+          onClick={() => setOpen((v) => !v)}>
+          <Icon name={open ? "chevron-up" : "chevron-down"} size={13}
+            className="knowledge-record-toggle-icon" aria-hidden="true" />
+          <span>{open ? "收起知识卡" : "查看完整知识卡"}</span>
+        </button>
         <span className="knowledge-record-actions">
           <button type="button" className="small primary" disabled={busy}
             onClick={() => {
@@ -258,6 +265,12 @@ function TaskQueueRow({ card, selected, busy, repos, promote, onToggle,
           <a className="small button-like" href={`/tasks/${card.task_id}`}>任务页</a>
         </span>
       </div>
+      {open && (
+        <div className="knowledge-record-body" id={bodyId}>
+          <KnowledgeFieldList kind={card.kind} fields={card.fields} />
+          <pre>{card.body_md}</pre>
+        </div>
+      )}
     </li>
   );
 }
@@ -513,7 +526,7 @@ export function TopicKnowledgeTab({ channels, onTotal }: {
       <aside className="topic-repos">
         <div className="topic-repos-head">
           <strong>主题知识库</strong>
-          <button type="button" className="small"
+          <button type="button" className="small ghost"
             onClick={() => setCreateOpen((v) => !v)}>
             {createOpen ? "取消" : "新建"}
           </button>
@@ -531,7 +544,8 @@ export function TopicKnowledgeTab({ channels, onTotal }: {
         )}
         <ul className="roles-list topic-repo-list">
           <li className={selectedRepo === "" ? "active" : ""}>
-            <button type="button" className="topic-repo-btn" onClick={() => setSelectedRepo("")}>
+            <button type="button" className="topic-repo-btn" aria-pressed={selectedRepo === ""}
+              onClick={() => setSelectedRepo("")}>
               <span className="topic-repo-name">全部主题</span>
               <span className="topic-repo-meta">
                 {repos.length} 个主题{pendingTotal > 0 ? ` · ${pendingTotal} 待批` : ""}
@@ -541,6 +555,7 @@ export function TopicKnowledgeTab({ channels, onTotal }: {
           {repos.map((repo) => (
             <li key={repo.id} className={selectedRepo === repo.display_name ? "active" : ""}>
               <button type="button" className="topic-repo-btn"
+                aria-pressed={selectedRepo === repo.display_name}
                 onClick={() => setSelectedRepo(repo.display_name)}>
                 <span className="topic-repo-name">{repo.display_name}</span>
                 <span className="topic-repo-meta">
