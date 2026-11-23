@@ -1122,9 +1122,12 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
 .finding-sev.is-info { color: var(--ink-900); background: var(--paper-2); border-color: var(--paper-2); }
 
 .finding-status {
+  display: inline-flex;
+  align-items: center;
   padding: 2px 7px;
   border-radius: 99px;
   font-size: 10px;
+  line-height: 1.2;
   font-weight: 800;
   border: 1.5px solid currentColor;
 }

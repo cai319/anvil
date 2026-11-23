@@ -347,7 +347,7 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
                     <span className="finding-tag">{riskLabel(schema, f.risk_type)}</span>
                     <span className="finding-tag">置信度 {f.confidence}%</span>
                     {f.external_id && (
-                      <span className="chip finding-external-badge">外部 #{f.external_id}</span>
+                      <span className="finding-tag finding-external-badge">外部 #{f.external_id}</span>
                     )}
                     <span className="muted">by {f.author_role} · {f.updated_at}</span>
                   </span>

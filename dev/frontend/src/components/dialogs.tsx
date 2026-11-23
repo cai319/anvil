@@ -32,11 +32,14 @@ type Request =
   | { kind: "prompt"; opts: DialogOptions; resolve: (value: string | null) => void };
 
 let pushRequest: ((req: Request) => void) | null = null;
+// DialogHost 尚未挂载（或极早点击）时先缓冲，挂载后立即消费，避免 Promise 永久悬挂。
+const pendingRequests: Request[] = [];
 
 function enqueue(req: Request): Promise<boolean | string | null> {
   return new Promise((resolve) => {
     req.resolve = resolve as never;
-    pushRequest?.(req);
+    if (pushRequest) pushRequest(req);
+    else pendingRequests.push(req);
   });
 }
 
@@ -64,6 +67,10 @@ export function DialogHost() {
 
   useEffect(() => {
     pushRequest = (next) => setQueue((prev) => [...prev, next]);
+    if (pendingRequests.length > 0) {
+      const buffered = pendingRequests.splice(0);
+      setQueue((prev) => [...prev, ...buffered]);
+    }
     return () => { pushRequest = null; };
   }, []);
 
@@ -100,7 +107,7 @@ export function DialogHost() {
   return createPortal(
     <div className="modal-overlay"
       onMouseDown={(e) => e.target === e.currentTarget
-        && canCloseOnBackdrop(openedAtRef.current)
+        && canCloseOnBackdrop(openedAtRef.current, e.detail)
         && finish(req.kind === "prompt" ? null : false)}>
       <div className="modal confirm-dialog" role="dialog" aria-modal="true"
         aria-label={opts.title}>
@@ -120,7 +127,10 @@ export function DialogHost() {
                 onChange={(e) => { valueRef.current = e.target.value; setValue(e.target.value); }} />
             ) : (
               <input autoFocus value={value} placeholder={opts.input?.placeholder}
-                onChange={(e) => { valueRef.current = e.target.value; setValue(e.target.value); }} />
+                onChange={(e) => { valueRef.current = e.target.value; setValue(e.target.value); }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !disabled) finish(valueRef.current);
+                }} />
             )}
           </label>
         )}

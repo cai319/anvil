@@ -303,7 +303,7 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
   return createPortal(
     <div className="modal-overlay finding-drawer-overlay"
       onMouseDown={(e) => e.target === e.currentTarget
-        && canCloseOnBackdrop(openedAtRef.current)
+        && canCloseOnBackdrop(openedAtRef.current, e.detail)
         && onClose()}>
       <aside className="modal finding-drawer" role="dialog" aria-modal="true"
         aria-label={finding?.title || "Finding 详情"}>
@@ -322,7 +322,7 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
                 <span className="finding-tag">置信度 {finding.confidence}%</span>
                 <span className="finding-tag">{riskLabel(schema, finding.risk_type)}</span>
                 {finding.external_id && (
-                  <span className="chip finding-external-badge">
+                  <span className="finding-tag finding-external-badge">
                     外部 #{finding.external_id}
                   </span>
                 )}
