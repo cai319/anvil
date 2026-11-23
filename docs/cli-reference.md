@@ -294,7 +294,7 @@ anvil workflow revise <wf> --file revision.json             # 创建修订草案
   重排切片、修改 running/submitted/approved 步骤都会 `requires_restart`。
 - `external_nodes` 与切片修订互斥；目标或重跑范围内有 running 步骤时先等待。
 - 同一 workflow 同时只允许一个待审修订；有待审完整 workflow 草案时也会 409。
-- 详细设计见 `docs/workflow-revision.md`。
+- 详细设计见本地设计文档（不随仓库发布）。
 
 ## 5.2 问题板：`anvil finding`
 

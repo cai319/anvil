@@ -3,6 +3,9 @@
 Anvil 是一个本地运行的多 Agent 编排服务：纳管运行时（Claude Code 等）、管理角色与私有工作区、
 提供带租约的任务板、记忆（FTS5）、reminder 与治理审计。
 
+> 内部规划、设计、实现状态与问题分析文档（根目录 `design.md`、`docs/superpowers`、
+> `dev/plan-*`、`architecture-*`、`implementation-status` 等）仅本地保留，不随仓库发布。
+
 - **backend/** — FastAPI 后端（状态存 SQLite，文件是真相层）
 - **agentcli/** — `anvil` 命令行（Typer），走同一套 REST API（`X-Anvil-Session` 鉴权）
 - **frontend/** — React + TypeScript（大厅 + 任务详情 + 频道 + 知识库 + 角色工坊）
@@ -65,7 +68,7 @@ v1.30 起明确区分三个容易混淆的概念：
 422；共享经验与角色知识支持角色按自身上下文智能补全，角色忙碌时排队。顶层任务在 Cindy
 规划、human 批准 workflow 落板后自动获得一条 `when(task done)` 知识收割提醒；任务完成时
 Cindy 收割任务/主题/频道知识，只写 proposed，审批仍由 human/任务参与者完成。详见
-`../docs/v1.30-channel-knowledge.md` 与 `../docs/v1.47.0-release.md`。
+本地 v1.30 方案文档（不随仓库发布）与 `../docs/v1.47.0-release.md`。
 
 ## 问题板（Issue Board）
 
@@ -79,7 +82,7 @@ Cindy 在规划时从已选角色中指定 reviewer，并保证 workflow 覆盖�
 
 ## 当前实现状态
 
-详见 `implementation-status.md`（各里程碑的已实现 / 未实现清单）。当前自动化测试：
+详见本地 `implementation-status.md`（不随仓库发布；各里程碑的已实现 / 未实现清单）。当前自动化测试：
 **1005 passed + 63 skipped**（CLI 契约需要 `ANVIL_BIN` 才运行；模型评测需要
 `ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。
 

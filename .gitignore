@@ -26,3 +26,21 @@ log/
 
 # Superpowers local brainstorm/cache
 .superpowers/
+
+# Local-only planning / design / internal docs (not published)
+/docs/superpowers/
+/docs/design/
+/docs/anvil-roadmap-*.pptx
+/docs/v1.30-channel-knowledge.md
+/docs/workflow-revision.md
+/design.md
+/optimization-roadmap.md
+/dev/anvil-next-stage-implementation-plan.md
+/dev/plan-p0-reliability-and-plan-first.md
+/dev/architecture-*.md
+/dev/implementation-status.md
+/dev/acceptance-tests.md
+/dev/issues-*.md
+/dev/raft-gap-analysis.md
+/dev/spec-*.md
+/dev/*-design.md

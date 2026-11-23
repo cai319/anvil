@@ -8,7 +8,7 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **地址**：`http://127.0.0.1:7317`（仅回环）
 - **当前版本**：v1.48.6（finding 详情静默刷新）
 
-> 架构、数据模型、工作流引擎与实现细节见 [design.md](design.md)。
+> 内部架构、设计与实现状态文档仅本地保留，不随仓库发布。
 
 ## 目录
 
@@ -240,8 +240,7 @@ anvil init
   `context_fit`、`hard_limit_tokens` 等指标。
 - **删除 vs 取消**：删除任务会回收该任务的常驻进程/会话；取消（`closed`）保留进程/会话，`reopen` 可继续。
 
-> 窗口解析优先级、阈值公式、模型切换与同族后缀处理等实现细节见
-> [design.md §2.7](design.md#27-上下文窗口与模型路由)。
+> 窗口解析优先级、阈值公式、模型切换与同族后缀处理等实现细节见本地设计文档（不随仓库发布）。
 
 ### 3.6 常用 CLI
 
@@ -640,9 +639,9 @@ anvil init
 
 ## 9. 文档
 
-- [design.md](design.md)：架构、数据模型、工作流引擎、上下文与模型策略
+> 内部规划、设计与实现状态文档仅本地保留，不随仓库发布。
+
 - [docs/cli-reference.md](docs/cli-reference.md)：CLI 命令、参数、规则、错误处理与示例
-- [docs/v1.30-channel-knowledge.md](docs/v1.30-channel-knowledge.md)：频道、知识作用域、知识卡、归档与效果评估方案
 - [docs/issue-board.md](docs/issue-board.md)：问题板（安全 findings）字段、状态机与提交/确认流程
 - [docs/v1.40.0-release.md](docs/v1.40.0-release.md)：v1.40.0 任务上下文隔离、分层知识库、质量门与 LLM 清洗变更方案
 - [docs/v1.41.0-release.md](docs/v1.41.0-release.md)：v1.41.0 问题板外部问题跟踪提交
@@ -675,6 +674,5 @@ anvil init
 - [docs/v1.47.1-release.md](docs/v1.47.1-release.md)：v1.47.1 实时刷新与 spawn 状态机修复、系统备注归属、workflow 子代理标记
 - [docs/v1.47.0-release.md](docs/v1.47.0-release.md)：v1.47.0 HITL 认证隔离、对象级授权、workflow CAS 与知识收割加固
 - [docs/v1.46.0-release.md](docs/v1.46.0-release.md)：v1.46.0 知识入库必须条款、智能补全、任务完成自动收割与弹窗冻结
-- [docs/workflow-revision.md](docs/workflow-revision.md)：运行中 workflow 的增量修订（安全变更不重启任务）
 - [docs/operations.md](docs/operations.md)：打包、备份/迁移/重置、卸载
 - [docs/troubleshooting.md](docs/troubleshooting.md)：详细排查
