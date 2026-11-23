@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { canCloseOnBackdrop } from "../dialogGuard";
 import { Icon } from "./Icon";
 
 /**
@@ -53,6 +54,13 @@ export function DialogHost() {
   const req = queue[0] ?? null;
   const valueRef = useRef("");
   const doneRef = useRef(false);
+  const activeReqRef = useRef<Request | null>(null);
+  const openedAtRef = useRef(0);
+  // 在提交阶段前记录弹层出现时间：触发按钮的连点第二下会落在遮罩上，需被忽略。
+  if (req !== activeReqRef.current) {
+    activeReqRef.current = req;
+    openedAtRef.current = req ? Date.now() : 0;
+  }
 
   useEffect(() => {
     pushRequest = (next) => setQueue((prev) => [...prev, next]);
@@ -92,6 +100,7 @@ export function DialogHost() {
   return createPortal(
     <div className="modal-overlay"
       onMouseDown={(e) => e.target === e.currentTarget
+        && canCloseOnBackdrop(openedAtRef.current)
         && finish(req.kind === "prompt" ? null : false)}>
       <div className="modal confirm-dialog" role="dialog" aria-modal="true"
         aria-label={opts.title}>

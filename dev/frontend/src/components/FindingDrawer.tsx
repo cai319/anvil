@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, type Finding, type FindingSchema } from "../api/client";
+import { canCloseOnBackdrop } from "../dialogGuard";
 import { useLiveRefresh } from "../useLiveRefresh";
 import { confirmDialog, promptDialog } from "../components/dialogs";
 import { Icon } from "../components/Icon";
@@ -147,6 +148,7 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const openedAtRef = useRef(Date.now());
 
   useEffect(() => {
     let alive = true;
@@ -166,7 +168,10 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
   });
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e: KeyboardEvent) => {
+      // 上层确认弹窗打开时，Escape 只取消弹窗，不能连带关闭抽屉。
+      if (e.key === "Escape" && !document.querySelector(".confirm-dialog")) onClose();
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
@@ -297,7 +302,9 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
 
   return createPortal(
     <div className="modal-overlay finding-drawer-overlay"
-      onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      onMouseDown={(e) => e.target === e.currentTarget
+        && canCloseOnBackdrop(openedAtRef.current)
+        && onClose()}>
       <aside className="modal finding-drawer" role="dialog" aria-modal="true"
         aria-label={finding?.title || "Finding 详情"}>
         <div className="modal-head finding-drawer-head">
