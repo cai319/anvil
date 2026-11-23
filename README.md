@@ -6,7 +6,7 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **前端**：React + TypeScript + Vite
 - **Agent CLI**：`anvil`，Agent 在自己的工具循环里调用它上报状态
 - **地址**：`http://127.0.0.1:7317`（仅回环）
-- **当前版本**：v1.48.4（finding 详情居中弹窗与尺寸调整）
+- **当前版本**：v1.48.5（finding 详情弹窗尺寸再放大）
 
 > 架构、数据模型、工作流引擎与实现细节见 [design.md](design.md)。
 
@@ -665,6 +665,7 @@ anvil init
 - [docs/v1.45.0-release.md](docs/v1.45.0-release.md)：v1.45.0 协作方式判断、角色一致性与 D1–D4 收尾
 - [docs/v1.45.1-release.md](docs/v1.45.1-release.md)：v1.45.1 角色删除关闭委派、dispatch 通知补投与 subagent 幽灵收尾
 - [docs/v1.45.2-release.md](docs/v1.45.2-release.md)：v1.45.2 收件箱委派验收、审批参与者预览与评测实跑
+- [docs/v1.48.5-release.md](docs/v1.48.5-release.md)：v1.48.5 finding 详情弹窗尺寸再放大
 - [docs/v1.48.4-release.md](docs/v1.48.4-release.md)：v1.48.4 finding 详情居中弹窗与尺寸调整
 - [docs/v1.48.3-release.md](docs/v1.48.3-release.md)：v1.48.3 安全 finding 详情页报告式纸张重设计
 - [docs/v1.48.2-release.md](docs/v1.48.2-release.md)：v1.48.2 finding 确认弹窗加固与外部编号徽标统一
