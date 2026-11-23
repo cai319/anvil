@@ -123,6 +123,7 @@ runtime 是否支持 subagent。设计见
 
 ## 最近版本
 
+- `../docs/v1.48.6-release.md` — finding 详情静默刷新
 - `../docs/v1.48.5-release.md` — finding 详情弹窗尺寸再放大
 - `../docs/v1.48.4-release.md` — finding 详情居中弹窗与尺寸调整
 - `../docs/v1.48.3-release.md` — 安全 finding 详情页报告式纸张重设计
