@@ -396,8 +396,70 @@ def get(conn: sqlite3.Connection, slug: str) -> dict | None:
     return _row(r) if r else None
 
 
-def list_all(conn: sqlite3.Connection) -> list[dict]:
-    return [_row(r) for r in conn.execute("SELECT * FROM roles ORDER BY slug")]
+def is_deleted(conn: sqlite3.Connection, slug: str) -> bool:
+    """该 slug 是否有已删除角色的展示快照（用于拒绝后续写操作）。"""
+    return conn.execute(
+        "SELECT 1 FROM role_snapshots WHERE slug=? LIMIT 1", (slug,)
+    ).fetchone() is not None
+
+
+def list_all(conn: sqlite3.Connection, *, include_deleted: bool = False) -> list[dict]:
+    roles = [_row(r) for r in conn.execute("SELECT * FROM roles ORDER BY slug")]
+    if not include_deleted:
+        return roles
+    active = {role["slug"] for role in roles}
+    for snap in conn.execute("SELECT * FROM role_snapshots ORDER BY slug"):
+        if snap["slug"] not in active:
+            roles.append(_snapshot_row(snap))
+    return roles
+
+
+def backfill_snapshots(conn: sqlite3.Connection) -> int:
+    """为已删除但仍被历史数据引用的角色回填最小显示快照。
+
+    只读 role_versions 的最新版本；没有版本时回退到 slug。幂等，可由启动清理调用。
+    """
+    refs: set[str] = set()
+    for sql in (
+        "SELECT DISTINCT assignee FROM tasks WHERE assignee IS NOT NULL AND assignee <> ''",
+        "SELECT DISTINCT role_slug FROM task_assignees",
+        "SELECT DISTINCT role_slug FROM task_reviewers",
+        "SELECT DISTINCT role_slug FROM workflow_steps WHERE role_slug IS NOT NULL",
+        "SELECT DISTINCT role_slug FROM runs WHERE role_slug IS NOT NULL",
+        "SELECT DISTINCT role_slug FROM workspace_participants",
+    ):
+        try:
+            refs.update(str(row[0]) for row in conn.execute(sql) if row[0])
+        except sqlite3.OperationalError:
+            continue
+    active = {str(row[0]) for row in conn.execute("SELECT slug FROM roles")}
+    missing = refs - active
+    if not missing:
+        return 0
+    existing = {
+        str(row[0]) for row in conn.execute("SELECT slug FROM role_snapshots")
+    }
+    added = 0
+    for slug in sorted(missing - existing):
+        version = conn.execute(
+            "SELECT display_name, definition_json FROM role_versions "
+            "WHERE slug=? ORDER BY version DESC LIMIT 1", (slug,)
+        ).fetchone()
+        display_name = str(version[0]) if version else slug
+        definition = jloads(version[1], {}) if version else {}
+        if not isinstance(definition, dict):
+            definition = {}
+        conn.execute(
+            "INSERT OR IGNORE INTO role_snapshots "
+            "(slug, display_name, avatar_color, avatar, deleted_at) "
+            "VALUES (?,?,?,?,?)",
+            (slug, display_name, definition.get("avatar_color"),
+             definition.get("avatar"), now_iso()),
+        )
+        added += 1
+    if added:
+        conn.commit()
+    return added
 
 
 def update(conn: sqlite3.Connection, slug: str, **fields) -> dict | None:
@@ -442,9 +504,45 @@ def update_avatar(conn: sqlite3.Connection, slug: str, avatar: str | None) -> di
 
 def delete(conn: sqlite3.Connection, slug: str) -> bool:
     role = get(conn, slug)
-    if role and jloads(role.get("definition_json") or "{}", {}).get("kind") == "onboarding":
+    if role is None:
+        return False
+    if jloads(role.get("definition_json") or "{}", {}).get("kind") == "onboarding":
         from ..util import ConflictError
         raise ConflictError("built-in onboarding assistant cannot be deleted")
+
+    # 有活跃 run 时拒绝删除：用户应先释放会话，避免留下一张幽灵实时会话卡。
+    from . import runs as runs_service  # 惰性导入，避免 runs -> roles 循环依赖
+    active = conn.execute(
+        "SELECT id FROM runs WHERE role_slug=? AND status IN ("
+        + ",".join("?" * len(runs_service.ACTIVE_RUN_STATUSES)) + ")",
+        (slug, *runs_service.ACTIVE_RUN_STATUSES),
+    ).fetchall()
+    if active:
+        raise ConflictError(
+            f"role {slug} still has {len(active)} active run(s); "
+            "release them before deleting")
+
+    # 删除前保留最小展示快照；历史任务通过快照继续显示名称/头像。
+    conn.execute(
+        "INSERT INTO role_snapshots "
+        "(slug, display_name, avatar_color, avatar, deleted_at) "
+        "VALUES (?,?,?,?,?) "
+        "ON CONFLICT(slug) DO UPDATE SET "
+        "display_name=excluded.display_name, avatar_color=excluded.avatar_color, "
+        "avatar=excluded.avatar, deleted_at=excluded.deleted_at",
+        (slug, role["display_name"], role.get("avatar_color"),
+         role.get("avatar"), now_iso()),
+    )
+
+    # 无活跃 run 时停止空闲常驻进程；失败不阻断删除。
+    try:
+        from . import daemon as daemon_service
+        mgr = daemon_service.get_manager()
+        if mgr is not None:
+            mgr.kill(slug)
+    except Exception:  # noqa: BLE001
+        logger.warning("failed to stop role process before delete: %s", slug, exc_info=True)
+
     # 被删角色名下的 open 委派无人处理：先按人工取消语义关闭并唤醒父 step，
     # 避免父 workflow 永久等待一个已不存在的角色。
     from . import tasks as tasks_service
@@ -690,4 +788,23 @@ def _row(r) -> dict:
         d["avatar"] = fallback if isinstance(fallback, str) else None
     # 跨平台/迁移：DB 里的绝对 home_path 可能来自旧系统；以当前数据目录为准。
     d["home_path"] = str(config.AGENTS_DIR / d["slug"])
+    d["deleted"] = False
     return d
+
+
+def _snapshot_row(r) -> dict:
+    """已删除角色的展示行；不暴露可运行配置。"""
+    d = dict(r)
+    deleted_at = d.get("deleted_at") or now_iso()
+    return {
+        "slug": d["slug"],
+        "display_name": d["display_name"],
+        "avatar_color": d.get("avatar_color"),
+        "avatar": d.get("avatar"),
+        "home_path": str(config.AGENTS_DIR / d["slug"]),
+        "enabled": False,
+        "created_at": deleted_at,
+        "updated_at": deleted_at,
+        "definition": {},
+        "deleted": True,
+    }

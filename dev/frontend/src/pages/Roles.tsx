@@ -220,7 +220,8 @@ export function Roles() {
   const remove = async (r: Role) => {
     const ok = await confirmDialog({
       title: "删除角色？",
-      message: `将删除「${r.display_name}（${r.slug}）」，该操作不可恢复。`,
+      message: `将删除「${r.display_name}（${r.slug}）」，该操作不可恢复。`
+        + " 若该角色仍有活跃会话/运行，请先释放；删除会被拒绝。",
       confirmLabel: "删除角色",
       danger: true,
     });

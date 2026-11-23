@@ -132,7 +132,7 @@ export function TaskReplay({ id }: { id: string }) {
     Promise.all([
       api.getTask(id),
       api.getTaskTimeline(id),
-      api.listRoles(),
+      api.listRoles({ includeDeleted: true }),
       api.listTaskWorkflows(id),
     ]).then(async ([t, tl, rs, hs]) => {
       if (!alive) return;

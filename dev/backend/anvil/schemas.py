@@ -98,6 +98,7 @@ class RoleOut(BaseModel):
     created_at: str
     updated_at: str
     definition: dict[str, Any] = Field(default_factory=dict)  # 角色画像（description/capabilities/system_prompt…）
+    deleted: bool = False
 
 
 class ToolsIn(BaseModel):

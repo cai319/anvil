@@ -1431,6 +1431,17 @@ def dispatch_task(tid: str, request: Request, conn=Depends(get_db),
     if t is None:
         raise HTTPException(status_code=404, detail="task not found")
     assignees = _assignee_slugs(conn, tid)
+    for role in assignees:
+        role_row = services.roles.get(conn, role)
+        if role_row is None:
+            if services.roles.is_deleted(conn, role):
+                raise HTTPException(
+                    status_code=409, detail=f"role {role} has been deleted")
+            # 兼容历史/测试中的未建角色引用；已删除角色由快照明确拦截。
+            continue
+        if not role_row.get("enabled", True):
+            raise HTTPException(
+                status_code=409, detail=f"role {role} is disabled")
     pending = conn.execute(
         "SELECT id, kind FROM board_drafts WHERE source_task=? AND status='pending'", (tid,)
     ).fetchone()

@@ -348,7 +348,7 @@ export function TaskDetail({ id }: { id: string }) {
     refreshWorkflow();
     refreshChildren();
     refreshRoleStates();
-    api.listRoles().then(setRoles).catch(() => {});
+    api.listRoles({ includeDeleted: true }).then(setRoles).catch(() => {});
     api.listWorkflowTemplates(undefined, "active").then((list) => {
       setSeedTemplates(list.filter((item) => item.published_version
         && (item.use_mode === "seed" || item.use_mode === "both")));
@@ -607,7 +607,7 @@ export function TaskDetail({ id }: { id: string }) {
     }
   };
 
-  const assignableRoles = roles.filter((r) => !isOnboardingRole(r));
+  const assignableRoles = roles.filter((r) => !r.deleted && !isOnboardingRole(r));
 
   // 优先联想任务参与角色；Cindy（onboarding 助理）和 task.planner 指向的真实角色始终加入：
   // 系统 @human 通知由它们发出，human 需要能直接 @ 回去答复。
@@ -621,7 +621,7 @@ export function TaskDetail({ id }: { id: string }) {
     : undefined;
   const extraSeen = new Set<string>();
   const extraMentionRoles = [onboardingAssistant, plannerRole]
-    .filter((r): r is Role => Boolean(r))
+    .filter((r): r is Role => r !== undefined && !r.deleted)
     .filter((r) => {
       if (baseMentionRoles.some((x) => x.slug === r.slug)
           || extraSeen.has(r.slug)) return false;

@@ -128,6 +128,7 @@ export function Lobby() {
   const now = useNow(30_000); // 运行时长按系统当前时间刷新
 
   const runtimeByRole = new Map(roleRuntimes.map((rt) => [rt.role_slug, rt]));
+  const activeRoles = roles.filter((role) => !role.deleted);
   // 一个角色同一时刻只保留一个实时会话：优先当前上下文任务，其次最近创建的 run。
   // 已完成任务遗留的 suspended run 仍会留在数据库，但不再重复占据实时面板。
   const visibleRuns = useMemo(() => {
@@ -207,7 +208,7 @@ export function Lobby() {
 
   const globalToneByRole = useMemo(() => {
     const out: Record<string, StatusTone> = {};
-    for (const role of roles) {
+    for (const role of activeRoles) {
       const visible = visibleRuns.find((r) => r.role_slug === role.slug);
       out[role.slug] = globalRoleState({
         runtime: runtimeByRole.get(role.slug),
@@ -216,20 +217,21 @@ export function Lobby() {
       }).tone;
     }
     return out;
-  }, [roles, visibleRuns, roleRuntimes, latestRunStatusByRole]);
+  }, [activeRoles, visibleRuns, roleRuntimes, latestRunStatusByRole]);
 
   const refresh = async () => {
     try {
       const [t, r, n, rt, cs] = await Promise.all([
         api.listTasks(),
-        api.listRoles(),
+        api.listRoles({ includeDeleted: true }),
         api.listActiveRuns(),
         api.listRoleRuntimes().catch(() => [] as RoleRuntimeStatus[]),
         api.listChannels().catch(() => [] as Channel[]),
       ]);
       setTasks(t);
       setRoles(r);
-      setRuns(n);
+      const activeSlugs = new Set(r.filter((role) => !role.deleted).map((role) => role.slug));
+      setRuns(n.filter((run) => activeSlugs.has(run.role_slug)));
       setRoleRuntimes(rt);
       setChannels(cs);
       const ids = t.map((task) => task.id);
@@ -316,7 +318,7 @@ export function Lobby() {
       <PageHeader
         kicker="MISSION BOARD"
         title="任务大厅"
-        subtitle={`${roles.length} 个角色 · ${visibleRuns.length} 个活跃会话`}
+        subtitle={`${activeRoles.length} 个角色 · ${visibleRuns.length} 个活跃会话`}
         actions={
           <>
             {panel.collapsed && (

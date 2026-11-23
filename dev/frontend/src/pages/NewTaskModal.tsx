@@ -26,7 +26,7 @@ export function NewTaskModal({ roles, roleStatus, channels = [], defaultChannelI
   const [error, setError] = useState<string | null>(null);
   const composingRef = useRef(false);
 
-  const candidates = roles.filter((r) => !isOnboardingRole(r));
+  const candidates = roles.filter((r) => !r.deleted && !isOnboardingRole(r));
   const selectedChannel = channelOptions.find((c) => c.id === channelId) ?? null;
 
   useEffect(() => {

@@ -398,6 +398,42 @@ def heal_stale_runs(conn: sqlite3.Connection) -> dict:
     return {"healed": healed, "terminated": terminated}
 
 
+def abandon_orphan_active_runs(conn: sqlite3.Connection) -> int:
+    """回收角色已删除但 run 仍活跃的残留会话。
+
+    角色不存在时这些 run 不可能再被合法唤醒；标 abandoned 保留历史，并尽量终止
+    遗留进程，避免实时看板继续显示幽灵会话。
+    """
+    rows = conn.execute(
+        "SELECT r.id, r.native_session_id FROM runs r "
+        "LEFT JOIN roles ro ON ro.slug=r.role_slug "
+        "WHERE ro.slug IS NULL AND r.status IN ("
+        + ",".join("?" * len(ACTIVE_RUN_STATUSES)) + ")",
+        ACTIVE_RUN_STATUSES,
+    ).fetchall()
+    if not rows:
+        return 0
+    try:
+        from ..platform import factory
+        pm = factory.get_platform()[0]
+    except Exception:  # noqa: BLE001
+        pm = None
+    abandoned = 0
+    for row in rows:
+        rid, native_session_id = row[0], row[1]
+        if pm is not None and native_session_id:
+            try:
+                pm.terminate(native_session_id)
+            except Exception:  # noqa: BLE001 —— 启动自愈尽力而为
+                pass
+        if set_status(
+            conn, rid, "abandoned", ended_at=now_iso(),
+            failure_class="role_missing", from_statuses=ACTIVE_RUN_STATUSES,
+        ):
+            abandoned += 1
+    return abandoned
+
+
 def set_native_session(conn: sqlite3.Connection, run_id: str, native_session_id: str | None) -> None:
     conn.execute("UPDATE runs SET native_session_id=? WHERE id=?", (native_session_id, run_id))
     conn.commit()

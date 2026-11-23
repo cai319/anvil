@@ -338,6 +338,15 @@ CREATE TABLE IF NOT EXISTS role_versions (
     PRIMARY KEY (slug, version)
 );
 
+-- 已删除角色的最小显示快照：仅用于任务/历史展示，不参与调度或角色查询。
+CREATE TABLE IF NOT EXISTS role_snapshots (
+    slug         TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    avatar_color TEXT,
+    avatar       TEXT,
+    deleted_at   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS role_tools (
     role_slug       TEXT PRIMARY KEY,
     preset          TEXT,

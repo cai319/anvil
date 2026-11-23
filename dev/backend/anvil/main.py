@@ -155,6 +155,9 @@ def _cleanup_orphans(conn) -> None:
     conn.execute(
         "DELETE FROM reminders WHERE role_slug IS NOT NULL "
         "AND role_slug NOT IN (SELECT slug FROM roles)")
+    # 角色已删除但历史任务/run 仍引用它：先回填展示快照，再回收不可能再唤醒的活跃 run。
+    roles_service.backfill_snapshots(conn)
+    runs_service.abandon_orphan_active_runs(conn)
     conn.commit()
 
 

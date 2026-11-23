@@ -134,7 +134,8 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
         raise ConflictError(f"task id {tid!r} is reserved")
     now = now_iso()
     tags = knowledge.normalize_tags(tags or [])
-    _assert_assignable(conn, assignees or [])
+    _assert_assignable(
+        conn, ([assignee] if assignee else []) + list(assignees or []))
     if parent_id:
         # 子任务从属于父任务：继承 workspace/repo/base_branch，禁止覆盖结构标记。
         parent = get(conn, parent_id)
@@ -230,10 +231,18 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
 
 
 def _assert_assignable(conn: sqlite3.Connection, roles: list[str]) -> None:
-    """onboarding 助理是系统默认角色，不能作为任务参与成员。"""
+    """任务参与角色必须存在且启用；onboarding 助理不能作为任务成员。"""
     from . import roles as roles_service
 
     for slug in roles:
+        role = roles_service.get(conn, slug)
+        if role is None:
+            if roles_service.is_deleted(conn, slug):
+                raise ConflictError(f"role {slug} has been deleted")
+            # 兼容历史/测试中的未建角色引用；已删除角色由快照明确拦截。
+            continue
+        if not role.get("enabled", True):
+            raise ConflictError(f"role {slug} is disabled")
         if roles_service.is_onboarding(conn, slug):
             raise ConflictError(f"{slug} is the built-in onboarding assistant and cannot join tasks")
 

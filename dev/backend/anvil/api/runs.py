@@ -25,6 +25,11 @@ def start_run(body: dict, request: Request, conn=Depends(get_db),
     它就能替任意角色拉起进程（冒充/烧 token）。
     """
     role = body.get("role_slug") or auth.role or "qa-role"
+    role_row = services.roles.get(conn, role)
+    if role_row is None and services.roles.is_deleted(conn, role):
+        raise HTTPException(status_code=404, detail="role not found")
+    if role_row is not None and not role_row.get("enabled", True):
+        raise HTTPException(status_code=409, detail=f"role {role} is disabled")
     task_id = body.get("task_id")
     task = services.tasks.get(conn, task_id) if task_id else None
     if task and task.get("plan_first"):
@@ -74,6 +79,10 @@ def list_runs(role_slug: str | None = None, task_id: str | None = None,
     statuses = list(services.runs.ACTIVE_RUN_STATUSES) if active else None
     runs = services.runs.list_runs(
         conn, role_slug=role_slug, task_id=task_id, statuses=statuses)
+    if active:
+        # 已删除角色的残留 run 不能出现在实时看板；快照不属于活跃角色。
+        existing = {row["slug"] for row in conn.execute("SELECT slug FROM roles")}
+        runs = [run for run in runs if run["role_slug"] in existing]
     if access.is_agent(auth) and not auth.task_id:
         # 角色级 token 可能跨任务；只返回仍有参与关系的任务 run，避免历史跨任务泄漏。
         runs = [run for run in runs

@@ -272,8 +272,9 @@ def _public_role(role: dict) -> dict:
 
 
 @router.get("/roles", response_model=list[RoleOut])
-def list_roles(conn=Depends(get_db), auth: Auth = Depends(get_auth)):
-    roles = services.roles.list_all(conn)
+def list_roles(include_deleted: bool = False, conn=Depends(get_db),
+               auth: Auth = Depends(get_auth)):
+    roles = services.roles.list_all(conn, include_deleted=include_deleted)
     if access.is_agent(auth):
         roles = [_public_role(role) for role in roles]
     return roles

@@ -5603,6 +5603,11 @@ export interface components {
             definition?: {
                 [key: string]: unknown;
             };
+            /**
+             * Deleted
+             * @default false
+             */
+            deleted: boolean;
         };
         /** RoleQueueContextOut */
         RoleQueueContextOut: {

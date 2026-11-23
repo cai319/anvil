@@ -578,7 +578,9 @@ export const api = {
     }),
 
   // roles
-  listRoles: (): Promise<Role[]> => authFetch(`${BASE}/roles`).then((r) => json<Role[]>(r)),
+  listRoles: (opts?: { includeDeleted?: boolean }): Promise<Role[]> =>
+    authFetch(`${BASE}/roles${opts?.includeDeleted ? "?include_deleted=true" : ""}`)
+      .then((r) => json<Role[]>(r)),
   getRole: (slug: string): Promise<Role> => authFetch(`${BASE}/roles/${slug}`).then((r) => json<Role>(r)),
   getEffectiveConfig: (slug: string): Promise<Record<string, unknown>> =>
     authFetch(`${BASE}/roles/${slug}/effective-config`).then((r) => json(r)),
