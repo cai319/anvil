@@ -4,7 +4,8 @@ import { api, type Finding, type FindingSchema } from "../api/client";
 import { canCloseOnBackdrop } from "../dialogGuard";
 import { useLiveRefresh } from "../useLiveRefresh";
 import { confirmDialog, promptDialog } from "../components/dialogs";
-import { Icon } from "../components/Icon";
+import { Icon, type IconName } from "../components/Icon";
+import { formatDateTime } from "../time";
 
 export const FINDING_STATUS_LABEL: Record<string, string> = {
   draft: "草稿",
@@ -12,6 +13,12 @@ export const FINDING_STATUS_LABEL: Record<string, string> = {
   confirmed: "已确认真实",
   false_positive: "误报",
   changes_requested: "需重新评估",
+};
+
+const DECISION_STATE: Record<string, { label: string; icon: IconName }> = {
+  confirmed: { label: "确认真实问题", icon: "shield" },
+  false_positive: { label: "标记误报", icon: "check" },
+  changes_requested: { label: "要求重新评估", icon: "alert" },
 };
 
 export const SEVERITY_LABEL: Record<string, string> = {
@@ -299,6 +306,9 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
   const decided = finding?.status === "confirmed" || finding?.status === "false_positive";
   const canExport = finding?.status === "submitted"
     || finding?.status === "confirmed" || finding?.status === "changes_requested";
+  const decisionMeta = finding
+    ? DECISION_STATE[finding.status] ?? { label: "人工决策", icon: "message" as IconName }
+    : null;
 
   return createPortal(
     <div className="modal-overlay finding-drawer-overlay"
@@ -321,7 +331,7 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
                 </span>
                 <span className="finding-tag">置信度 {finding.confidence}%</span>
                 <span className="finding-tag">{riskLabel(schema, finding.risk_type)}</span>
-                {finding.external_id && (
+                {finding.external_id != null && (
                   <span className="finding-tag finding-external-badge">
                     外部 #{finding.external_id}
                   </span>
@@ -339,27 +349,38 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
 
         {finding && (
           <div className="finding-drawer-body">
-            <div className="finding-meta-line muted">
-              <span>作者 {finding.author_role}</span>
-              <span>更新 {finding.updated_at}</span>
-              {finding.submitted_at && <span>提交 {finding.submitted_at}</span>}
+            <div className="finding-meta-line">
+              <span>作者 {finding.author_role || "—"}</span>
+              <span>
+                更新 <time dateTime={finding.updated_at}>
+                  {formatDateTime(finding.updated_at) || "—"}
+                </time>
+              </span>
+              {finding.submitted_at && (
+                <span>
+                  提交 <time dateTime={finding.submitted_at}>
+                    {formatDateTime(finding.submitted_at) || "—"}
+                  </time>
+                </span>
+              )}
             </div>
 
             {finding.status === "changes_requested" && (
-              <div className="finding-callout is-warn">
-                已要求重新评估。等待审核者更新并重新提交后，问题板才能完成。
+              <div className="finding-callout is-warn" role="status">
+                <Icon name="alert" size={16} aria-hidden="true" />
+                <span>已要求重新评估。等待审核者更新并重新提交后，问题板才能完成。</span>
               </div>
             )}
             {finding.status === "draft" && (
-              <div className="finding-callout">
-                审核者仍在填写草稿，字段不完整时不能提交。
+              <div className="finding-callout is-draft" role="status">
+                <Icon name="file-text" size={16} aria-hidden="true" />
+                <span>审核者仍在填写草稿，字段不完整时不能提交。</span>
               </div>
             )}
 
             <section className="finding-section">
               <div className="finding-section-head">
                 <h3>判定摘要</h3>
-                <span>5 项短字段 · 一行平铺</span>
               </div>
               <div className="finding-summary-band">
                 {summaryFields.map((f) => (
@@ -371,10 +392,34 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
               </div>
             </section>
 
+            {decisionMeta && (finding.decided_by || finding.decided_at || finding.decision_note) && (
+              <section className={`finding-decision-record is-${finding.status}`}>
+                <div className="finding-decision-head">
+                  <span className="finding-decision-icon" aria-hidden="true">
+                    <Icon name={decisionMeta.icon} size={16} />
+                  </span>
+                  <div className="finding-decision-copy">
+                    <h3>人工决策记录</h3>
+                    <p className="finding-decision-meta">
+                      <span>{decisionMeta.label}</span>
+                      <span>{finding.decided_by || "human"}</span>
+                      <span>
+                        <time dateTime={finding.decided_at || undefined}>
+                          {formatDateTime(finding.decided_at) || "时间未记录"}
+                        </time>
+                      </span>
+                    </p>
+                  </div>
+                </div>
+                <p className={`finding-decision-note${finding.decision_note ? "" : " is-empty"}`}>
+                  {finding.decision_note || "未填写决策备注。"}
+                </p>
+              </section>
+            )}
+
             <section className="finding-section">
               <div className="finding-section-head">
                 <h3>问题定位</h3>
-                <span>模块 / 函数 / 文件</span>
               </div>
               <div className="finding-location-grid">
                 {locationFields.map((f) => (
@@ -390,27 +435,16 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
             <section className="finding-section">
               <div className="finding-section-head">
                 <h3>详细信息</h3>
-                <span>长文本整行展示</span>
               </div>
-              <div className="finding-field-list">
+              <dl className="finding-detail-doc">
                 {detailFields.map((f) => (
-                  <section key={f.label} className="finding-field">
-                    <h3>{f.label}</h3>
-                    <pre>{formatFindingEntries(f.value) || "—"}</pre>
-                  </section>
+                  <div key={f.label} className="finding-detail-row">
+                    <dt>{f.label}</dt>
+                    <dd><pre>{formatFindingEntries(f.value) || "—"}</pre></dd>
+                  </div>
                 ))}
-              </div>
+              </dl>
             </section>
-
-            {(finding.decided_by || finding.decision_note) && (
-              <section className="finding-decision-record">
-                <h3>人工决策记录</h3>
-                <p className="muted">
-                  {finding.decided_by || "human"} · {finding.decided_at || "—"}
-                </p>
-                {finding.decision_note && <p className="finding-decision-note">{finding.decision_note}</p>}
-              </section>
-            )}
           </div>
         )}
 
@@ -429,10 +463,12 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
               )}
               {canExport && (
                 <span className="finding-drawer-export-group">
-                  {finding.external_id && (
-                    <span className="muted">
+                  {finding.external_id != null && (
+                    <span className="muted finding-export-meta">
                       已提交 #{finding.external_id}
-                      {finding.external_submitted_at ? ` · ${finding.external_submitted_at}` : ""}
+                      {finding.external_submitted_at
+                        ? ` · ${formatDateTime(finding.external_submitted_at)}`
+                        : ""}
                     </span>
                   )}
                   <button className="primary" disabled={busy || !trackerConfigured}

@@ -7,6 +7,7 @@ import { useLiveRefresh } from "../useLiveRefresh";
 import { FindingDrawer, FINDING_STATUS_LABEL, riskLabel, severityLabel, sortFindings } from "../components/FindingDrawer";
 import { Icon } from "../components/Icon";
 import { confirmDialog } from "../components/dialogs";
+import { formatDateTime } from "../time";
 
 const STATUS_FILTERS: { key: string; label: string }[] = [
   { key: "", label: "全部状态" },
@@ -203,7 +204,7 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
             </strong>
             <span className="muted">
               目标：{tracker?.server_url || "问题跟踪服务器"}
-              {" · "}{exportResult.submitted_at}
+              {" · "}{formatDateTime(exportResult.submitted_at)}
             </span>
             {exportResult.submitted.length > 0 && (
               <span className="muted">
@@ -349,7 +350,7 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
                     {f.external_id && (
                       <span className="finding-tag finding-external-badge">外部 #{f.external_id}</span>
                     )}
-                    <span className="muted">by {f.author_role} · {f.updated_at}</span>
+                    <span className="muted">by {f.author_role} · {formatDateTime(f.updated_at)}</span>
                   </span>
                 </span>
                 <span className="finding-card-arrow" aria-hidden="true">›</span>

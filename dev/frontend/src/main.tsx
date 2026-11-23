@@ -8,6 +8,7 @@ import "./styles/components.css";
 import "./styles/layout.css";
 import "./styles/type-scale.css";
 import "./styles/knowledge-detail.css";
+import "./styles/finding-detail.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
