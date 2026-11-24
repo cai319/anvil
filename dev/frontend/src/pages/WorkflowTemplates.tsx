@@ -31,6 +31,7 @@ import {
 } from "../api/client";
 import { PageHeader } from "../components/ui";
 import { Icon } from "../components/Icon";
+import { confirmDialog } from "../components/dialogs";
 import {
   addLoop,
   addStep,
@@ -239,6 +240,24 @@ export function WorkflowTemplates() {
     setEdges(generated.edges);
   }, [generated, setNodes, setEdges]);
 
+  const clearEditor = () => {
+    setTemplate(null);
+    setDefinition(blankDefinition());
+    setLayout({});
+    setMeta({ name: "", description: "", use_mode: "both" });
+    setIssues([]);
+    setSelectedNodeId(null);
+    setSelectedEdge(null);
+    setDraftSource(null);
+    setDraftMapping({});
+    setDraftOrigin(null);
+    setPast([]);
+    setFuture([]);
+    setDirty(false);
+    setShowVersions(false);
+    setShowDraftDiff(false);
+  };
+
   const refresh = async (select?: string | null) => {
     const list = await api.listWorkflowTemplates(q || undefined, "active");
     setTemplates(list);
@@ -248,10 +267,7 @@ export function WorkflowTemplates() {
     } else if (list.length && !select) {
       await loadTemplate(list[0].id);
     } else if (!list.length) {
-      setTemplate(null);
-      setDefinition(blankDefinition());
-      setLayout({});
-      setMeta({ name: "", description: "", use_mode: "both" });
+      clearEditor();
     }
   };
 
@@ -557,7 +573,64 @@ export function WorkflowTemplates() {
     const text = `${item.name} ${item.description}`.toLowerCase();
     return text.includes(q.trim().toLowerCase());
   });
-  const editable = Boolean(template || draftSource);
+  const renderTemplateItem = (item: WorkflowTemplate) => (
+    <button
+      key={item.id}
+      className={`wft-template-item ${template?.id === item.id ? "active" : ""}`}
+      title={item.description ? `${item.name}\n${item.description}` : item.name}
+      onClick={() => loadTemplate(item.id).catch((e) => setError(String(e)))}
+    >
+      <span className="wft-template-name">{item.name}</span>
+      <span className="wft-template-meta">
+        {item.published_version ? `v${item.published_version}` : "未发布"}
+        {item.has_draft ? " · 草稿" : ""}
+        {item.use_mode === "seed" ? " · 规划种子" : item.use_mode === "manual" ? " · 人工套用" : " · 通用"}
+      </span>
+      <span className="muted wft-template-desc">{item.description || "无描述"}</span>
+    </button>
+  );
+  const hasSelection = Boolean(template || draftSource);
+  const archived = template?.status === "archived";
+  const editable = Boolean(draftSource || (template && !archived));
+  const inUse = Boolean(
+    (template?.active_workflow_count ?? 0) + (template?.active_seed_count ?? 0));
+  const onDeleteTemplate = async () => {
+    if (!template || busy) return;
+    const name = template.name;
+    const versions = template.versions?.length ?? 0;
+    const usage = template.usage_count ?? 0;
+    const warnings = [
+      `将永久删除「${name}」及其全部 ${versions} 个历史版本。`,
+      template.published_version
+        ? `已发布 v${template.published_version} 将不能再套用、对比或回滚。` : "",
+      template.draft ? `未发布草稿 rev${template.draft.revision} 和当前未保存修改将一并丢弃。` : "",
+      usage ? `该模板已被 ${usage} 条历史 workflow 使用；历史 workflow 保留，但模板关联将失效。` : "",
+      template.use_mode !== "manual"
+        ? "引用该模板作为 Cindy 规划种子的任务将不再读取此骨架。" : "",
+      template.source_kind !== "manual"
+        ? "该模板由工作流/草案导入，删除后需重新导入来源才能恢复。" : "",
+      "此操作不可恢复；正在运行的 workflow 不会被终止。",
+    ].filter(Boolean);
+    const ok = await confirmDialog({
+      title: "删除工作流模板？",
+      message: warnings.join("\n"),
+      confirmLabel: "删除模板",
+      danger: true,
+    });
+    if (!ok) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteWorkflowTemplate(template.id);
+      clearEditor();
+      await refresh(null);
+      setNotice(`已删除模板「${name}」。`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div className="templates-page">
@@ -570,28 +643,31 @@ export function WorkflowTemplates() {
       <div className="templates-studio">
         <aside className="wft-library">
           <div className="wft-library-head">
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索模板…" />
-            <button className="small" onClick={createBlank} disabled={busy}>新建</button>
-            <button className="small" onClick={() => setShowImport(true)} disabled={busy}>导入</button>
+            <div className="wft-search">
+              <Icon name="search" size={13} />
+              <input value={q} onChange={(e) => setQ(e.target.value)}
+                placeholder="搜索模板…" aria-label="搜索模板" />
+              {q && (
+                <button type="button" className="wft-search-clear"
+                  onClick={() => setQ("")} aria-label="清除搜索" title="清除搜索">
+                  <Icon name="x" size={11} />
+                </button>
+              )}
+            </div>
+            <div className="wft-library-actions">
+              <button type="button" className="wft-action" onClick={createBlank}
+                disabled={busy} title="新建模板">
+                <Icon name="plus" size={13} /><span>新建</span>
+              </button>
+              <button type="button" className="wft-action" onClick={() => setShowImport(true)}
+                disabled={busy} title="导入模板">
+                <Icon name="file-text" size={13} /><span>导入</span>
+              </button>
+            </div>
           </div>
           <div className="wft-template-list">
             {filtered.length === 0 && <p className="muted">暂无模板。新建空白模板，或从任务 workflow / 草案导入。</p>}
-            {filtered.map((item) => (
-              <button
-                key={item.id}
-                className={`wft-template-item ${template?.id === item.id ? "active" : ""}`}
-                title={item.description ? `${item.name}\n${item.description}` : item.name}
-                onClick={() => loadTemplate(item.id).catch((e) => setError(String(e)))}
-              >
-                <span className="wft-template-name">{item.name}</span>
-                <span className="wft-template-meta">
-                  {item.published_version ? `v${item.published_version}` : "未发布"}
-                  {item.has_draft ? " · 草稿" : ""}
-                  {item.use_mode === "seed" ? " · 规划种子" : item.use_mode === "manual" ? " · 人工套用" : " · 通用"}
-                </span>
-                <span className="muted wft-template-desc">{item.description || "无描述"}</span>
-              </button>
-            ))}
+            {filtered.map(renderTemplateItem)}
           </div>
         </aside>
 
@@ -605,7 +681,9 @@ export function WorkflowTemplates() {
               <span className="wft-dirty">
                 {draftSource
                   ? "草案模式"
-                  : dirty ? "未保存" : template?.published_version ? `已发布 v${template.published_version}` : "草稿"}
+                  : archived
+                    ? "已归档 · 只读"
+                    : dirty ? "未保存" : template?.published_version ? `已发布 v${template.published_version}` : "草稿"}
               </span>
               <span className="wft-toolbar-spacer" />
               <button className="small" onClick={onSave} disabled={!editable || busy}>
@@ -614,18 +692,27 @@ export function WorkflowTemplates() {
               {draftSource ? (
                 <button className="primary small" onClick={saveAsTemplate} disabled={busy}>另存为模板</button>
               ) : (
-                <button className="primary small" onClick={onPublish} disabled={!template || busy}>发布</button>
+                <button className="primary small" onClick={onPublish} disabled={!editable || busy}>发布</button>
+              )}
+              {template && (
+                <button className="small danger" onClick={onDeleteTemplate}
+                  disabled={busy || inUse}
+                  title={inUse
+                    ? "仍有运行中 workflow 或未完成任务使用此模板，解除引用后可删除"
+                    : "永久删除模板及全部版本"}>
+                  删除模板
+                </button>
               )}
             </div>
             <div className="wft-toolbar-row wft-toolbar-tools">
-              <button className="small" onClick={undo} disabled={!past.length} title="撤销"><Icon name="refresh" size={12} />撤销</button>
-              <button className="small" onClick={redo} disabled={!future.length} title="重做"><Icon name="refresh" size={12} />重做</button>
+              <button className="small" onClick={undo} disabled={!editable || !past.length} title="撤销"><Icon name="refresh" size={12} />撤销</button>
+              <button className="small" onClick={redo} disabled={!editable || !future.length} title="重做"><Icon name="refresh" size={12} />重做</button>
               <button className="small" onClick={() => addNewStep("task")} disabled={!editable}>+ 步骤</button>
               <button className="small" onClick={addNewLoop} disabled={!editable}>+ 循环</button>
               <button className="small" onClick={applyLayout} disabled={!editable}>自动布局</button>
               <button className="small" onClick={() => flowRef.current?.fitView({
                 padding: 0.12, maxZoom: 1, minZoom: 0.25, duration: 220,
-              })} disabled={!editable}>适应视图</button>
+              })} disabled={!hasSelection}>适应视图</button>
               <button className="small" onClick={onValidate} disabled={!template || busy}>校验</button>
               {draftSource && (
                 <button className="small" onClick={() => setShowDraftDiff(true)} disabled={!draftOrigin}>
@@ -636,14 +723,15 @@ export function WorkflowTemplates() {
             </div>
           </div>
           {notice && <p className="muted wft-notice">{notice}</p>}
-          {editable && (
+          {hasSelection && (
             <p className="muted wft-canvas-hint">
-              拖节点右侧锚点到目标左侧锚点新建依赖；单击连线选中，按 Delete/Backspace 或使用右侧检查器删除；
-              拖动选中连线的端点可改接。橙色虚线是决策节点的打回边。
+              {archived
+                ? "该模板已归档，当前为只读视图；可在右上角删除模板。"
+                : "拖节点右侧锚点到目标左侧锚点新建依赖；单击连线选中，按 Delete/Backspace 或使用右侧检查器删除；拖动选中连线的端点可改接。橙色虚线是决策节点的打回边。"}
             </p>
           )}
           <div className="wft-canvas">
-            {!editable ? (
+            {!hasSelection ? (
               <p className="muted wft-canvas-empty">选择或新建一个模板。</p>
             ) : (
               <ReactFlow
@@ -655,11 +743,11 @@ export function WorkflowTemplates() {
                 onInit={(instance) => { flowRef.current = instance; }}
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
-                onConnect={onConnect}
-                onReconnect={(oldEdge, connection) => {
+                onConnect={editable ? onConnect : undefined}
+                onReconnect={editable ? ((oldEdge, connection) => {
                   if (!connection.source || !connection.target) return;
                   changeEdgeEndpoints(oldEdge, { source: connection.source, target: connection.target });
-                }}
+                }) : undefined}
                 onNodesDelete={(deleted) => {
                   const first = deleted[0];
                   if (first) { setSelectedNodeId(first.id); }
@@ -669,9 +757,13 @@ export function WorkflowTemplates() {
                 onEdgeClick={(_, edge) => { setSelectedNodeId(null); setSelectedEdge(edge); }}
                 onPaneClick={() => { setSelectedNodeId(null); setSelectedEdge(null); }}
                 onNodeDragStop={(_, node) => {
+                  if (!editable) return;
                   setLayout((prev) => ({ ...prev, [node.id]: { x: node.position.x, y: node.position.y } }));
                   setDirty(true);
                 }}
+                nodesDraggable={editable}
+                nodesConnectable={editable}
+                edgesReconnectable={editable}
                 fitView
                 fitViewOptions={{ padding: 0.08, maxZoom: 1, minZoom: 0.2 }}
                 defaultViewport={{ x: 20, y: 20, zoom: 1 }}
@@ -689,8 +781,9 @@ export function WorkflowTemplates() {
         </section>
 
         <aside className="wft-inspector">
-          <TemplateInspector
-            definition={definition}
+          <div style={!editable && template ? { pointerEvents: "none", opacity: 0.62 } : undefined}>
+            <TemplateInspector
+              definition={definition}
             selectedStep={selectedStep}
             selectedEdge={selectedEdge}
             selectedLoop={selectedLoop}
@@ -727,7 +820,8 @@ export function WorkflowTemplates() {
                 }],
               });
             }}
-          />
+            />
+          </div>
         </aside>
       </div>
 
@@ -1301,6 +1395,7 @@ function VersionDialog({ template, onClose, onRollback }: {
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
   };
   const rollback = async (version: number) => {
+    if (template.status === "archived") return;
     if (!window.confirm(`从 v${version} 创建回滚草稿？当前草稿会被替换，历史版本不会删除。`)) return;
     setBusy(true); setError(null);
     try { await onRollback(version); } catch (e) { setError(String(e)); setBusy(false); }
@@ -1350,7 +1445,11 @@ function VersionDialog({ template, onClose, onRollback }: {
                 <span className="muted">rev {version.revision}</span>
                 <span className="muted">{version.published_at || version.created_at}</span>
                 <button className="small" onClick={() => showVersion(version.version)} disabled={busy}>差异</button>
-                <button className="small" onClick={() => rollback(version.version)} disabled={busy}>回滚到此版</button>
+                <button className="small" onClick={() => rollback(version.version)}
+                  disabled={busy || template.status === "archived"}
+                  title={template.status === "archived" ? "已归档模板只读" : undefined}>
+                  回滚到此版
+                </button>
               </div>
             ))}
           </div>

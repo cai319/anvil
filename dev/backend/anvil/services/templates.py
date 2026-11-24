@@ -406,6 +406,30 @@ def _template_row(row) -> dict:
     return d
 
 
+def _template_usage(conn: sqlite3.Connection, tid: str) -> dict:
+    """模板引用计数：历史 workflow + 活跃 workflow + 活跃任务规划种子。"""
+    workflow_refs = conn.execute(
+        "SELECT COUNT(*) AS n FROM workflows WHERE template_id=?", (tid,)
+    ).fetchone()["n"]
+    active_workflows = conn.execute(
+        "SELECT COUNT(*) AS n FROM workflows WHERE template_id=? "
+        "AND status NOT IN ('done','closed','terminated')", (tid,)
+    ).fetchone()["n"]
+    active_seeds = conn.execute(
+        "SELECT COUNT(*) AS n FROM tasks "
+        "WHERE status NOT IN ('done','closed') "
+        "AND plan_seed_json IS NOT NULL "
+        "AND json_valid(plan_seed_json) "
+        "AND json_extract(plan_seed_json, '$.template_id')=?",
+        (tid,),
+    ).fetchone()["n"]
+    return {
+        "usage_count": workflow_refs,
+        "active_workflow_count": active_workflows,
+        "active_seed_count": active_seeds,
+    }
+
+
 def list_templates(conn: sqlite3.Connection, q: str | None = None,
                    status: str | None = None) -> list[dict]:
     where, params = [], []
@@ -427,9 +451,7 @@ def list_templates(conn: sqlite3.Connection, q: str | None = None,
         pv = d.get("published_version")
         d["has_draft"] = bool(dv)
         d["has_published"] = bool(pv)
-        d["usage_count"] = conn.execute(
-            "SELECT COUNT(*) AS n FROM workflows WHERE template_id=?", (d["id"],)
-        ).fetchone()["n"]
+        d.update(_template_usage(conn, d["id"]))
         out.append(d)
     return out
 
@@ -439,6 +461,7 @@ def get_template(conn: sqlite3.Connection, tid: str) -> dict | None:
     if not row:
         return None
     d = _template_row(row)
+    d.update(_template_usage(conn, tid))
     draft = None
     if d.get("draft_version"):
         draft = _version_row(conn.execute(
@@ -610,6 +633,40 @@ def archive_template(conn: sqlite3.Connection, tid: str) -> dict:
                  (now_iso(), tid))
     conn.commit()
     return get_template(conn, tid)  # type: ignore[return-value]
+
+
+def delete_template(conn: sqlite3.Connection, tid: str) -> dict:
+    """永久删除模板及其全部版本。
+
+    运行中 workflow 或未完成任务仍引用模板时阻止删除；历史 workflow/已结束任务
+    的引用允许保留为悬空 provenance。
+    """
+    template = get_template(conn, tid)
+    if template is None:
+        raise LookupError(tid)
+    active_workflows = int(template.get("active_workflow_count") or 0)
+    active_seeds = int(template.get("active_seed_count") or 0)
+    if active_workflows or active_seeds:
+        raise ConflictError(
+            "template is still in use: "
+            f"{active_workflows} running workflow(s), "
+            f"{active_seeds} active task plan seed(s); "
+            "finish/clear them before deleting")
+    versions_deleted = conn.execute(
+        "SELECT COUNT(*) AS n FROM workflow_template_versions WHERE template_id=?",
+        (tid,),
+    ).fetchone()["n"]
+    conn.execute("DELETE FROM workflow_template_versions WHERE template_id=?", (tid,))
+    conn.execute("DELETE FROM workflow_templates WHERE id=?", (tid,))
+    conn.commit()
+    return {
+        "id": tid,
+        "name": template.get("name"),
+        "source_kind": template.get("source_kind"),
+        "published_version": template.get("published_version"),
+        "versions_deleted": versions_deleted,
+        "usage_count": template.get("usage_count") or 0,
+    }
 
 
 def get_version(conn: sqlite3.Connection, tid: str, version: int) -> dict | None:

@@ -713,6 +713,10 @@ export const api = {
     req("POST", `/workflow-templates/${id}/publish`, { change_note: changeNote }).then((r) => json<WorkflowTemplate>(r)),
   archiveWorkflowTemplate: (id: string): Promise<WorkflowTemplate> =>
     req("POST", `/workflow-templates/${id}/archive`, {}).then((r) => json<WorkflowTemplate>(r)),
+  deleteWorkflowTemplate: (id: string): Promise<void> =>
+    req("DELETE", `/workflow-templates/${id}`).then((r) => {
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    }),
   getWorkflowTemplateVersion: (id: string, version: number): Promise<WorkflowTemplateVersion> =>
     authFetch(`${BASE}/workflow-templates/${id}/versions/${version}`)
       .then((r) => json<WorkflowTemplateVersion>(r)),
@@ -1603,6 +1607,8 @@ export interface WorkflowTemplate {
   has_draft?: boolean;
   has_published?: boolean;
   usage_count?: number;
+  active_workflow_count?: number;
+  active_seed_count?: number;
   draft?: WorkflowTemplateVersion | null;
   published?: WorkflowTemplateVersion | null;
   versions?: { version: number; state: string; revision: number; created_at: string; published_at?: string | null }[];

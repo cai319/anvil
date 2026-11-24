@@ -6,7 +6,7 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **前端**：React + TypeScript + Vite
 - **Agent CLI**：`anvil`，Agent 在自己的工具循环里调用它上报状态
 - **地址**：`http://127.0.0.1:7317`（仅回环）
-- **当前版本**：v1.48.7（角色删除契约与历史快照）
+- **当前版本**：v1.48.8（工作流模板删除与工作流页刷新修复）
 
 > 内部架构、设计与实现状态文档仅本地保留，不随仓库发布。
 
@@ -665,6 +665,7 @@ anvil init
 - [docs/v1.45.0-release.md](docs/v1.45.0-release.md)：v1.45.0 协作方式判断、角色一致性与 D1–D4 收尾
 - [docs/v1.45.1-release.md](docs/v1.45.1-release.md)：v1.45.1 角色删除关闭委派、dispatch 通知补投与 subagent 幽灵收尾
 - [docs/v1.45.2-release.md](docs/v1.45.2-release.md)：v1.45.2 收件箱委派验收、审批参与者预览与评测实跑
+- [docs/v1.48.8-release.md](docs/v1.48.8-release.md)：v1.48.8 工作流模板删除与任务详情工作流页刷新修复
 - [docs/v1.48.7-release.md](docs/v1.48.7-release.md)：v1.48.7 角色删除活跃会话拦截与历史显示快照
 - [docs/v1.48.6-release.md](docs/v1.48.6-release.md)：v1.48.6 finding 详情静默刷新
 - [docs/v1.48.5-release.md](docs/v1.48.5-release.md)：v1.48.5 finding 详情弹窗尺寸再放大

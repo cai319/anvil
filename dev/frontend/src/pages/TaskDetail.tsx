@@ -206,9 +206,12 @@ export function TaskDetail({ id }: { id: string }) {
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [workflowHistory, setWorkflowHistory] = useState<WorkflowHistoryItem[]>([]);
   const [viewingWorkflow, setViewingWorkflow] = useState<Workflow | null>(null);
+  const [workflowLoaded, setWorkflowLoaded] = useState(false);
+  const [workflowError, setWorkflowError] = useState<string | null>(null);
   const [workflowMetrics, setWorkflowMetrics] = useState<WorkflowMetrics | null>(null);
   const [graphDiff, setGraphDiff] = useState<WorkflowGraphResponse | null>(null);
   const [taskLeases, setTaskLeases] = useState<TaskLeases | null>(null);
+  const workflowReqRef = useRef(0);
   const [reserveInput, setReserveInput] = useState("");
   const [showWeight, setShowWeight] = useState(false);
   const [dossierBusy, setDossierBusy] = useState(false);
@@ -229,11 +232,40 @@ export function TaskDetail({ id }: { id: string }) {
   const displayWorkflow = viewingWorkflow ?? workflow;
   const isViewingHistory = Boolean(viewingWorkflow);
 
-  const refreshWorkflow = () => Promise.all([
-    api.getTaskWorkflow(id).then(setWorkflow).catch(() => setWorkflow(null)),
-    api.listTaskWorkflows(id).then(setWorkflowHistory).catch(() => setWorkflowHistory([])),
-    api.listTaskLeases(id).then(setTaskLeases).catch(() => setTaskLeases(null)),
-  ]);
+  const refreshWorkflow = () => {
+    const req = ++workflowReqRef.current;
+    const current = api.getTaskWorkflow(id)
+      .then((wf) => {
+        if (req !== workflowReqRef.current) return;
+        setWorkflow(wf);
+        setWorkflowLoaded(true);
+        setWorkflowError(null);
+      })
+      .catch((e) => {
+        if (req !== workflowReqRef.current) return;
+        setWorkflowLoaded(true);
+        const message = String(e);
+        if (message.includes("404")) {
+          setWorkflow(null);
+          setWorkflowError(null);
+        } else {
+          setWorkflowError(message);
+        }
+      });
+    return Promise.all([
+      current,
+      api.listTaskWorkflows(id).then((items) => {
+        if (req === workflowReqRef.current) setWorkflowHistory(items);
+      }).catch(() => {
+        if (req === workflowReqRef.current) setWorkflowHistory([]);
+      }),
+      api.listTaskLeases(id).then((leases) => {
+        if (req === workflowReqRef.current) setTaskLeases(leases);
+      }).catch(() => {
+        if (req === workflowReqRef.current) setTaskLeases(null);
+      }),
+    ]);
+  };
 
   useEffect(() => {
     api.listTaskLeases(id).then(setTaskLeases).catch(() => setTaskLeases(null));
@@ -342,6 +374,13 @@ export function TaskDetail({ id }: { id: string }) {
 
   useEffect(() => {
     if (gone) return; // 任务已删除：不再刷新、不再订阅事件
+    // 切换任务时丢弃上一个任务的 workflow 状态和未完成的旧请求。
+    workflowReqRef.current += 1;
+    setWorkflow(null);
+    setViewingWorkflow(null);
+    setWorkflowHistory([]);
+    setWorkflowLoaded(false);
+    setWorkflowError(null);
     setDescOpen(false);  // 切换任务时收起描述
     setDescOverflow(false);
     refresh();
@@ -391,6 +430,7 @@ export function TaskDetail({ id }: { id: string }) {
 
   const selectTab = (next: TaskTab) => {
     setTab(next);
+    if (next === "workflow") void refreshWorkflow();
     try {
       const url = new URL(window.location.href);
       if (next === "chat") url.searchParams.delete("tab");
@@ -1276,7 +1316,10 @@ export function TaskDetail({ id }: { id: string }) {
                         } else {
                           await api.approveDraft([d.id]);
                         }
-                        await api.listDrafts(id).then(setDrafts).catch(() => {});
+                        await Promise.all([
+                          refreshWorkflow(),
+                          api.listDrafts(id).then(setDrafts).catch(() => {}),
+                        ]);
                       })}
                     >{d.kind === "workflow_revision" ? "应用修订（不重启）"
                       : d.kind === "workflow" ? "批准并启动工作流"
@@ -1659,8 +1702,23 @@ export function TaskDetail({ id }: { id: string }) {
                 onClick={() => act(() => api.clearPlanSeed(id))}>清除种子</button>
             )}
           </div>
-          {!displayWorkflow && (
+          {!displayWorkflow && !workflowLoaded && !workflowError && (
+            <p className="muted">正在加载工作流…</p>
+          )}
+          {!displayWorkflow && workflowError && (
+            <div className="wf-refresh-error">
+              <p className="error">工作流加载失败：{workflowError}</p>
+              <button className="small" onClick={() => void refreshWorkflow()}>重试</button>
+            </div>
+          )}
+          {!displayWorkflow && workflowLoaded && !workflowError && (
             <p className="muted">还没有工作流。多角色任务启动后，Cindy 会生成步骤状态机并在此展示。</p>
+          )}
+          {displayWorkflow && workflowError && (
+            <div className="wf-refresh-error">
+              <p className="error">工作流刷新失败：{workflowError}（当前显示上次成功加载的数据）</p>
+              <button className="small" onClick={() => void refreshWorkflow()}>重试</button>
+            </div>
           )}
           {displayWorkflow && (
             <>

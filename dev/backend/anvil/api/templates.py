@@ -177,6 +177,27 @@ def archive(tid: str, request: Request, conn=Depends(get_db),
     return result
 
 
+@router.delete("/workflow-templates/{tid}", status_code=204)
+def delete_template(tid: str, request: Request, conn=Depends(get_db),
+                    auth: Auth = Depends(require_human)):
+    """永久删除模板及全部版本；运行中引用会返回 409。"""
+    try:
+        result = template_service.delete_template(conn, tid)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    _audit(conn, request, "template.delete", {
+        "template_id": tid,
+        "name": result.get("name"),
+        "source_kind": result.get("source_kind"),
+        "published_version": result.get("published_version"),
+        "versions_deleted": result.get("versions_deleted"),
+        "usage_count": result.get("usage_count"),
+    })
+    return None
+
+
 @router.post("/workflow-templates/{tid}/duplicate", status_code=201)
 def duplicate(tid: str, body: dict, request: Request, conn=Depends(get_db),
               auth: Auth = Depends(require_human)):

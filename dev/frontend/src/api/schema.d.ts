@@ -4078,7 +4078,11 @@ export interface paths {
         get: operations["get_template_api_v1_workflow_templates__tid__get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Template
+         * @description 永久删除模板及全部版本；运行中引用会返回 409。
+         */
+        delete: operations["delete_template_api_v1_workflow_templates__tid__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -7967,7 +7971,9 @@ export interface operations {
     };
     list_roles_api_v1_roles_get: {
         parameters: {
-            query?: never;
+            query?: {
+                include_deleted?: boolean;
+            };
             header?: {
                 "X-Anvil-Session"?: string | null;
                 "X-Anvil-Role"?: string | null;
@@ -16931,6 +16937,38 @@ export interface operations {
                 content: {
                     "application/json": unknown;
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_template_api_v1_workflow_templates__tid__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                tid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
