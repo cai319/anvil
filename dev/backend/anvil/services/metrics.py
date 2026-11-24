@@ -5,6 +5,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from ..util import jloads
+from ..workflow_payload import normalize_step_payload
 
 
 def _parse(value) -> datetime | None:
@@ -37,7 +38,7 @@ def _steps(conn: sqlite3.Connection, wid: str) -> list[dict]:
         d["depends_on"] = jloads(d.pop("depends_on_json", "[]"), [])
         d["gate"] = bool(d["gate"])
         d["kind"] = d.get("kind") or "task"
-        out.append(d)
+        out.append(normalize_step_payload(d, field_prefix="metrics.steps[]"))
     return out
 
 

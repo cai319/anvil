@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 
 from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
+from ..workflow_payload import normalize_affected_steps
 from ..schemas import (
     TaskLeasesOut, WorkflowGraphOut, WorkflowHistoryOut, WorkflowMetricsOut,
     WorkflowOut,
@@ -27,9 +28,13 @@ def _attach_pending_revision(conn, wf: dict) -> dict:
                 and d.get("status") == "pending"
                 and (d.get("tree") or {}).get("base_workflow_id") == wf["id"]), None)
     if rev:
+        impact = dict((rev.get("tree") or {}).get("impact") or {})
+        if "affected_steps" in impact:
+            impact["affected_steps"] = normalize_affected_steps(
+                impact["affected_steps"], context=str(wf.get("id") or ""))
         wf["pending_revision"] = {
             "draft_id": rev["id"],
-            "impact": (rev.get("tree") or {}).get("impact") or {},
+            "impact": impact,
             "created_by": rev.get("created_by"),
         }
     return wf

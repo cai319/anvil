@@ -4,7 +4,9 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from .workflow_payload import normalize_weight, normalize_workflow_payload
 
 
 class TaskStatus(str, Enum):
@@ -347,6 +349,12 @@ class WorkflowStepOut(BaseModel):
 
 
 class WorkflowOut(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_payload(cls, data):
+        """兼容历史/Agent 写入的非标准形状；响应序列化不再因字段形状 500。"""
+        return normalize_workflow_payload(data) if isinstance(data, dict) else data
+
     id: str
     task_id: str
     status: Literal["running", "done", "failed", "terminated"]
@@ -481,6 +489,15 @@ class WorkflowGraphOut(BaseModel):
 
 
 class WorkflowHistoryOut(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_weight(cls, data):
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        out["weight"] = normalize_weight(out.get("weight"))
+        return out
+
     id: str
     task_id: str
     status: str

@@ -6,6 +6,7 @@ import sqlite3
 
 from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
+from ..workflow_payload import normalize_definition_payload
 from . import dossier, leases, ledger, weights
 from .workflow_common import (
     _assert_current_run, _assert_delegations_done, _step_activity,
@@ -336,10 +337,10 @@ def normalize_definition(conn: sqlite3.Connection, definition: dict) -> dict:
     if definition.get("slices") and definition.get("loop"):
         raise ConflictError("workflow cannot use both `slices` and `loop`")
     if definition.get("steps") or definition.get("children"):
-        return definition
+        return normalize_definition_payload(definition)
     if definition.get("slices"):
-        return _expand_slices(definition)
-    return definition
+        return normalize_definition_payload(_expand_slices(definition))
+    return normalize_definition_payload(definition)
 
 
 def _plan_steps(conn: sqlite3.Connection, steps: list[dict], *,

@@ -9,6 +9,7 @@ from contextlib import contextmanager
 
 from .. import config
 from ..util import ConflictError, jloads, now_iso
+from ..workflow_payload import normalize_weight, normalize_workflow_payload
 from . import leases, ledger
 
 # 保持原有 logger 名称，拆分不改变日志通道。
@@ -111,7 +112,7 @@ def get_workflow(conn: sqlite3.Connection, wid: str) -> dict | None:
     d = dict(r)
     d["definition"] = jloads(d.get("definition_json") or "{}", {})
     d["steps"] = _steps(conn, wid)
-    return d
+    return normalize_workflow_payload(d)
 
 
 def get_for_task(conn: sqlite3.Connection, task_id: str) -> dict | None:
@@ -145,6 +146,7 @@ def list_for_task(conn: sqlite3.Connection, task_id: str) -> list[dict]:
     out = []
     for row in rows:
         item = dict(row)
+        item["weight"] = normalize_weight(item.get("weight"))
         item["metrics"] = metrics_service.compute(conn, item["id"])
         out.append(item)
     return out
