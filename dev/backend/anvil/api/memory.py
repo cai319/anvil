@@ -1,18 +1,66 @@
 """Agent self-service endpoints: memory / notes / proposals / lessons (§3.2/§3.4)."""
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from .. import config, services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..services import ledger
+from ..services import proposals as proposals_service
+from ..services import role_space
+from ..services import rsi as rsi_service
 from ..services import tokens as tokens_service
 from ..services import wake as wake_service
+from . import access
 from ..schemas import InstructionIn, LessonIn, MemoryAppendIn, NoteWriteIn, ProposalIn
 from ..util import ConflictError, jdumps, jloads, now_iso
 from . import events
 
 router = APIRouter()
+
+_STRATEGY_RE = re.compile(
+    r"(<!-- ANVIL:STRATEGY:BEGIN -->)(.*?)(<!-- ANVIL:STRATEGY:END -->)",
+    re.DOTALL)
+
+
+def _locked_for_agent(conn, auth: Auth, role: str) -> bool:
+    return bool(
+        access.is_agent(auth)
+        and getattr(config, "ROLE_RSI_LOCK_STRATEGY", False)
+        and rsi_service.role_enabled(conn, role)
+    )
+
+
+def _route_principle_candidate(conn, role: str, content: str) -> dict:
+    if len(content) > 400:
+        raise HTTPException(
+            status_code=422,
+            detail="locked strategy mode only accepts <=400 chars; "
+                   "use a reflection candidate for larger changes")
+    active = conn.execute(
+        "SELECT version FROM role_versions WHERE slug=? AND kind='evolution' "
+        "AND status='active' ORDER BY version DESC LIMIT 1", (role,)).fetchone()
+    candidate = proposals_service.create_candidate(
+        conn, role, cycle_id="manual:agent-instruction",
+        base_version=int(active["version"]) if active else None,
+        status="pending",
+        rationale="agent direct principle append routed to human approval",
+        risk="direct write is disabled by role_rsi_lock_strategy",
+        edits=[{
+            "operator": "append_principle",
+            "target": "principles",
+            "content_md": content,
+            "portrait_refs": ["role:self"],
+            "diagnosis_ref": "manual_agent_append",
+            "predicted_effect": {"dimension": "principles", "direction": "up"},
+        }])
+    return {
+        "role_slug": role, "accepted": False, "status": "pending",
+        "candidate_id": candidate["id"],
+        "message": "role_rsi_lock_strategy: written as a pending candidate",
+    }
 
 
 @router.get("/me")
@@ -177,9 +225,17 @@ def get_principles(conn=Depends(get_db), auth: Auth = Depends(get_auth)):
 @router.put("/me/memory/principles")
 def put_principles(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     role = auth.role or "qa-role"
+    content = str(body.get("content") or "")
+    mode = str(body.get("mode") or "replace")
+    if _locked_for_agent(conn, auth, role):
+        if mode != "append":
+            raise HTTPException(
+                status_code=422,
+                detail="role_rsi_lock_strategy: replace is human-only; "
+                       "append a principle or use an RSI candidate")
+        return _route_principle_candidate(conn, role, content.strip())
     return services.memory.write_principles(
-        conn, role, str(body.get("content") or ""),
-        mode=str(body.get("mode") or "replace"), actor=role)
+        conn, role, content, mode=mode, actor=role)
 
 
 @router.post("/me/memory/compact")
@@ -587,8 +643,27 @@ def reindex_all(body: dict | None = None, conn=Depends(get_db),
 
 @router.post("/me/instruction")
 def write_instruction(body: InstructionIn, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
-    """`anvil self edit-instruction`（自主档，§9.2）：直接写 instruction.md。"""
-    return services.memory.write_instruction(conn, auth.role or "qa-role", body.content)
+    """`anvil self edit-instruction`：锁定策略时仅允许人工直写。"""
+    role = auth.role or "qa-role"
+    if _locked_for_agent(conn, auth, role):
+        path = config.AGENTS_DIR / role / "instruction.md"
+        current = path.read_text(encoding="utf-8") if path.is_file() else ""
+        if role_space._charter_block(current) != role_space._charter_block(
+                body.content):
+            raise HTTPException(
+                status_code=422,
+                detail="Charter changes are human/proposal-only under "
+                       "role_rsi_lock_strategy")
+        if not _STRATEGY_RE.search(body.content or ""):
+            raise HTTPException(
+                status_code=422,
+                detail="instruction has no ANVIL:STRATEGY block; "
+                       "role_rsi_lock_strategy rejects direct rewrites")
+        raise HTTPException(
+            status_code=422,
+            detail="Strategy changes must go through the RSI candidate workflow "
+                   "(anvil rsi retro / reflection), not direct instruction writes")
+    return services.memory.write_instruction(conn, role, body.content)
 
 
 @router.get("/proposals")
@@ -602,9 +677,13 @@ def list_proposals(status: str | None = None, conn=Depends(get_db),
 
 @router.post("/proposals", status_code=201)
 def create_proposal(body: ProposalIn, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
-    proposal = services.memory.create_proposal(
-        conn, auth.role or "qa-role", body.field, body.proposed, body.rationale, body.risk,
-    )
+    try:
+        proposal = services.memory.create_proposal(
+            conn, auth.role or "qa-role", body.field, body.proposed,
+            body.rationale, body.risk,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     events.publish("proposal", {"id": proposal["id"], "status": "pending"})
     return proposal
 
@@ -612,7 +691,10 @@ def create_proposal(body: ProposalIn, conn=Depends(get_db), auth: Auth = Depends
 @router.post("/proposals/{pid}/approve")
 def approve_proposal(pid: str, conn=Depends(get_db), auth: Auth = Depends(require_human)):
     """审批通过：把提案字段落到角色配置（§9.2 审批档）。"""
-    p = services.memory.approve_proposal(conn, pid)
+    try:
+        p = services.memory.approve_proposal(conn, pid)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if p is None:
         raise HTTPException(status_code=404, detail="proposal not found")
     events.publish("proposal", {"id": pid, "status": "approved"})

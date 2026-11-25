@@ -1,6 +1,7 @@
 """Role CRUD + private home + effective-config + tool budget."""
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import shutil
@@ -318,24 +319,77 @@ def _ensure_daily_review_reminder(conn: sqlite3.Connection, slug: str) -> bool:
 
 def _snapshot_version(conn: sqlite3.Connection, slug: str, display_name: str,
                       definition: dict, source: str = "update") -> int:
-    """每次配置变更留一版（design §10 roles/{id}/versions）。"""
+    """配置修订留痕（v1.50：kind=config / archived，不进演进主视图）。
+
+    `role_rsi` 关闭时保持旧行为：只写 definition 行，不产生 CAS 存档。
+    """
+    tools_row = conn.execute(
+        "SELECT * FROM role_tools WHERE role_slug=?", (slug,)).fetchone()
+    tools_json = jdumps(dict(tools_row)) if tools_row is not None else None
+    if bool(getattr(config, "ROLE_RSI_ENABLED", False)):
+        try:
+            from . import role_space  # lazy: role_space reads roles/role_tools
+            row = role_space.snapshot(
+                conn, slug, kind="config", source=source, status="archived",
+                charter_definition=definition,
+                files=["instruction.md", "PRINCIPLES.md"],
+            )
+            conn.execute(
+                "UPDATE role_versions SET role_tools_json=? WHERE slug=? AND version=?",
+                (tools_json, slug, int(row["version"])))
+            conn.commit()
+            return int(row["version"])
+        except Exception:  # noqa: BLE001 —— 存档失败不应阻断角色配置写入
+            logger.warning("role config snapshot failed slug=%s source=%s",
+                           slug, source, exc_info=True)
+    try:
+        from . import role_space
+        digest = role_space.charter_digest(conn, slug, definition=definition)
+    except Exception:  # noqa: BLE001 —— 角色文件缺失时仍可退化为 definition 哈希
+        digest = "sha256:" + hashlib.sha256(
+            jdumps(definition).encode("utf-8")).hexdigest()
+    latest = conn.execute(
+        "SELECT version, content_hash FROM role_versions WHERE slug=? "
+        "AND kind='config' AND status != 'deleted' ORDER BY version DESC LIMIT 1",
+        (slug,)).fetchone()
+    if latest is not None and latest["content_hash"] == digest:
+        # Same manual config: no-op. Keep one revision and count coalesced saves
+        # instead of growing Cindy-style duplicate version lists.
+        conn.execute(
+            "UPDATE role_versions SET coalesced_count=coalesced_count+1, "
+            "updated_at=? WHERE slug=? AND version=?",
+            (now_iso(), slug, int(latest["version"])))
+        conn.commit()
+        return int(latest["version"])
     row = conn.execute(
         "SELECT COALESCE(MAX(version),0) AS v FROM role_versions WHERE slug=?", (slug,)
     ).fetchone()
     version = int(row["v"]) + 1
+    now = now_iso()
     conn.execute(
-        "INSERT INTO role_versions (slug, version, display_name, definition_json, source, created_at) "
-        "VALUES (?,?,?,?,?,?)",
-        (slug, version, display_name, jdumps(definition), source, now_iso()),
+        "INSERT INTO role_versions (slug, version, display_name, definition_json, "
+        "source, created_at, kind, status, content_hash, updated_at, "
+        "coalesced_count, integrity_status, role_tools_json) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (slug, version, display_name, jdumps(definition), source, now,
+         "config", "archived", digest, now, 1, "unverified", tools_json),
     )
     conn.commit()
     return version
 
 
-def list_versions(conn: sqlite3.Connection, slug: str) -> list[dict]:
+def list_versions(conn: sqlite3.Connection, slug: str,
+                  kind: str | None = None) -> list[dict]:
+    clauses = ["slug=?", "status != 'deleted'"]
+    params: list[object] = [slug]
+    if kind:
+        clauses.append("kind=?")
+        params.append(kind)
     rows = conn.execute(
-        "SELECT version, display_name, source, created_at FROM role_versions "
-        "WHERE slug=? ORDER BY version DESC", (slug,)
+        "SELECT version, display_name, source, created_at, kind, status, "
+        "content_hash, space_manifest_path, space_manifest_hash, charter_digest, "
+        "eval_run_id, integrity_status, note FROM role_versions "
+        "WHERE " + " AND ".join(clauses) + " ORDER BY version DESC", params,
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -352,13 +406,21 @@ def get_version(conn: sqlite3.Connection, slug: str, version: int) -> dict | Non
 
 
 def rollback(conn: sqlite3.Connection, slug: str, version: int) -> dict | None:
-    """回滚到指定版本：恢复 definition + 重写 profile.yaml，并留一版回滚记录。"""
+    """兼容旧入口：evolution 版本走 switch，config 修订走 restore_config。"""
     target = get_version(conn, slug, version)
     if target is None:
         return None
     role = get(conn, slug)
     if role is None:
         return None
+    from . import role_space  # lazy: role_space reads roles/role_tools
+    if target.get("kind") == "evolution":
+        role_space.switch(conn, slug, int(version))
+        return get(conn, slug)
+    if target.get("kind") == "config":
+        role_space.restore_config(conn, slug, int(version))
+        return get(conn, slug)
+    # 兼容早期没有 kind 的行：只恢复 definition，保留旧行为。
     update(conn, slug, display_name=target["display_name"], definition=target["definition"])
     _snapshot_version(conn, slug, target["display_name"], target["definition"],
                       source=f"rollback:{version}")
@@ -670,7 +732,8 @@ def capability_summary(conn: sqlite3.Connection, slug: str,
 
 def update_catalog(conn: sqlite3.Connection, slug: str, skills: list[str], mcp: list[str]) -> dict:
     """保存角色选择的 skill / MCP（全量替换）。"""
-    if get(conn, slug) is None:
+    role = get(conn, slug)
+    if role is None:
         return {}
     conn.execute(
         """INSERT INTO role_tools (role_slug, skills_json, mcp_json, created_at, updated_at)
@@ -680,6 +743,8 @@ def update_catalog(conn: sqlite3.Connection, slug: str, skills: list[str], mcp: 
         (slug, jdumps(skills), jdumps(mcp), now_iso(), now_iso()),
     )
     conn.commit()
+    _snapshot_version(conn, slug, role["display_name"],
+                      jloads(role["definition_json"], {}), source="catalog")
     return get_tools(conn, slug)
 
 
@@ -695,6 +760,25 @@ def get_profile(conn: sqlite3.Connection, slug: str) -> dict:
     }
 
 
+def set_rsi_enabled(conn: sqlite3.Connection, slug: str, enabled: bool) -> dict:
+    """Toggle the per-role RSI pilot gate (definition.rsi.enabled)."""
+    role = get(conn, slug)
+    if role is None:
+        return {}
+    definition = jloads(role["definition_json"], {})
+    rsi_cfg = definition.get("rsi")
+    if not isinstance(rsi_cfg, dict):
+        rsi_cfg = {}
+    rsi_cfg["enabled"] = bool(enabled)
+    definition["rsi"] = rsi_cfg
+    conn.execute("UPDATE roles SET definition_json=?, updated_at=? WHERE slug=?",
+                 (jdumps(definition), now_iso(), slug))
+    conn.commit()
+    _snapshot_version(conn, slug, role["display_name"], definition,
+                      source="rsi")
+    return {"slug": slug, "rsi": rsi_cfg}
+
+
 def update_profile(conn: sqlite3.Connection, slug: str, system_prompt: str, responsibilities: list[str]) -> dict:
     """更新角色的 system prompt + 职责。"""
     role = get(conn, slug)
@@ -705,6 +789,7 @@ def update_profile(conn: sqlite3.Connection, slug: str, system_prompt: str, resp
     definition["responsibilities"] = responsibilities
     conn.execute("UPDATE roles SET definition_json=?, updated_at=? WHERE slug=?", (jdumps(definition), now_iso(), slug))
     conn.commit()
+    _snapshot_version(conn, slug, role["display_name"], definition, source="profile")
     return get_profile(conn, slug)
 
 
@@ -750,6 +835,8 @@ def update_tools(conn: sqlite3.Connection, slug: str, preset: str | None,
         (slug, new_preset, cap, jdumps(new_allowlist), now_iso(), now_iso()),
     )
     conn.commit()
+    _snapshot_version(conn, slug, role["display_name"],
+                      jloads(role["definition_json"], {}), source="tools")
     return get_tools(conn, slug), None
 
 

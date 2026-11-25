@@ -32,6 +32,7 @@ log/
 /docs/design/
 /docs/anvil-roadmap-*.pptx
 /docs/v1.30-channel-knowledge.md
+/docs/v1.50-role-rsi.md
 /docs/workflow-revision.md
 /design.md
 /optimization-roadmap.md
@@ -44,3 +45,12 @@ log/
 /dev/raft-gap-analysis.md
 /dev/spec-*.md
 /dev/*-design.md
+
+# Local-only Anvil executive demo package (not published)
+/docs/demo/README.md
+/docs/demo/anvil-executive-demo*
+/docs/demo/build_deck.js
+/docs/demo/theme.json
+/docs/demo/live-demo-runbook.md
+/docs/demo/live-demo/
+/docs/demo/assets/

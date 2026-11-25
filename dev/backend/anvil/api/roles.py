@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from .. import services
 from ..deps import Auth, get_auth, get_db, require_human
 from ..schemas import RoleIn, RoleOut, RoleRuntimeStatusOut, ToolsIn
-from ..services import ledger, tokens as tokens_service, utility
+from ..services import ledger, role_space, tokens as tokens_service, utility
 from ..util import ConflictError
 from . import access
 
@@ -409,12 +409,18 @@ def role_home_history(slug: str, path: str | None = None, conn=Depends(get_db),
 
 
 @router.get("/roles/{slug}/versions")
-def role_versions(slug: str, conn=Depends(get_db),
-                  auth: Auth = Depends(get_auth)):
+def role_versions(slug: str, kind: str | None = None,
+                  status: str | None = None, source: str | None = None,
+                  limit: int | None = None, offset: int = 0,
+                  conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     access.assert_role_self(conn, auth, slug)
     if services.roles.get(conn, slug) is None:
         raise HTTPException(status_code=404, detail="role not found")
-    return services.roles.list_versions(conn, slug)
+    if limit is not None:
+        return role_space.list_versions_page(
+            conn, slug, kind=kind, status=status, source=source,
+            limit=limit, offset=offset)
+    return services.roles.list_versions(conn, slug, kind=kind)
 
 
 @router.post("/roles/{slug}/rollback/{version}")

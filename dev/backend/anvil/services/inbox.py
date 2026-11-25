@@ -26,6 +26,8 @@ def collect(conn: sqlite3.Connection) -> dict:
     items.extend(_workflow_decisions(conn))
     items.extend(_action_cards(conn))
     items.extend(_finding_boards(conn))
+    items.extend(_rsi_candidates(conn))
+    items.extend(_runtime_proposals(conn))
     items.sort(key=lambda i: i["created_at"] or "", reverse=True)
     return {"count": len(items), "items": items}
 
@@ -398,6 +400,42 @@ def _finding_boards(conn: sqlite3.Connection) -> list[dict]:
             },
         })
     return out
+
+
+def _rsi_candidates(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        "SELECT id, role_slug, status, tier, created_at FROM proposals "
+        "WHERE kind='strategy' AND status IN ('draft','queued','evaluating','pending') "
+        "ORDER BY created_at").fetchall()
+    return [{
+        "id": f"rsi_candidate:{r['id']}",
+        "kind": "rsi_candidate",
+        "title": f"角色演化候选 — {r['role_slug']}",
+        "detail": f"状态 {r['status']} · 层级 {r['tier']}",
+        "task_id": None,
+        "created_at": r["created_at"],
+        "meta": {"candidate_id": r["id"], "role": r["role_slug"],
+                 "status": r["status"], "tier": r["tier"]},
+    } for r in rows]
+
+
+def _runtime_proposals(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        "SELECT id, component_type, component_key, title, severity, status, "
+        "created_at FROM runtime_proposals "
+        "WHERE status IN ('draft','open','triaged') ORDER BY created_at").fetchall()
+    return [{
+        "id": f"runtime_proposal:{r['id']}",
+        "kind": "runtime_proposal",
+        "title": f"运行时提案 — {r['title']}",
+        "detail": f"{r['component_type']} · {r['component_key']} · "
+                  f"{r['severity']} · {r['status']}",
+        "task_id": None,
+        "created_at": r["created_at"],
+        "meta": {"proposal_id": r["id"], "component_type": r["component_type"],
+                 "component_key": r["component_key"],
+                 "severity": r["severity"], "status": r["status"]},
+    } for r in rows]
 
 
 def _proposals(conn: sqlite3.Connection) -> list[dict]:

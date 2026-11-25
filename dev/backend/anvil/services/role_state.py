@@ -6,6 +6,25 @@ from __future__ import annotations
 
 from typing import Any
 
+ACTIVE_RUN_STATUSES = (
+    "created", "projecting", "running", "submitted", "reviewing", "suspended",
+)
+
+
+def evolving(conn, role: str) -> dict[str, Any]:
+    """RSI 反思 run 派生状态：只用于 UI 徽标，不改变任务状态。"""
+    from .. import config
+    if not bool(getattr(config, "ROLE_RSI_ENABLED", False)):
+        return {"evolving": False, "run_id": None}
+    row = conn.execute(
+        "SELECT id FROM runs WHERE role_slug=? AND origin='rsi_reflect' "
+        "AND status IN (" + ",".join("?" * len(ACTIVE_RUN_STATUSES)) + ") "
+        "ORDER BY started_at DESC LIMIT 1",
+        (role, *ACTIVE_RUN_STATUSES)).fetchone()
+    if row is None:
+        return {"evolving": False, "run_id": None}
+    return {"evolving": True, "run_id": str(row["id"])}
+
 
 def _workflow_signal(steps: list[dict], role: str, slice_key: str | None) -> dict[str, bool]:
     selected = [

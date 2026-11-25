@@ -1347,6 +1347,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_task_knowledge_version_v1(conn)
     _migrate_repo_split_v1(conn)
     _migrate_knowledge_completion_v1(conn)
+    _migrate_rsi_v150(conn)
     conn.commit()
 
 
@@ -2804,3 +2805,170 @@ def _rebuild_memory_fts_once(conn: sqlite3.Connection) -> None:
         # FTS5 不可用：保持 LIKE 回退，不阻断启动。
         pass
     conn.commit()
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def _add_column(conn: sqlite3.Connection, table: str, ddl: str) -> None:
+    """Idempotent ALTER TABLE ADD COLUMN; SQLite has no IF NOT EXISTS here."""
+    column = ddl.split()[0]
+    if not _has_column(conn, table, column):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
+def _migrate_rsi_v150(conn: sqlite3.Connection) -> None:
+    """v1.50 角色 RSI 地基迁移（幂等）。
+
+    - role_versions: evolution/config 版本、存档 manifest、完整性、软删
+    - proposals: 候选归档字段与 active dedupe 索引
+    - eval_runs / runtime_proposals: 仅新增的 2 个持久状态家族
+    - runs.role_space_version / notes provenance
+    """
+    # ---- role_versions -------------------------------------------------
+    _add_column(conn, "role_versions", "kind TEXT NOT NULL DEFAULT 'config'")
+    _add_column(conn, "role_versions", "status TEXT NOT NULL DEFAULT 'archived'")
+    _add_column(conn, "role_versions", "parent_version INTEGER")
+    _add_column(conn, "role_versions", "space_manifest_path TEXT")
+    _add_column(conn, "role_versions", "space_manifest_hash TEXT")
+    _add_column(conn, "role_versions", "charter_digest TEXT")
+    _add_column(conn, "role_versions", "eval_run_id TEXT")
+    _add_column(conn, "role_versions", "origin_candidate_id TEXT")
+    _add_column(conn, "role_versions", "promoted_at TEXT")
+    _add_column(conn, "role_versions", "promoted_by TEXT")
+    _add_column(conn, "role_versions", "note TEXT")
+    _add_column(conn, "role_versions", "content_hash TEXT")
+    _add_column(conn, "role_versions", "updated_at TEXT")
+    _add_column(conn, "role_versions", "coalesced_count INTEGER NOT NULL DEFAULT 1")
+    _add_column(conn, "role_versions", "deleted_at TEXT")
+    _add_column(conn, "role_versions", "purged_at TEXT")
+    _add_column(conn, "role_versions", "integrity_status TEXT")
+    _add_column(conn, "role_versions", "last_verified_at TEXT")
+    _add_column(conn, "role_versions", "role_tools_json TEXT")
+    # 历史行：一律 config/archived，不冒充 evolution active；保留可审计。
+    rows = conn.execute(
+        "SELECT slug, version, definition_json, created_at, content_hash "
+        "FROM role_versions").fetchall()
+    for row in rows:
+        digest = row["content_hash"] or hashlib.sha256(
+            (row["definition_json"] or "").encode("utf-8")).hexdigest()
+        conn.execute(
+            "UPDATE role_versions SET kind=COALESCE(NULLIF(kind,''), 'config'), "
+            "status=COALESCE(NULLIF(status,''), 'archived'), content_hash=?, "
+            "updated_at=COALESCE(NULLIF(updated_at,''), created_at), "
+            "coalesced_count=COALESCE(coalesced_count, 1), "
+            "integrity_status=COALESCE(NULLIF(integrity_status,''), 'unverified') "
+            "WHERE slug=? AND version=?",
+            (digest, row["slug"], row["version"]))
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_role_versions_list "
+        "ON role_versions(slug, kind, status, created_at DESC)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_role_versions_hash "
+        "ON role_versions(slug, kind, content_hash)")
+
+    # ---- proposals（候选归档；legacy 行保持 portrait/proposal_only） ----
+    _add_column(conn, "proposals", "kind TEXT NOT NULL DEFAULT 'portrait'")
+    _add_column(conn, "proposals", "tier TEXT NOT NULL DEFAULT 'proposal_only'")
+    _add_column(conn, "proposals", "cycle_id TEXT")
+    _add_column(conn, "proposals", "dedupe_key TEXT")
+    _add_column(conn, "proposals", "base_version INTEGER")
+    _add_column(conn, "proposals", "applied_version INTEGER")
+    _add_column(conn, "proposals", "parent_id TEXT")
+    _add_column(conn, "proposals", "evidence_json TEXT NOT NULL DEFAULT '[]'")
+    _add_column(conn, "proposals", "manifest_json TEXT NOT NULL DEFAULT '{}'")
+    _add_column(conn, "proposals", "predictions_json TEXT NOT NULL DEFAULT '{}'")
+    _add_column(conn, "proposals", "diagnosis_json TEXT")
+    _add_column(conn, "proposals", "eval_id TEXT")
+    _add_column(conn, "proposals", "updated_at TEXT")
+    _add_column(conn, "proposals", "decided_by TEXT")
+    _add_column(conn, "proposals", "decision_note TEXT")
+    conn.execute(
+        "UPDATE proposals SET updated_at=COALESCE(NULLIF(updated_at,''), created_at)")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_proposals_active_dedupe "
+        "ON proposals(role_slug, dedupe_key) "
+        "WHERE status IN ('draft','queued','evaluating','pending','applied')")
+
+    # ---- eval_runs（新家族，单写者 services.role_eval） -----------------
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS eval_runs (
+            id                TEXT PRIMARY KEY,
+            role_slug         TEXT NOT NULL,
+            candidate_id      TEXT,
+            baseline_version  INTEGER,
+            candidate_version INTEGER,
+            baseline_working_set_hash TEXT,
+            candidate_working_set_hash TEXT,
+            suite_id          TEXT NOT NULL,
+            suite_digest      TEXT NOT NULL,
+            held_in_json      TEXT NOT NULL DEFAULT '{}',
+            held_out_json     TEXT NOT NULL DEFAULT '{}',
+            diagnosis_json    TEXT NOT NULL DEFAULT '{}',
+            integrity_json    TEXT NOT NULL DEFAULT '{}',
+            cost_json         TEXT NOT NULL DEFAULT '{}',
+            request_json      TEXT NOT NULL DEFAULT '{}',
+            verdict           TEXT NOT NULL DEFAULT 'inconclusive',
+            status            TEXT NOT NULL DEFAULT 'queued',
+            error             TEXT,
+            created_at        TEXT NOT NULL,
+            started_at        TEXT,
+            finished_at       TEXT
+        )""")
+    _add_column(conn, "eval_runs", "baseline_working_set_hash TEXT")
+    _add_column(conn, "eval_runs", "candidate_working_set_hash TEXT")
+    _add_column(conn, "eval_runs", "request_json TEXT NOT NULL DEFAULT '{}'")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_eval_runs_role "
+        "ON eval_runs(role_slug, created_at DESC)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_eval_runs_candidate "
+        "ON eval_runs(candidate_id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_eval_runs_status ON eval_runs(status)")
+
+    # ---- runtime_proposals（新家族，单写者 services.runtime_proposals） --
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS runtime_proposals (
+            id                    TEXT PRIMARY KEY,
+            dedupe_sig            TEXT NOT NULL,
+            component_type        TEXT NOT NULL,
+            component_key         TEXT NOT NULL,
+            runtime_id            TEXT,
+            title                 TEXT NOT NULL,
+            severity              TEXT NOT NULL DEFAULT 'medium',
+            status                TEXT NOT NULL DEFAULT 'draft',
+            origin                TEXT NOT NULL DEFAULT 'agent',
+            origin_role           TEXT,
+            summary               TEXT NOT NULL,
+            root_cause_hypothesis TEXT,
+            proposed_change_md    TEXT NOT NULL,
+            verification_md       TEXT,
+            risk_md               TEXT,
+            evidence_count        INTEGER NOT NULL DEFAULT 1,
+            markdown_path         TEXT,
+            export_path           TEXT,
+            decision_note         TEXT,
+            decided_by            TEXT,
+            decided_at            TEXT,
+            applied_ref           TEXT,
+            verified_at           TEXT,
+            created_at            TEXT NOT NULL,
+            updated_at            TEXT NOT NULL
+        )""")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_proposals_active "
+        "ON runtime_proposals(dedupe_sig) "
+        "WHERE status IN ('draft','open','triaged','accepted','implemented')")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runtime_proposals_status "
+        "ON runtime_proposals(status, created_at DESC)")
+
+    # ---- runs / notes ---------------------------------------------------
+    _add_column(conn, "runs", "role_space_version INTEGER")
+    _add_column(conn, "runs", "working_set_hash TEXT")
+    _add_column(conn, "notes", "origin TEXT NOT NULL DEFAULT 'system'")
+    _add_column(conn, "notes", "source_cycle_id TEXT")
+    _add_column(conn, "notes", "source_role_version INTEGER")
+    _add_column(conn, "notes", "last_modified_by TEXT")

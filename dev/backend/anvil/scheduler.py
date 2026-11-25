@@ -101,6 +101,12 @@ class Scheduler:
                 ("backfill_knowledge_harvest",
                  lambda: knowledge_harvest.backfill(conn)),
             )),
+            ("evolution", (
+                ("rsi_dispatch_reflections", lambda: self._rsi_dispatch(conn)),
+                ("rsi_reap_runs", lambda: self._rsi_reap(conn)),
+                ("rsi_soak_check", lambda: self._rsi_soak(conn)),
+                ("runtime_proposal_detect", lambda: self._runtime_detect(conn)),
+            )),
             ("finalize", (
                 ("finalize_ready_tasks", lambda: self._finalize_ready_tasks(conn)),
             )),
@@ -140,6 +146,73 @@ class Scheduler:
                 ("reconcile", lambda: self._reconcile(conn)),
             )),
         )
+
+    def _rsi_dispatch(self, conn) -> None:
+        from .services import rsi as rsi_service
+        if not rsi_service.enabled():
+            return
+        active_count = conn.execute(
+            "SELECT COUNT(*) FROM runs WHERE status IN ('created','projecting',"
+            "'running','submitted','reviewing','suspended')").fetchone()[0]
+        if int(active_count) >= int(
+                getattr(config, "ROLE_RSI_MAX_GLOBAL_ACTIVE_RUNS", 2)):
+            return
+        roles = conn.execute(
+            "SELECT slug FROM roles WHERE enabled=1 ORDER BY updated_at").fetchall()
+        for row in roles:
+            role = str(row["slug"])
+            if not rsi_service.role_enabled(conn, role):
+                continue
+            active = conn.execute(
+                "SELECT 1 FROM runs WHERE role_slug=? AND origin='rsi_reflect' "
+                "AND status IN ('created','projecting','running','submitted',"
+                "'reviewing','suspended') LIMIT 1", (role,)).fetchone()
+            if active is not None:
+                continue
+            busy = conn.execute(
+                "SELECT 1 FROM runs WHERE role_slug=? "
+                "AND COALESCE(origin,'') != 'rsi_reflect' "
+                "AND status IN ('created','projecting','running','submitted',"
+                "'reviewing','suspended') LIMIT 1", (role,)).fetchone()
+            if busy is not None:
+                rsi_service.record_deferred(conn, role, reason="role_busy")
+                continue
+            decision = rsi_service.due(conn, role)
+            if not decision.get("due"):
+                continue
+            run = rsi_service.start_reflection(
+                conn, role,
+                prompt_body=f"触发原因：{decision.get('reason')}；"
+                            f"观测数：{decision.get('observations')}")
+            if run is None:
+                continue
+            active_count += 1
+            if int(active_count) >= int(
+                    getattr(config, "ROLE_RSI_MAX_GLOBAL_ACTIVE_RUNS", 2)):
+                break
+
+    def _rsi_reap(self, conn) -> None:
+        from .services import rsi as rsi_service
+        if not rsi_service.enabled():
+            return
+        rsi_service.reap_reflections(conn)
+
+    def _rsi_soak(self, conn) -> None:
+        from .services import rsi as rsi_service
+        if not rsi_service.enabled() or not bool(
+                getattr(config, "ROLE_RSI_AUTO_ROLLBACK", False)):
+            return
+        rows = conn.execute(
+            "SELECT slug, version FROM role_versions WHERE kind='evolution' "
+            "AND status='active'").fetchall()
+        for row in rows:
+            rsi_service.soak_check(conn, str(row["slug"]), int(row["version"]))
+
+    def _runtime_detect(self, conn) -> None:
+        from .services import runtime_signals
+        if not bool(getattr(config, "RUNTIME_PROPOSAL_DETECTOR", False)):
+            return
+        runtime_signals.scan(conn)
 
     def tick_once(self) -> None:
         self._backup_daily()

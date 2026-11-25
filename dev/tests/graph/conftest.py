@@ -54,6 +54,7 @@ def make_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                              executable_path="/bin/echo", status="ready", capabilities={})
     roles_service.create(conn, slug="dev", display_name="Dev",
                          definition={"runtime": {"id": "claude-code"},
+                                     "rsi": {"enabled": True},
                                      "workspace": {"home": "agents/dev/", "repos": []},
                                      "tools": {}, "concurrency": {}})
     conn.close()

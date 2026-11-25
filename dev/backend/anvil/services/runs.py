@@ -50,12 +50,25 @@ def create_run(conn: sqlite3.Connection, role_slug: str, task_id: str | None = N
         log_path.write_text(
             f"# run {rid}  role={role_slug}  task={task_id}  slice={slice_key or '-'}"
             f"  started={now_iso()}\n", encoding="utf-8")
+    active_version = conn.execute(
+        "SELECT version FROM role_versions WHERE slug=? AND kind='evolution' "
+        "AND status='active' ORDER BY version DESC LIMIT 1",
+        (role_slug,)).fetchone()
+    role_space_version = int(active_version["version"]) if active_version else None
+    working_set_hash = None
+    try:
+        from . import role_space
+        working_set_hash = role_space.working_set(conn, role_slug)["hash"]
+    except Exception:  # noqa: BLE001 —— 工作集计算失败不应阻断 run
+        pass
     conn.execute(
         "INSERT INTO runs (id, role_slug, task_id, status, profile_snapshot, worktree_path, "
-        "log_path, prompt, step_id, workflow_id, slice_key, dispatch_id, origin, started_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "log_path, prompt, step_id, workflow_id, slice_key, dispatch_id, origin, "
+        "role_space_version, working_set_hash, started_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (rid, role_slug, task_id, "created", digest, str(worktree), str(log_path), prompt,
-         step_id, workflow_id, slice_key, dispatch_id, origin, now_iso()),
+         step_id, workflow_id, slice_key, dispatch_id, origin, role_space_version,
+         working_set_hash, now_iso()),
     )
     if commit:
         conn.commit()
@@ -66,6 +79,13 @@ def create_run(conn: sqlite3.Connection, role_slug: str, task_id: str | None = N
         task and task.get("type") in ("dispatch", "dispatched") and task.get("parent_id"))
     if not dispatch_child:
         _create_worktree(conn, rid, role_slug, task_id, worktree)
+    # 任务/步骤唤醒优先：终止该角色在跑的 RSI 反思 run（可抢占）。
+    if commit and task_id and origin != "rsi_reflect":
+        try:
+            from . import rsi as rsi_service
+            rsi_service.preempt(conn, role_slug, reason=f"task run {rid}")
+        except Exception:  # noqa: BLE001 —— 抢占失败不阻断 run 创建
+            pass
     return get_run(conn, rid)  # type: ignore[return-value]
 
 

@@ -420,6 +420,17 @@ def read_principles(role: str, max_chars: int | None = None) -> str:
     return text[:limit] if len(text) > limit else text
 
 
+def _snapshot_config(conn: sqlite3.Connection, role: str, source: str) -> None:
+    """Human/direct strategy writes still leave a deduped config revision."""
+    from . import roles as roles_service
+    role_row = roles_service.get(conn, role)
+    if role_row is None:
+        return
+    roles_service._snapshot_version(
+        conn, role, role_row["display_name"],
+        jloads(role_row["definition_json"], {}), source=source)
+
+
 def write_principles(conn: sqlite3.Connection, role: str, content: str, *,
                      mode: str = "replace", actor: str | None = None) -> dict:
     """写 `PRINCIPLES.md`：耐久准则，容量受限、去重、可审计。"""
@@ -437,6 +448,7 @@ def write_principles(conn: sqlite3.Connection, role: str, content: str, *,
         raise ValueError(
             f"principles exceed {limit} chars; move details to memory cards")
     _replace_home_file(role, "PRINCIPLES.md", text + "\n")
+    _snapshot_config(conn, role, "principles")
     now = now_iso()
     ledger.emit_audit(
         conn, role_slug=actor or role,
@@ -1112,9 +1124,32 @@ def list_shared_lesson_lines(repo: str = "shared") -> list[str]:
 
 # ---- proposals（角色演化审批，§9） ----------------------------------------
 
+# v1.50：提案只允许审批档字段；Charter/runtime/permissions 等不得经提案写入。
+ALLOWED_PROPOSAL_FIELDS = frozenset({
+    "capabilities", "tools", "responsibilities", "claim",
+})
+FORBIDDEN_PROPOSAL_FIELDS = frozenset({
+    "description", "runtime", "permissions", "workspace", "concurrency",
+    "system_prompt", "display_name", "tools.skills", "tools.mcp",
+})
+
+
+def validate_proposal_field(field: str) -> str:
+    field = str(field or "").strip()
+    if field in FORBIDDEN_PROPOSAL_FIELDS or field.startswith("portrait:"):
+        raise ValueError(
+            f"proposal field '{field}' is charter/runtime-owned; use role_suggestion "
+            "or runtime proposal instead")
+    if field not in ALLOWED_PROPOSAL_FIELDS:
+        raise ValueError(
+            f"proposal field '{field}' is not allowed; allowed: "
+            f"{', '.join(sorted(ALLOWED_PROPOSAL_FIELDS))}")
+    return field
+
 
 def create_proposal(conn: sqlite3.Connection, role: str, field: str, proposed: dict,
                     rationale: str | None, risk: str | None) -> dict:
+    field = validate_proposal_field(field)
     pid = new_id()
     conn.execute(
         "INSERT INTO proposals (id, role_slug, field, proposed_json, rationale, risk, status, created_at) "
@@ -1169,7 +1204,7 @@ def _apply_proposal(conn: sqlite3.Connection, row) -> None:
     from . import roles as roles_service  # 惰性导入避免循环
 
     slug = row["role_slug"]
-    field = row["field"]
+    field = validate_proposal_field(row["field"])
     proposed = jloads(row["proposed_json"], {})
     role = roles_service.get(conn, slug)
     if role is None:
@@ -1197,6 +1232,7 @@ def write_instruction(conn: sqlite3.Connection, role: str, content: str) -> dict
     home = config.AGENTS_DIR / role
     home.mkdir(parents=True, exist_ok=True)
     (home / "instruction.md").write_text(content, encoding="utf-8")
+    _snapshot_config(conn, role, "instruction")
     ledger.emit_audit(
         conn, role_slug=role,
         task_id=None,

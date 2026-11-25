@@ -278,7 +278,8 @@ def _run_workspace_path(conn: sqlite3.Connection, run: dict, role: dict,
     if _persistent_session(conn, effective) and run.get("task_id"):
         from ..services import daemon as daemon_service
         # 同一 task 的 workspace 在 slice 间共享；优先精确槽，再回退同 task 任意槽。
-        target_key = daemon_service.context_key(run["task_id"], run.get("slice_key"))
+        target_key = daemon_service.context_key(
+        run["task_id"], run.get("slice_key"), origin=run.get("origin"))
         row = conn.execute(
             "SELECT workspace_path FROM role_task_sessions "
             "WHERE role_slug=? AND task_key=?",
@@ -505,6 +506,8 @@ def _run_prompt_kind(conn: sqlite3.Connection, run: dict,
     prompt = run.get("prompt") or ""
     if prompt.startswith("[anvil:findings]"):
         return "findings"
+    if prompt.startswith("[anvil:rsi-reflect]"):
+        return "rsi_reflect"
     if run.get("step_id"):
         return "step"
     from ..services import planning as planning_service
@@ -528,6 +531,8 @@ def _protocols_for_run(conn: sqlite3.Connection, run: dict,
     """按 run 类型返回协议块（CLAUDE.md 投影与 prompt 注入共用同一来源）。"""
     if kind == "findings":
         return render.FINDING_PROTOCOL
+    if kind == "rsi_reflect":
+        return render.RSI_REFLECT_PROTOCOL
     if kind == "step":
         parts = [render.STEP_PROTOCOL]
         if _is_finding_reviewer(conn, task, run.get("role_slug")):

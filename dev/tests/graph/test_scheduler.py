@@ -711,6 +711,10 @@ def test_phase_domains_preserve_order_and_budget(tmp_path, monkeypatch):
         "reap_revision_drafts",
         "reconcile_knowledge_completion",
         "backfill_knowledge_harvest",
+        "rsi_dispatch_reflections",
+        "rsi_reap_runs",
+        "rsi_soak_check",
+        "runtime_proposal_detect",
         "finalize_ready_tasks",
         "resolve_dispatch_returns",
         "retry_dispatch_notifications",
@@ -730,6 +734,71 @@ def test_phase_domains_preserve_order_and_budget(tmp_path, monkeypatch):
     ]
     assert len(domains) <= 12
     assert [domain for domain, _ in domains] == [
-        "governance", "advance", "wake", "maintenance", "finalize",
-        "dispatch", "recovery", "monitor", "reap", "reconcile",
+        "governance", "advance", "wake", "maintenance", "evolution",
+        "finalize", "dispatch", "recovery", "monitor", "reap", "reconcile",
     ]
+
+
+def test_evolution_detector_creates_runtime_proposal(tmp_path, monkeypatch):
+    from anvil.services import runtime_signals  # noqa: F401
+    monkeypatch.setattr(config, "RUNTIME_PROPOSAL_DETECTOR", True)
+    monkeypatch.setattr(config, "RUNTIME_PROPOSALS_DIR", tmp_path / "rip")
+    env = make_env(tmp_path, monkeypatch)
+    conn = open_conn(env["db_path"])
+    conn.execute(
+        "INSERT INTO runtimes (id, display_name, executable_path, status) "
+        "VALUES ('rt-bad','Bad','/missing', 'missing')")
+    conn.commit()
+    conn.close()
+    Scheduler(env["db_path"], env["orch"]).tick_once()
+    conn = open_conn(env["db_path"])
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM runtime_proposals").fetchone()[0]
+        assert n == 1
+    finally:
+        conn.close()
+
+
+def test_rsi_dispatch_defers_busy_role(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "ROLE_RSI_ENABLED", True)
+    env = make_env(tmp_path, monkeypatch)
+    conn = open_conn(env["db_path"])
+    for i in range(3):
+        conn.execute(
+            "INSERT INTO events (ts, event_type, actor_type, actor, payload_json) "
+            "VALUES (?,?,?,?,?)",
+            (now_iso(), "rsi.observation", "system", "dev",
+             '{"role":"dev","trigger":"task_done"}'))
+    conn.execute(
+        "INSERT INTO runs (id, role_slug, status, started_at) "
+        "VALUES ('R-BUSY','dev','running',?)", (now_iso(),))
+    conn.commit()
+    conn.close()
+    Scheduler(env["db_path"], env["orch"]).tick_once()
+    assert not any(r["origin"] == "rsi_reflect" for r in _runs(env))
+    conn = open_conn(env["db_path"])
+    try:
+        deferred = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type='rsi.deferred'"
+        ).fetchone()[0]
+        assert deferred == 1
+    finally:
+        conn.close()
+
+
+def test_rsi_dispatch_creates_reflection_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "ROLE_RSI_ENABLED", True)
+    env = make_env(tmp_path, monkeypatch)
+    conn = open_conn(env["db_path"])
+    for i in range(3):
+        conn.execute(
+            "INSERT INTO events (ts, event_type, actor_type, actor, payload_json) "
+            "VALUES (?,?,?,?,?)",
+            (now_iso(), "rsi.observation", "system", "dev",
+             '{"role":"dev","trigger":"task_done"}'))
+    conn.commit()
+    conn.close()
+    Scheduler(env["db_path"], env["orch"]).tick_once()
+    runs = _runs(env)
+    assert any(r["origin"] == "rsi_reflect" and r["role_slug"] == "dev"
+               for r in runs)

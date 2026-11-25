@@ -853,3 +853,10 @@ def fail_step(conn: sqlite3.Connection, wid: str, step_id: str, reason: str,
             failure_class=category, actor=step.get("role_slug"))
     except Exception:  # noqa: BLE001 —— 捕获失败不影响失败处理
         pass
+    try:
+        from . import rsi as rsi_service
+        rsi_service.observe_failure(
+            conn, wf["task_id"], role=step.get("role_slug"), step_id=step_id,
+            run_id=step.get("run_id"), failure_class=category)
+    except Exception:  # noqa: BLE001 —— RSI 观测失败不影响失败处理
+        pass

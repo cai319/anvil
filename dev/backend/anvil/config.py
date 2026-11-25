@@ -55,6 +55,12 @@ TASK_WORKSPACES_DIR = Path(
 KNOWLEDGE_REPOS_DIR = Path(
     _env("ANVIL_KNOWLEDGE_REPOS_DIR", str(DATA_DIR / "knowledge-repos"))).expanduser()
 CHANNELS_DIR = Path(_env("ANVIL_CHANNELS_DIR", str(DATA_DIR / "channels"))).expanduser()
+# v1.50：隐藏回放集 / 运行时提案 / 导入隔离目录。
+ROLE_EVAL_DIR = Path(_env("ANVIL_ROLE_EVAL_DIR", str(DATA_DIR / "eval"))).expanduser()
+RUNTIME_PROPOSALS_DIR = Path(
+    _env("ANVIL_RUNTIME_PROPOSALS_DIR", str(DATA_DIR / "runtime-proposals"))).expanduser()
+ROLE_IMPORTS_DIR = Path(
+    _env("ANVIL_ROLE_IMPORTS_DIR", str(DATA_DIR / "imports"))).expanduser()
 
 # LangGraph 检查点独立文件（与 anvil.db 隔离，见 graph/__init__.py）。
 GRAPH_DB_PATH = Path(_env("ANVIL_GRAPH_DB_PATH", str(DATA_DIR / "anvil-graph.db"))).expanduser()
@@ -240,6 +246,33 @@ KNOWLEDGE_HARVEST_REMINDER_ENABLED = _env(
 KNOWLEDGE_LLM_CLEANING_ENABLED = _env(
     "ANVIL_KNOWLEDGE_LLM_CLEANING", "0") == "1"
 
+# v1.50 角色 RSI：默认全关，按角色试点后开启（见 docs/v1.50-role-rsi.md）。
+ROLE_RSI_ENABLED = _env("ANVIL_ROLE_RSI", "0") == "1"
+ROLE_RSI_AUTONOMOUS_KNOWLEDGE = _env(
+    "ANVIL_ROLE_RSI_AUTONOMOUS_KNOWLEDGE", "1") == "1"
+ROLE_RSI_REFLECTION = _env("ANVIL_ROLE_RSI_REFLECTION", "1") == "1"
+ROLE_RSI_EVALUATION = _env("ANVIL_ROLE_RSI_EVALUATION", "0") == "1"
+ROLE_RSI_AUTO_ROLLBACK = _env("ANVIL_ROLE_RSI_AUTO_ROLLBACK", "1") == "1"
+ROLE_RSI_RUBRIC_JUDGE = _env("ANVIL_ROLE_RSI_RUBRIC_JUDGE", "0") == "1"
+ROLE_RSI_LOCK_STRATEGY = _env("ANVIL_ROLE_RSI_LOCK_STRATEGY", "0") == "1"
+ROLE_RSI_REPLAY_L2 = _env("ANVIL_ROLE_RSI_REPLAY_L2", "0") == "1"
+ROLE_RSI_MAX_GLOBAL_ACTIVE_RUNS = int(
+    _env("ANVIL_ROLE_RSI_MAX_GLOBAL_ACTIVE_RUNS", "2"))
+RUNTIME_PROPOSALS_ENABLED = _env("ANVIL_RUNTIME_PROPOSALS", "1") == "1"
+RUNTIME_PROPOSAL_DETECTOR = _env("ANVIL_RUNTIME_PROPOSAL_DETECTOR", "0") == "1"
+
+# 版本存档 / 导出导入（v1.50）。
+ROLE_VERSION_COALESCE_SECONDS = int(
+    _env("ANVIL_ROLE_VERSION_COALESCE_SECONDS", "60"))
+ROLE_VERSION_KEEP_MANUAL = int(_env("ANVIL_ROLE_VERSION_KEEP_MANUAL", "30"))
+ROLE_VERSION_KEEP_RSI = int(_env("ANVIL_ROLE_VERSION_KEEP_RSI", "50"))
+ROLE_VERSION_KEEP_CANDIDATE = int(
+    _env("ANVIL_ROLE_VERSION_KEEP_CANDIDATE", "20"))
+ROLE_VERSION_REJECTED_DAYS = int(
+    _env("ANVIL_ROLE_VERSION_REJECTED_DAYS", "180"))
+ROLE_EVAL_ENCRYPT_HIDDEN = _env(
+    "ANVIL_ROLE_EVAL_ENCRYPT_HIDDEN", "0") == "1"
+
 # Phase 3：检索最低分 + 单任务上下文预算（0=关闭，按模型窗口 CIC 阈值）。
 # 基线校准：BM25/元数据重排后的分数偏低；0.05 只过滤明显噪声，保留精确关键词命中。
 KNOWLEDGE_MIN_SCORE = float(_env("ANVIL_KNOWLEDGE_MIN_SCORE", "0.05"))
@@ -345,6 +378,7 @@ def resolve_auth_token(path: Path | None = None) -> str:
 def ensure_dirs() -> None:
     for d in (DATA_DIR, USER_RUNTIMES_DIR, AGENTS_DIR, REPOS_DIR,
               TASK_WORKSPACES_DIR, KNOWLEDGE_REPOS_DIR, CHANNELS_DIR,
+              ROLE_EVAL_DIR, RUNTIME_PROPOSALS_DIR, ROLE_IMPORTS_DIR,
               SQLITE_PATH.parent):
         d.mkdir(parents=True, exist_ok=True)
     # 日志目录不可写时由 setup_logging 回退到 DATA_DIR/log，不能阻断服务启动。

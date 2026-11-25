@@ -616,6 +616,117 @@ def self_cmd(
             "可用动作: show/edit-instruction/propose/reset-context。运行 `anvil self -h`。")
 
 
+@app.command("rsi", help="角色 RSI：观测、触发状态、复盘与回放评估。",
+             short_help="RSI：show/trigger/retro/eval")
+def rsi_cmd(
+    action: str = typer.Argument("show"),
+    role: str = typer.Option(None, "--role", help="角色 slug（默认 ANVIL_AGENT_SLUG）"),
+    task: str = typer.Option(None, "--task", help="retro 的任务 id（默认 ANVIL_TASK_ID）"),
+    file: str = typer.Option(None, "--file", help="retro 内容文件"),
+    suite: str = typer.Option(None, "--suite", help="eval 的隐藏回放 suite id"),
+    candidate: str = typer.Option(None, "--candidate", help="eval 的候选 id"),
+    version: int = typer.Option(None, "--version", help="eval 的候选版本号"),
+    baseline: int = typer.Option(None, "--baseline", help="eval 的基线版本号"),
+    limit: int = typer.Option(50, "--limit", help="观测条数上限"),
+    json_out: bool = typer.Option(False, "--json", help="输出 JSON"),
+):
+    """anvil rsi <show|observations|trigger|retro|candidates|eval>"""
+    slug = (role or AGENT_SLUG or "").strip()
+    if not slug:
+        _usage_error("rsi 需要角色 slug", "传 --role，或由运行时注入 ANVIL_AGENT_SLUG。")
+    if action in ("show", "observations"):
+        _emit(_call("GET", f"/api/v1/rsi/roles/{slug}/observations",
+                    params={"limit": limit}), json_out)
+    elif action == "trigger":
+        _emit(_call("GET", f"/api/v1/rsi/roles/{slug}/trigger"), json_out)
+    elif action == "retro":
+        tid = task or DEFAULT_TASK
+        if not tid or not file:
+            _usage_error("rsi retro 需要 --task 与 --file",
+                         "例如 `anvil rsi retro --task T-1 --file retro.md`。")
+        try:
+            content = _read_text_file(file)
+        except OSError as exc:
+            _usage_error(f"无法读取 --file: {exc}", "检查文件路径与读权限。")
+        _emit(_call("POST", f"/api/v1/rsi/roles/{slug}/retro",
+                    {"task_id": tid, "content": content}), json_out)
+    elif action == "candidates":
+        _emit(_call("GET", "/api/v1/rsi/candidates",
+                    params={"role": slug}), json_out)
+    elif action == "eval":
+        if not suite or (not candidate and not version):
+            _usage_error(
+                "rsi eval 需要 --suite 与 --candidate 或 --version",
+                "例如 `anvil rsi eval --suite default --candidate P-...`。")
+        payload = {"suite_id": suite, "candidate_id": candidate,
+                   "candidate_version": version, "baseline_version": baseline}
+        _emit(_call("POST", f"/api/v1/rsi/roles/{slug}/evaluations",
+                    {k: v for k, v in payload.items() if v is not None}),
+              json_out)
+    else:
+        _usage_error(f"unknown rsi action: {action}",
+                     "可用动作: show/observations/trigger/retro/candidates/eval。")
+
+
+@app.command("runtime", help="运行时部件改进提案（RIP/RTP）。",
+             short_help="运行时提案：propose/evidence/list/show/export")
+def runtime_cmd(
+    action: str = typer.Argument("proposals"),
+    proposal_id: str = typer.Argument(None),
+    component_type: str = typer.Option(None, "--type", help="skill/mcp_server/..."),
+    component_key: str = typer.Option(None, "--component", help="组件 key"),
+    title: str = typer.Option(None, "--title", help="提案标题"),
+    summary_file: str = typer.Option(None, "--summary-file", help="现象/影响摘要文件"),
+    proposed_file: str = typer.Option(None, "--proposed-file", help="建议修改文件"),
+    evidence_file: str = typer.Option(None, "--evidence-file", help="证据 JSON 文件"),
+    severity: str = typer.Option("major", "--severity"),
+    status: str = typer.Option(None, "--status"),
+    json_out: bool = typer.Option(False, "--json", help="输出 JSON"),
+):
+    """anvil runtime <propose|evidence|proposals|show|export>"""
+    if action == "proposals":
+        _emit(_call("GET", "/api/v1/runtime-proposals",
+                    params={"status": status} if status else None), json_out)
+    elif action == "show":
+        if not proposal_id:
+            _usage_error("runtime show 需要提案 id", "例如 `anvil runtime show RTP-...`。")
+        _emit(_call("GET", f"/api/v1/runtime-proposals/{proposal_id}"), json_out)
+    elif action == "propose":
+        if not component_type or not component_key or not title:
+            _usage_error("runtime propose 需要 --type/--component/--title",
+                         "用 `anvil runtime propose -h` 查看参数。")
+        try:
+            summary = _read_text_file(summary_file) if summary_file else ""
+            proposed = _read_text_file(proposed_file) if proposed_file else ""
+            evidence = (json.loads(_read_text_file(evidence_file))
+                        if evidence_file else {})
+        except (OSError, json.JSONDecodeError) as exc:
+            _usage_error(f"无法读取文件: {exc}", "检查文件路径与 JSON 语法。")
+        _emit(_call("POST", "/api/v1/runtime-proposals", {
+            "component_type": component_type, "component_key": component_key,
+            "title": title, "summary": summary or title,
+            "proposed_change_md": proposed or "待补充",
+            "severity": severity, "evidence": evidence,
+        }), json_out)
+    elif action == "evidence":
+        if not proposal_id or not evidence_file:
+            _usage_error("runtime evidence 需要提案 id 与 --evidence-file",
+                         "例如 `anvil runtime evidence RTP-... --evidence-file e.json`。")
+        try:
+            evidence = json.loads(_read_text_file(evidence_file))
+        except (OSError, json.JSONDecodeError) as exc:
+            _usage_error(f"无法读取证据 JSON: {exc}", "检查文件路径与 JSON 语法。")
+        _emit(_call("POST", f"/api/v1/runtime-proposals/{proposal_id}/evidence",
+                    {"evidence": evidence}), json_out)
+    elif action == "export":
+        if not proposal_id:
+            _usage_error("runtime export 需要提案 id", "例如 `anvil runtime export RTP-...`。")
+        _emit(_call("POST", f"/api/v1/runtime-proposals/{proposal_id}/export"), json_out)
+    else:
+        _usage_error(f"unknown runtime action: {action}",
+                     "可用动作: propose/evidence/proposals/show/export。")
+
+
 @app.command("whoami")
 def whoami_cmd(json_out: bool = typer.Option(False, "--json", help="输出 JSON")):
     """anvil whoami — self show 的别名（M1 出口命令）。"""
@@ -1669,6 +1780,61 @@ app.add_typer(role_app, name="role")
 def role_list(json_out: bool = typer.Option(False, "--json")):
     """列出当前系统中的角色（slug、名称、状态、画像）。"""
     _emit(_call("GET", "/api/v1/roles"), json_out)
+
+
+@role_app.command("export")
+def role_export_cmd(
+    slug: str = typer.Argument(..., help="角色 slug"),
+    version: int = typer.Option(..., "--version", help="版本号"),
+    out: str = typer.Option(None, "--out", help="输出 zip 路径"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """导出角色@版本为 .anvil.zip（human）。"""
+    if not TOKEN:
+        _usage_error("未配置 Anvil token", "设置 ANVIL_TOKEN 或 ~/.config/Anvil/token。")
+    target = Path(out or f"role-{slug}-v{version}.anvil.zip")
+    with _client() as c:
+        r = c.get(f"/api/v1/roles/{slug}/versions/{version}/export",
+                  headers=_headers())
+    if r.status_code >= 300:
+        _emit({"error": r.text}, json_out)
+        raise typer.Exit(1)
+    target.write_bytes(r.content)
+    _emit({"path": str(target), "bytes": len(r.content)}, json_out)
+
+
+@role_app.command("import")
+def role_import_cmd(
+    file: str = typer.Argument(..., help=".anvil.zip 文件"),
+    mode: str = typer.Option("new_role", "--mode", help="new_role|add_version"),
+    slug: str = typer.Option(None, "--slug", help="目标 slug"),
+    allow_charter_change: bool = typer.Option(False, "--allow-charter-change"),
+    preview: bool = typer.Option(False, "--preview", help="只预览，不导入"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """导入角色@版本（human）；默认不自动启用/切换。"""
+    if not TOKEN:
+        _usage_error("未配置 Anvil token", "设置 ANVIL_TOKEN 或 ~/.config/Anvil/token。")
+    path = Path(file)
+    if not path.is_file():
+        _usage_error(f"文件不存在: {file}", "检查路径。")
+    data = {"mode": mode}
+    if slug:
+        data["slug"] = slug
+    data["allow_charter_change"] = "true" if allow_charter_change else "false"
+    endpoint = "/api/v1/roles/import/preview" if preview else "/api/v1/roles/import"
+    with path.open("rb") as fh, _client() as c:
+        r = c.post(endpoint, headers=_headers(),
+                   files={"file": (path.name, fh, "application/zip")},
+                   data=data)
+    try:
+        payload = r.json()
+    except ValueError:
+        payload = {"error": r.text}
+    if r.status_code >= 300:
+        _emit(payload, json_out)
+        raise typer.Exit(1)
+    _emit(payload, json_out)
 
 
 @role_app.command("propose", epilog="""\b

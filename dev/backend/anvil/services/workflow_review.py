@@ -459,6 +459,13 @@ def _review_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
                 feedback=feedback, actor="human")
         except Exception:  # noqa: BLE001 —— 捕获失败不影响评审
             pass
+        try:
+            from . import rsi as rsi_service
+            rsi_service.observe_rework(
+                conn, wf["task_id"], role=step.get("role_slug"),
+                step_id=step_id, feedback=feedback)
+        except Exception:  # noqa: BLE001 —— RSI 观测失败不影响评审
+            pass
     _finalize_if_done(conn, wid)
     return get_workflow(conn, wid)  # type: ignore[return-value]
 

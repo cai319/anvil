@@ -39,6 +39,9 @@ def _isolate_data_dirs(tmp_path, monkeypatch):
     monkeypatch.setattr(app_config, "TASK_WORKSPACES_DIR", data / "task-workspaces")
     monkeypatch.setattr(app_config, "KNOWLEDGE_REPOS_DIR", data / "knowledge-repos")
     monkeypatch.setattr(app_config, "CHANNELS_DIR", data / "channels")
+    monkeypatch.setattr(app_config, "ROLE_EVAL_DIR", data / "eval")
+    monkeypatch.setattr(app_config, "RUNTIME_PROPOSALS_DIR", data / "runtime-proposals")
+    monkeypatch.setattr(app_config, "ROLE_IMPORTS_DIR", data / "imports")
     monkeypatch.setattr(app_config, "SQLITE_PATH", data / "anvil.db")
     return data
 

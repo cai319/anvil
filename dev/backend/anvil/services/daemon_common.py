@@ -175,6 +175,7 @@ def frame_user_message(text: str) -> str:
 
 
 GLOBAL_TASK_KEY = "__global__"
+RSI_REFLECT_TASK_KEY = "__rsi_reflect__"
 
 
 CONTEXT_SEP = "::slice::"
@@ -183,8 +184,11 @@ CONTEXT_SEP = "::slice::"
 _ALL_SLOTS = object()
 
 
-def context_key(task_id: str | None, slice_key: str | None = None) -> str:
-    """上下文槽 key：task 级 / slice 级 / __global__。"""
+def context_key(task_id: str | None, slice_key: str | None = None,
+                origin: str | None = None) -> str:
+    """上下文槽 key：task 级 / slice 级 / __global__ / RSI 反思独立槽。"""
+    if origin == "rsi_reflect":
+        return RSI_REFLECT_TASK_KEY
     if not task_id:
         return GLOBAL_TASK_KEY
     return (f"{task_id}{CONTEXT_SEP}{slice_key}" if slice_key else str(task_id))

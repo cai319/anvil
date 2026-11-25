@@ -154,14 +154,138 @@ FLAGS: tuple[FeatureFlag, ...] = (
         key="dispatch_auto_from_mention",
         attr="DISPATCH_AUTO_FROM_MENTION",
         title="Agent 间 @ 自动派遣",
-        summary="Agent 之间 @ 且路由判定为独立工作时，自动创建派遣子任务。",
+        summary="Agent 间 @ 判定为独立工作时自动创建派遣子任务；关闭则退回当前 task 回复 run。",
         description=(
-            "人类 @ 始终按上下文路由执行；显式 context_mode=dispatch 始终可用。"
-            "此开关只控制 Agent 之间的自动路由。开启后，Agent 的无关 @ 会在来源 task "
-            "下创建非阻塞的派遣子任务；关闭后，退化为当前 task 的新切片/回复 run，"
-            "不创建子任务。"
+            "人类 @ 和显式 context_mode=dispatch 始终可派遣；此开关只控制 Agent 之间的"
+            "自动升级。开启后：Agent 对无关请求的 @ 会创建不阻塞当前 workflow 的派遣"
+            "子任务（独立 task 上下文，完成后可自动回切）。关闭后：不创建 child task，"
+            "也不新建 slice；改为在当前 task 的已有 slice 或任务级上下文创建/复用一个"
+            " @ 回复 run。关闭不停止执行，只是不独立建卡；适合先观察 router 判断，再"
+            "决定是否开启自动派遣。派遣/委派都是子任务：不修改 workflow、不需要 Cindy "
+            "介入；派遣提交即完成（无人工评审），委派由派发角色验收并释放父步骤；"
+            "父 workflow 的最终人工审批不受影响。"
         ),
         category="collaboration",
+    ),
+    FeatureFlag(
+        key="role_rsi",
+        attr="ROLE_RSI_ENABLED",
+        title="角色 RSI（总开关）",
+        summary="角色 RSI 总开关：从任务中复盘、积累经验并产生演进候选。",
+        description=(
+            "开启后：任务完成写回执；满足条件时在角色空闲窗口反思，产出经验卡、候选和"
+            "运行时提案；所有晋级仍需人工。关闭后：不产生观测/候选，现有行为不变。"
+            "建议先按角色 definition.rsi.enabled 试点。"
+        ),
+        category="evolution",
+    ),
+    FeatureFlag(
+        key="role_rsi_autonomous_knowledge",
+        attr="ROLE_RSI_AUTONOMOUS_KNOWLEDGE",
+        title="RSI 自主知识卡",
+        summary="允许 RSI 把成功任务的经验直接写成角色私有经验卡。",
+        description=(
+            "开启后：成功任务提炼的经验卡可自主写入，仍受质量、去重和实践门控制；"
+            "失败/返工只写 draft。关闭后：所有知识卡都要人工批准。"
+            "不改系统提示、工具或权限。"
+        ),
+        category="evolution",
+    ),
+    FeatureFlag(
+        key="role_rsi_reflection",
+        attr="ROLE_RSI_REFLECTION",
+        title="RSI 反思 run",
+        summary="让角色在空闲窗口复盘近期任务，生成候选与经验。",
+        description=(
+            "开启后：满足触发条件时创建一次性反思 run，消耗角色 runtime token；"
+            "任务唤醒会抢占。关闭后：只积累 observation，不调用模型。"
+        ),
+        category="evolution",
+    ),
+    FeatureFlag(
+        key="role_rsi_evaluation",
+        attr="ROLE_RSI_EVALUATION",
+        title="RSI 隐藏回放评估",
+        summary="像一次离线考试：用真实历史任务对比候选与当前角色。",
+        description=(
+            "开启后：候选和当前版本在同一批真实任务上各跑一遍，比较通过率和成本；"
+            "需要至少 8+8 条带确定性验收的任务，数据不足只会返回 inconclusive。"
+            "默认关闭：回放耗 token、耗时间，且角色看不到评测集。"
+            "当前真正控制回放执行的是本开关。"
+        ),
+        category="evolution",
+    ),
+    FeatureFlag(
+        key="role_rsi_auto_rollback",
+        attr="ROLE_RSI_AUTO_ROLLBACK",
+        title="RSI SOAKING 自动回滚",
+        summary="晋级后观察窗内表现变差时，自动回到上一批准版本。",
+        description=(
+            "开启后：新版本晋级后持续看实际成功率和返工，连续退化超过噪声阈值就切回"
+            "上一个曾人工批准的版本，并写审计。只回到人工批准过的状态，不会自动晋级；"
+            "关闭后只告警，由人工回滚。"
+        ),
+        category="evolution",
+    ),
+    FeatureFlag(
+        key="role_rsi_rubric_judge",
+        attr="ROLE_RSI_RUBRIC_JUDGE",
+        title="RSI rubric judge",
+        summary="没有确定性验收时，用固定评分器给出诊断。",
+        description=(
+            "开启后：可用冻结 rubric judge 产出诊断，但需要人工校准（κ≥0.6）和抽检；"
+            "结论仍封顶 inconclusive，不能单独作为晋级依据。默认关闭；"
+            "优先使用确定性 verifier。"
+        ),
+        category="evolution",
+    ),
+    FeatureFlag(
+        key="role_rsi_lock_strategy",
+        attr="ROLE_RSI_LOCK_STRATEGY",
+        title="锁定 Strategy 直写",
+        summary="agent 不能直接改 instruction/principles，只能提候选。",
+        description=(
+            "开启后：agent 直写 instruction 会被拒绝；追加准则会转成待审批候选；"
+            "human 直写仍可用。正式启用 RSI 的角色建议开启，避免绕过反思与评估。"
+        ),
+        category="evolution",
+    ),
+    FeatureFlag(
+        key="role_rsi_replay_l2",
+        attr="ROLE_RSI_REPLAY_L2",
+        title="RSI 任务回放 L2",
+        summary="预留开关：在隔离环境重跑历史任务。",
+        description=(
+            "设计上用于让候选在临时角色 home/workspace 中执行真实任务；"
+            "当前版本的 ReplayRunner 由“RSI 隐藏回放评估”控制，本开关尚未单独生效，"
+            "保留给后续拆分 L1/L2 门控。"
+        ),
+        category="evolution",
+    ),
+    FeatureFlag(
+        key="runtime_proposals",
+        attr="RUNTIME_PROPOSALS_ENABLED",
+        title="运行时改进提案",
+        summary="把角色遇到的运行时问题整理成给人类执行的修复提案。",
+        description=(
+            "角色遇到 skill 加载失败、MCP 连不上、runtime 配置/超时等自己不能改的问题时，"
+            "生成带证据和修复建议的 Markdown 提案。默认开启：只生成提案，不会自动应用；"
+            "角色只能建 draft/追加证据，流转和导出由 human 完成。"
+        ),
+        category="evolution",
+    ),
+    FeatureFlag(
+        key="runtime_proposal_detector",
+        attr="RUNTIME_PROPOSAL_DETECTOR",
+        title="运行时提案自动检测",
+        summary="系统巡检员：扫描运行时健康和失败 run，自动创建 draft。",
+        description=(
+            "定期检查 runtime 是否 missing/unhealthy，以及超时/启动失败/上下文溢出的 run，"
+            "自动创建 draft 并附证据。不会改运行时、审批或推进生命周期。"
+            "默认关闭：运行时不稳定时可能一次生成很多 draft；当前只覆盖这几类信号，"
+            "其他问题仍靠角色/人工提案。"
+        ),
+        category="evolution",
     ),
 )
 

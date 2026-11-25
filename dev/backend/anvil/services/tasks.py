@@ -940,6 +940,13 @@ def _submit_locked(conn: sqlite3.Connection, tid: str, *, summary: str | None = 
             dispatch_service.on_task_done(conn, tid)
         except Exception:  # noqa: BLE001 —— 回切/回流失败不阻断任务完成
             pass
+        try:
+            from . import rsi as rsi_service
+            rsi_service.observe_task_done(
+                conn, tid, source="dispatch_submit", trigger="task_done",
+                actor=role)
+        except Exception:  # noqa: BLE001 —— RSI 观测失败不影响任务完成
+            pass
         return get(conn, tid)  # type: ignore[return-value]
     if t["assignees"]:
         # 团队任务：每个角色独立提交；全部参与角色提交后才进入任务级评审。
@@ -1096,6 +1103,16 @@ def review(conn: sqlite3.Connection, tid: str, approve: bool,
         else:
             experience_capture.capture_review_rejection(conn, tid, reviewer=role, actor=role)
     except Exception:  # noqa: BLE001 —— 捕获失败不影响评审
+        pass
+    try:
+        from . import rsi as rsi_service
+        if approve:
+            rsi_service.observe_task_done(
+                conn, tid, source="review", trigger="task_done", actor=role)
+        else:
+            rsi_service.observe_rejection(
+                conn, tid, reviewer=role, feedback=feedback)
+    except Exception:  # noqa: BLE001 —— RSI 观测失败不影响评审
         pass
     if approve:
         notify_downstream(conn, tid)  # 完成后 @提及下游角色，触发交接

@@ -23,11 +23,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import config
 from .api import (
-    actions, agent_inbox, board, event_log, events, feature_flags, findings, governance, inbox, knowledge_repos, memory, reminders, roles, runs, runtimes, tasks, templates, tooling, workflow, workspaces,
+    actions, agent_inbox, board, event_log, events, feature_flags, findings, governance, inbox, knowledge_repos, memory, reminders, roles, runs, runtimes, rsi, runtime_proposals, tasks, templates, tooling, workflow, workspaces,
 )
 from .db import connect, open_conn
 from .deps import token_is_valid
 from .services import daemon as daemon_service
+from .services import eval_runner as eval_runner_service
 from .services import features as features_service
 from .services import knowledge_harvest as knowledge_harvest_service
 from .services import ledger as ledger_service
@@ -256,6 +257,10 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     if cfg.get("file_logging") is True:
         setup_logging()
     scheduler = Scheduler(path, orchestrator) if scheduler_enabled else None
+    eval_worker = (
+        eval_runner_service.EvalWorker(path)
+        if config.ROLE_RSI_ENABLED and config.ROLE_RSI_EVALUATION else None
+    )
 
     # 常驻角色运行时（owner 2026-10-19）：生产入口（scheduler_enabled）默认启用；
     # 测试/纯 API 模式默认关闭（保持 one-shot 假进程可测），可用 ANVIL_PERSISTENT_RUNTIME 覆盖。
@@ -304,7 +309,11 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             _conn.close()
         if scheduler:
             scheduler.start()
+        if eval_worker:
+            eval_worker.start()
         yield
+        if eval_worker:
+            eval_worker.stop()
         if scheduler:
             scheduler.stop()
         # 常驻角色进程先关闭（各任务上下文槽保留 session，下次按任务 --resume）
@@ -326,6 +335,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     app.state.orchestrator = orchestrator
     app.state.scheduler = scheduler
     app.state.scheduler_enabled = scheduler_enabled
+    app.state.eval_worker = eval_worker
 
     app.add_middleware(_LocalTokenMiddleware)
     app.add_middleware(_SecurityHeadersMiddleware)
@@ -346,6 +356,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     app.include_router(governance.router, prefix="/api/v1", tags=["governance"])
     app.include_router(feature_flags.router, prefix="/api/v1/features", tags=["features"])
     app.include_router(runs.router, prefix="/api/v1", tags=["runs"])
+    app.include_router(rsi.router, prefix="/api/v1", tags=["rsi"])
+    app.include_router(runtime_proposals.router, prefix="/api/v1", tags=["runtime-proposals"])
     app.include_router(board.router, prefix="/api/v1", tags=["board"])
     app.include_router(templates.router, prefix="/api/v1", tags=["workflow-templates"])
     app.include_router(reminders.router, prefix="/api/v1", tags=["reminders"])
