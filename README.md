@@ -707,13 +707,11 @@ anvil init
 
 ## 9. 文档
 
-> 内部规划、设计、实现状态文档默认仅本地保留，不随仓库发布；v1.50 角色 RSI 的
-> 设计文档与 Spec 按 owner 要求随 `rsi` 分支提交，作为本次交付件。
+> 内部规划、设计、实现状态文档仅本地保留，不随仓库发布。v1.50 角色 RSI 的设计文档
+> 与 Spec 已在 `.gitignore` 中排除，仅保留本地版本；发布说明与 CLI 参考随仓库发布。
 
 - [docs/cli-reference.md](docs/cli-reference.md)：CLI 命令、参数、规则、错误处理与示例
 - [dev/README.md](dev/README.md)：开发者入口（源码结构、本地开发与测试）
-- [docs/v1.50-role-rsi.md](docs/v1.50-role-rsi.md)：v1.50 角色 RSI 自进化详细设计（算法/评估/RIP/版本/实现对齐）
-- [docs/superpowers/specs/2026-11-24-anvil-role-rsi-spec.md](docs/superpowers/specs/2026-11-24-anvil-role-rsi-spec.md)：v1.50 RSI Spec（需求/验收/测试矩阵）
 - [docs/v1.50.0-release.md](docs/v1.50.0-release.md)：v1.50.0 角色 RSI、隐藏回放评估与运行时改进提案
 - [docs/issue-board.md](docs/issue-board.md)：问题板（安全 findings）字段、状态机与提交/确认流程
 - [docs/v1.40.0-release.md](docs/v1.40.0-release.md)：v1.40.0 任务上下文隔离、分层知识库、质量门与 LLM 清洗变更方案
