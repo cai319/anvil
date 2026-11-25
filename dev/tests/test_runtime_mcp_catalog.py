@@ -51,6 +51,36 @@ def test_catalog_merges_imported_registry_servers(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_mcp_config_for_marks_claude_code_http_servers(tmp_path):
+    conn = connect(str(tmp_path / "mcp.db"))
+    try:
+        tooling.create_mcp_server(
+            conn, name="remote", transport="http",
+            url="http://127.0.0.1:9000/mcp", runtime="claude-code")
+        tooling.create_mcp_server(
+            conn, name="remote-codex", transport="http",
+            url="http://127.0.0.1:9001/mcp", runtime="codex-cli")
+        claude = tooling.mcp_config_for(conn, ["remote"], "claude-code")
+        assert claude["remote"] == {
+            "url": "http://127.0.0.1:9000/mcp", "type": "http"}
+        other = tooling.mcp_config_for(conn, ["remote-codex"], "codex-cli")
+        assert other["remote-codex"] == {"url": "http://127.0.0.1:9001/mcp"}
+    finally:
+        conn.close()
+
+
+def test_mcp_config_for_keeps_stdio_shape(tmp_path):
+    conn = connect(str(tmp_path / "mcp-stdio.db"))
+    try:
+        tooling.create_mcp_server(
+            conn, name="local", transport="stdio", command="node",
+            args=["server.js"], runtime="claude-code")
+        cfg = tooling.mcp_config_for(conn, ["local"], "claude-code")
+        assert cfg["local"] == {"command": "node", "args": ["server.js"]}
+    finally:
+        conn.close()
+
+
 def test_mcp_catalog_entry_without_description_keeps_only_hint():
     entry = runtime._mcp_catalog_entry(
         "codegraph", {"type": "stdio", "command": "codegraph", "args": ["serve", "--mcp"]})

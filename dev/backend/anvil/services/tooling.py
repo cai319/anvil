@@ -322,6 +322,10 @@ def mcp_config_for(conn: sqlite3.Connection, names: list[str],
                 cfg["env"] = server["env"]
         else:
             cfg = {"url": server["url"]}
+            # Claude Code 用 type 区分 HTTP/SSE 与 stdio；缺少 type 时会按
+            # stdio 解析只带 url 的条目，导致 HTTP MCP 连不上。
+            if runtime == "claude-code" and server["transport"] == "http":
+                cfg["type"] = "http"
         out[name] = cfg
     return out
 
