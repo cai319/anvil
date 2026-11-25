@@ -107,6 +107,74 @@ export interface FeatureFlag {
 
 export type Role = Schemas["RoleOut"];
 
+export interface RuntimeProposal {
+  id: string;
+  component_type: string;
+  component_key: string;
+  title: string;
+  severity: string;
+  status: string;
+  summary: string;
+  evidence_count: number;
+  markdown_path?: string | null;
+  created_at: string;
+  updated_at: string;
+  evidence?: Record<string, unknown>;
+}
+
+export interface RoleVersion {
+  version: number;
+  display_name: string;
+  source: string;
+  created_at: string;
+  kind?: "evolution" | "config" | string;
+  status?: string;
+  content_hash?: string | null;
+  space_manifest_hash?: string | null;
+  charter_digest?: string | null;
+  eval_run_id?: string | null;
+  integrity_status?: string | null;
+  note?: string | null;
+  eval?: { verdict: string; run_id: string } | null;
+}
+
+export interface RoleVersionDiff {
+  role: string;
+  active_version: number | null;
+  target_version: number;
+  target_source: string;
+  target_created_at: string;
+  files: Array<{
+    path: string;
+    status: "added" | "modified" | "unchanged";
+    target_sha256: string;
+    current_sha256: string | null;
+    preserved_human: boolean;
+  }>;
+  knowledge: {
+    restore: number;
+    archive: string[];
+    preserve_human: string[];
+  };
+  working_set: { count: number; hash: string };
+  charter_changed: boolean;
+  restore_charter_default: boolean;
+  manifest_hash: string;
+}
+
+export interface RsiCandidate {
+  id: string;
+  role_slug: string;
+  status: string;
+  tier: string;
+  cycle_id?: string | null;
+  base_version?: number | null;
+  eval_id?: string | null;
+  edits?: Array<Record<string, unknown>>;
+  created_at: string;
+  updated_at?: string | null;
+}
+
 export type RoleTaskContext = Required<Schemas["RoleTaskContextOut"]>;
 
 export type SubagentRecord = Required<Schemas["SubagentRecordOut"]>;
@@ -1020,10 +1088,100 @@ export const api = {
   // role extras
   getRoleHome: (slug: string): Promise<{ slug: string; home_path: string; files: string[] }> =>
     authFetch(`${BASE}/roles/${slug}/home`).then((r) => json(r)),
-  getRoleVersions: (slug: string): Promise<{ version: number; display_name: string; source: string; created_at: string }[]> =>
-    authFetch(`${BASE}/roles/${slug}/versions`).then((r) => json(r)),
+  getRoleVersions: (slug: string, kind?: string): Promise<RoleVersion[]> => {
+    const qs = kind ? `?kind=${encodeURIComponent(kind)}` : "";
+    return authFetch(`${BASE}/roles/${slug}/versions${qs}`).then((r) => json(r));
+  },
+  getRoleVersionsPage: (slug: string, params: {
+    kind?: string; status?: string; source?: string; limit?: number; offset?: number;
+  }): Promise<{ items: RoleVersion[]; total: number; limit: number; offset: number }> => {
+    const qs = new URLSearchParams();
+    qs.set("limit", String(params.limit ?? 50));
+    qs.set("offset", String(params.offset ?? 0));
+    for (const key of ["kind", "status", "source"] as const) {
+      if (params[key]) qs.set(key, params[key]!);
+    }
+    return authFetch(`${BASE}/roles/${slug}/versions?${qs.toString()}`).then((r) => json(r));
+  },
   rollbackRole: (slug: string, version: number): Promise<Role> =>
     req("POST", `/roles/${slug}/rollback/${version}`, {}).then((r) => json(r)),
+  restoreRoleConfig: (slug: string, version: number, dryRun = false): Promise<{
+    role: string; version: number; dry_run: boolean; restored_files: string[];
+    tools_restored: boolean; warnings: string[];
+  }> => req("POST", `/roles/${slug}/versions/${version}/restore-config?dry_run=${dryRun ? "true" : "false"}`, {})
+    .then((r) => json(r)),
+  switchRoleVersion: (slug: string, version: number, restoreCharter = false): Promise<Record<string, unknown>> =>
+    req("POST", `/roles/${slug}/versions/${version}/switch${restoreCharter ? "?restore_charter=true" : ""}`)
+      .then((r) => json(r)),
+  getRoleVersionSummary: (slug: string): Promise<Record<string, unknown>> =>
+    authFetch(`${BASE}/roles/${slug}/versions/summary`).then((r) => json(r)),
+  getRoleVersionDiff: (slug: string, version: number): Promise<RoleVersionDiff> =>
+    authFetch(`${BASE}/roles/${slug}/versions/${version}/diff`).then((r) => json(r)),
+  ensureRoleBaseline: (slug: string): Promise<RoleVersion> =>
+    req("POST", `/roles/${slug}/versions/baseline`, {}).then((r) => json(r)),
+  setRoleRsiEnabled: (slug: string, enabled: boolean): Promise<{ slug: string; rsi: { enabled: boolean } }> =>
+    req("PUT", `/roles/${slug}/rsi`, { enabled }).then((r) => json(r)),
+  getRoleWorkingSet: (slug: string): Promise<{
+    base_version: number | null; count: number; hash: string;
+    cards: { path: string; sha256: string; human_modified: boolean }[];
+  }> => authFetch(`${BASE}/roles/${slug}/working-set`).then((r) => json(r)),
+  purgeRoleVersions: (slug: string, versions: number[], dryRun: boolean): Promise<{
+    dry_run: boolean; deleted: number[]; skipped: { version: number; reason: string }[];
+  }> => req("POST", `/roles/${slug}/versions/purge`, { versions, dry_run: dryRun })
+    .then((r) => json(r)),
+  dedupeConfigVersions: (slug: string, dryRun = true): Promise<{
+    dry_run: boolean; deleted: number[]; skipped: { version: number; reason: string }[];
+    kept: number[]; duplicate_groups: number; candidates: number;
+  }> => req("POST", `/roles/${slug}/versions/dedupe-config?dry_run=${dryRun ? "true" : "false"}`, {})
+    .then((r) => json(r)),
+  listRsiCandidates: (slug: string, status?: string): Promise<{ items: RsiCandidate[] }> => {
+    const qs = new URLSearchParams({ role: slug });
+    if (status) qs.set("status", status);
+    return authFetch(`${BASE}/rsi/candidates?${qs.toString()}`).then((r) => json(r));
+  },
+  evaluateRsiCandidate: (slug: string, payload: {
+    suite_id: string; candidate_id?: string; candidate_version?: number;
+    baseline_version?: number;
+  }): Promise<{ run_id: string; status: string; candidate_version: number; baseline_version: number }> =>
+    req("POST", `/rsi/roles/${slug}/evaluations`, payload).then((r) => json(r)),
+  approveRsiCandidate: (candidateId: string): Promise<Record<string, unknown>> =>
+    req("POST", `/rsi/candidates/${candidateId}/approve`, {}).then((r) => json(r)),
+  rejectRsiCandidate: (candidateId: string, note = ""): Promise<Record<string, unknown>> =>
+    req("POST", `/rsi/candidates/${candidateId}/reject?note=${encodeURIComponent(note)}`, {})
+      .then((r) => json(r)),
+  exportRoleVersion: async (slug: string, version: number): Promise<Blob> => {
+    const res = await authFetch(`${BASE}/roles/${slug}/versions/${version}/export`);
+    if (!res.ok) await json(res);
+    return res.blob();
+  },
+  previewRoleImport: (file: File): Promise<Record<string, unknown>> => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return authFetch(`${BASE}/roles/import/preview`, { method: "POST", body: fd }).then((r) => json(r));
+  },
+  importRole: (file: File, mode: string, slug?: string, allowCharterChange = false): Promise<Record<string, unknown>> => {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("mode", mode);
+    if (slug) fd.append("slug", slug);
+    fd.append("allow_charter_change", allowCharterChange ? "true" : "false");
+    return authFetch(`${BASE}/roles/import`, { method: "POST", body: fd }).then((r) => json(r));
+  },
+
+  // runtime proposals
+  listRuntimeProposals: (status?: string): Promise<{ items: RuntimeProposal[] }> => {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+    return authFetch(`${BASE}/runtime-proposals${qs}`).then((r) => json(r));
+  },
+  getRuntimeProposal: (id: string): Promise<RuntimeProposal> =>
+    authFetch(`${BASE}/runtime-proposals/${id}`).then((r) => json(r)),
+  transitionRuntimeProposal: (id: string, status: string, note?: string): Promise<RuntimeProposal> =>
+    req("POST", `/runtime-proposals/${id}/transition`, { status, note })
+      .then((r) => json(r)),
+  getRuntimeProposalMarkdown: (id: string): Promise<{ id: string; content: string }> =>
+    authFetch(`${BASE}/runtime-proposals/${id}/markdown`).then((r) => json(r)),
+  exportRuntimeProposal: (id: string): Promise<{ id: string; path: string }> =>
+    req("POST", `/runtime-proposals/${id}/export`, {}).then((r) => json(r)),
   getRoleHomeFile: (slug: string, path: string): Promise<{ path: string; content: string }> =>
     authFetch(`${BASE}/roles/${slug}/home/file?path=${encodeURIComponent(path)}`).then((r) => json(r)),
   getRoleMetrics: (slug: string): Promise<{
@@ -1354,7 +1512,7 @@ export interface InboxDraftMeta {
 
 export interface InboxItem {
   id: string;
-  kind: "review" | "delegation" | "mention" | "draft" | "lesson" | "proposal" | "gate" | "decision" | "action" | "finding";
+  kind: "review" | "delegation" | "mention" | "draft" | "lesson" | "proposal" | "gate" | "decision" | "action" | "finding" | "rsi_candidate" | "runtime_proposal";
   title: string;
   detail: string;
   task_id: string | null;

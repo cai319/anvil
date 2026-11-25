@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { canCloseOnBackdrop } from "../dialogGuard";
 import { Icon } from "./Icon";
@@ -12,7 +12,7 @@ import { Icon } from "./Icon";
 
 export interface DialogOptions {
   title: string;
-  message?: string;
+  message?: ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
   danger?: boolean;
@@ -118,7 +118,7 @@ export function DialogHost() {
             <Icon name="x" size={14} />
           </button>
         </div>
-        {opts.message && <p className="confirm-message">{opts.message}</p>}
+        {opts.message && <div className="confirm-message">{opts.message}</div>}
         {isPrompt && (
           <label className="field">
             {opts.input?.label && <span>{opts.input.label}</span>}

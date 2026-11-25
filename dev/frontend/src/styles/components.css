@@ -1532,13 +1532,28 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
   margin: 0;
   padding: 0;
   background: var(--paper-3);
+  /* 深色页面 body 默认是浅色字；知识列表是浅色纸张，必须显式切回 paper 色，
+     否则展开的字段值、muted 等会继承成白字，出现白底白字。 */
+  color: var(--text-on-paper);
   border: var(--stroke) solid var(--ink-900);
   border-radius: var(--radius);
   overflow: hidden;
   color-scheme: light;
 }
+.knowledge-record-list .muted { color: var(--text-on-paper-muted); }
+.knowledge-record .chip {
+  background: var(--paper-2);
+  border-color: var(--border-strong, #8f8578);
+  color: var(--text-on-paper-soft);
+}
+.knowledge-record .authority-reference { color: var(--text-on-paper-muted); }
+.knowledge-record .review-reason {
+  background: var(--paper-2);
+  border-color: var(--border, #d8cfc2);
+  color: var(--text-on-paper-muted);
+}
 .knowledge-record + .knowledge-record { border-top: 1.5px dashed var(--paper-2); }
-.knowledge-record { padding: 10px 12px; }
+.knowledge-record { padding: 10px 12px; color: var(--text-on-paper); }
 .knowledge-record-head {
   display: flex;
   align-items: flex-start;

@@ -29,6 +29,8 @@ const KIND_LABEL: Record<InboxItem["kind"], string> = {
   decision: "决策",
   action: "操作申请",
   finding: "问题板",
+  rsi_candidate: "角色演化",
+  runtime_proposal: "运行时提案",
 };
 
 const KIND_COLOR: Record<InboxItem["kind"], string> = {
@@ -42,6 +44,8 @@ const KIND_COLOR: Record<InboxItem["kind"], string> = {
   decision: "#0f766e",
   action: "#be185d",
   finding: "#a16207",
+  rsi_candidate: "#0369a1",
+  runtime_proposal: "#7c3aed",
 };
 
 type Tab = "all" | InboxItem["kind"];
@@ -58,6 +62,8 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "decision", label: "决策" },
   { key: "action", label: "操作申请" },
   { key: "finding", label: "问题板" },
+  { key: "rsi_candidate", label: "角色演化" },
+  { key: "runtime_proposal", label: "运行时提案" },
 ];
 
 export function Inbox() {

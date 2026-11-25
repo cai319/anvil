@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { api, type FeatureFlag, type IssueTrackerSettings, type IssueTrackerTestResult, type Runtime } from "../api/client";
+import { api, type FeatureFlag, type IssueTrackerSettings, type IssueTrackerTestResult, type Runtime, type RuntimeProposal } from "../api/client";
 import { PageHeader } from "../components/ui";
 
 const directoryProps = { webkitdirectory: "", directory: "" } as Record<string, string>;
@@ -25,6 +25,11 @@ const FLAG_GROUPS: { key: string; title: string; hint: string }[] = [
     key: "collaboration",
     title: "协作与派遣",
     hint: "控制 Agent 之间的 @ 路由是否自动创建派遣子任务。",
+  },
+  {
+    key: "evolution",
+    title: "角色演化 / 运行时提案",
+    hint: "控制角色 RSI 观测、反思、评估、自动回滚与运行时改进提案；默认总开关关闭。",
   },
 ];
 
@@ -93,6 +98,11 @@ export function Tooling() {
   const [trackerNotice, setTrackerNotice] = useState<string | null>(null);
   const [trackerError, setTrackerError] = useState<string | null>(null);
   const [trackerTest, setTrackerTest] = useState<IssueTrackerTestResult | null>(null);
+  const [ripItems, setRipItems] = useState<RuntimeProposal[]>([]);
+  const [ripStatus, setRipStatus] = useState("");
+  const [ripSelected, setRipSelected] = useState<RuntimeProposal | null>(null);
+  const [ripMarkdown, setRipMarkdown] = useState("");
+  const [ripBusy, setRipBusy] = useState(false);
   const skillDirRef = useRef<HTMLInputElement>(null);
   const skillArchiveRef = useRef<HTMLInputElement>(null);
   const mcpDirRef = useRef<HTMLInputElement>(null);
@@ -183,6 +193,57 @@ export function Tooling() {
     }
   };
 
+  const loadRip = async () => {
+    try {
+      const body = await api.listRuntimeProposals(ripStatus || undefined);
+      setRipItems(body.items);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  useEffect(() => {
+    void loadRip();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ripStatus]);
+
+  const openRip = async (proposal: RuntimeProposal) => {
+    setRipSelected(proposal);
+    setRipMarkdown("");
+    try {
+      const md = await api.getRuntimeProposalMarkdown(proposal.id);
+      setRipMarkdown(md.content);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const transitionRip = async (status: string) => {
+    if (!ripSelected) return;
+    setRipBusy(true);
+    try {
+      const next = await api.transitionRuntimeProposal(ripSelected.id, status);
+      setRipSelected(next);
+      await loadRip();
+      const md = await api.getRuntimeProposalMarkdown(next.id);
+      setRipMarkdown(md.content);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRipBusy(false);
+    }
+  };
+
+  const exportRip = async () => {
+    if (!ripSelected) return;
+    try {
+      const result = await api.exportRuntimeProposal(ripSelected.id);
+      setNotice(`已导出：${result.path}`);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const updateFlag = async (flag: FeatureFlag, value: boolean) => {
     setFlagBusy(flag.key);
     setFlagError(null);
@@ -255,15 +316,22 @@ export function Tooling() {
             {FLAG_GROUPS.map((group) => {
               const items = flags.filter((flag) => flag.category === group.key);
               if (items.length === 0) return null;
+              const onCount = items.filter((flag) => flag.value).length;
               return (
-                <div className="feature-group" key={group.key}>
+                <section className="feature-group" key={group.key}
+                         aria-labelledby={`feature-group-${group.key}`}>
                   <div className="feature-group-head">
-                    <h3>{group.title}</h3>
+                    <div className="feature-group-title">
+                      <h3 id={`feature-group-${group.key}`}>{group.title}</h3>
+                      <span className="chip feature-group-count">
+                        {onCount}/{items.length} 开启
+                      </span>
+                    </div>
                     <p>{group.hint}</p>
                   </div>
-                  <div className="feature-list">
+                  <div className="feature-tiles">
                     {items.map((flag) => (
-                      <div className={`feature-row ${flag.value ? "is-on" : ""}`} key={flag.key}>
+                      <div className={`feature-tile ${flag.value ? "is-on" : ""}`} key={flag.key}>
                         <div className="feature-copy">
                           <div className="feature-title-line">
                             <strong>{flag.title}</strong>
@@ -291,7 +359,7 @@ export function Tooling() {
                       </div>
                     ))}
                   </div>
-                </div>
+                </section>
               );
             })}
           </div>
@@ -442,6 +510,68 @@ export function Tooling() {
           <input ref={mcpArchiveRef} type="file" hidden
             accept=".zip,.tar,.tar.gz,.tgz"
             onChange={(e) => upload("mcp", e.currentTarget)} />
+        </div>
+      </section>
+
+      <section className="tool-import-card">
+        <div className="tool-import-head">
+          <div>
+            <h2>运行时改进提案</h2>
+            <p>
+              角色提出的 runtime skill/MCP/YAML/CLI 等问题；human 独占状态流转与导出，
+              agent 只能创建和追加证据。
+            </p>
+          </div>
+          <div className="toolbar">
+            <select value={ripStatus} onChange={(e) => setRipStatus(e.target.value)}>
+              <option value="">全部状态</option>
+              <option value="draft">draft</option>
+              <option value="open">open</option>
+              <option value="triaged">triaged</option>
+              <option value="accepted">accepted</option>
+              <option value="implemented">implemented</option>
+              <option value="verified">verified</option>
+              <option value="rejected">rejected</option>
+            </select>
+            <button className="small" onClick={() => void loadRip()}>刷新</button>
+          </div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(240px, 1fr) minmax(320px, 2fr)", gap: "0.8rem" }}>
+          <ul className="drafts" style={{ maxHeight: 360, overflow: "auto", margin: 0 }}>
+            {ripItems.map((p) => (
+              <li key={p.id} style={{ cursor: "pointer", opacity: ripSelected?.id === p.id ? 1 : 0.85 }}
+                  onClick={() => void openRip(p)}>
+                <strong>{p.title}</strong>
+                <div className="muted" style={{ fontSize: "0.82rem" }}>
+                  {p.id} · {p.component_type} · {p.severity} · {p.status} ×{p.evidence_count}
+                </div>
+              </li>
+            ))}
+            {ripItems.length === 0 && <li className="muted">暂无提案。</li>}
+          </ul>
+          <div>
+            {ripSelected ? (
+              <div>
+                <div className="toolbar" style={{ flexWrap: "wrap" }}>
+                  {ripSelected.status === "draft" && <button className="primary" disabled={ripBusy} onClick={() => void transitionRip("open")}>标记 open</button>}
+                  {ripSelected.status === "open" && <button className="primary" disabled={ripBusy} onClick={() => void transitionRip("triaged")}>分诊 triaged</button>}
+                  {ripSelected.status === "triaged" && <button className="primary" disabled={ripBusy} onClick={() => void transitionRip("accepted")}>接受 accepted</button>}
+                  {ripSelected.status === "accepted" && <button className="primary" disabled={ripBusy} onClick={() => void transitionRip("implemented")}>已实施</button>}
+                  {ripSelected.status === "implemented" && <button className="primary" disabled={ripBusy} onClick={() => void transitionRip("verified")}>验证通过</button>}
+                  {ripSelected.status === "verified" && <button className="primary" disabled={ripBusy} onClick={() => void transitionRip("closed")}>关闭</button>}
+                  {!["rejected", "duplicate", "wontfix", "closed"].includes(ripSelected.status) && (
+                    <button className="small" disabled={ripBusy} onClick={() => void transitionRip("rejected")}>拒绝</button>
+                  )}
+                  <button className="small" onClick={() => void exportRip()}>导出 md</button>
+                </div>
+                <pre style={{
+                  whiteSpace: "pre-wrap", maxHeight: 360, overflow: "auto",
+                  background: "var(--surface-2, #f7f7f7)", padding: "0.6rem",
+                  borderRadius: 6, fontSize: "0.82rem",
+                }}>{ripMarkdown || "加载中…"}</pre>
+              </div>
+            ) : <p className="muted">选择左侧提案查看 md。</p>}
+          </div>
         </div>
       </section>
 

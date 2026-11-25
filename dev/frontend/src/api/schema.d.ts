@@ -2531,7 +2531,7 @@ export interface paths {
         put?: never;
         /**
          * Write Instruction
-         * @description `anvil self edit-instruction`（自主档，§9.2）：直接写 instruction.md。
+         * @description `anvil self edit-instruction`：锁定策略时仅允许人工直写。
          */
         post: operations["write_instruction_api_v1_me_instruction_post"];
         delete?: never;
@@ -3885,6 +3885,535 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/rsi/candidates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Candidates */
+        get: operations["list_candidates_api_v1_rsi_candidates_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/rsi/candidates/{candidate_id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Approve Candidate */
+        post: operations["approve_candidate_api_v1_rsi_candidates__candidate_id__approve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/rsi/candidates/{candidate_id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reject Candidate */
+        post: operations["reject_candidate_api_v1_rsi_candidates__candidate_id__reject_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/roles/{slug}/rsi": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Set Role Rsi */
+        put: operations["set_role_rsi_api_v1_roles__slug__rsi_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/roles/{slug}/versions/baseline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ensure Baseline */
+        post: operations["ensure_baseline_api_v1_roles__slug__versions_baseline_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/roles/{slug}/versions/{version}/switch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Switch Version */
+        post: operations["switch_version_api_v1_roles__slug__versions__version__switch_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/roles/{slug}/versions/{version}/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Version Diff */
+        get: operations["version_diff_api_v1_roles__slug__versions__version__diff_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/roles/{slug}/versions/{version}/restore-config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Restore Config */
+        post: operations["restore_config_api_v1_roles__slug__versions__version__restore_config_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/roles/{slug}/versions/{version}/performance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Version Performance */
+        get: operations["version_performance_api_v1_roles__slug__versions__version__performance_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/rsi/roles/{slug}/observations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Observations */
+        get: operations["observations_api_v1_rsi_roles__slug__observations_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/rsi/roles/{slug}/trigger": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Trigger */
+        get: operations["trigger_api_v1_rsi_roles__slug__trigger_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/roles/{slug}/working-set": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Working Set */
+        get: operations["get_working_set_api_v1_roles__slug__working_set_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/roles/{slug}/versions/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Versions Summary */
+        get: operations["versions_summary_api_v1_roles__slug__versions_summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/roles/{slug}/versions/duplicates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Versions Duplicates */
+        get: operations["versions_duplicates_api_v1_roles__slug__versions_duplicates_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/roles/{slug}/versions/dedupe-config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Dedupe Config Versions */
+        post: operations["dedupe_config_versions_api_v1_roles__slug__versions_dedupe_config_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/roles/{slug}/versions/purge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Versions Purge */
+        post: operations["versions_purge_api_v1_roles__slug__versions_purge_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/roles/{slug}/versions/{version}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Export Version */
+        get: operations["export_version_api_v1_roles__slug__versions__version__export_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/roles/import/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Import Preview */
+        post: operations["import_preview_api_v1_roles_import_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/roles/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Import Role */
+        post: operations["import_role_api_v1_roles_import_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/rsi/suite/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Suite Status */
+        get: operations["suite_status_api_v1_rsi_suite_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/rsi/suite/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Add Suite Item */
+        post: operations["add_suite_item_api_v1_rsi_suite_items_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/rsi/suite/freeze": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Freeze Suite */
+        post: operations["freeze_suite_api_v1_rsi_suite_freeze_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/rsi/roles/{slug}/evaluations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Evaluations */
+        get: operations["list_evaluations_api_v1_rsi_roles__slug__evaluations_get"];
+        put?: never;
+        /** Enqueue Evaluation */
+        post: operations["enqueue_evaluation_api_v1_rsi_roles__slug__evaluations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/rsi/evaluations/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Evaluation */
+        get: operations["get_evaluation_api_v1_rsi_evaluations__run_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/rsi/roles/{slug}/retro": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Retro */
+        post: operations["retro_api_v1_rsi_roles__slug__retro_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime-proposals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Proposals */
+        get: operations["list_proposals_api_v1_runtime_proposals_get"];
+        put?: never;
+        /** Create Proposal */
+        post: operations["create_proposal_api_v1_runtime_proposals_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime-proposals/{proposal_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Proposal */
+        get: operations["get_proposal_api_v1_runtime_proposals__proposal_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime-proposals/{proposal_id}/evidence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Add Evidence */
+        post: operations["add_evidence_api_v1_runtime_proposals__proposal_id__evidence_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime-proposals/{proposal_id}/transition": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Transition */
+        post: operations["transition_api_v1_runtime_proposals__proposal_id__transition_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime-proposals/{proposal_id}/markdown": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Markdown */
+        get: operations["get_markdown_api_v1_runtime_proposals__proposal_id__markdown_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime-proposals/{proposal_id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Export */
+        post: operations["export_api_v1_runtime_proposals__proposal_id__export_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/board/templates": {
         parameters: {
             query?: never;
@@ -4638,6 +5167,28 @@ export interface components {
             /** Files */
             files: string[];
         };
+        /** Body_import_preview_api_v1_roles_import_preview_post */
+        Body_import_preview_api_v1_roles_import_preview_post: {
+            /** File */
+            file: string;
+        };
+        /** Body_import_role_api_v1_roles_import_post */
+        Body_import_role_api_v1_roles_import_post: {
+            /** File */
+            file: string;
+            /**
+             * Mode
+             * @default new_role
+             */
+            mode: string;
+            /** Slug */
+            slug?: string | null;
+            /**
+             * Allow Charter Change
+             * @default false
+             */
+            allow_charter_change: boolean;
+        };
         /** Body_import_skills_api_v1_tooling_import_skills_post */
         Body_import_skills_api_v1_tooling_import_skills_post: {
             /**
@@ -4803,6 +5354,38 @@ export interface components {
         DepIn: {
             /** Depends On */
             depends_on: string[];
+        };
+        /** EvalIn */
+        EvalIn: {
+            /** Suite Id */
+            suite_id: string;
+            /** Candidate Id */
+            candidate_id?: string | null;
+            /** Candidate Version */
+            candidate_version?: number | null;
+            /** Baseline Version */
+            baseline_version?: number | null;
+            /**
+             * Noise Floor
+             * @default 0.1
+             */
+            noise_floor: number;
+            /**
+             * Minimum Effect
+             * @default 0.05
+             */
+            minimum_effect: number;
+            /** Runtime Id */
+            runtime_id?: string | null;
+            /** Model Id */
+            model_id?: string | null;
+        };
+        /** EvidenceIn */
+        EvidenceIn: {
+            /** Evidence */
+            evidence?: {
+                [key: string]: unknown;
+            };
         };
         /** FindingBoardOut */
         FindingBoardOut: {
@@ -5388,16 +5971,15 @@ export interface components {
             /** Set At */
             set_at?: string | null;
         };
-        /** ProposalIn */
-        ProposalIn: {
-            /** Field */
-            field: string;
-            /** Proposed */
-            proposed?: unknown;
-            /** Rationale */
-            rationale?: string | null;
-            /** Risk */
-            risk?: string | null;
+        /** PurgeIn */
+        PurgeIn: {
+            /** Versions */
+            versions?: number[];
+            /**
+             * Dry Run
+             * @default true
+             */
+            dry_run: boolean;
         };
         /** QualityDimensionsOut */
         QualityDimensionsOut: {
@@ -5466,6 +6048,13 @@ export interface components {
             llm?: {
                 [key: string]: unknown;
             } | null;
+        };
+        /** RetroIn */
+        RetroIn: {
+            /** Task Id */
+            task_id: string;
+            /** Content */
+            content: string;
         };
         /** ReviewEvidenceOut */
         ReviewEvidenceOut: {
@@ -5657,6 +6246,11 @@ export interface components {
              * @default 0
              */
             ahead_count: number;
+        };
+        /** RoleRsiIn */
+        RoleRsiIn: {
+            /** Enabled */
+            enabled: boolean;
         };
         /** RoleRuntimeStatusOut */
         RoleRuntimeStatusOut: {
@@ -6676,6 +7270,13 @@ export interface components {
             /** Max Tool Tokens */
             max_tool_tokens?: number | null;
         };
+        /** TransitionIn */
+        TransitionIn: {
+            /** Status */
+            status: string;
+            /** Note */
+            note?: string | null;
+        };
         /** ValidationError */
         ValidationError: {
             /** Location */
@@ -7395,6 +7996,49 @@ export interface components {
             name: string;
             /** Repo */
             repo?: string | null;
+        };
+        /** ProposalIn */
+        anvil__api__runtime_proposals__ProposalIn: {
+            /** Component Type */
+            component_type: string;
+            /** Component Key */
+            component_key: string;
+            /** Title */
+            title: string;
+            /** Summary */
+            summary: string;
+            /** Proposed Change Md */
+            proposed_change_md: string;
+            /**
+             * Severity
+             * @default medium
+             */
+            severity: string;
+            /** Evidence */
+            evidence?: {
+                [key: string]: unknown;
+            };
+            /** Root Cause Hypothesis */
+            root_cause_hypothesis?: string | null;
+            /** Verification Md */
+            verification_md?: string | null;
+            /** Risk Md */
+            risk_md?: string | null;
+            /** Runtime Id */
+            runtime_id?: string | null;
+            /** Phase */
+            phase?: string | null;
+        };
+        /** ProposalIn */
+        anvil__schemas__ProposalIn: {
+            /** Field */
+            field: string;
+            /** Proposed */
+            proposed?: unknown;
+            /** Rationale */
+            rationale?: string | null;
+            /** Risk */
+            risk?: string | null;
         };
     };
     responses: never;
@@ -8463,7 +9107,13 @@ export interface operations {
     };
     role_versions_api_v1_roles__slug__versions_get: {
         parameters: {
-            query?: never;
+            query?: {
+                kind?: string | null;
+                status?: string | null;
+                source?: string | null;
+                limit?: number | null;
+                offset?: number;
+            };
             header?: {
                 "X-Anvil-Session"?: string | null;
                 "X-Anvil-Role"?: string | null;
@@ -13250,7 +13900,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ProposalIn"];
+                "application/json": components["schemas"]["anvil__schemas__ProposalIn"];
             };
         };
         responses: {
@@ -16465,6 +17115,1182 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ContextManifestOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_candidates_api_v1_rsi_candidates_get: {
+        parameters: {
+            query?: {
+                role?: string | null;
+                status?: string | null;
+            };
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    approve_candidate_api_v1_rsi_candidates__candidate_id__approve_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                candidate_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reject_candidate_api_v1_rsi_candidates__candidate_id__reject_post: {
+        parameters: {
+            query?: {
+                note?: string;
+            };
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                candidate_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_role_rsi_api_v1_roles__slug__rsi_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RoleRsiIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    ensure_baseline_api_v1_roles__slug__versions_baseline_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    switch_version_api_v1_roles__slug__versions__version__switch_post: {
+        parameters: {
+            query?: {
+                restore_charter?: boolean;
+            };
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                slug: string;
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    version_diff_api_v1_roles__slug__versions__version__diff_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                slug: string;
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    restore_config_api_v1_roles__slug__versions__version__restore_config_post: {
+        parameters: {
+            query?: {
+                dry_run?: boolean;
+            };
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                slug: string;
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    version_performance_api_v1_roles__slug__versions__version__performance_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                slug: string;
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    observations_api_v1_rsi_roles__slug__observations_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    trigger_api_v1_rsi_roles__slug__trigger_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_working_set_api_v1_roles__slug__working_set_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    versions_summary_api_v1_roles__slug__versions_summary_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    versions_duplicates_api_v1_roles__slug__versions_duplicates_get: {
+        parameters: {
+            query?: {
+                kind?: string | null;
+            };
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    dedupe_config_versions_api_v1_roles__slug__versions_dedupe_config_post: {
+        parameters: {
+            query?: {
+                dry_run?: boolean;
+            };
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    versions_purge_api_v1_roles__slug__versions_purge_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PurgeIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    export_version_api_v1_roles__slug__versions__version__export_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                slug: string;
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    import_preview_api_v1_roles_import_preview_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_import_preview_api_v1_roles_import_preview_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    import_role_api_v1_roles_import_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_import_role_api_v1_roles_import_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    suite_status_api_v1_rsi_suite_status_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    add_suite_item_api_v1_rsi_suite_items_post: {
+        parameters: {
+            query: {
+                suite_id: string;
+            };
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    freeze_suite_api_v1_rsi_suite_freeze_post: {
+        parameters: {
+            query: {
+                suite_id: string;
+            };
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_evaluations_api_v1_rsi_roles__slug__evaluations_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    enqueue_evaluation_api_v1_rsi_roles__slug__evaluations_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EvalIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_evaluation_api_v1_rsi_evaluations__run_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    retro_api_v1_rsi_roles__slug__retro_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RetroIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_proposals_api_v1_runtime_proposals_get: {
+        parameters: {
+            query?: {
+                status?: string | null;
+            };
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_proposal_api_v1_runtime_proposals_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["anvil__api__runtime_proposals__ProposalIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_proposal_api_v1_runtime_proposals__proposal_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                proposal_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    add_evidence_api_v1_runtime_proposals__proposal_id__evidence_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                proposal_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EvidenceIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    transition_api_v1_runtime_proposals__proposal_id__transition_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                proposal_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TransitionIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_markdown_api_v1_runtime_proposals__proposal_id__markdown_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                proposal_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    export_api_v1_runtime_proposals__proposal_id__export_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                proposal_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

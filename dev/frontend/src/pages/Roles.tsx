@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { api, isOnboardingRole, type Role, type Runtime } from "../api/client";
+import { api, isOnboardingRole, type Role, type RoleVersion, type RoleVersionDiff, type RsiCandidate, type Runtime } from "../api/client";
 import { AvatarPicker } from "../components/AvatarPicker";
 import { Icon } from "../components/Icon";
 import { RoleAvatar } from "../components/RoleAvatar";
 import { formatDateTime } from "../time";
 import { PageHeader } from "../components/ui";
-import { confirmDialog } from "../components/dialogs";
+import { confirmDialog, promptDialog } from "../components/dialogs";
 
-type Tab = "basic" | "instruction" | "tools" | "catalog" | "home" | "permissions" | "runtime";
+type Tab = "basic" | "instruction" | "tools" | "catalog" | "home" | "permissions" | "runtime" | "evolution";
 
 const TABS: { key: Tab; label: string }[] = [
   { key: "basic", label: "基本" },
@@ -17,12 +17,96 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "home", label: "主页" },
   { key: "permissions", label: "权限" },
   { key: "runtime", label: "运行时" },
+  { key: "evolution", label: "演化" },
 ];
 
 // slug 会进入 agents/<slug>/ 路径、分支名与 CLI 参数；只允许 ASCII。
 const SLUG_RE = /^[a-z0-9][a-z0-9_-]{1,63}$/;
 const SLUG_HINT = "slug 只能使用小写英文字母、数字、-、_（2-64 位，且以字母或数字开头）；"
   + "不支持中文、大写、空格或其它特殊字符。";
+
+async function copyText(value: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {
+    // fall through to the legacy path
+  }
+  try {
+    const area = document.createElement("textarea");
+    area.value = value;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(area);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+function VersionDiffSummary({ diff }: { diff: RoleVersionDiff }) {
+  const added = diff.files.filter((f) => f.status === "added").length;
+  const modified = diff.files.filter((f) => f.status === "modified").length;
+  const unchanged = diff.files.filter((f) => f.status === "unchanged").length;
+  return (
+    <div className="version-diff">
+      <p>
+        当前 {diff.active_version ? `v${diff.active_version}` : "无 active 版本"}
+        {" → "}目标 <strong>v{diff.target_version}</strong>
+      </p>
+      <div className="version-diff-stats">
+        <span>文件：新增 {added} · 修改 {modified} · 未变 {unchanged}</span>
+        <span>知识卡：恢复 {diff.knowledge.restore}</span>
+        <span>归档 {diff.knowledge.archive.length}</span>
+        <span>保留人工卡 {diff.knowledge.preserve_human.length}</span>
+      </div>
+      {diff.charter_changed && (
+        <p className="version-diff-warn">Charter 有差异，应用版本默认不恢复 Charter。</p>
+      )}
+      <p className="muted">不会重新跑评估；确认后下一次 run 生效。</p>
+      {diff.files.length > 0 && (
+        <div className="version-diff-list">
+          {diff.files.slice(0, 20).map((f) => (
+            <div className="version-diff-row" key={f.path}>
+              <span className={`version-diff-status ${f.status}`}>{f.status}</span>
+              <code title={f.path}>{f.path}</code>
+              {f.preserved_human && <span className="muted">保留人工修改</span>}
+            </div>
+          ))}
+          {diff.files.length > 20 && (
+            <p className="muted">还有 {diff.files.length - 20} 个文件未展开。</p>
+          )}
+        </div>
+      )}
+      {diff.knowledge.archive.length > 0 && (
+        <details className="version-diff-details">
+          <summary>将归档 {diff.knowledge.archive.length} 张 RSI 知识卡</summary>
+          <div className="version-diff-list">
+            {diff.knowledge.archive.slice(0, 10).map((path) => (
+              <div className="version-diff-row" key={path}><code>{path}</code></div>
+            ))}
+          </div>
+        </details>
+      )}
+      {diff.knowledge.preserve_human.length > 0 && (
+        <details className="version-diff-details">
+          <summary>保留 {diff.knowledge.preserve_human.length} 张人工修改/人工卡</summary>
+          <div className="version-diff-list">
+            {diff.knowledge.preserve_human.slice(0, 10).map((path) => (
+              <div className="version-diff-row" key={path}><code>{path}</code></div>
+            ))}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
 
 export function Roles() {
   const [roles, setRoles] = useState<Role[]>([]);
@@ -54,7 +138,36 @@ export function Roles() {
   const [homeFiles, setHomeFiles] = useState<string[]>([]);
   const [homeFile, setHomeFile] = useState<{ path: string; content: string } | null>(null);
   const [message, setMessage] = useState("");
-  const [versions, setVersions] = useState<{ version: number; display_name: string; source: string; created_at: string }[]>([]);
+  const [versions, setVersions] = useState<RoleVersion[]>([]);
+  const [versionKind, setVersionKind] = useState<"evolution" | "config">("evolution");
+  const [versionStatus, setVersionStatus] = useState("");
+  const [versionSelected, setVersionSelected] = useState<number[]>([]);
+  const [versionPageItems, setVersionPageItems] = useState<RoleVersion[]>([]);
+  const [versionTotal, setVersionTotal] = useState(0);
+  const [versionPage, setVersionPage] = useState(0);
+  const [versionSummary, setVersionSummary] = useState<{
+    active_evolution?: number | null;
+    counts?: {
+      kind?: Record<string, number>; status?: Record<string, number>;
+      deleted?: number;
+    };
+  } | null>(null);
+  const [workingSet, setWorkingSet] = useState<{
+    base_version: number | null; count: number; hash: string;
+    cards: { path: string; sha256: string; human_modified: boolean }[];
+  } | null>(null);
+  const [copiedSlug, setCopiedSlug] = useState(false);
+  const copyTimerRef = useRef<number | null>(null);
+  const [candidates, setCandidates] = useState<RsiCandidate[]>([]);
+  const [evalSuite, setEvalSuite] = useState("default");
+  const [evalBusy, setEvalBusy] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importPreview, setImportPreview] = useState<Record<string, any> | null>(null);
+  const [importMode, setImportMode] = useState("new_role");
+  const [importSlug, setImportSlug] = useState("");
+  const [importAllow, setImportAllow] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
   const [metrics, setMetrics] = useState<{ runs: number; tasks_total: number; tasks_done: number; input_tokens: number; output_tokens: number; total_tokens: number; today_total_tokens: number } | null>(null);
   const [toolsForm, setToolsForm] = useState({ preset: "", max_tool_tokens: "", allowlist: "[]" });
   const [runtimes, setRuntimes] = useState<Runtime[]>([]);
@@ -120,6 +233,9 @@ export function Roles() {
     setBrief("");
     setGenBusy(false);
     setVersions([]);
+    setVersionSummary(null);
+    setCopiedSlug(false);
+    setCandidates([]);
     setMetrics(null);
     setHomeFiles([]);
     setHomeFile(null);
@@ -139,11 +255,54 @@ export function Roles() {
       });
     }).catch((e) => { if (!cancelled) setError(String(e)); });
     api.getRoleProfile(selected).then((p) => { if (!cancelled) setProfile(p); }).catch(() => {});
-    api.getRoleVersions(selected).then((v) => { if (!cancelled) setVersions(v); }).catch(() => {});
+    api.getRoleVersions(selected)
+      .then((v) => { if (!cancelled) setVersions(Array.isArray(v) ? v : []); })
+      .catch(() => {});
+    api.getRoleVersionSummary(selected)
+      .then((s) => { if (!cancelled) setVersionSummary(s as typeof versionSummary); })
+      .catch(() => {});
+    api.listRsiCandidates(selected)
+      .then((r) => { if (!cancelled) setCandidates(Array.isArray(r?.items) ? r.items : []); })
+      .catch(() => {});
+    setVersionSelected([]);
+    setVersionPage(0);
+    setWorkingSet(null);
+    api.getRoleWorkingSet(selected).then((w) => { if (!cancelled) setWorkingSet(w); }).catch(() => {});
     api.getRoleMetrics(selected).then((m) => { if (!cancelled) setMetrics(m); }).catch(() => {});
     api.getRoleHome(selected).then((h) => { if (!cancelled) setHomeFiles(h.files); }).catch(() => {});
     return () => { cancelled = true; };
   }, [selected]);
+
+  useEffect(() => () => {
+    if (copyTimerRef.current != null) window.clearTimeout(copyTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    if (!selected) {
+      setVersionPageItems([]);
+      setVersionTotal(0);
+      return;
+    }
+    let cancelled = false;
+    api.getRoleVersionsPage(selected, {
+      kind: versionKind,
+      status: versionStatus || undefined,
+      limit: 50,
+      offset: versionPage * 50,
+    }).then((page) => {
+      if (cancelled) return;
+      // 兼容旧后端：分页参数未生效时可能返回数组；不能让 undefined 进入渲染。
+      const items = Array.isArray(page) ? page : (page?.items ?? []);
+      setVersionPageItems(Array.isArray(items) ? items : []);
+      setVersionTotal(Array.isArray(page) ? items.length : (page?.total ?? items.length));
+    }).catch(() => {
+      if (!cancelled) {
+        setVersionPageItems([]);
+        setVersionTotal(0);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [selected, versionKind, versionStatus, versionPage]);
 
   // 切到「技能/MCP」tab 时，拉运行时可用目录 + 该角色当前选择。
   // 默认 selections 为空；每个角色独立保存，切换角色时先清空，避免旧状态残留。
@@ -311,13 +470,137 @@ export function Roles() {
       setError(String(e));
     }
   };
+  const copySlug = async (value: string) => {
+    if (!(await copyText(value))) {
+      setError("复制失败，请手动选择 Slug 文本。");
+      return;
+    }
+    setCopiedSlug(true);
+    if (copyTimerRef.current != null) window.clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = window.setTimeout(() => setCopiedSlug(false), 1500);
+  };
 
   const projection = (config?.projection ?? {}) as Record<string, any>;
   const currentRuntime = typeof projection.runtime === "string"
     ? projection.runtime
     : projection.runtime?.id ?? "—";
   const current = roles.find((r) => r.slug === selected);
+  const permissionHome = String(
+    projection.workspace?.home || current?.home_path || "—");
+  const permissionRepos = Array.isArray(projection.workspace?.repos)
+    ? projection.workspace.repos
+    : [];
+  const permissionRepoText = permissionRepos.map((r: any) => (
+    typeof r === "string"
+      ? r
+      : `${r.name ?? r.repo ?? r.slug ?? ""}${r.access ? `（${r.access}）` : ""}`
+  )).filter(Boolean).join("、");
   const slugInvalid = slug.length > 0 && !SLUG_RE.test(slug);
+  const visibleVersions = versionPageItems;
+  const configCount = versionSummary?.counts?.kind?.config ?? 0;
+  const deletedCount = versionSummary?.counts?.deleted ?? 0;
+  const rsiRoleEnabled = Boolean(
+    (current?.definition as Record<string, any> | undefined)?.rsi?.enabled);
+  const currentEvolution = versions.find(
+    (v) => (v.kind || "evolution") === "evolution" && v.status === "active");
+  const latestConfig = versions.find(
+    (v) => (v.kind || "evolution") === "config" && v.status !== "deleted");
+  const toggleVersion = (version: number) => {
+    setVersionSelected((prev) => prev.includes(version)
+      ? prev.filter((x) => x !== version)
+      : [...prev, version]);
+  };
+  const refreshVersions = async () => {
+    if (!selected) return;
+    const [v, w, page, summary] = await Promise.all([
+      api.getRoleVersions(selected),
+      api.getRoleWorkingSet(selected),
+      api.getRoleVersionsPage(selected, {
+        kind: versionKind, status: versionStatus || undefined,
+        limit: 50, offset: versionPage * 50,
+      }),
+      api.getRoleVersionSummary(selected),
+    ]);
+    const items = Array.isArray(page) ? page : (page?.items ?? []);
+    setVersions(Array.isArray(v) ? v : []);
+    setVersionSummary(summary as typeof versionSummary);
+    setWorkingSet(w ?? null);
+    setVersionPageItems(Array.isArray(items) ? items : []);
+    setVersionTotal(Array.isArray(page) ? items.length : (page?.total ?? items.length));
+    setVersionSelected([]);
+  };
+  const refreshCandidates = async () => {
+    if (!selected) return;
+    try {
+      const r = await api.listRsiCandidates(selected);
+      setCandidates(Array.isArray(r?.items) ? r.items : []);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+  const downloadVersion = async (version: number) => {
+    if (!selected) return;
+    try {
+      const blob = await api.exportRoleVersion(selected, version);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `role-${selected}-v${version}.anvil.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+  const purgeSelected = async () => {
+    if (!selected || versionSelected.length === 0) return;
+    try {
+      const dry = await api.purgeRoleVersions(selected, versionSelected, true);
+      const skipped = dry.skipped.length
+        ? `\n跳过：${dry.skipped.map((x) => `v${x.version}(${x.reason})`).join("、")}`
+        : "";
+      if (dry.deleted.length === 0) {
+        setError(`没有可删除版本${skipped}`);
+        return;
+      }
+      if (!(await confirmDialog({
+        title: "批量删除版本",
+        message: `将删除 ${dry.deleted.length} 个版本（soft delete + 删快照）${skipped}`,
+        confirmLabel: "删除",
+        danger: true,
+      }))) return;
+      await api.purgeRoleVersions(selected, versionSelected, false);
+      await refreshVersions();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+  const dedupeConfigVersions = async () => {
+    if (!selected) return;
+    try {
+      const dry = await api.dedupeConfigVersions(selected, true);
+      if (dry.candidates === 0) {
+        setMessage("没有重复的配置修订。");
+        return;
+      }
+      const skipped = dry.skipped.length
+        ? `\n跳过：${dry.skipped.map((x) => `v${x.version}(${x.reason})`).join("、")}`
+        : "";
+      if (!(await confirmDialog({
+        title: "清理重复配置修订",
+        message: `检测到 ${dry.duplicate_groups} 组重复；将 soft delete `
+          + `${dry.deleted.length} 条旧修订，每组保留最新一条（共保留 ${dry.kept.length} 条）。`
+          + skipped,
+        confirmLabel: "清理重复项",
+        danger: true,
+      }))) return;
+      await api.dedupeConfigVersions(selected, false);
+      await refreshVersions();
+      setMessage("重复配置修订已清理（soft delete，可审计）。");
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   return (
     <div className="roles roles-page">
@@ -517,10 +800,22 @@ export function Roles() {
               {tab === "basic" && (
                 <div className="role-basic">
                   <section className="role-info-card">
-                    <div className="role-info-grid">
-                      <div className="role-info-item">
+                    <div className="role-info-grid role-info-grid-basic">
+                      <div className="role-info-item role-info-item-slug">
                         <span>Slug</span>
-                        <code>{current.slug}</code>
+                        <div className="role-info-code-row">
+                          <code tabIndex={0} title={current.slug}>{current.slug}</code>
+                          <button
+                            type="button"
+                            className="small role-copy-btn"
+                            onClick={() => { void copySlug(current.slug); }}
+                            aria-label={copiedSlug ? "Slug 已复制" : `复制 Slug ${current.slug}`}
+                            title="复制 Slug"
+                          >{copiedSlug ? "已复制" : "复制"}</button>
+                          <span role="status" aria-live="polite" className="role-copy-status">
+                            {copiedSlug ? "Slug 已复制到剪贴板" : ""}
+                          </span>
+                        </div>
                       </div>
                       <div className="role-info-item">
                         <span>显示名</span>
@@ -563,33 +858,477 @@ export function Roles() {
 
                   <section className="role-detail-section">
                     <div className="role-section-head">
-                      <h3>配置版本</h3>
-                      <span className="muted">{versions.length} 个</span>
+                      <h3>角色空间</h3>
+                      <button className="small" onClick={() => setTab("evolution")}>
+                        前往演化
+                      </button>
                     </div>
-                    {versions.length === 0 ? (
-                      <p className="muted">暂无版本记录。</p>
+                    <div className="role-metrics">
+                      <div className="role-metric">
+                        <span>当前演进版本</span>
+                        <strong>
+                          {currentEvolution ? `v${currentEvolution.version}` : "未建立"}
+                        </strong>
+                      </div>
+                      <div className="role-metric">
+                        <span>工作集</span>
+                        <strong>{workingSet?.count ?? 0}<small> 张未版本化知识卡</small></strong>
+                      </div>
+                      <div className="role-metric">
+                        <span>配置修订</span>
+                        <strong>{configCount}<small> 个（默认折叠）</small></strong>
+                      </div>
+                      <div className="role-metric">
+                        <span>最近配置修订</span>
+                        <strong>
+                          {latestConfig
+                            ? `v${latestConfig.version}`
+                            : "—"}
+                          {latestConfig && (
+                            <small> {latestConfig.source} · {formatDateTime(latestConfig.created_at)}</small>
+                          )}
+                        </strong>
+                      </div>
+                    </div>
+                    <p className="muted">
+                      基本信息页只做摘要。版本切换、配置恢复、导出/导入和批量清理统一在
+                      “演化”页处理；配置修订默认不进入演进主视图。
+                    </p>
+                  </section>
+                </div>
+              )}
+              {tab === "evolution" && (
+                <div>
+                  <p className="muted" style={{ margin: "0 0 0.6rem" }}>
+                    这里管理角色的 RSI 演进：当前基线、每日收割但尚未固化的工作集、
+                    反思候选与回放评估、以及可切换/导出的演进版本。任务执行不在这里，
+                    打开 RSI 前此页只读。
+                  </p>
+                  <label className="muted" style={{
+                    display: "inline-flex", alignItems: "center", gap: 6,
+                    marginBottom: "0.6rem",
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={rsiRoleEnabled}
+                      onChange={async (e) => {
+                        const enabled = e.target.checked;
+                        try {
+                          await api.setRoleRsiEnabled(current.slug, enabled);
+                          if (enabled) {
+                            try { await api.ensureRoleBaseline(current.slug); }
+                            catch { /* baseline may already exist */ }
+                          }
+                          await refresh();
+                          await refreshVersions();
+                        } catch (err) {
+                          setError(String(err));
+                        }
+                      }}
+                    />
+                    本角色参与 RSI 试点（仍需全局 role_rsi 开关）
+                  </label>
+                  <section className="role-detail-section">
+                    <div className="role-section-head">
+                      <h3>当前基线</h3>
+                      <span className="muted">
+                        {currentEvolution ? `v${currentEvolution.version}` : "尚未建立版本"}
+                      </span>
+                    </div>
+                    <div className="role-metrics">
+                      <div className="role-metric">
+                        <span>工作集</span>
+                        <strong>{workingSet?.count ?? 0}<small> 张未版本化知识卡</small></strong>
+                      </div>
+                      <div className="role-metric">
+                        <span>工作集 hash</span>
+                        <strong className="mono" style={{ fontSize: "0.8rem" }}>
+                          {workingSet?.hash ? workingSet.hash.slice(0, 18) : "—"}
+                        </strong>
+                      </div>
+                      <div className="role-metric">
+                        <span>演进版本</span>
+                        <strong>
+                          {versions.length}
+                          <small>
+                            {" "}个（配置修订 {configCount} 个
+                            {deletedCount > 0 ? `，已清理 ${deletedCount} 条重复` : ""}）
+                          </small>
+                        </strong>
+                      </div>
+                    </div>
+                    {!currentEvolution && (
+                      <div style={{ marginTop: "0.6rem" }}>
+                        <p className="muted">
+                          当前还没有演进基线。历史手动保存的
+                          {configCount > 0 ? ` ${configCount} 个配置修订` : "配置修订"}
+                          不会混入演进视图；建立基线后，RSI 才能从这一版开始演进。
+                        </p>
+                        <button
+                          className="primary small"
+                          onClick={async () => {
+                            try {
+                              await api.ensureRoleBaseline(selected!);
+                              await refreshVersions();
+                              setMessage("已建立当前角色空间的演进基线。");
+                            } catch (e) {
+                              setError(String(e));
+                            }
+                          }}
+                        >建立当前基线</button>
+                      </div>
+                    )}
+                    {workingSet && workingSet.count > 0 && (
+                      <p className="muted">
+                        每日收割的知识卡属于工作集，不会自动改变基线；晋级或切换时按规则固化/归档。
+                      </p>
+                    )}
+                  </section>
+
+                  <section className="role-detail-section">
+                    <div className="role-section-head">
+                      <h3>演化候选</h3>
+                      <span className="muted">
+                        {candidates.filter((c) => ["draft", "queued", "evaluating", "pending"].includes(c.status)).length} 个待处理
+                      </span>
+                    </div>
+                    <div className="toolbar" style={{ flexWrap: "wrap" }}>
+                      <input
+                        value={evalSuite}
+                        onChange={(e) => setEvalSuite(e.target.value)}
+                        placeholder="隐藏回放集 id（如 default）"
+                        style={{ minWidth: 220 }}
+                      />
+                      <button className="small" onClick={refreshCandidates}>刷新候选</button>
+                    </div>
+                    {candidates.length === 0 ? (
+                      <p className="muted">暂无演化候选。触发反思后，候选会出现在这里与 Inbox。</p>
                     ) : (
                       <ul className="role-version-list">
-                        {versions.map((v) => (
-                          <li key={v.version}>
-                            <span className="role-version-no">v{v.version}</span>
-                            <span className="role-version-source">{v.source}</span>
-                            <span className="muted mono">{formatDateTime(v.created_at)}</span>
-                            <button
-                              className="small role-version-btn"
-                              onClick={async () => {
-                                try {
-                                  await api.rollbackRole(current.slug, v.version);
-                                  await refresh();
-                                  const c = await api.getEffectiveConfig(current.slug);
-                                  setConfig(c);
-                                } catch (e) {
-                                  setError(String(e));
-                                }
-                              }}
-                            >回滚</button>
+                        {candidates.map((c) => (
+                          <li key={c.id} style={{ alignItems: "center", gap: "0.4rem", flexWrap: "wrap" }}>
+                            <span className="badge" style={{ background: "#e3f2fd", padding: "0 0.4rem", borderRadius: 4 }}>
+                              {c.status}
+                            </span>
+                            <span className="muted">{c.tier}</span>
+                            <span className="mono" style={{ fontSize: "0.78rem" }}>{c.id}</span>
+                            <span className="muted">编辑 {(c.edits || []).length}</span>
+                            {c.base_version != null && <span className="muted">base v{c.base_version}</span>}
+                            {c.eval_id && <span className="muted mono">eval {c.eval_id.slice(0, 10)}</span>}
+                            <span className="muted mono">{formatDateTime(c.created_at)}</span>
+                            {["draft", "queued"].includes(c.status) && (
+                              <button
+                                className="small"
+                                disabled={evalBusy === c.id || !evalSuite.trim()}
+                                onClick={async () => {
+                                  try {
+                                    setEvalBusy(c.id);
+                                    const r = await api.evaluateRsiCandidate(selected!, {
+                                      suite_id: evalSuite.trim(), candidate_id: c.id,
+                                    });
+                                    setMessage(`评估已入队：${r.run_id}（候选 v${r.candidate_version}）`);
+                                    await refreshCandidates();
+                                  } catch (e) {
+                                    setError(String(e));
+                                  } finally {
+                                    setEvalBusy(null);
+                                  }
+                                }}
+                              >{evalBusy === c.id ? "入队中…" : "评估"}</button>
+                            )}
+                            {["draft", "pending"].includes(c.status) && (
+                              <button
+                                className="primary small"
+                                onClick={async () => {
+                                  const ok = await confirmDialog({
+                                    title: "批准并应用候选？",
+                                    message: `将应用 ${c.id} 的编辑并生成新的 active 演进版本；`
+                                      + "开启评估时必须有 promote 结论。",
+                                    confirmLabel: "批准应用",
+                                  });
+                                  if (!ok) return;
+                                  try {
+                                    await api.approveRsiCandidate(c.id);
+                                    await refreshCandidates();
+                                    await refreshVersions();
+                                  } catch (e) {
+                                    setError(String(e));
+                                  }
+                                }}
+                              >批准应用</button>
+                            )}
+                            {!["rejected", "applied", "rolled_back"].includes(c.status) && (
+                              <button
+                                className="small"
+                                onClick={async () => {
+                                  const note = await promptDialog({
+                                    title: "拒绝候选",
+                                    message: "填写拒绝理由（写入审计与负结果归档）。",
+                                    input: { placeholder: "例如：收益在噪声内 / 成本回归" },
+                                    confirmLabel: "拒绝",
+                                  });
+                                  if (note === null) return;
+                                  try {
+                                    await api.rejectRsiCandidate(c.id, note);
+                                    await refreshCandidates();
+                                  } catch (e) {
+                                    setError(String(e));
+                                  }
+                                }}
+                              >拒绝</button>
+                            )}
                           </li>
                         ))}
+                      </ul>
+                    )}
+                  </section>
+
+                  <section className="role-detail-section">
+                    <div className="role-section-head">
+                      <h3>版本管理</h3>
+                      <span className="muted">{versionTotal} 个 · 第 {versionPage + 1} 页</span>
+                    </div>
+                    <div className="toolbar" style={{ flexWrap: "wrap" }}>
+                      <select value={versionKind} onChange={(e) => { setVersionKind(e.target.value as "evolution" | "config"); setVersionPage(0); }}>
+                        <option value="evolution">演进版本</option>
+                        <option value="config">配置修订</option>
+                      </select>
+                      <select value={versionStatus} onChange={(e) => { setVersionStatus(e.target.value); setVersionPage(0); }}>
+                        <option value="">全部状态</option>
+                        <option value="active">当前</option>
+                        <option value="candidate">候选</option>
+                        <option value="archived">已归档</option>
+                        <option value="rejected">已拒绝</option>
+                        <option value="deleted">已删除</option>
+                      </select>
+                      <button
+                        className="small"
+                        disabled={versionSelected.length === 0}
+                        onClick={purgeSelected}
+                      >批量删除（{versionSelected.length}）</button>
+                      <button className="small" onClick={dedupeConfigVersions}>
+                        清理重复配置修订
+                      </button>
+                      <button className="small" onClick={() => setImportOpen((v) => !v)}>
+                        导入角色版本
+                      </button>
+                      <button className="small" disabled={versionPage === 0}
+                              onClick={() => setVersionPage((p) => Math.max(0, p - 1))}>上一页</button>
+                      <button className="small" disabled={(versionPage + 1) * 50 >= versionTotal}
+                              onClick={() => setVersionPage((p) => p + 1)}>下一页</button>
+                    </div>
+                    <div className="role-version-legend">
+                      {versionKind === "evolution" ? (
+                        <>
+                          <span id="version-help-apply"><strong>应用</strong>：把该演进快照设为当前版本（Strategy/Experience；Charter 默认不动）。</span>
+                          <span id="version-help-reapply"><strong>重新应用</strong>：对当前 active 版本执行同一操作，修复漂移；不会重跑评估。</span>
+                          <span id="version-help-export"><strong>导出 zip</strong>：下载 role@version 的完整演进快照。</span>
+                        </>
+                      ) : (
+                        <span id="version-help-restore"><strong>恢复配置</strong>：恢复手动配置修订（画像/策略文件/工具快照），不改变当前演进版本。</span>
+                      )}
+                    </div>
+
+                    {importOpen && (
+                      <div style={{
+                        border: "1px solid var(--border, #ddd)", borderRadius: 8,
+                        padding: "0.8rem", margin: "0.6rem 0", display: "grid", gap: "0.5rem",
+                      }}>
+                        <strong>导入 role@version</strong>
+                        <input
+                          type="file"
+                          accept=".zip,.anvil.zip"
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0] || null;
+                            setImportFile(file);
+                            setImportPreview(null);
+                            if (!file) return;
+                            try {
+                              setImportPreview(await api.previewRoleImport(file));
+                            } catch (err) {
+                              setError(String(err));
+                            }
+                          }}
+                        />
+                        {importPreview && (
+                          <div style={{ fontSize: "0.85rem" }}>
+                            <div>
+                              来源：<code>{String(importPreview.export?.slug)}@v{String(importPreview.export?.version)}</code>
+                              {" · "}文件 {Object.keys(importPreview.files || {}).length}
+                              {" · "}知识卡 {importPreview.manifest?.knowledge_cards?.length ?? 0}
+                            </div>
+                            {importPreview.warnings?.length > 0 && (
+                              <div className="muted">依赖：{importPreview.warnings.join("；")}</div>
+                            )}
+                          </div>
+                        )}
+                        <div className="toolbar" style={{ flexWrap: "wrap" }}>
+                          <select value={importMode} onChange={(e) => setImportMode(e.target.value)}>
+                            <option value="new_role">导入为新角色</option>
+                            <option value="add_version">作为现有角色候选版本</option>
+                          </select>
+                          <input
+                            value={importSlug}
+                            onChange={(e) => setImportSlug(e.target.value)}
+                            placeholder={importMode === "add_version" ? "目标角色 slug" : "新角色 slug（可空）"}
+                            style={{ minWidth: 180 }}
+                          />
+                          <label className="muted">
+                            <input
+                              type="checkbox"
+                              checked={importAllow}
+                              onChange={(e) => setImportAllow(e.target.checked)}
+                            /> 允许 Charter 差异
+                          </label>
+                          <button
+                            className="primary"
+                            disabled={!importFile || importBusy}
+                            onClick={async () => {
+                              if (!importFile) return;
+                              try {
+                                setImportBusy(true);
+                                await api.importRole(
+                                  importFile, importMode,
+                                  importSlug.trim() || undefined, importAllow);
+                                setImportOpen(false);
+                                setImportFile(null);
+                                setImportPreview(null);
+                                await refresh();
+                                await refreshVersions();
+                              } catch (err) {
+                                setError(String(err));
+                              } finally {
+                                setImportBusy(false);
+                              }
+                            }}
+                          >{importBusy ? "导入中…" : "确认导入"}</button>
+                        </div>
+                        <p className="muted" style={{ margin: 0 }}>
+                          导入不会自动启用或切换；add_version 只生成候选版本。
+                        </p>
+                      </div>
+                    )}
+
+                    {visibleVersions.length === 0 ? (
+                      <p className="muted">
+                        {versionKind === "config"
+                          ? "暂无配置修订。"
+                          : configCount > 0
+                            ? `暂无演进版本。检测到 ${configCount} 个历史手动配置修订，`
+                              + "可在上方切到「配置修订」查看或批量清理。"
+                            : "暂无演进版本。启用 RSI 并建立基线后，候选与晋级版本会出现在这里。"}
+                      </p>
+                    ) : (
+                      <ul className="role-version-list">
+                        {visibleVersions.map((v) => {
+                          const isCurrent = v.status === "active";
+                          const isRsi = String(v.source || "").startsWith("rsi");
+                          const isBaseline = v.source === "baseline";
+                          const deletable = !isCurrent && !isBaseline && v.status !== "deleted";
+                          const evalVerdict = v.eval?.verdict;
+                          return (
+                            <li key={v.version} style={{ alignItems: "center", gap: "0.4rem", flexWrap: "wrap" }}>
+                              <input
+                                type="checkbox"
+                                disabled={!deletable}
+                                checked={versionSelected.includes(v.version)}
+                                onChange={() => toggleVersion(v.version)}
+                              />
+                              <span className="role-version-no">v{v.version}</span>
+                              {isCurrent && <span className="badge" style={{ background: "#e8f5e9", padding: "0 0.4rem", borderRadius: 4 }}>当前</span>}
+                              {isRsi && <span className="badge" style={{ background: "#e3f2fd", padding: "0 0.4rem", borderRadius: 4 }}>RSI</span>}
+                              {isBaseline && <span className="badge" style={{ background: "#f3e5f5", padding: "0 0.4rem", borderRadius: 4 }}>基线</span>}
+                              {v.kind === "config" && <span className="badge" style={{ background: "#f5f5f5", padding: "0 0.4rem", borderRadius: 4 }}>配置修订</span>}
+                              {v.status && v.status !== "active" && (
+                                <span className="muted">{v.status}</span>
+                              )}
+                              {evalVerdict && (
+                                <span className="mono" style={{ fontSize: "0.78rem" }}>{evalVerdict}</span>
+                              )}
+                              <span className="role-version-source">{v.source}</span>
+                              <span className="muted mono">{formatDateTime(v.created_at)}</span>
+                              {v.content_hash && (
+                                <span className="muted mono" title={v.content_hash}>
+                                  {v.content_hash.replace("sha256:", "").slice(0, 10)}
+                                </span>
+                              )}
+                              {v.integrity_status === "corrupt" && (
+                                <span style={{ color: "#c62828" }}>损坏</span>
+                              )}
+                              <button
+                                className="small role-version-btn"
+                                title={(v.kind || "evolution") === "evolution"
+                                  ? (isCurrent
+                                    ? "把当前 active 快照重新写回角色空间；会归档未版本化 RSI 卡，不会重新跑评估"
+                                    : "把该演进快照设为当前版本；下一次 run 生效")
+                                  : "恢复该手动配置修订；不改变当前演进版本"}
+                                aria-label={(v.kind || "evolution") === "evolution"
+                                  ? (isCurrent ? `重新应用 v${v.version}` : `应用 v${v.version}`)
+                                  : `恢复配置 v${v.version}`}
+                                aria-describedby={(v.kind || "evolution") === "evolution"
+                                  ? (isCurrent ? "version-help-reapply" : "version-help-apply")
+                                  : "version-help-restore"}
+                                onClick={async () => {
+                                  if (!selected) return;
+                                  try {
+                                    if ((v.kind || "evolution") === "evolution") {
+                                      const diff = await api.getRoleVersionDiff(
+                                        selected, v.version);
+                                      const ok = await confirmDialog({
+                                        title: isCurrent
+                                          ? "重新应用当前版本？"
+                                          : `应用 v${v.version}？`,
+                                        message: <VersionDiffSummary diff={diff} />,
+                                        confirmLabel: isCurrent
+                                          ? "重新应用"
+                                          : `应用 v${v.version}`,
+                                        danger: true,
+                                      });
+                                      if (!ok) return;
+                                      await api.switchRoleVersion(selected, v.version);
+                                    } else {
+                                      const dry = await api.restoreRoleConfig(
+                                        selected, v.version, true);
+                                      const warnings = dry.warnings.length
+                                        ? `\n注意：${dry.warnings.join("；")}`
+                                        : "";
+                                      const ok = await confirmDialog({
+                                        title: "恢复配置修订？",
+                                        message: `将恢复 v${v.version} 的画像定义`
+                                          + ` 与 ${dry.restored_files.length} 个策略文件；`
+                                          + `工具配置${dry.tools_restored ? "会" : "不会"}恢复。`
+                                          + `\n不会改变当前演进版本。`
+                                          + warnings,
+                                        confirmLabel: "恢复配置",
+                                        danger: true,
+                                      });
+                                      if (!ok) return;
+                                      await api.restoreRoleConfig(
+                                        selected, v.version, false);
+                                    }
+                                    await refreshVersions();
+                                    await refresh();
+                                    const c = await api.getEffectiveConfig(selected);
+                                    setConfig(c);
+                                  } catch (err) {
+                                    setError(String(err));
+                                  }
+                                }}
+                              >{(v.kind || "evolution") === "evolution"
+                                ? (isCurrent ? "重新应用" : "应用")
+                                : "恢复配置"}</button>
+                              {(v.kind || "evolution") === "evolution" && (
+                                <button
+                                  className="small role-version-btn"
+                                  title="下载该演进版本的 role@version zip（Strategy/Experience + manifest）"
+                                  aria-label={`导出 v${v.version} zip`}
+                                  aria-describedby="version-help-export"
+                                  onClick={() => downloadVersion(v.version)}
+                                >导出 zip</button>
+                              )}
+                            </li>
+                          );
+                        })}
                       </ul>
                     )}
                   </section>
@@ -721,23 +1460,25 @@ export function Roles() {
                 <section className="role-info-card">
                   <div className="role-info-grid">
                     <div className="role-info-item role-info-wide">
-                      <span>工作目录</span>
-                      <code>{projection.workspace?.home ?? "—"}</code>
+                      <span>角色工作目录（home）</span>
+                      <code>{permissionHome}</code>
                     </div>
                     <div className="role-info-item role-info-wide">
-                      <span>可写仓库</span>
-                      <code>
-                        {Array.isArray(projection.workspace?.repos)
-                          ? projection.workspace.repos
-                              .map((r: any) => typeof r === "string"
-                                ? r
-                                : `${r.name ?? r.repo ?? r.slug ?? ""}${r.access ? `（${r.access}）` : ""}`)
-                              .filter(Boolean)
-                              .join("、") || "—"
-                          : "—"}
-                      </code>
+                      <span>角色级可写仓库白名单</span>
+                      {permissionRepoText ? (
+                        <code>{permissionRepoText}</code>
+                      ) : (
+                        <span className="muted">
+                          未设置白名单（不限制仓库；仍受任务 scope 和 .anvilignore 约束）
+                        </span>
+                      )}
                     </div>
                   </div>
+                  <p className="muted" style={{ margin: "0.7rem 0 0" }}>
+                    这是只读摘要。实际写入范围 = 任务 repo + 这里列出的白名单
+                    （空表示不限制）+ 任务 scope_paths + .anvilignore；
+                    它不控制 API/HITL、工具、skill/MCP 或运行时绑定。
+                  </p>
                 </section>
               )}
               {tab === "catalog" && (
