@@ -80,7 +80,9 @@ pip install --force-reinstall <anvil-cli-wheel-or-sdist>
 | `anvil finding ...` | 问题板：安全 finding 的填写/提交/完成（reviewer） |
 | `anvil knowledge ...` | 角色知识：检索/索引/补全/仓库/知识卡 |
 | `anvil note write` | 写入角色笔记（实践门控） |
-| `anvil role ...` | 角色：list/expand |
+| `anvil role ...` | 角色：list/propose/expand/export/import |
+| `anvil rsi ...` | 角色 RSI：show/observations/trigger/retro/candidates/eval |
+| `anvil runtime ...` | 运行时改进提案：propose/evidence/proposals/show/export |
 | `anvil workspace ...` | 频道与频道知识卡 |
 | `anvil lesson propose/fill` | 提议共享经验 / 收割角色补全字段（human 审批） |
 | `anvil reminder ...` | 定时提醒（含任务完成知识收割提醒） |
@@ -391,6 +393,10 @@ anvil note write notes/<path>.md --content-file <file> \
 anvil role list [--json]        # 查找系统已有角色（slug/名称/状态/画像）
 anvil role propose --task <id> --file roles.json [--goal "..."] [--json]
 anvil role expand --brief "需要一个安全评审角色" --slug <已批准 slug> [--task <id>] [--json]
+anvil role export <slug> --version <n> [--out role-<slug>-v<n>.anvil.zip] [--json]
+anvil role import <file.anvil.zip> --mode new_role [--slug <new-slug>] [--json]
+anvil role import <file.anvil.zip> --mode add_version --slug <existing> [--json]
+anvil role import --preview <file.anvil.zip> [--json]
 ```
 
 `roles.json`：
@@ -420,6 +426,11 @@ anvil role expand --brief "需要一个安全评审角色" --slug <已批准 slu
   已批准的 slug；多角色提案必须用 `--slug` 指定。
 - 任务已有 Roster 时，`task assign` 只追加新角色；未获批准会自动生成追加提案，
   human 反馈/批准后重试，不会覆盖已有 assignees。
+- `role export` 导出 evolution 版本的 Strategy/Experience + manifest + Charter 引用；
+  只支持演进版本（`kind=evolution`），需要 human token。
+- `role import` 默认 `new_role`，导入为 `source=import` 的基线且**不自动启用/切换**；
+  `add_version` 只追加候选版本，不自动切换；Charter 不一致需 `--allow-charter-change`。
+  导入前可 `--preview` 查看 hash/依赖/Charter diff；恶意 zip、hash 篡改或超限会被拒绝。
 
 ## 9. 频道与频道知识：`anvil workspace`
 
@@ -438,6 +449,50 @@ anvil workspace knowledge review <ws-id>
 规则：频道是任务归属 + 知识作用域，不是聊天室。Agent 写入为 `proposed`；
 `approve` 仅 human；harvest 只接受 `done/closed` 任务。Agent 读取频道知识/成员/
 资产时，必须在该频道有参与任务，否则 403；human 不受限。
+
+## 9.1 角色 RSI：`anvil rsi`
+
+```bash
+anvil rsi show --role <slug> [--json]
+anvil rsi observations --role <slug> [--limit 50] [--json]
+anvil rsi trigger --role <slug> [--json]
+anvil rsi retro --task <task-id> --file retro.md [--role <slug>] [--json]
+anvil rsi candidates --role <slug> [--json]
+anvil rsi eval --suite <suite-id> --candidate <candidate-id> [--baseline <n>] [--json]
+anvil rsi eval --suite <suite-id> --version <candidate-version> [--baseline <n>] [--json]
+```
+
+规则：
+
+- 默认角色取 `ANVIL_AGENT_SLUG`；Agent 只能读自己的 RSI 数据，human 可指定角色。
+- `retro` 写一条复盘回执，供下一次反思证据包使用；不直接改角色策略。
+- `eval` 需要 human token；入队后由评估 worker 单并发执行，返回 `run_id`，
+  通过 `GET /rsi/evaluations/{id}` 查询 verdict/diagnosis。
+- RSI 总开关 `role_rsi` 关闭时，除只读查询外不产生观察/反思/候选。
+- 隐藏回放评估需要已冻结 suite；默认关闭 `role_rsi_evaluation`，数据不足只返回
+  `inconclusive`。
+
+## 9.2 运行时改进提案：`anvil runtime`
+
+```bash
+anvil runtime proposals [--status draft|open|triaged|accepted|implemented|verified|closed]
+anvil runtime propose --type skill --component <key> --title "..." \
+  --summary-file symptom.md --proposed-file change.md --evidence-file evidence.json \
+  [--severity major]
+anvil runtime evidence <RTP-id> --evidence-file evidence.json
+anvil runtime show <RTP-id>
+anvil runtime export <RTP-id>            # human
+```
+
+规则：
+
+- 组件类型：skill / mcp_server / runtime_yaml / feature_flag / tool_preset / model /
+  environment / harness_part；禁止 eval/security/anvil-source/role-config。
+- Agent 只能创建 draft、追加 evidence；`open→triaged→accepted→implemented→verified→closed`
+  及 rejected/duplicate/wontfix/stale 只能由 human 流转。
+- 提案 md 生成在 `data/runtime-proposals/<id>/proposal.md`；`export` 复制为 human 可执行文档，
+  不会自动改运行时。
+- 自动检测器 `runtime_proposal_detector` 默认关闭；开启后只创建 draft/追加证据。
 
 ## 10. 其他命令
 

@@ -6,7 +6,7 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **前端**：React + TypeScript + Vite
 - **Agent CLI**：`anvil`，Agent 在自己的工具循环里调用它上报状态
 - **地址**：`http://127.0.0.1:7317`（仅回环）
-- **当前版本**：v1.48.9（工作流载荷兼容修复）
+- **当前版本**：v1.50.0（角色 RSI 自进化、隐藏回放评估、运行时改进提案）
 
 > 内部架构、设计与实现状态文档仅本地保留，不随仓库发布。
 
@@ -48,6 +48,14 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
   晋升/收割入口；具体知识条目显示单条命中次数/最近命中，评估页展示命中覆盖率、零命中、
   治理待处理与任务知识覆盖率。
 - **HITL**：评审、审批、删除、重置等只接受自然人身份，Agent 令牌返回 403。
+- **角色 RSI（自进化，默认关闭）**：任务完成写回执，角色在空闲窗口复盘并产出经验卡/
+  候选；候选可走隐藏真实任务回放（held-in/held-out 配对统计、噪声门槛、
+  `promote/reject/inconclusive`），只有人工批准才会成为 active 演进版本。版本 =
+  完整角色空间快照（Strategy + Experience + 知识卡），支持切换/导出/导入、配置修订恢复、
+  SOAKING 自动回滚；按角色 `definition.rsi.enabled` 试点。
+- **运行时改进提案（RIP）**：角色遇到 skill/MCP/runtime YAML/工具预设等自己不能改的
+  运行时问题，只生成带证据和修复建议的 Markdown 提案；human 独占流转、导出和实施。
+  可选确定性巡检器扫描缺失运行时与超时/启动失败/上下文溢出 run，自动建 draft。
 - **可观测**：SSE 事件、审计、运行日志、Token 统计、全场冻结。
 
 ## 2. 快速开始
@@ -366,6 +374,61 @@ anvil knowledge card-validate --file card.json --for-approval
   范围 64–4096）；`ANVIL_ISSUE_TRACKER_FIELD_MAX_CHARS` 提供环境默认值，
   `ANVIL_ISSUE_TRACKER_COMPACT_TIMEOUT` 控制 LLM 精简超时（默认 60 秒）。
 
+### 3.11 角色 RSI 与运行时提案
+
+**默认全部关闭，按角色试点。** 在「工具治理 → 功能开关」打开 `role_rsi` 后，再到
+「角色工坊 → 演化」勾选“本角色参与 RSI 试点”，并建立当前基线。正式试点建议同时开启
+`role_rsi_lock_strategy`，让 Agent 只能提 Strategy 候选，不能直写 instruction/principles。
+
+一次完整闭环：
+
+```text
+任务 done / 驳回 / 步骤失败 / 返工
+  → 幂等 observation
+  → 角色空闲窗口反思（独立 __rsi_reflect__ 上下文）
+  → 经验卡 / 策略候选 / 角色提案 / 运行时提案
+  → 候选静态门（可选隐藏回放评估）
+  → 人工批准 → active 演进版本
+  → SOAKING 实际指标；退化自动回滚到上一批准版本
+```
+
+演化页：
+
+- **当前基线 / 工作集**：每日收割但尚未固化进版本的 RSI 知识卡；
+- **候选**：draft/queued/evaluating/pending；可入队评估、批准应用、拒绝；
+- **版本**：演进版本（`kind=evolution`）与配置修订（`kind=config`）分开；
+  - “应用”= 把该演进快照设为当前版本；“重新应用”= 对当前版本修复漂移；
+    两者都会先展示文件/知识卡/Charter diff，二次确认后执行；
+  - “恢复配置”= 找回手动配置修订，不改变 active 演进版本；
+  - 支持导出/导入 `role-<slug>-vN-<hash8>.anvil.zip`、批量清理重复配置修订。
+
+CLI：
+
+```bash
+anvil rsi show --role <slug> [--json]
+anvil rsi observations --role <slug> [--limit 50]
+anvil rsi trigger --role <slug>
+anvil rsi retro --task <task-id> --file retro.md
+anvil rsi candidates --role <slug>
+anvil rsi eval --suite <suite-id> --candidate <candidate-id>
+anvil role export <slug> --version <n> --out role-<slug>-v<n>.anvil.zip
+anvil role import --preview role-<slug>-v<n>.anvil.zip
+anvil role import role-<slug>-v<n>.anvil.zip --mode new_role --slug <new-slug>
+anvil runtime proposals [--status draft]
+anvil runtime propose --type skill --component <name> \
+  --title "..." --summary-file s.md --proposed-file p.md --evidence-file e.json
+anvil runtime evidence <RTP-id> --evidence-file e.json
+anvil runtime export <RTP-id>
+```
+
+运行时提案的 Markdown 生成在 `data/runtime-proposals/<id>/proposal.md`；可在「工具治理 →
+运行时提案」板查看、人工流转和导出。检测器 `runtime_proposal_detector` 默认关闭，
+开启后只建 draft/追加证据，不会自动改运行时。
+
+**注意**：隐藏回放评估 `role_rsi_evaluation` 默认关闭，因为它需要人工准备至少 8+8 条带
+确定性验收的真实任务，且每次评估会跑 baseline/candidate 两臂、消耗较多 token。
+数据不足时只会返回 `inconclusive`，不会为了有结论而晋级。
+
 ## 4. 配置
 
 所有配置通过环境变量读取（完整列表见 `dev/backend/anvil/config.py`）。常用项：
@@ -401,6 +464,11 @@ anvil knowledge card-validate --file card.json --for-approval
 | `ANVIL_CONTEXT_WINDOW_FLOOR` | `0` | 全局保守窗口下限 |
 | `ANVIL_ONBOARDING` | `1` | 多角色任务是否启用 Cindy 规划 |
 | `ANVIL_AUTO_DISPATCH` | `0` | 是否自动派发 todo 任务 |
+| `ANVIL_ROLE_RSI` | `0` | 角色 RSI 总开关；开启后仍需角色 `definition.rsi.enabled=true` |
+| `ANVIL_ROLE_RSI_EVALUATION` | `0` | 隐藏回放评估 + 评估队列；需先准备 ≥8+8 真实任务 suite |
+| `ANVIL_ROLE_RSI_LOCK_STRATEGY` | `0` | 禁止 Agent 直写 instruction/principles，转为人工候选 |
+| `ANVIL_RUNTIME_PROPOSALS` | `1` | 运行时改进提案（只生成文档，不自动应用） |
+| `ANVIL_RUNTIME_PROPOSAL_DETECTOR` | `0` | 确定性运行时巡检器；默认关闭避免自动工单噪声 |
 | `ANVIL_MAX_ROLES` | `20` | 角色总数上限 |
 | `ANVIL_RUN_TIMEOUT` | `600` | 运行超时兜底（秒） |
 | `ANVIL_BACKUP` | `1` | 是否每天自动备份 SQLite |
@@ -639,10 +707,14 @@ anvil init
 
 ## 9. 文档
 
-> 内部规划、设计与实现状态文档仅本地保留，不随仓库发布。
+> 内部规划、设计、实现状态文档默认仅本地保留，不随仓库发布；v1.50 角色 RSI 的
+> 设计文档与 Spec 按 owner 要求随 `rsi` 分支提交，作为本次交付件。
 
 - [docs/cli-reference.md](docs/cli-reference.md)：CLI 命令、参数、规则、错误处理与示例
 - [dev/README.md](dev/README.md)：开发者入口（源码结构、本地开发与测试）
+- [docs/v1.50-role-rsi.md](docs/v1.50-role-rsi.md)：v1.50 角色 RSI 自进化详细设计（算法/评估/RIP/版本/实现对齐）
+- [docs/superpowers/specs/2026-11-24-anvil-role-rsi-spec.md](docs/superpowers/specs/2026-11-24-anvil-role-rsi-spec.md)：v1.50 RSI Spec（需求/验收/测试矩阵）
+- [docs/v1.50.0-release.md](docs/v1.50.0-release.md)：v1.50.0 角色 RSI、隐藏回放评估与运行时改进提案
 - [docs/issue-board.md](docs/issue-board.md)：问题板（安全 findings）字段、状态机与提交/确认流程
 - [docs/v1.40.0-release.md](docs/v1.40.0-release.md)：v1.40.0 任务上下文隔离、分层知识库、质量门与 LLM 清洗变更方案
 - [docs/v1.41.0-release.md](docs/v1.41.0-release.md)：v1.41.0 问题板外部问题跟踪提交

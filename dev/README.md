@@ -2,8 +2,8 @@
 
 Anvil 是本地运行的多 Agent 编排服务；产品功能、安装（含 Windows）、使用与运维以根 [README](../README.md) 为准。
 
-> 内部规划、设计、实现状态与问题分析文档（根目录 `design.md`、`docs/superpowers`、
-> `dev/plan-*`、`architecture-*`、`implementation-status` 等）仅本地保留，不随仓库发布。
+> 内部规划、设计、实现状态与问题分析文档默认仅本地保留，不随仓库发布；v1.50 角色 RSI
+> 的设计文档与 Spec 按 owner 要求随 `rsi` 分支提交，见根 README「文档」入口。
 
 ## 源码与数据
 
@@ -62,9 +62,15 @@ cd dev
 source .venv/bin/activate
 pip install -e agentcli
 anvil --help
+
+# v1.50：角色 RSI / 运行时提案
+anvil rsi show --role <slug>
+anvil runtime proposals
+anvil role export <slug> --version <n>
 ```
 
-Windows 安装、运行时发现和 `claude.exe` 注意事项见根 README 的「快速开始」。
+Windows 安装、运行时发现和 `claude.exe` 注意事项见根 README 的「快速开始」；
+完整命令见 [docs/cli-reference.md](../docs/cli-reference.md)。
 
 ## 关键约定
 
@@ -81,6 +87,8 @@ Windows 安装、运行时发现和 `claude.exe` 注意事项见根 README 的�
 
 - 产品、安装、使用与运维：根 [README](../README.md)
 - CLI：[docs/cli-reference.md](../docs/cli-reference.md)
+- v1.50 RSI 设计：[docs/v1.50-role-rsi.md](../docs/v1.50-role-rsi.md)
+- v1.50 RSI Spec：[docs/superpowers/specs/2026-11-24-anvil-role-rsi-spec.md](../docs/superpowers/specs/2026-11-24-anvil-role-rsi-spec.md)
 - 问题板：[docs/issue-board.md](../docs/issue-board.md)
 - 变更记录：`docs/v*-release.md`
 - 测试说明：[tests/README.md](tests/README.md)
