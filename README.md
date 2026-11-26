@@ -6,7 +6,7 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **前端**：React + TypeScript + Vite
 - **Agent CLI**：`anvil`，Agent 在自己的工具循环里调用它上报状态
 - **地址**：`http://127.0.0.1:7317`（仅回环）
-- **当前版本**：v1.50.0（角色 RSI 自进化、隐藏回放评估、运行时改进提案）
+- **当前版本**：v1.50.1（任务会话默认「对话」、面向自然人的沟通规范）
 
 > 内部架构、设计与实现状态文档仅本地保留，不随仓库发布。
 
@@ -712,6 +712,7 @@ anvil init
 
 - [docs/cli-reference.md](docs/cli-reference.md)：CLI 命令、参数、规则、错误处理与示例
 - [dev/README.md](dev/README.md)：开发者入口（源码结构、本地开发与测试）
+- [docs/v1.50.1-release.md](docs/v1.50.1-release.md)：v1.50.1 任务会话默认「对话」、面向自然人的沟通规范
 - [docs/v1.50.0-release.md](docs/v1.50.0-release.md)：v1.50.0 角色 RSI、隐藏回放评估与运行时改进提案
 - [docs/issue-board.md](docs/issue-board.md)：问题板（安全 findings）字段、状态机与提交/确认流程
 - [docs/v1.40.0-release.md](docs/v1.40.0-release.md)：v1.40.0 任务上下文隔离、分层知识库、质量门与 LLM 清洗变更方案

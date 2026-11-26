@@ -95,6 +95,18 @@ def test_planning_protocol_requires_deliverable_check():
     assert "无具体交付件" in PLANNING_PROTOCOL
 
 
+def test_planning_protocol_teaches_plain_human_handoff():
+    """Cindy 的 @human 说明与草案 goal 必须让非技术读者直接看懂。"""
+    from anvil.graph.render import PLANNING_PROTOCOL, workflow_instruction
+
+    for needle in ("草案 id", "日常语言", "批准后", "驳回后",
+                   "本次无具体交付件", "为什么需要这个角色"):
+        assert needle in PLANNING_PROTOCOL
+    text = workflow_instruction("plan_confirm_execute")
+    assert "方案已产出，请确认" not in text
+    assert "请确认" in text and "交付件" in text
+
+
 def test_planning_protocol_keeps_decomposition_with_planner():
     """规划级分解只能由 Cindy 定义；执行角色只能提议或使用委派工单。"""
     from anvil.graph.render import PLANNING_PROTOCOL

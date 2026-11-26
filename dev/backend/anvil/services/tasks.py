@@ -987,8 +987,16 @@ def _submit_locked(conn: sqlite3.Connection, tid: str, *, summary: str | None = 
                 f"task {tid} state changed; refresh before submitting")
         _complete_runs(conn, tid)
         if not _notify_delegator(conn, t, role):
+            from . import roles as roles_service
+            names = []
+            for slug in t["assignees"]:
+                info = roles_service.get(conn, slug) or {}
+                names.append(info.get("display_name") or slug)
+            who = "、".join(names) or "负责角色"
             mention(conn, tid, role or "system", "human",
-                    f"团队任务已全部提交，请评审（{', '.join(t['assignees'])}）")
+                    f"任务「{t.get('title') or tid}」的{who}已全部提交。"
+                    "请打开任务会话核对各角色的提交摘要与交付件清单，然后通过或驳回；"
+                    "驳回时请写明具体修改要求。")
         _audit(conn, role, tid, "submit", {"summary": summary, "branch": branch,
                                            "changed_paths": changed,
                                            "reported_paths": changed_paths,

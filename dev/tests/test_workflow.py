@@ -76,9 +76,35 @@ def test_dependency_progression_and_gate(conn):
     wf = wf_service.submit_step(conn, wf["id"], "S4", "developer", "回归完成")
     assert wf["status"] == "done"
     assert conn.execute("SELECT status FROM tasks WHERE id='T1'").fetchone()["status"] == "in_review"
-    # 完成时 @human 通知
-    assert conn.execute(
-        "SELECT 1 FROM activities WHERE task_id='T1' AND kind='mention'").fetchone()
+    # 完成时 @human 通知必须让自然人看懂：任务名 + 交付件清单 + 明确动作
+    row = conn.execute(
+        "SELECT payload_json FROM activities WHERE task_id='T1' AND kind='mention' "
+        "ORDER BY id DESC LIMIT 1").fetchone()
+    assert row is not None
+    message = json.loads(row["payload_json"])["message"]
+    assert "跳棋" in message
+    assert "交付件清单" in message
+    assert "通过或驳回" in message
+    assert "问题板" not in message  # 未启用问题板时不得谎称问题板已就绪
+
+
+def test_finalize_task_review_is_idempotent(conn):
+    """重复收口不得重复 @human（transition CAS 失败时直接返回 False）。"""
+    wf = wf_service.create_workflow(conn, "T1", {"steps": [
+        {"id": "S1", "title": "x", "role": "dev"}]})
+    conn.execute("UPDATE workflows SET status='done' WHERE id=?", (wf["id"],))
+    conn.commit()
+
+    def mention_count() -> int:
+        return conn.execute(
+            "SELECT COUNT(*) AS n FROM activities WHERE task_id='T1' AND kind='mention'"
+        ).fetchone()["n"]
+
+    assert wf_service.finalize_task_review_if_ready(conn, "T1") is True
+    first = mention_count()
+    assert first == 1
+    assert wf_service.finalize_task_review_if_ready(conn, "T1") is False
+    assert mention_count() == first
 
 
 def test_same_role_steps_are_serialized(conn):
@@ -315,6 +341,11 @@ def test_issue_board_gate_waits_for_board_after_workflow(conn):
     assert wf_service.finalize_task_review_if_ready(conn, "T1") is True
     task = conn.execute("SELECT status FROM tasks WHERE id='T1'").fetchone()
     assert task["status"] == "in_review"
+    row = conn.execute(
+        "SELECT payload_json FROM activities WHERE task_id='T1' AND kind='mention' "
+        "ORDER BY id DESC LIMIT 1").fetchone()
+    message = json.loads(row["payload_json"])["message"]
+    assert "问题板（安全发现清单）" in message
 
 
 def test_issue_board_gate_allows_review_when_board_finished_first(conn):
@@ -991,6 +1022,12 @@ def test_rework_exhausted_retry_resets_on_reject_targets(conn):
     assert steps["D1"]["status"] == "failed"
     assert steps["D1"]["failure_reason"] == "rework_exhausted"
     assert steps["S1"]["status"] == "approved"
+    row = conn.execute(
+        "SELECT payload_json FROM activities WHERE task_id='T1' AND kind='mention' "
+        "ORDER BY id DESC LIMIT 1").fetchone()
+    message = json.loads(row["payload_json"])["message"]
+    assert "跳棋" in message
+    assert "继续返工" in message and "最近反馈" in message
     wf_service.retry_step(conn, wf["id"], "D1")
     steps = _steps_by_id(conn, wf["id"])
     assert steps["D1"]["status"] == "pending"

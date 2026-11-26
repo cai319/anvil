@@ -169,14 +169,20 @@ def _decide_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
             from . import roles as roles_service
             sender = roles_service.notification_sender(
                 conn, wf["task_id"], wf.get("created_by"))
+            task_row = conn.execute(
+                "SELECT title FROM tasks WHERE id=?", (wf["task_id"],)).fetchone()
+            task_title = (task_row["title"] if task_row else "") or "当前任务"
             ledger.emit_activity(
                 conn, task_id=wf["task_id"],
                 role_slug=sender,
                 kind="mention",
                 payload=jdumps({
                     "target": "human",
-                    "message": f"决策步骤「{step['title']}」已超过最大重做次数"
-                               f"（{max_rework} 次）；请人工介入。反馈：{note}",
+                    "message": f"任务「{task_title}」的决策步骤「{step['title']}」"
+                               f"已超过最大重做次数（{max_rework} 次），需要你决定："
+                               "继续返工、调整步骤或终止任务。继续返工会按现有工作流 "
+                               "再跑一轮；调整步骤需要修改工作流；终止任务会停止后续步骤。"
+                               f"最近反馈：{note}",
                     "event": "rework_exhausted", "workflow_id": wid, "step_id": step_id,
                 }),
                 now=now)
@@ -526,20 +532,29 @@ def finalize_task_review_if_ready(conn: sqlite3.Connection, task_id: str) -> boo
     if task_review_blocker(conn, task_id) is not None:
         return False
     task = conn.execute(
-        "SELECT review_rejected_at FROM tasks WHERE id=?", (task_id,)).fetchone()
+        "SELECT title, issue_board_enabled, review_rejected_at FROM tasks WHERE id=?",
+        (task_id,)).fetchone()
     if task is not None and task["review_rejected_at"]:
         return False
     now = now_iso()
     from . import tasks as tasks_service
-    tasks_service.transition_task(
+    moved = tasks_service.transition_task(
         conn, task_id, "in_review",
         from_statuses=("in_progress", "todo"),
         fields={"lease_expires_at": None}, now=now)
+    if not moved:
+        # 并发/重复收口：状态已变化，不再重复 @human。
+        return False
     conn.commit()
     from . import roles as roles_service
     sender = roles_service.notification_sender(conn, task_id)
+    title = (task["title"] if task else "") or "当前任务"
+    board_note = ("问题板（安全发现清单）已就绪。"
+                  if task and task["issue_board_enabled"] else "")
     _mention(conn, task_id, "human",
-             "工作流全部步骤完成，问题板已就绪，请做最终评审（通过/驳回）",
+             f"任务「{title}」工作流全部步骤完成。{board_note}"
+             "请打开任务会话核对最终产出与交付件清单，然后做最终评审：通过或驳回；"
+             "驳回时请写明具体原因。",
              sender=sender)
     conn.commit()
     return True

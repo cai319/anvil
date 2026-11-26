@@ -89,7 +89,10 @@ def auto_create_role(body: dict, conn=Depends(get_db),
         '  "capabilities": 领域能力权重对象（如 {"python":0.9,"sql":0.85}）\n'
         '  "responsibilities": 职责列表（3-5 条）\n'
         '  "system_prompt": 系统提示（角色身份与行为准则；须写出：在任务会话中主动用 '
-        'anvil task comment 同步进展、用 anvil task mention @协作角色；需要人类决策时 @human）\n'
+        'anvil task comment 同步进展、用 anvil task mention @协作角色；需要人类决策时 @human；'
+        '写给人类的 @human / 提交摘要要让非技术读者看懂：先写结论与需要人类做什么，'
+        '给选项/推荐/下一步；涉及交付件时列出性质、内容简介与绝对路径，'
+        '没有则明确写本次无具体交付件）\n'
     )
     runtime_id = str(body.get("runtime_id") or "").strip() or None
     try:
@@ -197,7 +200,9 @@ def expand_role(body: dict, conn=Depends(get_db), auth: Auth = Depends(get_auth)
         f"brief：{brief}\n\n"
         '字段：display_name、description、capabilities（对象）、responsibilities（3-5 条）、'
         "system_prompt（身份与行为准则；要求主动用 anvil task comment 同步进展、"
-        "用 anvil task mention 协作、需要人类决策时 @human）。"
+        "用 anvil task mention 协作、需要人类决策时 @human；写给人类的 @human / 提交摘要"
+        "要让非技术读者看懂：先写结论与需要人类做什么，给选项/推荐/下一步；涉及交付件时"
+        "列出性质、内容简介与绝对路径，没有则明确写本次无具体交付件）。"
     )
     data: dict = {}
     try:
@@ -715,7 +720,10 @@ def generate_role(slug: str, body: dict, conn=Depends(get_db),
         '  "responsibilities": 职责列表（3-5 条字符串）\n'
         '  "system_prompt": 系统提示（一段话：角色身份与行为准则；须明确写出该角色在团队协作时'
         '会主动在任务会话用 anvil task comment 同步思考进展、用 anvil task mention @提及'
-        '需要协作的其它角色；若该角色负责规划/设计，须先产出方案/设计并 @human 请确认、'
+        '需要协作的其它角色；写给人类的 @human / 提交摘要要让非技术读者看懂：先写结论与'
+        '需要人类做什么，给选项/推荐/下一步；涉及交付件时列出性质、内容简介与绝对路径，'
+        '没有则明确写本次无具体交付件；若该角色负责规划/设计，须先产出方案/设计，'
+        '并用通俗、自包含的消息 @human 请确认（说明要批什么、推荐、确认后下一步、交付件路径），'
         '收到 human 确认后再实施）\n'
     )
     definition = role.get("definition") or {}

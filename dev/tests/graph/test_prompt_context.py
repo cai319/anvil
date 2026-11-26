@@ -1,6 +1,8 @@
 """@ 反馈进入步骤/回复上下文：步骤 run 注入最近会话；回复 run 用 REPLY_PROTOCOL。"""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from anvil import config
@@ -62,7 +64,8 @@ def test_protocols_include_attachment_budget():
 
 def test_protocols_require_deliverable_manifest():
     """提交 human 评审前必须给出交付件清单：性质、内容简介、绝对路径。"""
-    for protocol in (render.PROTOCOL, render.STEP_PROTOCOL, render.FINDING_PROTOCOL):
+    for protocol in (render.PROTOCOL, render.STEP_PROTOCOL, render.FINDING_PROTOCOL,
+                     render.REPLY_PROTOCOL):
         assert "交付件清单" in protocol
         assert "性质" in protocol
         assert "内容简介" in protocol
@@ -70,6 +73,50 @@ def test_protocols_require_deliverable_manifest():
         assert "无具体交付件" in protocol
     assert "test -f" in render.PROTOCOL
     assert "test -f" in render.STEP_PROTOCOL
+
+
+def test_protocols_require_human_readable_messages():
+    """所有可能直面人类的 run 都要注入「面向自然人」的沟通规范。"""
+    for protocol in (render.PROTOCOL, render.STEP_PROTOCOL, render.REPLY_PROTOCOL,
+                     render.FINDING_PROTOCOL, render.PLANNING_PROTOCOL):
+        assert render.HUMAN_COMMUNICATION_PROTOCOL in protocol
+    composed = render.STEP_PROTOCOL + "\n\n" + render.STEP_FINDING_PROTOCOL
+    assert composed.count(render.HUMAN_COMMUNICATION_PROTOCOL) == 1
+    for needle in ("面向自然人的沟通", "第一段先写结论", "平实中文", "自包含",
+                   "选项、各自后果、你的推荐", "批准/驳回后下一步",
+                   "性质/内容简介/绝对路径", "一条整合后的消息", "反例"):
+        assert needle in render.HUMAN_COMMUNICATION_PROTOCOL
+
+
+def test_await_review_notifies_human_with_task_title(tmp_path, monkeypatch):
+    """普通任务提交进入评审时，@human 通知要带任务名和明确的评审动作。"""
+    db_path = str(tmp_path / "g.db")
+    conn = connect(db_path)
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO tasks (id,title,description,status,created_at,updated_at) "
+        "VALUES ('T1','跳棋','实现跳棋','in_progress',?,?)", (now, now))
+    conn.commit()
+    run = runs_service.create_run(conn, "developer", "T1", prompt="执行任务")
+    runs_service.set_status(conn, run["id"], "submitted")
+    conn.close()
+
+    monkeypatch.setattr(nodes, "interrupt", lambda payload: {})
+    nodes.await_review_node(
+        {}, {"configurable": {"thread_id": run["id"], "db_path": db_path}})
+
+    conn = connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT payload_json FROM activities WHERE task_id='T1' AND kind='mention' "
+            "ORDER BY id DESC LIMIT 1").fetchone()
+        assert row is not None
+        message = json.loads(row["payload_json"])["message"]
+        assert "跳棋" in message
+        assert "交付件清单" in message
+        assert "通过或驳回" in message
+    finally:
+        conn.close()
 
 
 def test_protocols_define_delegation_contract():
@@ -97,7 +144,7 @@ def test_step_prompt_uses_agent_inbox_and_stays_small(conn):
                                   workflow_id="wf-1")
     prompt = nodes._prompt_for_run(conn, run, {"title": "跳棋", "description": "实现"})
     assert "## 未读会话" in prompt and "anvil inbox check" in prompt
-    assert len(prompt) < 8500  # 不把全量历史 push 进上下文（含协作/委派/派遣协议头）
+    assert len(prompt) < 9000  # 不把全量历史 push 进上下文（含协作/委派/派遣与人类沟通协议头）
 
 
 def test_projected_protocol_matches_run_kind(conn):

@@ -279,7 +279,11 @@ async def test_role_addition_to_existing_roster_creates_proposal(client, tmp_pat
     assert draft["tree"]["requested_assignees"] == ["designer"]
 
     inbox = (await client.get(f"{API}/inbox", headers=human_headers())).json()
-    assert any("角色追加提案" in i["title"] for i in inbox["items"])
+    titles = [i["title"] for i in inbox["items"] if "角色追加提案" in i["title"]]
+    assert titles
+    assert "M1 冒烟任务" in titles[0]
+    assert "需要 UI 设计能力" in titles[0]
+    assert "不会立即开始执行" in titles[0]
 
 
 async def test_approved_role_addition_appends_without_replacing(client, tmp_path, monkeypatch):

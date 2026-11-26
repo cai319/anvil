@@ -406,6 +406,15 @@ async def test_team_task_parallel_claims_and_all_submit(client):
     assert {c["role_slug"]: c["status"] for c in task["role_claims"]} == {
         "dev": "submitted", "qa-role": "submitted",
     }
+    timeline = (await client.get(f"{API}/tasks/T-TEAM/timeline",
+                                 headers=auth_headers())).json()
+    mentions = [e for e in timeline
+                if e["kind"] == "mention"
+                and (e.get("payload") or {}).get("target") == "human"]
+    message = mentions[-1]["payload"]["message"]
+    assert "并行协作" in message
+    assert "交付件清单" in message
+    assert "通过或驳回" in message
 
     approved = await client.post(f"{API}/tasks/T-TEAM/review", json={"approve": True},
                                  headers=human_headers())

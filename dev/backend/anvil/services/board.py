@@ -442,10 +442,17 @@ def propose_assignee_additions(conn: sqlite3.Connection, task_id: str, agent: st
         revised = False
 
     sender = roles_service.notification_sender(conn, task_id, f"agent:{agent}")
+    task_row = conn.execute("SELECT title FROM tasks WHERE id=?", (task_id,)).fetchone()
+    task_title = (task_row["title"] if task_row else "") or "当前任务"
+    names = "、".join(str(e.get("display_name") or e["slug"]) for e in entries)
+    reason_text = (reason or "").strip()
+    if not reason_text or reason_text.startswith("追加任务角色："):
+        reason_text = "现有角色无法覆盖该任务所需能力"
     tasks_service.mention(
         conn, task_id, sender, "human",
-        f"角色追加提案{'已更新' if revised else '已提交'}：{', '.join(requested)}。"
-        "请审批或反馈；批准后再执行 task assign。")
+        f"任务「{task_title}」的角色追加提案{'已更新' if revised else '已提交'}：{names}。"
+        f"原因：{reason_text}。请在任务页的草案中批准或驳回；"
+        "批准只授权 planner 后续绑定这些角色，不会立即开始执行。")
     return get_draft(conn, draft_id)  # type: ignore[return-value]
 
 

@@ -171,6 +171,9 @@ MAIN_EPILOG = """\b
   · 身份由 ANVIL_TOKEN / ANVIL_TASK_ID 环境变量决定；不要伪造角色。
   · 删除、审批、重置等人类操作需要 human token。
   · 退出码: 0 成功 / 1 通用失败 / 2 参数错误 / 3 状态冲突 / 4 无权限。
+  · 面向 human 的消息（@human、submit 摘要、评审说明）要让非技术读者看懂：
+    先写结论与需要人类做什么，给选项/推荐/下一步；交付件列性质、内容简介与绝对路径，
+    没有交付件就写「本次无具体交付件」。
   · 每个命令都支持 -h / --help，例如 anvil task -h。
   · 文件参数用当前目录相对路径或绝对路径；Windows 临时目录用 %TEMP%，
     不要写死 /tmp（macOS/Linux 的 /tmp 在 Windows 不存在）。
@@ -217,6 +220,8 @@ TASK_EPILOG = """\b
 
 提示: 工作流任务先看 `anvil step show <workflow-id>`；步骤操作不要用 task claim/submit。
 任务已有 assignees 时，assign 只追加新角色，并先自动提交提案 @human；批准后重试即可。
+@human / submit 摘要要面向非技术读者：先写结论与需要人类做什么，给选项/推荐/下一步；
+涉及交付件时列性质、内容简介与绝对路径，没有交付件就写「本次无具体交付件」。
 上下文规则:
   · 同 task 同 slice 的复核/追问用 mention，复用当前上下文，不要 dispatch。
   · 同 task 已知 slice 的反馈会自动切回该 slice 上下文。
@@ -242,6 +247,8 @@ STEP_EPILOG = """\b
     未排定时，才用 `anvil task create --parent ... --parent-step ...` 建委派，并在提交前验收。
   · 同一角色不能被委派自己的当前 step（会自锁）；跨角色才会建委派。
   · `anvil inbox check` 默认只看当前切片；要拉全任务需显式 `--task-wide`。
+  · submit 摘要、@human 与评审说明要让非技术读者看懂：先写结论与需要人类做什么，
+    给选项/推荐/下一步；交付件列性质、内容简介与绝对路径。
 """
 
 # 未知 action 提示与 -h 的动作用同一份清单，避免新增命令后只更新一处。
@@ -800,7 +807,9 @@ def task_cmd(
                                   rich_help_panel="查询 / 创建"),
     on: str = typer.Option(None, "--on", help="block：依赖的任务 id",
                            rich_help_panel="执行 / 协作"),
-    to: str = typer.Option(None, "--to", help="mention/dispatch：目标角色或 human",
+    to: str = typer.Option(None, "--to",
+                           help="mention/dispatch：目标角色或 human（写给 human 时"
+                                "用平实、自包含的说明：诉求/背景/选项/交付件/下一步）",
                            rich_help_panel="执行 / 协作"),
     slice_key: str = typer.Option(
         None, "--slice",
@@ -813,7 +822,8 @@ def task_cmd(
         rich_help_panel="执行 / 协作"),
     summary: str = typer.Option(
         None, "--summary",
-        help="submit：摘要（涉及交付件时逐项写性质/内容简介/绝对路径）",
+        help="submit：摘要（结论 + 交付件清单；让非技术读者看懂；涉及交付件时"
+             "逐项写性质/内容简介/绝对路径）",
         rich_help_panel="执行 / 协作"),
     feedback: str = typer.Option(
         None, "--feedback",
@@ -2168,6 +2178,7 @@ app.add_typer(step_app, name="step")
   anvil step submit WF-1 S2 --summary "修复完成" --changed-paths src/auth.ts,src/api.ts
 
 规则: 只对 running 步骤提交；不要用 task submit。409 时先 `anvil step show WF-1`。
+摘要要让非技术读者看懂：先写结论与需要人类做什么，给选项/推荐/下一步。
 涉及具体交付件时，--summary 必须逐项列出性质、内容简介与绝对路径；无交付件时写「本次提交无具体交付件」。
 """)
 def step_submit(
@@ -2175,7 +2186,7 @@ def step_submit(
     step_id: str = typer.Argument(..., help="步骤 ID（如 S1）"),
     summary: str = typer.Option(
         "", "--summary",
-        help="完成摘要；涉及交付件时逐项写性质、内容简介与绝对路径"),
+        help="完成摘要；让非技术读者看懂；涉及交付件时逐项写性质、内容简介与绝对路径"),
     evidence_file: str = typer.Option(
         "", "--evidence-file", help="证据 JSON 文件（数组）"),
     changed_paths: str = typer.Option(

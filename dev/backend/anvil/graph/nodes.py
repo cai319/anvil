@@ -1017,9 +1017,15 @@ def await_review_node(state: dict, config) -> dict:
             runs_service.set_status(conn, run_id, "reviewing")
             # HITL：通知自然人来评审，把 @human 提及打进任务会话时间线
             if run.get("task_id"):
+                task = tasks_service.get(conn, run["task_id"]) or {}
+                title = task.get("title") or "当前任务"
+                role = roles_service.get(conn, run["role_slug"]) or {}
+                role_name = role.get("display_name") or run["role_slug"]
                 tasks_service.mention(
                     conn, run["task_id"], run["role_slug"], "human",
-                    f"{run['role_slug']} 已提交任务，请评审（通过/驳回）",
+                    f"任务「{title}」已由{role_name}提交，进入评审。"
+                    "请打开任务会话查看提交摘要与交付件清单，然后通过或驳回；"
+                    "驳回时请写明具体修改要求。",
                 )
         decision = interrupt({"kind": "review", "run_id": run_id, "task_id": run.get("task_id")})
         return {"review_decision": decision}

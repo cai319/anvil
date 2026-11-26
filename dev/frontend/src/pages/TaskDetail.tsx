@@ -160,6 +160,9 @@ const TL_FILTERS = [
   { key: "review", label: "评审" },
 ] as const;
 
+type TimelineFilter = (typeof TL_FILTERS)[number]["key"];
+const DEFAULT_TL_KIND: TimelineFilter = "dialog";
+
 
 type TaskTab = "chat" | "workflow" | "findings" | "subtasks" | "runtime";
 
@@ -197,7 +200,7 @@ export function TaskDetail({ id }: { id: string }) {
   const [tab, setTab] = useState<TaskTab>(initialRoute.tab);
   const [runtimeFocus, setRuntimeFocus] = useState<{ role: string; sliceKey: string | null } | null>(null);
   const [findingSummary, setFindingSummary] = useState<FindingSummary | null>(null);
-  const [tlKind, setTlKind] = useState<"all" | "dialog" | "mention" | "step" | "decision" | "run" | "review">("all");
+  const [tlKind, setTlKind] = useState<TimelineFilter>(DEFAULT_TL_KIND);
   const [tlLimit, setTlLimit] = useState(40);
   const threadRef = useRef<HTMLElement>(null);
   const pinnedRef = useRef(true);          // 用户是否停留在底部
@@ -1342,6 +1345,7 @@ export function TaskDetail({ id }: { id: string }) {
                 <div className="thread-filters">
                   {TL_FILTERS.map((f) => (
                     <button key={f.key} className={`small ${tlKind === f.key ? "primary" : ""}`}
+                      title={f.key === "dialog" ? "默认只显示评论与 @提及" : undefined}
                       onClick={() => setTlKind(f.key)}>{f.label}</button>
                   ))}
                 </div>
@@ -1353,7 +1357,19 @@ export function TaskDetail({ id }: { id: string }) {
               </button>
             )}
             {filteredTimeline.length === 0 && (
-              <p className="muted empty">当前筛选下没有交互。</p>
+              <div className="muted empty">
+                <div>
+                  当前筛选（{TL_FILTERS.find((f) => f.key === tlKind)?.label ?? tlKind}）
+                  下没有交互。
+                </div>
+                {tlKind === "dialog" && <div>默认只显示评论与 @提及。</div>}
+                {tlKind !== "all" && timeline.length > 0 && (
+                  <button className="small" style={{ marginTop: 8 }}
+                    onClick={() => setTlKind("all")}>
+                    查看全部 {timeline.length} 条
+                  </button>
+                )}
+              </div>
             )}
             {visibleTimeline.map((ev) => {
               const d = describe(ev, displayNameFor);

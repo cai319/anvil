@@ -25,7 +25,7 @@ ATTACHMENT_BUDGET = (
 DELIVERABLE_MANIFEST = (
     "## 交付件清单（涉及具体交付件时必须遵守）\n"
     "· 只要任务/步骤产出代码、文档、报告、测试、配置、构建产物、数据文件等具体交付件，"
-    "提交 human 评审前必须在 submit 摘要（以及评审说明）中逐项列出「交付件清单」。\n"
+    "在提交 human 评审、给人类回复或写评审说明时，必须逐项列出「交付件清单」。\n"
     "· 每个交付件写清三要素：**性质**（代码/文档/报告/测试/配置/产物/数据等）、"
     "**内容简介**（一句话说明它是什么、解决什么问题）、"
     "**绝对路径**（从根目录开始的完整路径，如 /Users/.../src/foo.py；不要只写文件名或相对路径）。\n"
@@ -33,6 +33,22 @@ DELIVERABLE_MANIFEST = (
     "`test -f <绝对路径>` 自检，不得编造。\n"
     "· 没有具体交付件（纯讨论/决策/评审）时，在摘要中明确写「本次提交无具体交付件」。\n"
     "· 证据文件仍按 CLI 的相对路径规则提交；交付件清单只用于 human 直接打开，不替代证据。\n"
+)
+
+# 面向自然人：所有可能向人类发消息的 run 都注入；协议自律优先，硬校验只兜底。
+HUMAN_COMMUNICATION_PROTOCOL = (
+    "## 面向自然人的沟通（必须遵守）\n"
+    "· 任何 @human、请求确认/评审、提交结果或解释请求，读者默认是不懂技术的自然人。\n"
+    "· 第一段先写结论和需要人类做什么，再给判断所需的最少背景；不要让人先读过程。\n"
+    "· 用平实中文；正文避免缩写、内部代号、JSON/日志/堆栈和内部 ID，必须出现时用一句话解释。\n"
+    "· 自包含：不写“见上文/同上/之前那条”，把关键背景、当前状态和影响直接写出来。\n"
+    "· 需要决策时给出：选项、各自后果、你的推荐、人类最少要做的一个动作；"
+    "并说明批准/驳回后下一步由谁做什么。\n"
+    "· 涉及交付件时按「交付件清单」写性质/内容简介/绝对路径；没有就写“本次无具体交付件”。\n"
+    "· 一个决策点只发一条整合后的消息（进展、问题、请求写在一起），不要连发碎片；"
+    "长度以人类一分钟能读完为准。\n"
+    "· 决策/评审类可按「①要你做什么 → ②背景与影响 → ③选项与建议 → ④交付件 → ⑤下一步」组织。\n"
+    "· 反例：只写“已完成”“方案已产出，请确认”不合格；必须写清要人类批什么、推荐什么、下一步是什么。\n"
 )
 
 # 子任务 = 委派工单：默认不建；只有跨角色/跨 turn 的强依赖才拆。
@@ -182,7 +198,8 @@ PROTOCOL = (
     "需要与其它角色协作或澄清时，执行 `anvil task mention $ANVIL_TASK_ID --to <角色slug> \"消息\"` @提及对方（角色间直接交互，不经过人类）。\n"
     "遇到漏洞模式、故障场景、模块知识不确定时，先用 `anvil knowledge search \"<关键词>\" --task $ANVIL_TASK_ID` 检索自己的知识库；检索结果需用代码/测试验证，不盲信。\n"
     "如果你 @提及了其它角色等待响应，就**不要 submit**，直接结束进程挂起等待；系统会在对方 @你之后再次唤醒你，你带着最新会话内容继续；只有任务真正完成时才执行 submit。\n"
-    "完成后必须执行 `anvil task submit $ANVIL_TASK_ID \"完成摘要\"` 声明完成，仅仅退出进程不算完成。\n"
+    "完成后必须执行 `anvil task submit $ANVIL_TASK_ID \"完成摘要：结论 + 交付件清单，让人类看懂\"` "
+    "声明完成，仅仅退出进程不算完成。\n"
     "长任务中每隔若干分钟执行 `anvil task heartbeat` 续租，否则任务会被回收。\n"
     "发现自己不适合这个任务时执行 `anvil task unclaim` 并说明理由，这是正常操作。\n"
     "需要拆出独立子任务时，先按下方「子任务 = 委派工单」判断；命令必须带 "
@@ -193,7 +210,8 @@ PROTOCOL = (
     "只修改 scope 范围内的文件，越界的提交会被拒绝。"
 ) + ("\n\n" + COLLABORATION_PROTOCOL + "\n\n" + DELEGATION_PROTOCOL + "\n\n"
      + DISPATCH_PROTOCOL + "\n\n"
-     + DELIVERABLE_MANIFEST + "\n\n" + ATTACHMENT_BUDGET)
+     + DELIVERABLE_MANIFEST + "\n\n" + HUMAN_COMMUNICATION_PROTOCOL + "\n\n"
+     + ATTACHMENT_BUDGET)
 
 # v1.50 RSI 反思：一次性 no-task run，只读证据，严格 JSON 输出。
 RSI_REFLECT_PROTOCOL = (
@@ -228,7 +246,8 @@ REPLY_PROTOCOL = (
     "如果当前任务仍有 running 步骤，回复后按系统回切提示回到步骤继续，"
     "不要停留在回复模式。\n"
     "回复后结束进程；如果需要对方处理后给你回执，你会在被 @ 时再次唤醒。"
-) + "\n\n" + REPLY_DELEGATION_PROTOCOL + "\n\n" + DISPATCH_PROTOCOL
+) + ("\n\n" + REPLY_DELEGATION_PROTOCOL + "\n\n" + DISPATCH_PROTOCOL
+     + "\n\n" + DELIVERABLE_MANIFEST + "\n\n" + HUMAN_COMMUNICATION_PROTOCOL)
 
 # 工作流步骤协议：角色执行一个 workflow step（不是整个 task）。
 STEP_PROTOCOL = (
@@ -303,14 +322,15 @@ STEP_PROTOCOL = (
     "证据缺失/过期、验收未满足或风险超限时不要强行通过，执行 "
     "`anvil step escalate <工作流ID> <步骤ID> --reason \"原因\"` 交自然人裁定。\n"
     "其它步骤完成后**必须**执行步骤说明中给出的 "
-    "`anvil step submit <工作流ID> <步骤ID> --summary \"...\"`；"
+    "`anvil step submit <工作流ID> <步骤ID> --summary \"<结论 + 交付件清单，让人类看懂>\"`；"
     "若步骤要求证据，用 `--evidence-file <evidence.json>` 附文件/测试/命令/产物/链接，"
     "文件证据只能使用 repo 或 agent home 内的相对路径。"
     "不要调用 `anvil task submit` 或 `anvil task claim`。\n"
     "只修改本步骤范围内的文件；越界提交会被拒绝。"
 ) + ("\n\n" + COLLABORATION_PROTOCOL + "\n\n" + DELEGATION_PROTOCOL + "\n\n"
      + DISPATCH_PROTOCOL + "\n\n"
-     + DELIVERABLE_MANIFEST + "\n\n" + ATTACHMENT_BUDGET)
+     + DELIVERABLE_MANIFEST + "\n\n" + HUMAN_COMMUNICATION_PROTOCOL + "\n\n"
+     + ATTACHMENT_BUDGET)
 
 # 问题板（Issue Board）：reviewer 在任务内填写结构化安全 findings。
 # 写入规则由“步骤 run”和“问题板收口 run”共用；complete 只在收口 run 中允许。
@@ -338,9 +358,12 @@ FINDING_PROTOCOL = FINDING_WRITE_PROTOCOL + (
     "· 完成问题板后，任务会进入 human 最终评审；human 可能退回并要求你与其他角色复评，"
     "此时更新/补证并重新提交，再 complete。\n"
     "· 本 run 只做问题板工作：不要 claim/submit 普通任务，也不要修改 workflow 结构。"
-) + "\n\n" + DELIVERABLE_MANIFEST + "\n\n" + ATTACHMENT_BUDGET
+) + ("\n\n" + DELIVERABLE_MANIFEST + "\n\n" + HUMAN_COMMUNICATION_PROTOCOL
+     + "\n\n" + ATTACHMENT_BUDGET)
 
 # 工作流步骤里的 reviewer：只记录本步骤发现，不允许提前收口。
+# 注意：本片段只以 STEP_PROTOCOL + STEP_FINDING_PROTOCOL 组合注入；
+# HUMAN_COMMUNICATION_PROTOCOL / DELIVERABLE_MANIFEST 已由 STEP_PROTOCOL 提供，不要重复追加。
 STEP_FINDING_PROTOCOL = FINDING_WRITE_PROTOCOL + (
     "\n## 当前 run 的限制（工作流步骤）\n"
     "· 不要执行 `anvil finding complete`。问题板必须等整个 workflow（所有切片/步骤）"
@@ -443,6 +466,8 @@ PLANNING_PROTOCOL = (
     "不满足则重写。\n"
     "  然后把工作流写入 JSON 文件并执行 "
     "`anvil board draft --task $ANVIL_TASK_ID --goal \"<目标一句话>\" --kind workflow --tree-file <workflow.json>`。\n"
+    "  · `--goal` 会直接显示在人类收件箱与草案审批页：用一句非技术语言写清任务要达成什么，"
+    "不要堆术语或角色 slug。\n"
     "  大型任务用 `plan_slices + loop` 格式（服务端在运行时展开切片）：\n"
     "  {\"tags\":[\"security\",\"openssl\"],"
     "\"knowledge_repos\":[{\"repo\":\"openssl-4.0.1\",\"reason\":\"命中 openssl/asan 标签\"}],"
@@ -495,14 +520,25 @@ PLANNING_PROTOCOL = (
     "    - **确实需要新建角色**（现有角色库无法满足能力）：不要生成 workflow 步骤，"
     "提交 role_suggestion 等待 human 审批。把评估写入 JSON 文件并执行 "
     "`anvil board draft --task $ANVIL_TASK_ID --goal \"<角色建议一句话>\" --kind role_suggestion --tree-file <roles.json>`。\n"
+    "      该 `--goal` 同样面向人类：用日常语言说明为什么需要这个角色、它解决什么问题。\n"
     "      JSON 格式：{\"assessment\":\"为什么现有角色不够\",\"missing_capabilities\":[\"...\"],"
     "\"suggested_roles\":[{\"slug\":\"...\",\"display_name\":\"...\",\"description\":\"...\","
     "\"runtime\":{\"id\":\"claude-code\"},\"capabilities\":{},\"responsibilities\":[...],"
     "\"system_prompt\":\"...\"}]}。角色建议要克制：只补真正缺失的能力。\n"
+    "      assessment 与 description 用人类能懂的话说明现有角色为何不足、新角色补什么能力，不要只写术语。\n"
     "    - **已有绑定角色但你认为不足**：不要自行改绑 human 已定的 Roster；按现有角色规划并标注风险，"
     "或提交 role_suggestion 说明缺失能力，等待 human 决定。\n"
-    "第三步：执行 `anvil task mention $ANVIL_TASK_ID --to human \"...\"` 说明是工作流草案还是角色建议，"
-    "然后直接结束进程挂起等待。\n"
+    "第三步：执行 `anvil task mention $ANVIL_TASK_ID --to human \"<给自然人的说明>\"`，"
+    "然后直接结束进程挂起等待。消息必须让不懂技术的人看懂（遵循下方「面向自然人的沟通」），至少写清：\n"
+    "  · 这是「工作流草案」还是「角色建议」，并附草案 id；\n"
+    "  · 用日常语言复述任务目标、建议的参与角色与关键阶段；\n"
+    "  · 需要人类决定什么（批准/驳回草案、批准角色、是否重启）、各选项后果与你的推荐；\n"
+    "  · 批准后谁先开始、第一步做什么；驳回后你会怎么改；\n"
+    "  · 交付件清单（性质/内容简介/绝对路径）；只有草案、没有文件时写"
+    "「本次无具体交付件（草案见 D-xxx）」，不得编造路径；\n"
+    "  · 反例：只写「方案已产出，请确认」不合格。合格示例：`任务「导出报表」草案 D-123 已生成："
+    "analyst 盘点 → developer 实现 → tester 验证（3 阶段）；主要风险是外部接口未确认。"
+    "请批准并启动工作流；批准后 analyst 先开始。本次无具体交付件（草案见 D-123）。`\n"
     "  · **升级路由**：问题如果落在某个现有角色的职责/能力范围内，直接 "
     "`anvil task mention $ANVIL_TASK_ID --to <角色> \"...\"` 让对方处理，不要 @human。"
     "只有需要自然人裁定的事项（新建角色、workflow 草案审批、gate、最终评审、"
@@ -520,7 +556,7 @@ PLANNING_PROTOCOL = (
     "· 审核步骤的 instructions 要写明用 `anvil finding add/update/submit` 逐条填写，"
     "完成后 `anvil finding complete --summary`；审核者必须独立于实现者。\n"
     "禁止：不要实现具体步骤；不要 submit 主任务；不要自行创建角色；草案被驳回时按人工意见修订后重新提交。"
-)
+) + "\n\n" + HUMAN_COMMUNICATION_PROTOCOL
 
 # 增量修订协议：执行角色反馈 loop 需要调整时，先判断能否原地修订，避免整任务重启。
 REVISION_PROTOCOL = (
@@ -559,8 +595,10 @@ _MANAGED = re.compile(re.escape(_BEGIN) + r".*?" + re.escape(_END), re.DOTALL)
 # 角色工作流（role definition 的 workflow 字段）：规划确认 vs 直接实施。
 WORKFLOW_INSTRUCTION = {
     "plan_confirm_execute": (
-        "你负责规划/设计：先产出方案/设计文档，然后执行 "
-        "`anvil task mention $ANVIL_TASK_ID --to human \"方案已产出，请确认\"` @human 请确认；"
+        "你负责规划/设计：先产出方案/设计文档，然后用平实语言向 human 说明：要批什么、推荐什么、"
+        "确认后下一步是什么；涉及交付件时列出性质、内容简介与绝对路径"
+        "（没有则写「本次无具体交付件」）。执行 "
+        "`anvil task mention $ANVIL_TASK_ID --to human \"<上述说明>\"` @human 请确认；"
         "收到 human 确认后再继续实施。\n"
     ),
     "direct_execute": "",
