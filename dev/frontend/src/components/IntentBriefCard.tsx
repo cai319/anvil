@@ -222,102 +222,100 @@ export function IntentBriefCard({
         </span>
       </div>
 
-      <BriefSummary brief={state.brief} weight={weight} planShape={planShape} />
+      <div className="ibc-body">
+        <BriefSummary brief={state.brief} weight={weight} planShape={planShape} />
 
-      {openQuestions.length > 0 && (
-        <ul className="ibc-open">
-          {openQuestions.map((q, i) => <li key={i}>{q}</li>)}
-        </ul>
-      )}
+        {openQuestions.length > 0 && (
+          <ul className="ibc-open">
+            {openQuestions.map((q, i) => <li key={i}>{q}</li>)}
+          </ul>
+        )}
+
+        {active && openQuestions.length > 0 && (
+          <label className="checkline ibc-ack">
+            <input type="checkbox" checked={ackOpen} disabled={busy}
+              onChange={(e) => setAckOpen(e.target.checked)} />
+            我已接受这些开放问题
+          </label>
+        )}
+
+        {editing && (active || state.status === "confirmed") && (
+          <textarea className="ibc-editor mono" value={draftText} disabled={busy}
+            onChange={(e) => setDraftText(e.target.value)} rows={12} />
+        )}
+      </div>
 
       {active && (
-        <>
-          <div className="toolbar ibc-controls">
-            <label className="field-inline">
-              流程强度
-              <select value={weight} disabled={busy}
-                onChange={(e) => {
-                  weightTouched.current = true;
-                  setWeight(e.target.value as WorkflowWeight);
-                }}>
-                <option value="light">轻量</option>
-                <option value="standard">标准</option>
-                <option value="strict">严格</option>
-              </select>
-            </label>
-            <label className="field-inline">
-              计划形态
-              <select value={planShape} disabled={busy}
-                onChange={(e) => {
-                  shapeTouched.current = true;
-                  setPlanShape(e.target.value as ClarificationPlanShape);
-                }}>
-                <option value="auto">自动判断</option>
-                <option value="flat">扁平静态步骤</option>
-                <option value="slices">切片 + 闭环</option>
-              </select>
-            </label>
-            {openQuestions.length > 0 && (
-              <label className="checkline">
-                <input type="checkbox" checked={ackOpen} disabled={busy}
-                  onChange={(e) => setAckOpen(e.target.checked)} />
-                我已接受这些开放问题
-              </label>
-            )}
-          </div>
-          {editing && (
-            <textarea className="ibc-editor mono" value={draftText} disabled={busy}
-              onChange={(e) => setDraftText(e.target.value)} rows={12} />
+        <div className="ibc-actions">
+          <label className="field-inline">
+            流程强度
+            <select className="ibc-control" value={weight} disabled={busy}
+              onChange={(e) => {
+                weightTouched.current = true;
+                setWeight(e.target.value as WorkflowWeight);
+              }}>
+              <option value="light">轻量</option>
+              <option value="standard">标准</option>
+              <option value="strict">严格</option>
+            </select>
+          </label>
+          <label className="field-inline">
+            计划形态
+            <select className="ibc-control" value={planShape} disabled={busy}
+              onChange={(e) => {
+                shapeTouched.current = true;
+                setPlanShape(e.target.value as ClarificationPlanShape);
+              }}>
+              <option value="auto">自动判断</option>
+              <option value="flat">扁平静态步骤</option>
+              <option value="slices">切片 + 闭环</option>
+            </select>
+          </label>
+          <button className="small ibc-control" disabled={busy}
+            onClick={() => setEditing((v) => !v)}>
+            {editing ? "收起编辑" : "编辑简报"}
+          </button>
+          {state.status === "in_progress" && editing && (
+            <button className="small ibc-control" disabled={busy} onClick={saveDraft}>
+              保存草稿
+            </button>
           )}
-          <div className="toolbar">
-            <button className="small" disabled={busy}
-              onClick={() => setEditing((v) => !v)}>
-              {editing ? "收起编辑" : "编辑简报"}
-            </button>
-            {state.status === "in_progress" && editing && (
-              <button className="small" disabled={busy} onClick={saveDraft}>保存草稿</button>
-            )}
-            <button className="primary" disabled={busy
-              || (!state.ready && !editing)
-              || (openQuestions.length > 0 && !ackOpen)} onClick={confirm}>
-              确认开始规划
-            </button>
-            <button className="small danger" disabled={busy} onClick={skip}
-              title="不等 Cindy 继续提问，不生成任务简报，直接启动 planner 规划工作流">
-              不等澄清，直接规划
-            </button>
-          </div>
-        </>
+          <button className="primary ibc-control" disabled={busy
+            || (!state.ready && !editing)
+            || (openQuestions.length > 0 && !ackOpen)} onClick={confirm}>
+            确认开始规划
+          </button>
+          <button className="small danger ibc-control" disabled={busy} onClick={skip}
+            title="不等 Cindy 继续提问，不生成任务简报，直接启动 planner 规划工作流">
+            不等澄清，直接规划
+          </button>
+        </div>
       )}
 
       {state.status === "confirmed" && (
-        <>
-          {editing && (
-            <textarea className="ibc-editor mono" value={draftText} disabled={busy}
-              onChange={(e) => setDraftText(e.target.value)} rows={12} />
+        <div className="ibc-actions">
+          {state.can_edit ? (
+            <button className="small ibc-control" disabled={busy}
+              onClick={() => setEditing((v) => !v)}>
+              {editing ? "收起编辑" : "编辑简报"}
+            </button>
+          ) : (
+            <span className="muted ibc-note">
+              Cindy 正在规划工作流；完成或终止规划后可编辑简报。
+            </span>
           )}
-          <div className="toolbar">
-            {state.can_edit ? (
-              <button className="small" disabled={busy}
-                onClick={() => setEditing((v) => !v)}>
-                {editing ? "收起编辑" : "编辑简报"}
-              </button>
-            ) : (
-              <span className="muted">
-                Cindy 正在规划工作流；完成或终止规划后可编辑简报。
-              </span>
-            )}
-            {editing && state.can_edit && (
-              <button className="small primary" disabled={busy}
-                onClick={saveConfirmed}>保存修改</button>
-            )}
-          </div>
-        </>
+          {editing && state.can_edit && (
+            <button className="small primary ibc-control" disabled={busy}
+              onClick={saveConfirmed}>保存修改</button>
+          )}
+        </div>
       )}
 
       {state.status === "skipped" && state.can_start && (
-        <div className="toolbar">
-          <button className="small" disabled={busy} onClick={start}>重新澄清</button>
+        <div className="ibc-actions">
+          <button className="small ibc-control" disabled={busy} onClick={start}>
+            重新澄清
+          </button>
         </div>
       )}
 

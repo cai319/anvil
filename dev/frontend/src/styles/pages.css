@@ -1978,3 +1978,45 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
   font-size: var(--fs-hint);
   margin: 8px 0;
 }
+
+/* 简报卡：内容区最多 1/3 视口高度并滚动；操作栏固定不滚。 */
+.intent-brief-card {
+  display: flex;
+  flex-direction: column;
+}
+.ibc-body {
+  max-height: calc(100vh / 3);
+  overflow-y: auto;
+  min-height: 0;
+  padding-right: 4px;
+}
+.ibc-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.ibc-actions .field-inline {
+  height: 32px;
+  white-space: nowrap;
+}
+.ibc-actions select.ibc-control,
+.ibc-actions button.ibc-control {
+  height: 32px;
+  box-sizing: border-box;
+  line-height: 1.2;
+}
+.ibc-ack {
+  margin: 4px 0 0;
+}
+.ibc-note {
+  font-size: var(--fs-hint);
+}
+.ibc-actions select.ibc-control,
+.ibc-actions button.ibc-control {
+  min-height: 32px;
+}
