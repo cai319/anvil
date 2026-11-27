@@ -95,6 +95,8 @@ workflow_revision 审批；已批准但未消费的 `authorize` 建议还要求�
 `@human` 提醒按 `(task_id, role_slug)` 各自保留最新一条；只有该提醒之后
 `role_slug=human` 的活动才算回应，agent/system/workflow 的评论不清除。简报确认/
 跳过、board 草案批准/驳回、任务关闭/归档，以及失败事件已解决时，对应提醒自动隐藏。
+任务进入 `in_review` 后，最终评审/问题板条目是唯一收件箱待办；`@human` 消息仍保留在
+任务时间线，但不再单独生成 mention 条目。
 
 ## 界面与工具治理
 

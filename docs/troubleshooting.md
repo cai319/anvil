@@ -78,7 +78,7 @@ netstat -ano | findstr :7317
 ### Q10. 测试全部 skipped
 
 venv 缺少 `langgraph`。执行 `pip install -r backend/requirements.txt`，再运行测试。
-完整基线为 **1265 passed / 63 skipped**；未设置 `ANVIL_BIN` 或
+完整基线为 **1266 passed / 63 skipped**；未设置 `ANVIL_BIN` 或
 `ANVIL_COLLAB_EVAL_CMD` 时，CLI 契约与模型评测用例会增加跳过数。
 
 ### Q11. 修改了任务但 Agent 看不到最新配置
@@ -585,6 +585,8 @@ Select-String -Path .\log\anvil.log -Pattern 'tracker|http id=|ERROR|Traceback'
 - 每个 `(task_id, role_slug)` 只保留最新一条 `@human`；不同角色各自等待，不会互相覆盖。
 - 只有该 mention 之后 `activities.role_slug='human'` 的活动才算回应；agent/system/workflow
   的 comment 不会清除提醒。
+- 任务进入 `in_review` 后，最终评审/问题板条目是唯一收件箱待办；该任务的 `@human`
+  消息仍保留在任务时间线，但不再单独显示为 mention 条目。
 - 以下情况会自动隐藏：
   - 简报确认/跳过或编辑后，早于 `clarification_confirmed_at` 的澄清提醒；
   - 对应 board draft 已批准/驳回；

@@ -39,6 +39,32 @@ async def test_inbox_review_item(client, seeded):
     assert (await _inbox(client))["count"] == 0
 
 
+async def test_inbox_review_suppresses_agent_review_mention(client, seeded):
+    """in_review 由唯一评审条目承载，agent 的评审说明不再单独占一条收件箱。"""
+    await client.post("/api/v1/tasks", json=task_payload(
+        id="T-REV-MEN", assignees=["pm"]), headers=auth_headers())
+    await client.patch("/api/v1/tasks/T-REV-MEN", json={"status": "in_review"},
+                       headers=human_headers())
+    await client.post("/api/v1/tasks/T-REV-MEN/mention",
+                      json={"target": "human",
+                            "message": "已完成，请核对全量交付件并做最终评审"},
+                      headers=auth_headers("pm"))
+
+    body = await _inbox(client)
+    assert [i["id"] for i in body["items"]] == ["review:T-REV-MEN"]
+    assert all(i["kind"] != "mention" for i in body["items"])
+
+    # 收件箱合并只影响条目；mention 仍应保留在任务时间线。
+    timeline = await client.get("/api/v1/tasks/T-REV-MEN/timeline",
+                                headers=human_headers())
+    assert timeline.status_code == 200, timeline.text
+    assert any(
+        e["kind"] == "mention"
+        and (e.get("payload") or {}).get("target") == "human"
+        for e in timeline.json()
+    )
+
+
 async def test_inbox_mention_lifecycle(client, seeded):
     await client.post("/api/v1/tasks", json=task_payload(id="T-MEN"), headers=auth_headers())
     await client.post("/api/v1/tasks/T-MEN/mention",

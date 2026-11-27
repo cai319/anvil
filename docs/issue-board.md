@@ -165,4 +165,4 @@ submit 缺字段返回 422，`detail.missing_fields` 列出待补字段；task r
 - `tests/test_workflow.py`：workflow/问题板完成顺序无关、reviewer 必须被 workflow 覆盖。
 - `tests/cli/test_cli_contract.py`：finding 命令映射、模板字段、`--issue-board` 透传。
 - v1.51 交叉覆盖：`tests/api/test_clarification_api.py`、`tests/api/test_role_gate_api.py`；
-  全量基线 **1265 passed / 63 skipped**。
+  全量基线 **1266 passed / 63 skipped**。

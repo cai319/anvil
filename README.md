@@ -202,6 +202,9 @@ anvil init
 的回复/审批才算回应，agent/system/workflow 的评论不会清除提醒。简报确认/跳过、board
 草案批准/驳回、任务关闭/归档后，对应提醒自动隐藏；简报更新会补发任务 SSE。
 
+任务进入 `in_review` 后，最终评审或问题板条目是该任务唯一的收件箱待办；agent 的
+评审说明 / 交付件路径仍保留在任务时间线，但不再单独生成 `@human` 收件箱条目。
+
 角色建议必须先于 workflow 审批解决：pending 建议会阻塞审批；`authorize` 建议批准后
 planner 才创建/绑定角色，完成前 workflow 审批保持锁定。
 
@@ -581,7 +584,7 @@ cd dev
 pytest tests/ -q
 ```
 
-当前基线：**1265 passed + 63 skipped**（CLI 契约需要 `ANVIL_BIN`，模型评测需要
+当前基线：**1266 passed + 63 skipped**（CLI 契约需要 `ANVIL_BIN`，模型评测需要
 `ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。v1.51.1 覆盖新增的澄清、角色思考强度、
 角色建议门禁、收件箱提醒生命周期、功能开关默认恢复、工具治理与大厅性能。
 

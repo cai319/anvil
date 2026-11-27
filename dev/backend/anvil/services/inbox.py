@@ -92,6 +92,9 @@ def _mentions(conn: sqlite3.Connection) -> list[dict]:
     scheduler 判断 HITL 等待时，只把该角色最后一条 @human 之后的人类动作
     视为回应；收件箱沿用同一口径。不同角色可能各自在等人类，不能被同任务
     的其他角色提醒覆盖。
+
+    任务进入 in_review 后，最终评审/问题板条目已经是该任务唯一的可执行待办；
+    此后的 @human 评价/交付件说明保留在任务时间线，但不再单独生成收件箱提醒。
     """
     rows = conn.execute(
         """SELECT a.id AS aid, a.task_id, a.role_slug, a.payload_json, a.created_at,
@@ -124,6 +127,10 @@ def _mentions(conn: sqlite3.Connection) -> list[dict]:
             continue
         # 终态/归档任务没有 agent 在等人类回复。
         if r["task_status"] in ("done", "closed") or r["archived_at"]:
+            continue
+        # in_review 由 review/finding 条目统一承载，避免“请评审”类 @human
+        # 与最终评审/问题板产生两条收件箱。消息仍保留在任务时间线。
+        if r["task_status"] == "in_review":
             continue
         # 人类确认/跳过简报/编辑简报后，早于该动作的澄清提醒不再需要处理；
         # 晚于 clarification_confirmed_at 的新 mention 仍然保留。

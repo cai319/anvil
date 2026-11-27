@@ -251,6 +251,16 @@ async def test_inbox_lists_pending_finding_board(client, app):
     assert item["meta"]["finding_pending"] == 1
     # 有待确认 finding 时不再生成一个点进去也会 409 的普通评审项
     assert not any(i["id"] == "review:T-IB-INBOX" for i in inbox["items"])
+
+    # agent 的“请查看问题板并评审”说明不应再单独生成 mention 条目。
+    await client.post(f"{API}/tasks/T-IB-INBOX/mention",
+                      json={"target": "human",
+                            "message": "问题板已完成，请查看问题板并做最终评审"},
+                      headers=reviewer)
+    inbox = (await client.get(f"{API}/inbox", headers=human_headers())).json()
+    assert not any(i["kind"] == "mention" for i in inbox["items"])
+    assert any(i["id"] == "finding:T-IB-INBOX" for i in inbox["items"])
+
     await client.post(f"{API}/tasks/T-IB-INBOX/findings/{fid}/confirm",
                       json={}, headers=human_headers())
     inbox = (await client.get(f"{API}/inbox", headers=human_headers())).json()

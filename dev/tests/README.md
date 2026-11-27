@@ -22,7 +22,7 @@ source .venv/bin/activate
 pytest tests/ -q
 ```
 
-当前基线：**1265 passed / 63 skipped**。
+当前基线：**1266 passed / 63 skipped**。
 
 跳过条件：
 
@@ -55,6 +55,7 @@ pytest tests/api/test_clarification_api.py -q
   stale、门禁与澄清 API。
 - `tests/test_role_effort.py`、`tests/api/test_role_effort_api.py`：角色思考强度默认值与参数注入。
 - `tests/api/test_role_gate_api.py`：pending/approved 角色建议门禁、authorize 唤醒与解锁。
-- `tests/api/test_inbox.py`：按发送角色保留 @human、human-only 回应、澄清确认/终态抑制。
+- `tests/api/test_inbox.py`：按发送角色保留 @human、human-only 回应、澄清确认/终态抑制、
+  `in_review` 时合并到唯一评审/问题板条目。
 - `tests/api/test_feature_flags.py`：切回默认值清除覆盖。
 - `tests/test_runtime_proposals.py`、`tests/api/test_tool_import.py`：运行时提案与工具导入契约。
