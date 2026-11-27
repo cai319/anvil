@@ -305,6 +305,14 @@ export function Inbox() {
               onClick={() => act(it.id, () => api.rejectProposal(raw))}>拒绝</button>
           </>
         );
+      case "runtime_proposal":
+        return (
+          <>
+            <a className="primary small button-like"
+              href={`/tooling?rip=${encodeURIComponent(raw)}`}>去处理</a>
+            <a className="small" href="/tooling">打开工具页</a>
+          </>
+        );
       case "action": {
         const actionId = it.id.split(":", 2)[1];
         return (

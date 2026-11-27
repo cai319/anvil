@@ -103,6 +103,7 @@ export function Tooling() {
   const [ripSelected, setRipSelected] = useState<RuntimeProposal | null>(null);
   const [ripMarkdown, setRipMarkdown] = useState("");
   const [ripBusy, setRipBusy] = useState(false);
+  const ripDeepLink = useRef(false);
   const skillDirRef = useRef<HTMLInputElement>(null);
   const skillArchiveRef = useRef<HTMLInputElement>(null);
   const mcpDirRef = useRef<HTMLInputElement>(null);
@@ -217,6 +218,19 @@ export function Tooling() {
       setError(String(e));
     }
   };
+
+  // 收件箱「去处理」深链：/tooling?rip=<proposal-id> 自动选中该提案。
+  useEffect(() => {
+    if (ripDeepLink.current || ripItems.length === 0) return;
+    const id = new URLSearchParams(window.location.search).get("rip");
+    if (!id) return;
+    const hit = ripItems.find((p) => p.id === id);
+    if (hit) {
+      ripDeepLink.current = true;
+      void openRip(hit);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ripItems]);
 
   const transitionRip = async (status: string) => {
     if (!ripSelected) return;
