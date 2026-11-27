@@ -1154,16 +1154,6 @@ export function TaskDetail({ id }: { id: string }) {
                 >指派并执行</button>
               </>
             )}
-            {task.status === "todo" && clarification?.status === "in_progress" && (
-              <span className="muted">
-                Cindy 正在澄清需求：请在上方简报卡确认/跳过，或在会话中回复。
-              </span>
-            )}
-            {task.status === "todo" && clarification?.status === "stale" && (
-              <span className="muted">
-                任务定义已变更：请在上方简报卡重新确认或跳过。
-              </span>
-            )}
             {task.status === "todo" && clarification?.status !== "in_progress"
               && clarification?.status !== "stale" && plannerActive && (
               <span className="muted">Cindy 正在规划工作流，请到收件箱处理草案。</span>
@@ -1180,7 +1170,7 @@ export function TaskDetail({ id }: { id: string }) {
                   const res = await api.dispatchTask(id);
                   setDispatchNote(
                     res.mode === "clarifying"
-                      ? `Cindy 正在澄清需求（第 ${res.clarification?.round ?? 1} 轮）…请在上方简报卡确认/跳过，或在会话中回复。`
+                      ? null
                       : res.mode === "planning"
                         ? (task.assignees?.length
                             ? `规划助理 ${res.planner} 正在分析任务并设计工作流…草案将出现在收件箱，批准后自动启动步骤执行。`
