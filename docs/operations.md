@@ -11,7 +11,8 @@
    `pip install -e agentcli`；
 3. 重启后端。`init_schema` 幂等补齐任务澄清字段、`task_brief_versions`、任务工作区投影，
    以及大厅查询索引 `idx_workflows_task_created`、`idx_runs_task_role_started`；
-4. 重新构建前端：`cd frontend && npm run build`；
+4. 清理并重新构建前端：`cd frontend && npm run rebuild`（等价于删除 `dist`/Vite 缓存后
+   再 `npm run build`，避免旧哈希产物或缓存冲突）；
 5. 验证 `anvil --version` 为 `1.51.1`，`GET /api/v1/features` 包含
    `cindy_clarification`；旧 `/tooling?rip=<id>` 深链仍可用。
 

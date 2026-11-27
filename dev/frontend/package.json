@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; for (const p of ['dist', 'node_modules/.vite']) rmSync(p, { recursive: true, force: true });\"",
+    "rebuild": "npm run clean && npm run build",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "dump:api": "../.venv/bin/python ../backend/dump_openapi.py openapi.json",

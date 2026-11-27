@@ -117,6 +117,9 @@ cd backend
 python run_server.py
 ```
 
+> 升级或重新构建前端时使用 `npm run rebuild`：先清理 `dist` 与 Vite 缓存，再构建。
+> `npm run clean` 只清理项目产物，不触碰 npm 全局包缓存。
+
 初始化：
 
 ```powershell
@@ -600,7 +603,9 @@ cd dev
 packaging\build.bat
 ```
 
-产物在 `dev/dist/anvil-dist/`。完整打包说明见 [docs/operations.md](docs/operations.md)。
+产物在 `dev/dist/anvil-dist/`。打包前建议先执行 `cd dev/frontend && npm run rebuild`，
+确保 `dist` 与 Vite 缓存无旧版本残留；完整打包说明见
+[docs/operations.md](docs/operations.md)。
 
 ## 6. 卸载与清理
 
@@ -678,7 +683,7 @@ Remove-Item -Recurse -Force dev\dist, dev\build -ErrorAction SilentlyContinue
 
 | 现象 | 处理 |
 |---|---|
-| 打开 7317 是 404/空白 | `cd dev/frontend && npm install && npm run build`，重启后端 |
+| 打开 7317 是 404/空白 | `cd dev/frontend && npm install && npm run rebuild`，重启后端 |
 | `anvil init` 提示后端未启动 | 先启动 `python run_server.py` |
 | 运行时 `missing` | 检查 CLI 是否在 PATH；Windows 优先原生 `.exe`；重新扫描运行时 |
 | 角色一直“等待授权” | 检查 `ANVIL_DEFAULT_PERMISSION_MODE` 与运行日志 |

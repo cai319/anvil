@@ -41,8 +41,12 @@ uvicorn anvil.main:app --reload --port 7317
 cd dev/frontend
 npm install
 npm run dev            # 开发模式
-npm run build          # 生产构建
+npm run build          # 生产构建（Vite 会自动清空 dist）
+npm run clean          # 清理 dist 与 node_modules/.vite
+npm run rebuild        # clean + build，发布前推荐
 ```
+
+版本号来自 `dev/VERSION`，由 Vite 构建时注入；升级版本后先清理再构建。
 
 ### 测试
 
