@@ -332,7 +332,8 @@ def get_state(conn: sqlite3.Connection, task_id: str) -> dict:
         "plan_shape": plan_shape,
         "stale_reason": "任务定义已变更" if status == "stale" else None,
         "waiting_for_human": waiting_for_human,
-        "thinking": _is_thinking(conn, task, status),
+        # 已发出问题并等待 human 时，即使 run 仍残留 running 也不再显示思考动画。
+        "thinking": _is_thinking(conn, task, status) and not waiting_for_human,
         "can_start": status in ("none", "stale", "skipped")
         and can_clarify(conn, task_id),
         "can_confirm": status in ACTIVE_STATUSES and ready,

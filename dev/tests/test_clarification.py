@@ -432,3 +432,18 @@ def test_start_clarify_run_must_conclude(conn, tmp_path):
     run = clarification.start_clarify_run(
         conn, str(tmp_path / "c.db"), None, "T1", "cindy")
     assert "must_conclude：true" in run["prompt"]
+
+
+def test_thinking_stops_when_waiting_for_human(conn, tmp_path):
+    _task(conn)
+    clarification.start(conn, "T1")
+    run = clarification.start_clarify_run(
+        conn, str(tmp_path / "c.db"), None, "T1", "cindy")
+    conn.execute("UPDATE runs SET status='running' WHERE id=?", (run["id"],))
+    conn.commit()
+    assert clarification.get_state(conn, "T1")["thinking"] is True
+
+    tasks.mention(conn, "T1", "cindy", "human", "请确认任务简报")
+    state = clarification.get_state(conn, "T1")
+    assert state["waiting_for_human"] is True
+    assert state["thinking"] is False

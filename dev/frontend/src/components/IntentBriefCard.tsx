@@ -200,7 +200,11 @@ export function IntentBriefCard({
         <strong>任务简报</strong>
         <span className="badge">{STATUS_LABEL[state.status] ?? state.status}</span>
         {state.status === "in_progress" && (
-          <span className="muted">第 {state.round}/{state.max_rounds} 轮</span>
+          <span className="muted"
+            title={`${state.max_rounds} 轮是软上限，不是固定议程：每轮最多 3 个问题；`
+              + "简报足够完整会提前结束；最后一轮只收束、不再开新问题。"}>
+            第 {Math.max(1, state.round)} 轮（上限 {state.max_rounds}）
+          </span>
         )}
         {state.status === "stale" && (
           <span className="ibc-warn">{state.stale_reason || "任务定义已变更"}</span>
