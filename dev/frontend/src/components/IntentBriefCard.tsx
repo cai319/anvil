@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   api,
   type ClarificationPlanShape,
@@ -32,7 +32,13 @@ function listText(values?: string[]): string {
   return (values ?? []).filter(Boolean).join("；");
 }
 
-function BriefSummary({ brief }: { brief: IntentBrief | null }) {
+function BriefSummary({
+  brief, weight, planShape,
+}: {
+  brief: IntentBrief | null;
+  weight: WorkflowWeight;
+  planShape: ClarificationPlanShape;
+}) {
   if (!brief) {
     return <p className="muted">尚无简报草稿；Cindy 会在澄清轮次中逐步补齐。</p>;
   }
@@ -53,13 +59,17 @@ function BriefSummary({ brief }: { brief: IntentBrief | null }) {
       ))}
       <dt>流程强度</dt>
       <dd>
-        {brief.weight ? WEIGHT_LABEL[brief.weight] : "—"}
-        {brief.weight_rationale ? `（${brief.weight_rationale}）` : ""}
+        {WEIGHT_LABEL[weight]}
+        {brief.weight !== weight
+          ? "（已按你的选择，确认后生效）"
+          : brief.weight_rationale ? `（${brief.weight_rationale}）` : ""}
       </dd>
       <dt>计划形态</dt>
       <dd>
-        {brief.plan_shape ? SHAPE_LABEL[brief.plan_shape] : "—"}
-        {brief.plan_shape_rationale ? `（${brief.plan_shape_rationale}）` : ""}
+        {SHAPE_LABEL[planShape]}
+        {brief.plan_shape !== planShape
+          ? "（已按你的选择，确认后生效）"
+          : brief.plan_shape_rationale ? `（${brief.plan_shape_rationale}）` : ""}
       </dd>
     </dl>
   );
@@ -79,17 +89,37 @@ export function IntentBriefCard({
   const [ackOpen, setAckOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const weightTouched = useRef(false);
+  const shapeTouched = useRef(false);
+  const lastScope = useRef("");
 
   useEffect(() => {
     if (!state) return;
     setDraftText(JSON.stringify(state.brief ?? {}, null, 2));
-    setWeight((state.weight as WorkflowWeight) || state.brief?.weight || "standard");
-    setPlanShape(
-      (state.plan_shape as ClarificationPlanShape) || state.brief?.plan_shape || "auto");
     setAckOpen(false);
     setEditing(false);
     setError(null);
   }, [state?.task_id, state?.status, state?.brief_version]);
+
+  // 用户改过的强度/形态不能被 Cindy 的简报更新重置；只有切换任务/状态时才重新同步。
+  useEffect(() => {
+    if (!state) return;
+    const scope = `${state.task_id}:${state.status}`;
+    if (lastScope.current !== scope) {
+      lastScope.current = scope;
+      weightTouched.current = false;
+      shapeTouched.current = false;
+    }
+    if (!weightTouched.current) {
+      setWeight((state.weight as WorkflowWeight)
+        || state.brief?.weight || "standard");
+    }
+    if (!shapeTouched.current) {
+      setPlanShape((state.plan_shape as ClarificationPlanShape)
+        || state.brief?.plan_shape || "auto");
+    }
+  }, [state?.task_id, state?.status, state?.brief_version,
+      state?.weight, state?.plan_shape]);
 
   if (!state) return null;
   if (state.status === "none" && !state.can_start) return null;
@@ -186,7 +216,9 @@ export function IntentBriefCard({
         </p>
       )}
 
-      {state.status !== "none" && <BriefSummary brief={state.brief} />}
+      {state.status !== "none" && (
+        <BriefSummary brief={state.brief} weight={weight} planShape={planShape} />
+      )}
 
       {openQuestions.length > 0 && (
         <ul className="ibc-open">
@@ -200,7 +232,10 @@ export function IntentBriefCard({
             <label className="field-inline">
               流程强度
               <select value={weight} disabled={busy}
-                onChange={(e) => setWeight(e.target.value as WorkflowWeight)}>
+                onChange={(e) => {
+                  weightTouched.current = true;
+                  setWeight(e.target.value as WorkflowWeight);
+                }}>
                 <option value="light">轻量</option>
                 <option value="standard">标准</option>
                 <option value="strict">严格</option>
@@ -209,7 +244,10 @@ export function IntentBriefCard({
             <label className="field-inline">
               计划形态
               <select value={planShape} disabled={busy}
-                onChange={(e) => setPlanShape(e.target.value as ClarificationPlanShape)}>
+                onChange={(e) => {
+                  shapeTouched.current = true;
+                  setPlanShape(e.target.value as ClarificationPlanShape);
+                }}>
                 <option value="auto">自动判断</option>
                 <option value="flat">扁平静态步骤</option>
                 <option value="slices">切片 + 闭环</option>

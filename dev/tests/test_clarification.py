@@ -342,6 +342,59 @@ def test_assert_workflow_allowed(conn):
     clarification.assert_workflow_allowed(conn, "T1")
 
 
+def test_confirmed_weight_overrides_draft_tree(conn):
+    _task(conn)
+    clarification.start(conn, "T1")
+    clarification.save_draft(conn, "T1", _brief(), actor="cindy")
+    clarification.confirm(
+        conn, "T1", weight="light", plan_shape="flat", actor="human")
+    tree = {"weight": "strict", "steps": [
+        {"id": "S1", "title": "实现", "role": "dev"}]}
+    out = clarification.apply_confirmed_weight(conn, "T1", tree)
+    assert out["weight"] == "light"
+    assert out["weight_rationale"].startswith("澄清阶段确认")
+    clarification.enforce_plan_shape(conn, "T1", tree)  # flat: 允许扁平
+    with pytest.raises(ConflictError):
+        clarification.enforce_plan_shape(
+            conn, "T1", {**tree, "loop": {"execute": {"role": "dev"}}})
+
+
+def test_plan_shape_slices_requires_loop(conn):
+    _task(conn)
+    clarification.start(conn, "T1")
+    clarification.save_draft(conn, "T1", _brief(), actor="cindy")
+    clarification.confirm(conn, "T1", plan_shape="slices", actor="human")
+    flat = {"steps": [{"id": "S1", "title": "实现", "role": "dev"}]}
+    with pytest.raises(ConflictError):
+        clarification.enforce_plan_shape(conn, "T1", flat)
+    sliced = {
+        "steps": [{"id": "P", "title": "切片计划", "kind": "plan_slices",
+                   "role": "dev"}],
+        "loop": {"execute": {"role": "dev"}},
+    }
+    clarification.enforce_plan_shape(conn, "T1", sliced)
+
+
+def test_plan_shape_auto_allows_any(conn):
+    _task(conn)
+    clarification.start(conn, "T1")
+    clarification.save_draft(conn, "T1", _brief(), actor="cindy")
+    clarification.confirm(conn, "T1", plan_shape="auto", actor="human")
+    clarification.enforce_plan_shape(
+        conn, "T1", {"steps": [{"id": "S1", "title": "实现", "role": "dev"}]})
+    clarification.enforce_plan_shape(conn, "T1", {
+        "steps": [{"id": "P", "kind": "plan_slices", "role": "dev"}],
+        "loop": {"execute": {"role": "dev"}}})
+
+
+def test_weight_override_only_after_confirmation(conn):
+    _task(conn)
+    clarification.start(conn, "T1")
+    tree = {"weight": "strict"}
+    out = clarification.apply_confirmed_weight(conn, "T1", tree)
+    assert out["weight"] == "strict"
+
+
 def test_planning_conflict_during_clarification(conn):
     _task(conn)
     clarification.start(conn, "T1")

@@ -115,8 +115,13 @@ def create_draft(conn: sqlite3.Connection, goal: str, tree: dict,
     if kind == "workflow":
         # 把 Cindy 的 slices 确定性展开成每片闭环，并在草案阶段就拦下
         # 「大型多角色但无决策点」的串行工作流，让 planner 当场修正。
+        from . import clarification
         from . import workflow as workflow_service
+        if source_task:
+            tree = clarification.apply_confirmed_weight(conn, source_task, tree)
         tree = workflow_service.normalize_definition(conn, tree)
+        if source_task:
+            clarification.enforce_plan_shape(conn, source_task, tree)
         workflow_service.validate_definition(
             conn, tree, task_id=source_task,
             require_subagent_decisions=not str(created_by).startswith("human"))

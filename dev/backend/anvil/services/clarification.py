@@ -552,6 +552,66 @@ def assert_workflow_allowed(conn: sqlite3.Connection, task_id: str) -> None:
             "creating a workflow draft")
 
 
+def confirmed_brief(conn: sqlite3.Connection, task_id: str) -> dict | None:
+    """读取已确认的任务简报；未确认/不存在时返回 None。"""
+    row = conn.execute(
+        "SELECT clarification_status, intent_brief_json FROM tasks WHERE id=?",
+        (task_id,)).fetchone()
+    if row is None or str(row["clarification_status"] or "none") != "confirmed":
+        return None
+    brief = jloads(row["intent_brief_json"], None)
+    return brief if isinstance(brief, dict) else None
+
+
+def apply_confirmed_weight(conn: sqlite3.Connection, task_id: str,
+                           tree: dict) -> dict:
+    """把 human 在澄清阶段确认的流程强度写进 workflow 草案。
+
+    weight 的最终解析本来就有 human override 兜底；这里同步草案本身，
+    避免审批页/草案树仍显示 Cindy 的旧建议（例如 strict）。
+    """
+    brief = confirmed_brief(conn, task_id)
+    if not brief:
+        return tree
+    weight = weights.normalize(brief.get("weight"))
+    if weight is None:
+        return tree
+    out = dict(tree)
+    out["weight"] = weight
+    out["weight_rationale"] = (
+        "澄清阶段确认：" + (brief.get("weight_rationale") or "human 确认"))
+    return out
+
+
+def enforce_plan_shape(conn: sqlite3.Connection, task_id: str, tree: dict) -> None:
+    """按已确认简报的 plan_shape 校验 workflow 结构。
+
+    - flat：不允许 plan_slices 步骤或 loop 模板；
+    - slices：必须同时有 plan_slices 步骤与 loop 模板；
+    - auto：不约束。
+    在 normalize_definition 之后调用，检查服务端展开后的实际结构。
+    """
+    brief = confirmed_brief(conn, task_id)
+    if not brief:
+        return
+    shape = str(brief.get("plan_shape") or "auto").strip().lower()
+    if shape == "auto":
+        return
+    steps = tree.get("steps") or tree.get("children") or []
+    has_plan_slices = any(
+        str(step.get("kind") or "") == "plan_slices"
+        for step in steps if isinstance(step, dict))
+    has_loop = isinstance(tree.get("loop"), dict)
+    if shape == "flat" and (has_plan_slices or has_loop):
+        raise ConflictError(
+            "confirmed plan_shape=flat; submit flat steps without "
+            "plan_slices/loop")
+    if shape == "slices" and not (has_plan_slices and has_loop):
+        raise ConflictError(
+            "confirmed plan_shape=slices; submit a plan_slices step plus "
+            "a loop template")
+
+
 def start_clarify_run(conn: sqlite3.Connection, db_path: str,
                       orchestrator, task_id: str, planner: str, *,
                       assignees: list[str] | None = None,

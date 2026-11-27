@@ -175,3 +175,26 @@ async def test_planner_agent_can_write_brief_draft(client, seeded, app):
         json={"brief": _brief()})
     assert resp.status_code == 200, resp.text
     assert resp.json()["brief"]["goal"] == "实现登录"
+
+
+async def test_confirmed_weight_normalizes_workflow_draft(client, seeded):
+    tid = await _create_task(client)
+    await _dispatch(client, tid)
+    await client.put(
+        f"{API}/tasks/{tid}/clarification/draft", headers=human_headers(),
+        json={"brief": _brief()})
+    confirmed = await client.post(
+        f"{API}/tasks/{tid}/clarification/confirm", headers=human_headers(),
+        json={"weight": "light", "plan_shape": "auto"})
+    assert confirmed.status_code == 200, confirmed.text
+
+    draft = await client.post(
+        f"{API}/board/drafts", headers=human_headers(), json={
+            "goal": "g", "source_task": tid, "kind": "workflow",
+            "tree": {"weight": "strict", "steps": [
+                {"id": "S1", "title": "需求", "role": "pm"},
+                {"id": "S2", "title": "实现", "role": "developer"},
+            ]},
+        })
+    assert draft.status_code == 201, draft.text
+    assert draft.json()["tree"]["weight"] == "light"

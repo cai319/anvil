@@ -34,7 +34,9 @@ dispatch → planner run → workflow draft → human approve → workflow
    `intent-brief.json/.md`；human 可编辑，版本化。
 4. **强度在澄清中确认**：Cindy 提议 `light | standard | strict` 与 `plan_shape`
    （flat/slices/auto），human 在简报卡确认。确认时写
-   `tasks.workflow_weight`（source=human），沿用现有 `weights.resolve()` 优先级。
+   `tasks.workflow_weight`（source=human），沿用现有 `weights.resolve()` 优先级；
+   已确认 weight 同步写入 workflow 草案树，`plan_shape` 由服务端校验结构
+   （flat 拒绝 plan_slices/loop，slices 要求 plan_slices+loop，auto 不约束）。
    工作流页的强度入口降级为「高级 → 仅影响下一次执行」。
 5. **确认是结构化人类动作**：简报卡按钮是唯一状态迁移入口；聊天文本「确认」
    不会直接改状态，Cindy 只重贴卡片。
