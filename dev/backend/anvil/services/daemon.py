@@ -73,8 +73,8 @@ class DaemonManager(DeliveryQueueMixin, ContextEngineMixin,
             "INSERT INTO role_sessions (role_slug, session_id, token, model_id, pid, status, "
             "busy_since, last_active_at, last_context_tokens, last_error, "
             "current_task_id, current_run_id, current_step_id, current_context_key, "
-            "current_slice_key, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "current_slice_key, sandbox_instance_id, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(role_slug) DO UPDATE SET session_id=excluded.session_id, token=excluded.token, "
             "model_id=COALESCE(excluded.model_id, role_sessions.model_id), "
             "pid=excluded.pid, status=excluded.status, busy_since=excluded.busy_since, "
@@ -83,13 +83,15 @@ class DaemonManager(DeliveryQueueMixin, ContextEngineMixin,
             "last_error=excluded.last_error, current_task_id=excluded.current_task_id, "
             "current_run_id=excluded.current_run_id, current_step_id=excluded.current_step_id, "
             "current_context_key=excluded.current_context_key, "
-            "current_slice_key=excluded.current_slice_key, updated_at=excluded.updated_at",
+            "current_slice_key=excluded.current_slice_key, "
+            "sandbox_instance_id=excluded.sandbox_instance_id, "
+            "updated_at=excluded.updated_at",
             (r.role, r.session_id or "", r.token, r.model_id, pid, status,
              datetime.fromtimestamp(busy_since, tz=timezone.utc).isoformat() if busy_since else None,
              datetime.fromtimestamp(r.last_active, tz=timezone.utc).isoformat() if r.last_active else None,
              r.context_tokens or None, error,
              current_task, current_run, current_step, current_context, current_slice,
-             now_iso()),
+             r.sandbox_instance_id, now_iso()),
         )
         conn.commit()
         # 当前任务上下文槽同步（session/水位/状态）；没有加载槽时跳过。
@@ -129,6 +131,11 @@ class DaemonManager(DeliveryQueueMixin, ContextEngineMixin,
                 "updated_at=? WHERE status IN ('starting','idle','busy')", (now_iso(),))
             conn.execute("UPDATE role_task_sessions SET status='dead', updated_at=? "
                          "WHERE status IN ('idle','busy')", (now_iso(),))
+            try:
+                from . import sandbox as sandbox_service
+                sandbox_service.reconcile_startup(conn)
+            except Exception:  # noqa: BLE001 —— 观测表问题不能阻断启动
+                pass
             conn.commit()
         finally:
             conn.close()

@@ -1350,6 +1350,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_rsi_v150(conn)
     _migrate_clarification_v1(conn)
     _migrate_lobby_indexes_v1(conn)
+    _migrate_sandbox_v160(conn)
     conn.commit()
 
 
@@ -3016,4 +3017,43 @@ def _migrate_clarification_v1(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_task_brief_versions_task "
         "ON task_brief_versions(task_id, version DESC)")
+    conn.commit()
+
+
+def _migrate_sandbox_v160(conn: sqlite3.Connection) -> None:
+    """v1.60 执行沙箱 M0：实例表与 run/角色槽实例引用（幂等）。
+
+    M0 只记录进程生命周期；策略/能力/作业表在后续迁移追加。实例表缺失时
+    sandbox service 会静默跳过记录，不阻断角色执行。
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sandbox_instances (
+            id               TEXT PRIMARY KEY,
+            scope_kind       TEXT NOT NULL,   -- role_session|one_shot|mcp_probe|poc_job
+            scope_id         TEXT NOT NULL,
+            role_slug        TEXT,
+            backend          TEXT NOT NULL,
+            tier             TEXT NOT NULL DEFAULT 'standard',
+            profile          TEXT NOT NULL DEFAULT 'standard',
+            capabilities_json TEXT NOT NULL DEFAULT '{}',
+            status           TEXT NOT NULL DEFAULT 'starting',
+            native_handle    TEXT,
+            pid              INTEGER,
+            root_dir         TEXT,
+            generation       INTEGER NOT NULL DEFAULT 1,
+            exit_reason      TEXT,
+            peak_json        TEXT NOT NULL DEFAULT '{}',
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL,
+            ended_at         TEXT
+        )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sandbox_instances_scope "
+        "ON sandbox_instances(scope_kind, scope_id, created_at)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sandbox_instances_status "
+        "ON sandbox_instances(status, updated_at)")
+    _add_column(conn, "runs", "sandbox_instance_id TEXT")
+    _add_column(conn, "role_sessions", "sandbox_instance_id TEXT")
+    _add_column(conn, "role_task_sessions", "sandbox_instance_id TEXT")
     conn.commit()

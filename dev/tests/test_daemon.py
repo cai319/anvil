@@ -1520,3 +1520,26 @@ def test_agent_env_strips_human_auth(monkeypatch):
     assert env["FOO"] == "bar"
     assert "ANVIL_AUTH_TOKEN" not in env
     assert "ANVIL_TEST_AUTH" not in env
+
+
+def test_spawn_records_sandbox_instance(env):
+    """M0：持久进程 spawn 必须落一条 sandbox_instances，并回填到 run。"""
+    conn, mgr, fake, log = env
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "hello")
+
+    def has_instance():
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM sandbox_instances").fetchone()
+        return int(row["n"] or 0) >= 1
+
+    assert _wait(has_instance)
+    row = conn.execute(
+        "SELECT * FROM sandbox_instances ORDER BY created_at DESC, rowid DESC LIMIT 1"
+    ).fetchone()
+    assert row["role_slug"] == "qa-role"
+    assert row["backend"] in ("host", "windows_job")
+    assert row["status"] in ("starting", "running", "exited")
+    run_row = conn.execute(
+        "SELECT sandbox_instance_id FROM runs WHERE id=?", (run["id"],)).fetchone()
+    assert run_row["sandbox_instance_id"] == row["id"]

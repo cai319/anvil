@@ -9,6 +9,7 @@ from dataclasses import dataclass
 class SpawnResult:
     pid: int
     native_session_id: str | None = None
+    sandbox_instance_id: str | None = None
 
 
 @dataclass
@@ -23,7 +24,8 @@ class ProcessManager(ABC):
 
     @abstractmethod
     def spawn(self, executable: str, args: list[str], cwd: str, env: dict[str, str],
-              stdout=None, stderr=None) -> SpawnResult:
+              stdout=None, stderr=None,
+              sandbox_policy: dict | None = None) -> SpawnResult:
         ...
 
     @abstractmethod

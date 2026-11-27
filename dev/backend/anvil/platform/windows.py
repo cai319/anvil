@@ -24,7 +24,8 @@ _procs: dict[str, subprocess.Popen] = {}
 
 class WindowsProcessManager(ProcessManager):
     def spawn(self, executable: str, args: list[str], cwd: str, env: dict[str, str],
-              stdout=None, stderr=None) -> SpawnResult:
+              stdout=None, stderr=None,
+              sandbox_policy: dict | None = None) -> SpawnResult:
         # 用 subprocess.Popen 以便复用 Python 的 stdout/stderr 重定向；
         # 进程随后挂到 Job Object 上（kill-on-close，整棵进程树）。
         merged_env = scrub_agent_env(dict(os.environ), allow_run_token=False)

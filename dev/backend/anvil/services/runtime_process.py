@@ -12,7 +12,9 @@ from datetime import datetime, timedelta, timezone
 
 from .. import config
 from ..db import open_conn
+from ..sandbox.ports import SpawnRequest
 from ..util import decode_child_output, jdumps, now_iso
+from . import sandbox as sandbox_service
 from .daemon_common import (
     _Role, _SpawnSpec, _attachment_chars, _clean_env,
     _is_context_overflow, _is_payload_overflow, clear_session,
@@ -99,15 +101,47 @@ class RuntimeProcessMixin:
 
         # 二进制管道：由 _reader_loop 统一按 UTF-8/本地编码回退解码，
         # 避免 Windows text 模式按 GBK 解码或把 \n 改写成 \r\n。
-        kwargs: dict = dict(
-            cwd=spec.cwd, env=merged_env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+        # v1.60 M0：整个角色进程经沙箱后端启动；Host 后端行为等价旧 Popen。
+        backend = sandbox_service.get_backend()
+        instance_id = ""
+        try:
+            caps = backend.capabilities().as_dict()
+        except Exception:  # noqa: BLE001 —— 能力探测失败不阻断启动
+            caps = {}
+        try:
+            instance_id = sandbox_service.create_instance(
+                conn, role_slug=r.role,
+                scope_kind="role_session",
+                scope_id=r.context_key or f"role:{r.role}",
+                backend=getattr(backend, "name", "host"),
+                capabilities=caps,
+            )
+        except Exception as exc:  # noqa: BLE001 —— 观测表问题不能阻断执行
+            self._log(r.role, f"[anvil] sandbox instance record failed: {exc}")
+            instance_id = ""
+        req = SpawnRequest(
+            executable=spec.executable, args=args, cwd=spec.cwd,
+            env=merged_env, instance_id=instance_id or None,
         )
         try:
-            proc = subprocess.Popen(
-                [spec.executable, *args], start_new_session=True, **kwargs)
-        except TypeError:  # Windows 不支持 start_new_session
-            proc = subprocess.Popen([spec.executable, *args], **kwargs)
+            sp = backend.spawn_persistent(req)
+        except Exception:
+            if instance_id:
+                try:
+                    sandbox_service.finish_instance(
+                        conn, instance_id, exit_reason="spawn_error")
+                except Exception:  # noqa: BLE001
+                    pass
+            raise
+        proc = sp.popen
+        r.sandbox_instance_id = instance_id or None
+        r.sandbox_backend = getattr(backend, "name", None)
+        if instance_id:
+            try:
+                sandbox_service.bind_instance(
+                    conn, instance_id, pid=proc.pid, native_handle=sp.native_handle)
+            except Exception:  # noqa: BLE001
+                pass
         r.proc = proc
         r.proc_generation += 1
         # 新进程不继承上一代的溢出标记。
@@ -378,6 +412,17 @@ class RuntimeProcessMixin:
             if overflow_run_id:
                 note = f"context overflow ({overflow_reason}) run={overflow_run_id}"
             self._db_upsert(conn, r, status="dead", pid=None, error=note)
+            if r.sandbox_instance_id:
+                exit_reason = (
+                    "exit_0" if code == 0
+                    else ("eof" if code is None else f"exit_{code}"))
+                try:
+                    sandbox_service.finish_instance(
+                        conn, r.sandbox_instance_id, exit_reason=exit_reason)
+                except Exception:  # noqa: BLE001 —— 观测失败不改变退出语义
+                    pass
+                r.sandbox_instance_id = None
+                r.sandbox_backend = None
             if reset_key:
                 # 只清当前任务的槽；其它任务的上下文不受影响。
                 clear_session(conn, r.role, note or "auto reset after failure",
@@ -549,6 +594,7 @@ class RuntimeProcessMixin:
         proc = r.proc
         if proc is None:
             return
+        instance_id = r.sandbox_instance_id
         # 先与进程失联：旧 reader 仍可能有缓冲事件，必须立即停止回写共享状态，
         # 否则上下文切换后旧 turn 的 result 会修改新任务的 current_run/tokens。
         r.proc = None
@@ -559,23 +605,34 @@ class RuntimeProcessMixin:
         r.busy = False
         r.busy_since = None
         try:
-            if graceful and proc.stdin:
-                proc.stdin.close()
-            proc.wait(timeout=5)
-        except Exception:  # noqa: BLE001
+            sandbox_service.terminate_process(proc, graceful=graceful)
+        except Exception:  # noqa: BLE001 —— 后端异常不能留下不可回收的进程
             try:
-                proc.terminate()
-                proc.wait(timeout=3)
+                if graceful and getattr(proc, "stdin", None):
+                    proc.stdin.close()
+                proc.wait(timeout=5)
             except Exception:  # noqa: BLE001
                 try:
-                    proc.kill()
+                    proc.terminate()
+                    proc.wait(timeout=3)
                 except Exception:  # noqa: BLE001
-                    pass
+                    try:
+                        proc.kill()
+                    except Exception:  # noqa: BLE001
+                        pass
         conn = open_conn(self.db_path)
         try:
             self._db_upsert(conn, r, status="dead", pid=None)
+            if instance_id:
+                try:
+                    sandbox_service.finish_instance(
+                        conn, instance_id, exit_reason="killed")
+                except Exception:  # noqa: BLE001
+                    pass
         finally:
             conn.close()
+        r.sandbox_instance_id = None
+        r.sandbox_backend = None
 
     @staticmethod
     def _assistant_text(ev: dict) -> str:

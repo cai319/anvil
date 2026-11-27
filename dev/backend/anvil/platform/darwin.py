@@ -40,7 +40,8 @@ def _clean_env(extra: dict[str, str]) -> dict[str, str]:
 
 class DarwinProcessManager(ProcessManager):
     def spawn(self, executable: str, args: list[str], cwd: str, env: dict[str, str],
-              stdout=None, stderr=None) -> SpawnResult:
+              stdout=None, stderr=None,
+              sandbox_policy: dict | None = None) -> SpawnResult:
         merged_env = _clean_env(env)
         proc = subprocess.Popen(
             [executable, *args],

@@ -459,6 +459,13 @@ def set_native_session(conn: sqlite3.Connection, run_id: str, native_session_id:
     conn.commit()
 
 
+def set_sandbox_instance(conn: sqlite3.Connection, run_id: str,
+                         instance_id: str | None) -> None:
+    """只写 run 的沙箱实例引用；绝不触碰 status/CAS。"""
+    conn.execute("UPDATE runs SET sandbox_instance_id=? WHERE id=?", (instance_id, run_id))
+    conn.commit()
+
+
 def _worktree_path(run_id: str) -> Path:
     return config.DATA_DIR / "worktrees" / run_id
 

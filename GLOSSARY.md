@@ -126,3 +126,60 @@ Anvil 的内置 onboarding planner（slug `cindy`）。只规划、不实现；�
 其他角色默认 `high`。Claude Code 通过 `--effort` 传入；不支持
 `thinking_effort` 能力的运行时忽略该值。入口：角色 → 运行时 → 思考强度。
 决策见本地 ADR-0002（`docs/adr/`，不随仓库发布）。
+
+## 执行沙箱
+
+### 执行沙箱（Execution Sandbox）
+
+包裹整个角色进程（agent CLI 及其工具/shell）的 OS 级边界。Anvil 控制器留在
+边界之外；沙箱负责写范围、资源上限、进程树回收与秘密读拒绝。沙箱不是 Anvil
+权限系统的替代：`bypassPermissions` 与单一 human token 模型不变。
+
+避免说法：把任务工作区隔离、知识隔离、mock 试运行（workflow-editor 的
+「Sandbox Run」）叫作执行沙箱。
+
+### 标准档（Standard Tier）
+
+普通角色 run 与工作流步骤的隔离档。保证工作区写范围、资源上限、进程树回收，
+以及对 Anvil 自身秘密（human token、数据库、备份、其它任务/角色数据）的定向
+读拒绝；**不限制普通宿主文件读取，也不限制网络**。决策见本地 ADR-0003。
+
+### 严格档（Strict Tier）
+
+不可信代码（PoC、动态验证、RSI replay 验证命令）的一次性隔离档。默认完全断网、
+源码只读、独立 scratch、固定资源与时限；产物与证据回传后销毁。
+
+### 沙箱实例（Sandbox Instance）
+
+与角色上下文槽同生命周期的执行边界实例。同一 (角色, 任务上下文) 复用实例；
+切换上下文或策略摘要变化时重建。
+
+### 能力矩阵（Capability Matrix）
+
+平台与基础设施实际可提供的能力集合（写范围、读拒绝、资源上限、进程树、断网、
+挂载隔离、产物导出）。能力缺口必须通过状态接口与界面显式可见，不得静默降级。
+
+### 能力横幅（Capability Banner）
+
+能力矩阵存在缺口时，在运行详情、治理页或状态接口展示的常驻警示。
+
+### 受控 PoC 运行（PoC Job）
+
+一次 build → run → 取证的受控执行单元，绑定 finding 与任务工作区快照。默认
+安全档（断网、只读源、限额限时）可由角色发起；放宽网络/资源/时长或使用非默认
+环境需人工批准。
+
+### 已验证（Verified）
+
+由成功的 PoC 作业派生的 finding 验证状态（`verified | pending | failed |
+blocked | none`）。它是派生视图，不改变 finding 的手工 `poc_status` 字段。
+
+### 源码快照（Source Snapshot）
+
+严格档作业开始时对任务工作区做的一次性只读副本（排除 `.git`、沙箱 home、
+依赖目录），记录 tree hash；作业期间的源码改动不影响本次验证。
+
+### host-unsafe
+
+显式关闭执行沙箱的宿主直跑模式，仅用于开发/排障。必须记审计、状态接口返回
+常驻警告；严格档在 host-unsafe 下默认仍不执行。

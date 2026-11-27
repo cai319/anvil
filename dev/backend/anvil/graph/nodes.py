@@ -997,6 +997,8 @@ def spawn_node(state: dict, config) -> dict:
             return {}
         # P0-1/P0-2：写会话+冻结超时+重置 started_at（续跑重新计时），再置 running
         runs_service.mark_spawned(conn, run_id, result.native_session_id, timeout_seconds=timeout)
+        if getattr(result, "sandbox_instance_id", None):
+            runs_service.set_sandbox_instance(conn, run_id, result.sandbox_instance_id)
         if not runs_service.set_status(
                 conn, run_id, "running",
                 from_statuses=("created", "projecting")):

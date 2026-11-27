@@ -389,6 +389,9 @@ class _Role:
     context_overflow_proc: subprocess.Popen | None = None
     # 进程世代：每次 spawn +1，用于防止旧 reader 回写新进程状态。
     proc_generation: int = 0
+    # v1.60 沙箱实例（与当前进程一对一；kill/退出后清空）。
+    sandbox_instance_id: str | None = None
+    sandbox_backend: str | None = None
     suppress_exit: bool = False
     current_log_path: str | None = None
     # 当前 run 中运行时原生 subagent（Task/Agent）的观测状态；不是 Anvil 任务。

@@ -564,6 +564,12 @@ class DeliveryQueueMixin:
         r.busy_since = time.time()
         r.current_run_id = item.run_id
         r.current_task_id = item.task_id
+        if item.run_id and r.sandbox_instance_id:
+            try:
+                runs_service.set_sandbox_instance(
+                    conn, item.run_id, r.sandbox_instance_id)
+            except Exception:  # noqa: BLE001 —— 观测列写入失败不阻断投递
+                pass
         row = (conn.execute("SELECT log_path, step_id FROM runs WHERE id=?",
                             (item.run_id,)).fetchone() if item.run_id else None)
         r.current_log_path = row["log_path"] if row else None

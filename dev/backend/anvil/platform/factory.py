@@ -4,6 +4,7 @@ from __future__ import annotations
 import platform
 
 from .base import CredentialStore, ProcessManager
+from .sandbox_manager import SandboxProcessManager
 
 
 def _make() -> tuple[ProcessManager, CredentialStore]:
@@ -11,11 +12,11 @@ def _make() -> tuple[ProcessManager, CredentialStore]:
     if system == "Darwin":
         from .darwin import DarwinCredentialStore, DarwinProcessManager
 
-        return DarwinProcessManager(), DarwinCredentialStore()
+        return SandboxProcessManager(DarwinProcessManager()), DarwinCredentialStore()
     if system == "Windows":
         from .windows import WindowsCredentialStore, WindowsProcessManager
 
-        return WindowsProcessManager(), WindowsCredentialStore()
+        return SandboxProcessManager(WindowsProcessManager()), WindowsCredentialStore()
     raise RuntimeError(f"Unsupported platform: {system}")
 
 
