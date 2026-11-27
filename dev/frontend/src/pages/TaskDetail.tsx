@@ -818,11 +818,15 @@ export function TaskDetail({ id }: { id: string }) {
     const targets = [...new Set(mentionRoles
       .filter((r) => hasToken(r.slug) || (r.display_name ? hasToken(r.display_name) : false))
       .map((r) => r.slug))];
+    const clarifying = clarification?.status === "in_progress";
     await act(async () => {
       if (targets.length) {
         for (const target of targets) {
           await api.mentionTask(id, target, text);
         }
+      } else if (clarifying) {
+        // 澄清期间不强制用户手动 @：直接回复就是给 Cindy 的答案，进入下一轮。
+        await api.mentionTask(id, task?.planner || "cindy", text);
       } else {
         await api.commentTask(id, text);
       }
@@ -1517,7 +1521,9 @@ export function TaskDetail({ id }: { id: string }) {
                   }
                   blurTimerRef.current = window.setTimeout(() => setMention(null), 150);
                 }}
-                placeholder="输入消息；输入 @ 选择角色（界面显示昵称，后台用 slug 激活）"
+                placeholder={clarification?.status === "in_progress"
+                  ? "输入你的回答，发送后进入下一轮澄清（自动 @Cindy）"
+                  : "输入消息；输入 @ 选择角色（界面显示昵称，后台用 slug 激活）"}
               />
               {mention && mentionCandidates.length > 0 && (
                 <div className="mention-menu" role="listbox" aria-label="选择要 @ 的角色">
@@ -1540,11 +1546,19 @@ export function TaskDetail({ id }: { id: string }) {
                 </div>
               )}
             </div>
-            <button className="primary" onClick={send} disabled={busy || !comment.trim()}>发送</button>
+            <button className="primary" onClick={send} disabled={busy || !comment.trim()}>
+              {clarification?.status === "in_progress" ? "发送给 Cindy（下一轮）" : "发送"}
+            </button>
           </div>
           <p className="muted hint" style={{ margin: "4px 2px 0" }}>
-            提示：输入 <strong>@</strong> 会弹出角色选择（上下键选择，Enter 确认）；选中后按 Enter 发送。
-            @角色 消息会按「@提及」发送——时间线标黄并唤醒该角色。
+            {clarification?.status === "in_progress" ? (
+              <>澄清中：直接发送会唤醒 Cindy 并进入下一轮；只想评论不唤醒时，请先确认或跳过澄清。</>
+            ) : (
+              <>
+                提示：输入 <strong>@</strong> 会弹出角色选择（上下键选择，Enter 确认）；选中后按 Enter 发送。
+                @角色 消息会按「@提及」发送——时间线标黄并唤醒该角色。
+              </>
+            )}
           </p>
         </div>
 

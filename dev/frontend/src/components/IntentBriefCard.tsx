@@ -179,9 +179,9 @@ export function IntentBriefCard({
 
   const skip = async () => {
     const ok = await confirmDialog({
-      title: "跳过澄清，直接规划？",
-      message: "Cindy 将不产出任务简报，直接按当前任务描述规划工作流。",
-      confirmLabel: "跳过并规划",
+      title: "不等澄清，直接规划？",
+      message: "Cindy 会停止提问，不生成任务简报，直接按当前任务描述规划工作流。",
+      confirmLabel: "直接规划",
       danger: false,
     });
     if (!ok) return;
@@ -282,8 +282,9 @@ export function IntentBriefCard({
               || (openQuestions.length > 0 && !ackOpen)} onClick={confirm}>
               确认开始规划
             </button>
-            <button className="small danger" disabled={busy} onClick={skip}>
-              跳过澄清，直接规划
+            <button className="small danger" disabled={busy} onClick={skip}
+              title="不等 Cindy 继续提问，不生成任务简报，直接启动 planner 规划工作流">
+              不等澄清，直接规划
             </button>
           </div>
         </>
