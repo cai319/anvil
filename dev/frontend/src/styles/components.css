@@ -2608,3 +2608,39 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
 .knowledge-clean-before { color: var(--text-on-paper-muted); text-decoration: line-through; }
 .knowledge-clean-after { color: var(--ink-900); }
 .knowledge-clean-arrow { color: var(--text-on-paper-muted); text-align: center; }
+
+/* v1.60 执行沙箱 */
+.sandbox-card {
+  margin: 8px 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle, #d8d2c4);
+  border-radius: 8px;
+  background: var(--paper-raised, #faf7f0);
+  display: grid;
+  gap: 4px;
+}
+.sandbox-card-head,
+.sandbox-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+  font-size: 11px;
+}
+.sandbox-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--ink-900, #2b2b2b);
+  color: var(--paper, #fdfbf5);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.sandbox-warning {
+  margin: 2px 0 0;
+  color: var(--danger, #b03030);
+  font-size: 11px;
+}
+.sandbox-status-panel .toolbar { flex-wrap: wrap; }

@@ -217,6 +217,7 @@ class RunOut(BaseModel):
     profile_snapshot: str | None = None
     worktree_path: str | None = None
     native_session_id: str | None = None
+    sandbox_instance_id: str | None = None
     log_path: str | None = None
     prompt: str | None = None
     started_at: str | None = None

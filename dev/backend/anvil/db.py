@@ -3053,7 +3053,12 @@ def _migrate_sandbox_v160(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sandbox_instances_status "
         "ON sandbox_instances(status, updated_at)")
+    _add_column(conn, "sandbox_instances", "rss_limit_mib INTEGER")
+    _add_column(conn, "sandbox_instances", "pids_limit INTEGER")
+    _add_column(conn, "sandbox_instances", "disk_limit_mib INTEGER")
+    _add_column(conn, "sandbox_instances", "workspace_path TEXT")
     _add_column(conn, "runs", "sandbox_instance_id TEXT")
     _add_column(conn, "role_sessions", "sandbox_instance_id TEXT")
     _add_column(conn, "role_task_sessions", "sandbox_instance_id TEXT")
+    _add_column(conn, "tasks", "sandbox_json TEXT NOT NULL DEFAULT '{}'")
     conn.commit()

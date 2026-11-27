@@ -105,6 +105,20 @@ ROLE_IDLE_RELEASE_MINUTES = float(_env("ANVIL_IDLE_RELEASE_MINUTES", "15"))
 RESET_SESSION_ON_FAILURE = _env("ANVIL_RESET_SESSION_ON_FAILURE", "1") == "1"
 ROLE_SESSION_TOKEN_DAYS = int(_env("ANVIL_ROLE_TOKEN_DAYS", "30"))
 
+# ---- v1.60 执行沙箱 ---------------------------------------------------------
+# enforce：按平台首选后端（macOS Seatbelt / Windows 命名 Job）；host-unsafe：显式关闭沙箱。
+SANDBOX_MODE = _env("ANVIL_SANDBOX", "enforce").strip().lower()
+if SANDBOX_MODE not in ("enforce", "host-unsafe"):
+    raise RuntimeError("ANVIL_SANDBOX must be 'enforce' or 'host-unsafe'")
+SANDBOX_ENABLED = _env("ANVIL_SANDBOX_ENABLED", "1") == "1"
+SANDBOX_STANDARD_TIMEOUT = float(_env("ANVIL_SANDBOX_STANDARD_TIMEOUT", "3600"))
+SANDBOX_STANDARD_RSS_MIB = int(_env("ANVIL_SANDBOX_STANDARD_RSS_MIB", "4096"))
+SANDBOX_STANDARD_PIDS = int(_env("ANVIL_SANDBOX_STANDARD_PIDS", "256"))
+SANDBOX_STANDARD_DISK_MIB = int(_env("ANVIL_SANDBOX_STANDARD_DISK_MIB", "20480"))
+# 沙箱内 HOME/CLI 配置放在 cwd 下的这个目录；必须从 diff/提交中排除。
+SANDBOX_HOME_DIRNAME = ".anvil/home"
+SANDBOX_INSTANCES_DIR = DATA_DIR / "sandbox" / "instances"
+
 # 角色未显式配置 permission_mode 时的默认值。本地单用户环境用 bypassPermissions；
 # --print 模式下没有交互授权通道，default 会让 agent 停在「等待授权」。
 DEFAULT_PERMISSION_MODE = _env("ANVIL_DEFAULT_PERMISSION_MODE", "bypassPermissions")
@@ -381,7 +395,7 @@ def ensure_dirs() -> None:
     for d in (DATA_DIR, USER_RUNTIMES_DIR, AGENTS_DIR, REPOS_DIR,
               TASK_WORKSPACES_DIR, KNOWLEDGE_REPOS_DIR, CHANNELS_DIR,
               ROLE_EVAL_DIR, RUNTIME_PROPOSALS_DIR, ROLE_IMPORTS_DIR,
-              SQLITE_PATH.parent):
+              SANDBOX_INSTANCES_DIR, SQLITE_PATH.parent):
         d.mkdir(parents=True, exist_ok=True)
     # 日志目录不可写时由 setup_logging 回退到 DATA_DIR/log，不能阻断服务启动。
     try:

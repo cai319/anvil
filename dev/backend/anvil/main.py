@@ -24,7 +24,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import config
 from .api import (
-    actions, agent_inbox, board, event_log, events, feature_flags, findings, governance, inbox, knowledge_repos, memory, reminders, roles, runs, runtimes, rsi, runtime_proposals, tasks, templates, tooling, workflow, workspaces,
+    actions, agent_inbox, board, event_log, events, feature_flags, findings, governance, inbox, knowledge_repos, memory, reminders, roles, runs, runtimes, rsi, runtime_proposals, sandbox, tasks, templates, tooling, workflow, workspaces,
 )
 from .db import connect, open_conn
 from .deps import token_is_valid
@@ -35,6 +35,7 @@ from .services import knowledge_harvest as knowledge_harvest_service
 from .services import ledger as ledger_service
 from .services import roles as roles_service
 from .services import runs as runs_service
+from .services import sandbox as sandbox_service
 from .graph import build_graph, get_checkpointer
 from .graph.orchestrator import Orchestrator
 from .logging_setup import AccessLogMiddleware, setup_logging
@@ -310,12 +311,14 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             _conn.close()
         if scheduler:
             scheduler.start()
+            sandbox_service.start_supervisor()
         if eval_worker:
             eval_worker.start()
         yield
         if eval_worker:
             eval_worker.stop()
         if scheduler:
+            sandbox_service.stop_supervisor()
             scheduler.stop()
         # 常驻角色进程先关闭（各任务上下文槽保留 session，下次按任务 --resume）
         role_daemon.shutdown()
@@ -360,6 +363,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     app.include_router(governance.router, prefix="/api/v1", tags=["governance"])
     app.include_router(feature_flags.router, prefix="/api/v1/features", tags=["features"])
     app.include_router(runs.router, prefix="/api/v1", tags=["runs"])
+    app.include_router(sandbox.router, prefix="/api/v1", tags=["sandbox"])
     app.include_router(rsi.router, prefix="/api/v1", tags=["rsi"])
     app.include_router(runtime_proposals.router, prefix="/api/v1", tags=["runtime-proposals"])
     app.include_router(board.router, prefix="/api/v1", tags=["board"])

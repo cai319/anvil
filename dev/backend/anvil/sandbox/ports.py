@@ -45,6 +45,9 @@ class SandboxPolicy:
     policy_digest: str = ""
     source: str = "default"
 
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
 
 @dataclass
 class SpawnRequest:
@@ -58,6 +61,10 @@ class SpawnRequest:
     stdout: int | None = subprocess.PIPE
     stderr: int | None = subprocess.STDOUT
     instance_id: str | None = None
+    instance_dir: str | None = None
+    workspace_path: str | None = None
+    role_slug: str | None = None
+    policy: SandboxPolicy | None = None
 
 
 @dataclass

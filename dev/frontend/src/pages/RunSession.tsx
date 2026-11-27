@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type Run, type TimelineEvent } from "../api/client";
+import { api, type Run, type RunSandbox, type TimelineEvent } from "../api/client";
 import { useLiveRefresh } from "../useLiveRefresh";
 import { formatClock, formatDateTime, parseTime, useNow } from "../time";
 import { Icon } from "../components/Icon";
@@ -17,21 +17,37 @@ function fmtDuration(start: string | null, end: string | null, now = Date.now())
   return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 }
 
+function sandboxBackendLabel(backend: string | null): string {
+  const labels: Record<string, string> = {
+    seatbelt: "Seatbelt",
+    windows_job: "Windows Job",
+    host: "Host（无隔离）",
+    docker: "Docker",
+    wsl_bwrap: "WSL + bwrap",
+  };
+  return backend ? labels[backend] || backend : "未绑定";
+}
+
 export function RunSession({ id }: { id: string }) {
   const [run, setRun] = useState<Run | null>(null);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
   const [snapshot, setSnapshot] = useState<Record<string, unknown> | null>(null);
   const [log, setLog] = useState<{ exists: boolean; content: string } | null>(null);
+  const [sandbox, setSandbox] = useState<RunSandbox | null>(null);
   const [error, setError] = useState<string | null>(null);
   const now = useNow(30_000); // 运行时长按系统当前时间刷新
 
   const refresh = () =>
-    Promise.all([api.getRun(id), api.getRunTimeline(id), api.getRunSnapshot(id), api.getRunLog(id)])
-      .then(([r, tl, snap, lg]) => {
+    Promise.all([
+      api.getRun(id), api.getRunTimeline(id), api.getRunSnapshot(id),
+      api.getRunLog(id), api.getRunSandbox(id),
+    ])
+      .then(([r, tl, snap, lg, sb]) => {
         setRun(r);
         setTimeline(tl);
         setSnapshot(snap);
         setLog(lg);
+        setSandbox(sb);
       })
       .catch((e) => setError(String(e)));
 
@@ -79,6 +95,32 @@ export function RunSession({ id }: { id: string }) {
           <span className="muted mono">worktree {run.worktree_path ?? "—"}</span>
         </div>
       </div>
+
+      {sandbox && sandbox.instance && (
+        <div className="sandbox-card">
+          <div className="sandbox-card-head">
+            <span className="sandbox-badge">{sandboxBackendLabel(sandbox.backend)}</span>
+            <span className="muted">
+              profile {sandbox.profile ?? "standard"} · 网络 {sandbox.network === "host" ? "宿主" : sandbox.network}
+            </span>
+            {sandbox.exit_reason && (
+              <span className="muted mono">退出 {sandbox.exit_reason}</span>
+            )}
+            <span className="muted mono">{sandbox.instance.id.slice(0, 12)}</span>
+          </div>
+          <div className="sandbox-card-meta">
+            <span>峰值 RSS {sandbox.peak.rss_mib ?? "—"} MiB</span>
+            <span>进程 {sandbox.peak.pids ?? "—"}</span>
+            {sandbox.peak.disk_mib != null && <span>磁盘 {sandbox.peak.disk_mib} MiB</span>}
+            <span>状态 {sandbox.instance.status}</span>
+          </div>
+          {!sandbox.capabilities.write_scope && (
+            <p className="sandbox-warning">
+              当前后端未强制工作区写范围；能力缺口与残余风险见治理页。
+            </p>
+          )}
+        </div>
+      )}
 
       {run.status === "projecting" && (
         <p className="muted">

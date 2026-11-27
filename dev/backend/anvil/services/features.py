@@ -301,6 +301,19 @@ FLAGS: tuple[FeatureFlag, ...] = (
         ),
         category="workflow",
     ),
+    FeatureFlag(
+        key="sandbox",
+        attr="SANDBOX_ENABLED",
+        title="执行沙箱",
+        summary="角色执行与 PoC 运行使用 OS 级沙箱边界。",
+        description=(
+            "开启后：角色进程经平台沙箱启动（macOS Seatbelt / Windows 命名 Job），"
+            "工作区写范围、资源上限与 Anvil 秘密读拒绝生效；严格档缺失时阻止 PoC/动态验证。"
+            "关闭后：退回宿主直跑（等同 host-unsafe），安全边界消失；仅用于排障。"
+            "环境变量 ANVIL_SANDBOX=host-unsafe 优先于本开关。"
+        ),
+        category="security",
+    ),
 )
 
 _BY_KEY = {flag.key: flag for flag in FLAGS}

@@ -16,6 +16,8 @@ import pytest
 os.environ.setdefault("ANVIL_TEST_AUTH", "1")
 # 默认关闭知识 repo 绑定，避免测试扫描真实 data/repos；特性测试显式开启并改 REPOS_DIR。
 os.environ.setdefault("ANVIL_KNOWLEDGE_BINDING_MODE", "off")
+# 测试默认不走平台沙箱（不建 Seatbelt profile、不改 HOME）；沙箱后端用测试直接实例化。
+os.environ.setdefault("ANVIL_SANDBOX", "host-unsafe")
 
 # 后端 M1 落地前跳过；落地后移除这行 importorskip 即可。
 app_factory = pytest.importorskip(
@@ -42,6 +44,7 @@ def _isolate_data_dirs(tmp_path, monkeypatch):
     monkeypatch.setattr(app_config, "ROLE_EVAL_DIR", data / "eval")
     monkeypatch.setattr(app_config, "RUNTIME_PROPOSALS_DIR", data / "runtime-proposals")
     monkeypatch.setattr(app_config, "ROLE_IMPORTS_DIR", data / "imports")
+    monkeypatch.setattr(app_config, "SANDBOX_INSTANCES_DIR", data / "sandbox" / "instances")
     monkeypatch.setattr(app_config, "SQLITE_PATH", data / "anvil.db")
     return data
 

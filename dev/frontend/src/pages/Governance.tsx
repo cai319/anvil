@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "../api/client";
+import { api, type SandboxSelfCheck, type SandboxStatus } from "../api/client";
 import { formatDateTime } from "../time";
 import { PageHeader } from "../components/ui";
 import { useLiveRefresh } from "../useLiveRefresh";
@@ -55,6 +55,9 @@ export function Governance() {
   const [frozen, setFrozen] = useState(false);
   const [audit, setAudit] = useState<AuditRow[]>([]);
   const [tokens, setTokens] = useState<TokenSummary | null>(null);
+  const [sandbox, setSandbox] = useState<SandboxStatus | null>(null);
+  const [selfCheck, setSelfCheck] = useState<SandboxSelfCheck | null>(null);
+  const [checking, setChecking] = useState(false);
   const [limits, setLimits] = useState({
     max_parallel_system: 6,
     max_parallel_runtime: 4,
@@ -64,12 +67,14 @@ export function Governance() {
 
   const refresh = async () => {
     try {
-      const [f, b, a, t] = await Promise.all([
+      const [f, b, a, t, s] = await Promise.all([
         api.getFreeze(), api.getBudget(), api.listAudit(), api.getTokens(),
+        api.getSandboxStatus(),
       ]);
       setFrozen(f.frozen);
       setAudit(a as AuditRow[]);
       setTokens(t as TokenSummary);
+      setSandbox(s);
       const bb = b as BudgetInfo;
       setLimits({
         max_parallel_system: bb.max_parallel_system ?? 6,
@@ -160,6 +165,53 @@ export function Governance() {
           </label>
           <button onClick={saveLimits}>保存</button>
         </div>
+      </section>
+
+      <section className="governance-limits sandbox-status-panel">
+        <h2>执行沙箱</h2>
+        {sandbox ? (
+          <>
+            <div className="toolbar">
+              <span>模式 <strong>{sandbox.mode}</strong></span>
+              <span>标准档 <strong>{sandbox.standard.backend}</strong></span>
+              <span className={sandbox.standard.capabilities.write_scope ? "muted" : "error"}>
+                写范围 {sandbox.standard.capabilities.write_scope ? "已强制" : "未强制"}
+              </span>
+              <span className="muted">
+                读拒绝 {sandbox.standard.capabilities.read_deny ? "开启" : "关闭"}
+              </span>
+              <button
+                disabled={checking}
+                onClick={() => {
+                  setChecking(true);
+                  api.runSandboxSelfCheck()
+                    .then(setSelfCheck)
+                    .catch((e) => setError(String(e)))
+                    .finally(() => setChecking(false));
+                }}
+              >{checking ? "自检中…" : "重新自检"}</button>
+            </div>
+            <p className="muted">
+              严格档（PoC/动态验证）：
+              {sandbox.strict.available
+                ? sandbox.strict.backend
+                : `未启用（${sandbox.strict.detail}）`}
+            </p>
+            {sandbox.warnings.length > 0 && (
+              <p className="sandbox-warning">
+                能力/模式提示：{sandbox.warnings.join(" · ")}
+              </p>
+            )}
+            {selfCheck && (
+              <p className={selfCheck.ok ? "muted" : "error"}>
+                自检：{selfCheck.ok ? "通过" : "未通过"}
+                {selfCheck.warnings.length > 0 ? ` · ${selfCheck.warnings.join(" · ")}` : ""}
+              </p>
+            )}
+          </>
+        ) : (
+          <p className="muted">加载中…</p>
+        )}
       </section>
 
       <div className="governance-panels">

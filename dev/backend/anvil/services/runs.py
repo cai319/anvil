@@ -35,6 +35,14 @@ def create_run(conn: sqlite3.Connection, role_slug: str, task_id: str | None = N
     `prompt` 用于无任务的 run（reminder / 直接消息），有任务时由任务内容组装提示。
     """
     effective = roles_service.effective_config(conn, role_slug) or {}
+    # v1.60：在 run 创建瞬间冻结沙箱策略（限额/网络/来源），后续执行只读快照。
+    try:
+        from ..sandbox import policy as sandbox_policy
+        policy_task = tasks_service.get(conn, task_id) if task_id else None
+        effective["sandbox_policy"] = sandbox_policy.as_dict(
+            sandbox_policy.resolve_for_run(effective, policy_task))
+    except Exception:  # noqa: BLE001 —— 策略解析失败不阻断建 run；spawn 时会再解析
+        pass
     payload = jdumps(effective)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     conn.execute(
@@ -607,9 +615,34 @@ def _create_worktree(conn: sqlite3.Connection, run_id: str, role_slug: str, task
             ["git", "-C", str(repo_path), "worktree", "add", "-b", branch, str(worktree)],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
         )
+        _exclude_sandbox_home(worktree)
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+def _exclude_sandbox_home(worktree: Path) -> None:
+    """把 `.anvil/` 写入 worktree 的 git exclude，避免沙箱 HOME 污染状态/提交。"""
+    try:
+        rel = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "--git-path", "info/exclude"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10,
+        )
+        if rel.returncode != 0 or not (rel.stdout or "").strip():
+            return
+        path = Path(rel.stdout.strip())
+        if not path.is_absolute():
+            path = worktree / path
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        if ".anvil/" not in existing.splitlines():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as fh:
+                if existing and not existing.endswith("\n"):
+                    fh.write("\n")
+                fh.write(".anvil/\n")
+    except Exception:  # noqa: BLE001 —— 排除失败仍由 diff 过滤兜底
+        pass
 
 
 def list_subagents(conn: sqlite3.Connection, *, run_id: str | None = None,

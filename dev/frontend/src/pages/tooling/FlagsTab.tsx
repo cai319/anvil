@@ -17,6 +17,11 @@ const KNOWN_GROUPS: { key: string; title: string; hint: string }[] = [
     title: "角色演化 / 运行时提案",
     hint: "控制角色 RSI 观测、反思、评估、自动回滚与运行时改进提案。",
   },
+  {
+    key: "security",
+    title: "安全与隔离",
+    hint: "控制角色执行与 PoC 运行是否使用 OS 级执行沙箱。",
+  },
 ];
 
 export function FlagsTab() {

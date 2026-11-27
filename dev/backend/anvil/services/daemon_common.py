@@ -304,6 +304,9 @@ class _SpawnSpec:
     context_window_floor: int | None = None
     runtime_id: str | None = None
     workspace_path: str | None = None
+    # v1.60 沙箱策略快照；digest 变化时在同一上下文槽内重建进程。
+    sandbox_policy: dict = field(default_factory=dict)
+    sandbox_policy_digest: str | None = None
 
 
 @dataclass
@@ -392,6 +395,7 @@ class _Role:
     # v1.60 沙箱实例（与当前进程一对一；kill/退出后清空）。
     sandbox_instance_id: str | None = None
     sandbox_backend: str | None = None
+    sandbox_policy_digest: str | None = None
     suppress_exit: bool = False
     current_log_path: str | None = None
     # 当前 run 中运行时原生 subagent（Task/Agent）的观测状态；不是 Anvil 任务。

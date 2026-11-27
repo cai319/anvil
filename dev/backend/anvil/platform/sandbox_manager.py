@@ -13,6 +13,8 @@ logger = logging.getLogger("anvil.platform.sandbox")
 
 
 class SandboxProcessManager(ProcessManager):
+    supports_sandbox = True
+
     def __init__(self, inner: ProcessManager) -> None:
         self._inner = inner
         self._instances: dict[str, str] = {}

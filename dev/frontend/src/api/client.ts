@@ -666,6 +666,12 @@ export const api = {
   listRoleRuns: (roleSlug: string): Promise<Run[]> =>
     authFetch(`${BASE}/runs?role_slug=${encodeURIComponent(roleSlug)}`).then((r) => json<Run[]>(r)),
   getRun: (id: string): Promise<Run> => authFetch(`${BASE}/runs/${id}`).then((r) => json<Run>(r)),
+  getRunSandbox: (id: string): Promise<RunSandbox> =>
+    authFetch(`${BASE}/runs/${id}/sandbox`).then((r) => json<RunSandbox>(r)),
+  getSandboxStatus: (): Promise<SandboxStatus> =>
+    authFetch(`${BASE}/sandbox/status`).then((r) => json<SandboxStatus>(r)),
+  runSandboxSelfCheck: (): Promise<SandboxSelfCheck> =>
+    req("POST", "/sandbox/self-check").then((r) => json<SandboxSelfCheck>(r)),
   getRunTimeline: (id: string): Promise<TimelineEvent[]> =>
     authFetch(`${BASE}/runs/${id}/timeline`).then((r) => json<TimelineEvent[]>(r)),
   getRunLog: (id: string): Promise<{ run_id: string; exists: boolean; content: string }> =>
@@ -1482,6 +1488,71 @@ export type RunStatus =
   | "suspended";
 
 export type Run = Required<Schemas["RunOut"]>;
+
+export interface SandboxCapabilities {
+  backend: string;
+  platform: string;
+  write_scope: boolean;
+  read_deny: boolean;
+  resource_caps: boolean;
+  process_tree: boolean;
+  network_none: boolean;
+  disposable_fs: boolean;
+  mount_isolation: boolean;
+  artifact_export: boolean;
+  detail: string;
+}
+
+export interface SandboxInstance {
+  id: string;
+  scope_kind: string;
+  scope_id: string;
+  role_slug: string | null;
+  backend: string;
+  tier: string;
+  profile: string;
+  capabilities_json: string;
+  status: string;
+  pid: number | null;
+  native_handle: string | null;
+  exit_reason: string | null;
+  peak_json: string;
+  workspace_path?: string | null;
+  rss_limit_mib?: number | null;
+  pids_limit?: number | null;
+  disk_limit_mib?: number | null;
+  created_at: string;
+  updated_at: string;
+  ended_at: string | null;
+}
+
+export interface RunSandbox {
+  run_id: string;
+  instance_id: string | null;
+  instance: SandboxInstance | null;
+  backend: string | null;
+  profile: string | null;
+  network: string;
+  capabilities: Partial<SandboxCapabilities>;
+  peak: { rss_mib?: number; pids?: number; disk_mib?: number; sampled_at?: string };
+  exit_reason: string | null;
+}
+
+export interface SandboxStatus {
+  mode: string;
+  enabled: boolean;
+  standard: { available: boolean; backend: string; capabilities: SandboxCapabilities };
+  strict: { available: boolean; backend: string | null; detail: string };
+  substrates: Record<string, boolean | string>;
+  warnings: string[];
+  counts: Record<string, number>;
+}
+
+export interface SandboxSelfCheck {
+  ok: boolean;
+  checks: Record<string, unknown>;
+  warnings: string[];
+}
 
 export type TaskDispatch = Required<Schemas["TaskDispatchOut"]>;
 

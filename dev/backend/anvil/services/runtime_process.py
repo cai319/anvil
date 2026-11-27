@@ -102,8 +102,26 @@ class RuntimeProcessMixin:
         # 二进制管道：由 _reader_loop 统一按 UTF-8/本地编码回退解码，
         # 避免 Windows text 模式按 GBK 解码或把 \n 改写成 \r\n。
         # v1.60 M0：整个角色进程经沙箱后端启动；Host 后端行为等价旧 Popen。
+        from ..sandbox import env as sandbox_env
+        from ..sandbox import instances as sandbox_instances
+        from ..sandbox.ports import SandboxPolicy
+
         backend = sandbox_service.get_backend()
+        policy_obj = None
+        if isinstance(spec.sandbox_policy, dict) and spec.sandbox_policy:
+            try:
+                policy_obj = SandboxPolicy(**spec.sandbox_policy)
+            except Exception:  # noqa: BLE001 —— 坏快照退回默认策略
+                policy_obj = None
+        resources = dict(policy_obj.resources) if policy_obj else {}
         instance_id = ""
+        iid = sandbox_service.new_instance_id()
+        root_dir = ""
+        if config.SANDBOX_ENABLED and config.SANDBOX_MODE != "host-unsafe":
+            try:
+                root_dir = str(sandbox_instances.prepare(r.role, iid))
+            except Exception as exc:  # noqa: BLE001
+                self._log(r.role, f"[anvil] sandbox instance dir failed: {exc}")
         try:
             caps = backend.capabilities().as_dict()
         except Exception:  # noqa: BLE001 —— 能力探测失败不阻断启动
@@ -114,14 +132,35 @@ class RuntimeProcessMixin:
                 scope_kind="role_session",
                 scope_id=r.context_key or f"role:{r.role}",
                 backend=getattr(backend, "name", "host"),
+                profile=(policy_obj.profile if policy_obj else "standard"),
                 capabilities=caps,
+                root_dir=root_dir or None,
+                rss_limit_mib=int(resources.get("rss_mib") or 0) or None,
+                pids_limit=int(resources.get("pids") or 0) or None,
+                disk_limit_mib=int(resources.get("disk_mib") or 0) or None,
+                workspace_path=spec.workspace_path or spec.cwd,
+                instance_id=iid,
             )
         except Exception as exc:  # noqa: BLE001 —— 观测表问题不能阻断执行
             self._log(r.role, f"[anvil] sandbox instance record failed: {exc}")
             instance_id = ""
+        if config.SANDBOX_ENABLED and config.SANDBOX_MODE != "host-unsafe":
+            try:
+                home, tmp = sandbox_env.prepare_home(
+                    spec.workspace_path or spec.cwd,
+                    str(config.AGENTS_DIR / r.role),
+                    root_dir or None,
+                )
+                merged_env = sandbox_env.apply_standard_env(
+                    merged_env, home=home, tmp=tmp)
+            except Exception as exc:  # noqa: BLE001 —— 环境重定向失败不阻断启动
+                self._log(r.role, f"[anvil] sandbox env redirect failed: {exc}")
         req = SpawnRequest(
             executable=spec.executable, args=args, cwd=spec.cwd,
             env=merged_env, instance_id=instance_id or None,
+            instance_dir=root_dir or None,
+            workspace_path=spec.workspace_path or spec.cwd,
+            role_slug=r.role, policy=policy_obj,
         )
         try:
             sp = backend.spawn_persistent(req)
@@ -136,10 +175,12 @@ class RuntimeProcessMixin:
         proc = sp.popen
         r.sandbox_instance_id = instance_id or None
         r.sandbox_backend = getattr(backend, "name", None)
+        r.sandbox_policy_digest = spec.sandbox_policy_digest
         if instance_id:
             try:
                 sandbox_service.bind_instance(
-                    conn, instance_id, pid=proc.pid, native_handle=sp.native_handle)
+                    conn, instance_id, pid=proc.pid,
+                    native_handle=sp.native_handle, root_dir=root_dir or None)
             except Exception:  # noqa: BLE001
                 pass
         r.proc = proc

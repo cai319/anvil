@@ -100,6 +100,17 @@ def get_run(rid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     return run
 
 
+@router.get("/runs/{rid}/sandbox")
+def run_sandbox(rid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    """该 run 的沙箱实例/能力/峰值/退出原因；前端运行详情卡片使用。"""
+    run = services.runs.get_run(conn, rid)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    access.assert_run_read(conn, auth, run)
+    from ..services import sandbox as sandbox_service
+    return sandbox_service.run_view(conn, run)
+
+
 @router.get("/runs/{rid}/timeline")
 def run_timeline(rid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
     """该 run 的生命周期迁移事件（运行会话追溯）。"""

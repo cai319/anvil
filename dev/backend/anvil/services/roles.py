@@ -917,6 +917,7 @@ def effective_config(conn: sqlite3.Connection, slug: str) -> dict | None:
         "workspace": definition.get("workspace"),
         "tools": tools,
         "concurrency": definition.get("concurrency"),
+        "sandbox": definition.get("sandbox") or {},
         "system_prompt": definition.get("system_prompt"),
         "responsibilities": definition.get("responsibilities") or [],
     }

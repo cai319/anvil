@@ -22,7 +22,8 @@ class DeliveryQueueMixin:
                            model_pool: list[str] | None = None,
                            context_window_floor: int | None = None,
                            runtime_id: str | None = None,
-                           workspace_path: str | None = None) -> dict:
+                           workspace_path: str | None = None,
+                           sandbox_policy: dict | None = None) -> dict:
         """确保角色进程存活（必要时 --resume/新建）并投递一条消息。
 
         消息按 task_id 进入角色队列；如果角色正忙（或前面排着别的任务），
@@ -36,6 +37,10 @@ class DeliveryQueueMixin:
             context_window_floor=(int(context_window_floor)
                                   if context_window_floor not in (None, "", 0) else None),
             runtime_id=runtime_id, workspace_path=workspace_path,
+            sandbox_policy=dict(sandbox_policy or {}),
+            sandbox_policy_digest=(str(sandbox_policy.get("policy_digest"))
+                                   if isinstance(sandbox_policy, dict)
+                                   and sandbox_policy.get("policy_digest") else None),
         )
         r = self._role(role)
         with r.lock:
@@ -303,6 +308,7 @@ class DeliveryQueueMixin:
                 r.proc is not None
                 and r.proc.poll() is None
                 and r.context_key == target_key
+                and r.sandbox_policy_digest == item.spec.sandbox_policy_digest
             )
             try:
                 if same_context:

@@ -49,8 +49,9 @@ DENIED_PREFIXES = (".anvil/", ".git/", ".env", "secrets/")
 # 编排器自己投影产生的文件，不算 Agent 的改动（否则每次 submit 都会越界）。
 def _is_anvil_managed(path: str) -> bool:
     p = path[2:] if path.startswith("./") else path
-    # 只排除投影产物；`.anvil/` 仍是受保护目录（改它必须被拒）。
-    return p in ("CLAUDE.md", "AGENTS.md", "GEMINI.md") or p.startswith((".claude/", ".gemini/"))
+    # 只排除投影产物与沙箱 HOME；其余 `.anvil/` 仍是受保护目录（改它必须被拒）。
+    return (p in ("CLAUDE.md", "AGENTS.md", "GEMINI.md")
+            or p.startswith((".claude/", ".gemini/", ".anvil/home/")))
 
 
 def _init_role_claims(conn: sqlite3.Connection, tid: str, roles: list[str], now: str) -> None:

@@ -17,13 +17,16 @@ from ..ports import SandboxCapabilities, SandboxProcess, SandboxProbe, SpawnRequ
 class HostBackend:
     name = "host"
 
+    def __init__(self, detail: str = "host process without OS confinement") -> None:
+        self._detail = detail
+
     def capabilities(self) -> SandboxCapabilities:
         has_killpg = hasattr(os, "killpg")
         return SandboxCapabilities(
             backend=self.name,
             platform=sys.platform,
             process_tree=has_killpg,
-            detail="host process without OS confinement",
+            detail=self._detail,
         )
 
     def spawn_persistent(self, req: SpawnRequest) -> SandboxProcess:

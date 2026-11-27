@@ -930,6 +930,9 @@ def spawn_node(state: dict, config) -> dict:
         role = roles_service.get(conn, run["role_slug"]) or {}
         task = _task(conn, run.get("task_id"))
         effective = _effective(conn, run)
+        from ..sandbox import policy as sandbox_policy
+        sandbox_policy_dict = sandbox_policy.as_dict(
+            sandbox_policy.resolve_for_run(effective, task))
         workspace_path = _run_workspace_path(conn, run, role, effective)
         # 常驻会话模式：唤醒 = 向角色进程 stdin 投递消息（进程存活则复用，不新建）
         persistent = _persistent_session(conn, effective)
@@ -947,7 +950,8 @@ def spawn_node(state: dict, config) -> dict:
                     slice_key=run.get("slice_key"),
                     priority=_delivery_priority(conn, run),
                     model_pool=model_pool, context_window_floor=window_floor,
-                    runtime_id=runtime_id, workspace_path=ws_path)
+                    runtime_id=runtime_id, workspace_path=ws_path,
+                    sandbox_policy=sandbox_policy_dict)
             except Exception:  # noqa: BLE001 —— 无法拉起/投递即失败
                 logger.exception("persistent spawn failed for run %s", run_id)
                 runs_service.set_status(
@@ -981,13 +985,18 @@ def spawn_node(state: dict, config) -> dict:
             executable, args, cwd, env, timeout = _render_invocation(
                 conn, run, task, effective, role, workspace_path)
             pm = factory.get_platform()[0]
+            spawn_kwargs = (
+                {"sandbox_policy": sandbox_policy_dict}
+                if getattr(pm, "supports_sandbox", False) else {})
             log_path = run.get("log_path")
             if log_path:
                 Path(log_path).parent.mkdir(parents=True, exist_ok=True)
                 with open(log_path, "ab") as logf:
-                    result = pm.spawn(executable, args, cwd, env, stdout=logf, stderr=subprocess.STDOUT)
+                    result = pm.spawn(
+                        executable, args, cwd, env, stdout=logf,
+                        stderr=subprocess.STDOUT, **spawn_kwargs)
             else:
-                result = pm.spawn(executable, args, cwd, env)
+                result = pm.spawn(executable, args, cwd, env, **spawn_kwargs)
         except Exception:  # noqa: BLE001 —— 无法拉起子进程即失败，不做静默降级
             logger.exception("spawn failed for run %s", run_id)
             runs_service.set_status(

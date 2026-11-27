@@ -7,16 +7,27 @@ from __future__ import annotations
 
 import platform as _platform
 
+from ... import config
 from .host import HostBackend
 
 
 def make_backend():
     system = _platform.system()
+    if not config.SANDBOX_ENABLED or config.SANDBOX_MODE == "host-unsafe":
+        reason = ("host-unsafe override" if config.SANDBOX_MODE == "host-unsafe"
+                  else "sandbox disabled")
+        return HostBackend(detail=reason)
     if system == "Windows":
         from .windows_job import WindowsJobBackend
 
         return WindowsJobBackend()
-    return HostBackend()
+    if system == "Darwin":
+        from .seatbelt import SeatbeltBackend, available
+
+        if available():
+            return SeatbeltBackend()
+        return HostBackend(detail="sandbox-exec unavailable")
+    return HostBackend(detail="unsupported platform sandbox")
 
 
 __all__ = ["HostBackend", "make_backend"]
