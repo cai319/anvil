@@ -122,7 +122,8 @@ export function IntentBriefCard({
       state?.weight, state?.plan_shape]);
 
   if (!state) return null;
-  if (state.status === "none" && !state.can_start) return null;
+  // 无简报时不显示卡片：任务启动按钮就是「Cindy 先澄清再规划」的唯一入口。
+  if (state.status === "none") return null;
 
   const active = state.status === "in_progress" || state.status === "stale";
   const openQuestions = state.brief?.open_questions ?? [];
@@ -209,16 +210,7 @@ export function IntentBriefCard({
         )}
       </div>
 
-      {state.status === "none" && (
-        <p className="muted">
-          Cindy 会在首次规划前先澄清需求、确认任务简报与投入强度。
-          跳过则直接按当前任务描述规划。
-        </p>
-      )}
-
-      {state.status !== "none" && (
-        <BriefSummary brief={state.brief} weight={weight} planShape={planShape} />
-      )}
+      <BriefSummary brief={state.brief} weight={weight} planShape={planShape} />
 
       {openQuestions.length > 0 && (
         <ul className="ibc-open">
@@ -317,13 +309,7 @@ export function IntentBriefCard({
 
       {state.status === "skipped" && state.can_start && (
         <div className="toolbar">
-          <button className="small" disabled={busy} onClick={start}>开始澄清</button>
-        </div>
-      )}
-
-      {state.status === "none" && state.can_start && (
-        <div className="toolbar">
-          <button className="primary" disabled={busy} onClick={start}>开始澄清</button>
+          <button className="small" disabled={busy} onClick={start}>重新澄清</button>
         </div>
       )}
 

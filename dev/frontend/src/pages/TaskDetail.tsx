@@ -1191,19 +1191,21 @@ export function TaskDetail({ id }: { id: string }) {
                               : "已有待审工作流草案，请到收件箱审阅批准。")
                           : "已直接启动参与角色执行。");
                 })}
-              >{(task.assignees?.length ?? 0) === 0
-                  ? "启动（Cindy 分析并建议角色）"
-                  : (task.assignees?.length ?? 0) >= 2
-                    ? (clarification?.status === "none"
-                        ? "启动（Cindy 先澄清）"
-                        : "启动（先由 Cindy 规划）")
-                    : task.plan_first
-                      ? "启动（先规划工作流）"
-                      : (!task.knowledge_binding_locked
-                          && ["needs_cindy", "suggested", "fallback"].includes(
-                            task.knowledge_binding_state ?? ""))
-                        ? "启动（Cindy 识别知识仓库）"
-                        : "启动并执行"}</button>
+              >{clarification?.status === "none" && clarification?.can_start
+                  ? "启动（Cindy 先澄清）"
+                  : (task.assignees?.length ?? 0) === 0
+                    ? "启动（Cindy 分析并建议角色）"
+                    : (task.assignees?.length ?? 0) >= 2
+                      ? (clarification?.status === "skipped"
+                          ? "启动（直接规划）"
+                          : "启动（先由 Cindy 规划）")
+                      : task.plan_first
+                        ? "启动（先规划工作流）"
+                        : (!task.knowledge_binding_locked
+                            && ["needs_cindy", "suggested", "fallback"].includes(
+                              task.knowledge_binding_state ?? ""))
+                          ? "启动（Cindy 识别知识仓库）"
+                          : "启动并执行"}</button>
             )}
             {task.status === "in_progress" && (
               <>

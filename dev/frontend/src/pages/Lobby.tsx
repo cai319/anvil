@@ -467,9 +467,11 @@ export function Lobby() {
                             ? "先由 Cindy 澄清需求并规划工作流，批准后按依赖执行"
                             : "直接启动该角色执行"}
                         >{t.assignees.length >= 2
-                            ? (["confirmed", "skipped"].includes(t.clarification_status)
+                            ? (t.clarification_status === "confirmed"
                                 ? "启动（Cindy 规划）"
-                                : "启动（Cindy 澄清）")
+                                : t.clarification_status === "skipped"
+                                  ? "启动（直接规划）"
+                                  : "启动（Cindy 澄清）")
                             : "启动并执行"}</button>
                       </div>
                     )}
