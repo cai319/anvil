@@ -447,3 +447,9 @@ def test_thinking_stops_when_waiting_for_human(conn, tmp_path):
     state = clarification.get_state(conn, "T1")
     assert state["waiting_for_human"] is True
     assert state["thinking"] is False
+
+
+def test_clarify_protocol_has_structured_questions():
+    from anvil.graph import render
+    assert "anvil-questions" in render.CLARIFY_PROTOCOL
+    assert '"recommend"' in render.CLARIFY_PROTOCOL

@@ -86,6 +86,7 @@ export function IntentBriefCard({
   const [weight, setWeight] = useState<WorkflowWeight>("standard");
   const [planShape, setPlanShape] = useState<ClarificationPlanShape>("auto");
   const [ackOpen, setAckOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const weightTouched = useRef(false);
@@ -99,6 +100,11 @@ export function IntentBriefCard({
     setEditing(false);
     setError(null);
   }, [state?.task_id, state?.status, state?.brief_version]);
+
+  // 换任务或状态变化时回到紧凑栏；用户主动展开/编辑才占用会话高度。
+  useEffect(() => {
+    setExpanded(false);
+  }, [state?.task_id, state?.status]);
 
   // 用户改过的强度/形态不能被 Cindy 的简报更新重置；只有切换任务/状态时才重新同步。
   useEffect(() => {
@@ -196,20 +202,23 @@ export function IntentBriefCard({
 
   return (
     <section className={`intent-brief-card is-${state.status}`}>
-      <div className="ibc-head">
-        <strong>任务简报</strong>
-        <span className="badge">{STATUS_LABEL[state.status] ?? state.status}</span>
-        {state.status === "in_progress" && (
-          <span className="muted"
-            title={`${state.max_rounds} 轮是软上限，不是固定议程：每轮最多 3 个问题；`
-              + "简报足够完整会提前结束；最后一轮只收束、不再开新问题。"}>
-            第 {Math.max(1, state.round)} 轮（上限 {state.max_rounds}）
-          </span>
-        )}
-        {state.status === "stale" && (
-          <span className="ibc-warn">{state.stale_reason || "任务定义已变更"}</span>
-        )}
-        <span className="ibc-head-right">
+      <div className="ibc-bar">
+        <div className="ibc-bar-main">
+          <strong>任务简报</strong>
+          <span className="badge">{STATUS_LABEL[state.status] ?? state.status}</span>
+          {state.status === "in_progress" && (
+            <span className="muted"
+              title={`${state.max_rounds} 轮是软上限，不是固定议程：每轮最多 3 个问题；`
+                + "简报足够完整会提前结束；最后一轮只收束、不再开新问题。"}>
+              第 {Math.max(1, state.round)} 轮（上限 {state.max_rounds}）
+            </span>
+          )}
+          {state.status === "stale" && (
+            <span className="ibc-warn">{state.stale_reason || "任务定义已变更"}</span>
+          )}
+          {active && openQuestions.length > 0 && !ackOpen && (
+            <span className="ibc-warn-dot" title="有开放问题需展开简报接受" />
+          )}
           {thinking && (
             <span className="ibc-thinking" title="Cindy 正在思考"
               aria-label="Cindy 正在思考">
@@ -217,105 +226,131 @@ export function IntentBriefCard({
             </span>
           )}
           {state.brief_version > 0 && (
-            <span className="muted">v{state.brief_version}</span>
+            <span className="muted ibc-version">v{state.brief_version}</span>
           )}
-        </span>
-      </div>
+        </div>
 
-      <div className="ibc-body">
-        <BriefSummary brief={state.brief} weight={weight} planShape={planShape} />
-
-        {openQuestions.length > 0 && (
-          <ul className="ibc-open">
-            {openQuestions.map((q, i) => <li key={i}>{q}</li>)}
-          </ul>
+        {(active || state.status === "confirmed") && (
+          <div className="ibc-bar-options">
+            {active ? (
+              <>
+                <label className="field-inline" title="流程强度">
+                  强度
+                  <select className="ibc-control" value={weight} disabled={busy}
+                    onChange={(e) => {
+                      weightTouched.current = true;
+                      setWeight(e.target.value as WorkflowWeight);
+                    }}>
+                    <option value="light">轻量</option>
+                    <option value="standard">标准</option>
+                    <option value="strict">严格</option>
+                  </select>
+                </label>
+                <label className="field-inline" title="计划形态">
+                  形态
+                  <select className="ibc-control" value={planShape} disabled={busy}
+                    onChange={(e) => {
+                      shapeTouched.current = true;
+                      setPlanShape(e.target.value as ClarificationPlanShape);
+                    }}>
+                    <option value="auto">自动判断</option>
+                    <option value="flat">扁平静态步骤</option>
+                    <option value="slices">切片 + 闭环</option>
+                  </select>
+                </label>
+              </>
+            ) : (
+              <>
+                <span className="muted">强度 {WEIGHT_LABEL[weight]}</span>
+                <span className="muted">形态 {SHAPE_LABEL[planShape]}</span>
+              </>
+            )}
+          </div>
         )}
 
-        {active && openQuestions.length > 0 && (
-          <label className="checkline ibc-ack">
-            <input type="checkbox" checked={ackOpen} disabled={busy}
-              onChange={(e) => setAckOpen(e.target.checked)} />
-            我已接受这些开放问题
-          </label>
-        )}
-
-        {editing && (active || state.status === "confirmed") && (
-          <textarea className="ibc-editor mono" value={draftText} disabled={busy}
-            onChange={(e) => setDraftText(e.target.value)} rows={12} />
-        )}
-      </div>
-
-      {active && (
-        <div className="ibc-actions">
-          <label className="field-inline">
-            流程强度
-            <select className="ibc-control" value={weight} disabled={busy}
-              onChange={(e) => {
-                weightTouched.current = true;
-                setWeight(e.target.value as WorkflowWeight);
-              }}>
-              <option value="light">轻量</option>
-              <option value="standard">标准</option>
-              <option value="strict">严格</option>
-            </select>
-          </label>
-          <label className="field-inline">
-            计划形态
-            <select className="ibc-control" value={planShape} disabled={busy}
-              onChange={(e) => {
-                shapeTouched.current = true;
-                setPlanShape(e.target.value as ClarificationPlanShape);
-              }}>
-              <option value="auto">自动判断</option>
-              <option value="flat">扁平静态步骤</option>
-              <option value="slices">切片 + 闭环</option>
-            </select>
-          </label>
+        <div className="ibc-bar-actions">
           <button className="small ibc-control" disabled={busy}
-            onClick={() => setEditing((v) => !v)}>
-            {editing ? "收起编辑" : "编辑简报"}
+            onClick={() => setExpanded((v) => {
+              const next = !v;
+              if (!next) setEditing(false);
+              return next;
+            })}>
+            {expanded ? "收起" : "展开"}
           </button>
-          {state.status === "in_progress" && editing && (
-            <button className="small ibc-control" disabled={busy} onClick={saveDraft}>
-              保存草稿
+
+          {active && (
+            <>
+              <button className="small ibc-control" disabled={busy}
+                onClick={() => { setExpanded(true); setEditing((v) => !v); }}>
+                {editing ? "完成编辑" : "编辑"}
+              </button>
+              {state.status === "in_progress" && editing && (
+                <button className="small ibc-control" disabled={busy} onClick={saveDraft}>
+                  保存草稿
+                </button>
+              )}
+              <button className="primary ibc-control" disabled={busy
+                || (!state.ready && !editing)
+                || (openQuestions.length > 0 && !ackOpen)} onClick={confirm}
+                title={openQuestions.length > 0 && !ackOpen
+                  ? "请展开简报并接受开放问题后再确认"
+                  : undefined}>
+                确认规划
+              </button>
+              <button className="small danger ibc-control" disabled={busy} onClick={skip}
+                title="不等 Cindy 继续提问，不生成任务简报，直接启动 planner 规划工作流">
+                直接规划
+              </button>
+            </>
+          )}
+
+          {state.status === "confirmed" && (
+            state.can_edit ? (
+              <>
+                <button className="small ibc-control" disabled={busy}
+                  onClick={() => { setExpanded(true); setEditing((v) => !v); }}>
+                  {editing ? "完成编辑" : "编辑"}
+                </button>
+                {editing && (
+                  <button className="small primary ibc-control" disabled={busy}
+                    onClick={saveConfirmed}>保存修改</button>
+                )}
+              </>
+            ) : (
+              <span className="muted ibc-note">Cindy 正在规划工作流…</span>
+            )
+          )}
+
+          {state.status === "skipped" && state.can_start && (
+            <button className="small ibc-control" disabled={busy} onClick={start}>
+              重新澄清
             </button>
           )}
-          <button className="primary ibc-control" disabled={busy
-            || (!state.ready && !editing)
-            || (openQuestions.length > 0 && !ackOpen)} onClick={confirm}>
-            确认开始规划
-          </button>
-          <button className="small danger ibc-control" disabled={busy} onClick={skip}
-            title="不等 Cindy 继续提问，不生成任务简报，直接启动 planner 规划工作流">
-            不等澄清，直接规划
-          </button>
         </div>
-      )}
+      </div>
 
-      {state.status === "confirmed" && (
-        <div className="ibc-actions">
-          {state.can_edit ? (
-            <button className="small ibc-control" disabled={busy}
-              onClick={() => setEditing((v) => !v)}>
-              {editing ? "收起编辑" : "编辑简报"}
-            </button>
-          ) : (
-            <span className="muted ibc-note">
-              Cindy 正在规划工作流；完成或终止规划后可编辑简报。
-            </span>
-          )}
-          {editing && state.can_edit && (
-            <button className="small primary ibc-control" disabled={busy}
-              onClick={saveConfirmed}>保存修改</button>
-          )}
-        </div>
-      )}
+      {expanded && (
+        <div className="ibc-body">
+          <BriefSummary brief={state.brief} weight={weight} planShape={planShape} />
 
-      {state.status === "skipped" && state.can_start && (
-        <div className="ibc-actions">
-          <button className="small ibc-control" disabled={busy} onClick={start}>
-            重新澄清
-          </button>
+          {openQuestions.length > 0 && (
+            <ul className="ibc-open">
+              {openQuestions.map((q, i) => <li key={i}>{q}</li>)}
+            </ul>
+          )}
+
+          {active && openQuestions.length > 0 && (
+            <label className="checkline ibc-ack">
+              <input type="checkbox" checked={ackOpen} disabled={busy}
+                onChange={(e) => setAckOpen(e.target.checked)} />
+              我已接受这些开放问题
+            </label>
+          )}
+
+          {editing && (active || state.status === "confirmed") && (
+            <textarea className="ibc-editor mono" value={draftText} disabled={busy}
+              onChange={(e) => setDraftText(e.target.value)} rows={12} />
+          )}
         </div>
       )}
 

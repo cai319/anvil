@@ -2020,3 +2020,124 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
 .ibc-actions button.ibc-control {
   min-height: 32px;
 }
+.ibc-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ibc-bar-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.ibc-bar-options {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ibc-bar-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ibc-bar .field-inline {
+  height: 32px;
+  white-space: nowrap;
+}
+.ibc-bar select.ibc-control,
+.ibc-bar button.ibc-control {
+  height: 32px;
+  min-height: 32px;
+  box-sizing: border-box;
+  line-height: 1.2;
+}
+.ibc-warn-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--amber);
+  display: inline-block;
+  flex: 0 0 auto;
+}
+.ibc-body {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+/* 会话内澄清问题控件（Cindy 消息里的 A/B/C 选项） */
+.clarify-questions {
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface, var(--bg-soft));
+  color: var(--text);
+  padding: 8px 10px;
+}
+.cq-head {
+  font-weight: 600;
+  font-size: var(--fs-hint);
+  margin-bottom: 6px;
+}
+.cq-question + .cq-question {
+  margin-top: 8px;
+}
+.cq-text {
+  font-size: var(--fs-hint);
+  margin-bottom: 4px;
+}
+.cq-options {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.cq-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-soft);
+  color: var(--text);
+  padding: 4px 10px;
+  font-size: var(--fs-hint);
+  cursor: pointer;
+}
+.cq-option strong {
+  color: var(--accent);
+}
+.cq-option.is-rec {
+  border-color: var(--amber);
+}
+.cq-option.is-active {
+  background: var(--accent);
+  color: var(--ink-900);
+}
+.cq-option.is-active strong {
+  color: var(--ink-900);
+}
+.cq-rec {
+  font-style: normal;
+  font-size: 10px;
+  color: var(--amber);
+}
+.cq-option.is-active .cq-rec {
+  color: var(--ink-900);
+}
+.cq-why {
+  margin-top: 4px;
+  font-size: var(--fs-hint);
+  color: var(--muted);
+}
+.cq-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}

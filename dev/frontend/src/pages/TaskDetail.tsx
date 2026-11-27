@@ -15,6 +15,7 @@ import { SubtasksPanel } from "../components/SubtasksPanel";
 import { WorkflowSummary } from "../components/WorkflowSummary";
 import { WorkflowWeightDialog } from "../components/WorkflowWeightDialog";
 import { IntentBriefCard } from "../components/IntentBriefCard";
+import { ClarifyQuestions, parseClarifyQuestions } from "../components/ClarifyQuestions";
 import { DraftParticipants } from "../components/DraftParticipants";
 import {
   ChannelKnowledgePanel, KNOWLEDGE_MODE_LABEL, KnowledgeRepoPanel,
@@ -1393,6 +1394,7 @@ export function TaskDetail({ id }: { id: string }) {
             )}
             {visibleTimeline.map((ev) => {
               const d = describe(ev, displayNameFor);
+              const clarifyParsed = d.mention ? parseClarifyQuestions(d.text) : null;
               const p = ev.payload as Record<string, unknown>;
               const noteBody = ev.kind === "comment" ? String(p.body ?? "") : "";
               const noteAuthor = typeof p.author === "string" && p.author ? p.author : null;
@@ -1401,6 +1403,9 @@ export function TaskDetail({ id }: { id: string }) {
                 && (noteAuthor !== null || noteBody.startsWith("系统备注"));
               const noteStep = typeof p.for_step === "string" ? p.for_step : null;
               const role = ev.role ?? (isSystemNote ? "system" : "human");
+              const showClarify = Boolean(
+                clarifyParsed && clarifyParsed.questions.length > 0
+                && (role === "cindy" || role === (task?.planner || "cindy")));
               const isHuman = role === "human";
               const systemLabel = SYSTEM_SENDERS[role];
               // 聊天框用户名显示昵称；后台仍保留 slug 作为身份。
@@ -1475,12 +1480,21 @@ export function TaskDetail({ id }: { id: string }) {
                           <span className="mention-tag">
                             @{displayNameFor(d.mention)}
                           </span>{" "}
-                          {renderMentionText(d.text, roleTokens)}
+                          {renderMentionText(
+                            clarifyParsed ? clarifyParsed.text : d.text, roleTokens)}
                         </>
                       ) : (
                         renderMentionText(noteText, roleTokens)
                       )}
                     </div>
+                    {showClarify && clarifyParsed && (
+                      <ClarifyQuestions
+                        taskId={id}
+                        planner={task?.planner || "cindy"}
+                        questions={clarifyParsed.questions}
+                        onAnswered={() => { void refresh(); }}
+                      />
+                    )}
                   </div>
                 </div>
               );

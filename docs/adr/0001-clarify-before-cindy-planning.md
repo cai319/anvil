@@ -44,6 +44,9 @@ dispatch → planner run → workflow draft → human approve → workflow
    自行给角色勾选 skill。
 7. **确认权**：系统没有人类身份表，human 是单一共享 token 主体；任何 human
    token 持有者都可回答与确认，确认记录进版本表；冲突必须显式裁决。
+8. **结构化问题控件**：Cindy 在 @human 消息末尾附 `anvil-questions` JSON 块；
+   前端解析并渲染 A/B/C 选项、推荐与「发送回答给 Cindy」一键回复；原始 JSON
+   隐藏，无块/解析失败回退普通消息。问题不新增持久实体，仍以消息为载体。
 
 ## Consequences
 
