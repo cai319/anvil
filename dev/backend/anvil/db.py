@@ -1349,6 +1349,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_knowledge_completion_v1(conn)
     _migrate_rsi_v150(conn)
     _migrate_clarification_v1(conn)
+    _migrate_lobby_indexes_v1(conn)
     conn.commit()
 
 
@@ -2973,6 +2974,16 @@ def _migrate_rsi_v150(conn: sqlite3.Connection) -> None:
     _add_column(conn, "notes", "source_cycle_id TEXT")
     _add_column(conn, "notes", "source_role_version INTEGER")
     _add_column(conn, "notes", "last_modified_by TEXT")
+
+
+def _migrate_lobby_indexes_v1(conn: sqlite3.Connection) -> None:
+    """任务大厅热路径索引：每任务最新 workflow / 每角色最新 run（幂等）。"""
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_workflows_task_created "
+        "ON workflows(task_id, created_at DESC)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runs_task_role_started "
+        "ON runs(task_id, role_slug, started_at DESC)")
 
 
 def _migrate_clarification_v1(conn: sqlite3.Connection) -> None:

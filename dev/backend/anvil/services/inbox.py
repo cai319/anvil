@@ -87,38 +87,48 @@ def _delegations(conn: sqlite3.Connection) -> list[dict]:
 
 
 def _mentions(conn: sqlite3.Connection) -> list[dict]:
-    """@human 提及：每任务取最新一条；其后有评论/评审（已回应）则视为已处理。"""
+    """@human 提及：按 (任务, 发送角色) 各取最新一条。
+
+    scheduler 判断 HITL 等待时，只把该角色最后一条 @human 之后的人类动作
+    视为回应；收件箱沿用同一口径。不同角色可能各自在等人类，不能被同任务
+    的其他角色提醒覆盖。
+    """
     rows = conn.execute(
-        """SELECT a.id AS aid, a.task_id, a.role_slug, a.payload_json, a.created_at, t.title
+        """SELECT a.id AS aid, a.task_id, a.role_slug, a.payload_json, a.created_at,
+                  t.title, t.status AS task_status, t.archived_at,
+                  t.clarification_status, t.clarification_confirmed_at
              FROM activities a JOIN tasks t ON t.id = a.task_id
             WHERE a.kind='mention' AND json_extract(a.payload_json, '$.target')='human'
             ORDER BY a.id"""
     ).fetchall()
-    latest: dict[str, sqlite3.Row] = {}
+    latest: dict[tuple[str, str], sqlite3.Row] = {}
     for r in rows:
-        latest[r["task_id"]] = r  # 同任务后一条覆盖前一条
+        latest[(r["task_id"], r["role_slug"] or "")] = r
     out = []
-    for tid, r in latest.items():
+    for (tid, _sender), r in latest.items():
+        # 只有 role_slug='human' 的活动才算人类回应；agent/system/workflow
+        # 的评论不能替人类清掉待办。
         handled = conn.execute(
-            "SELECT 1 FROM activities WHERE task_id=? AND id>? AND ("
-            "kind IN ('comment','review') OR (kind='mention' AND role_slug='human')) "
-            "LIMIT 1",
+            "SELECT 1 FROM activities WHERE task_id=? AND id>? "
+            "AND role_slug='human' LIMIT 1",
             (tid, r["aid"]),
         ).fetchone()
-        # 工作流草案在该提及之后被批准 → 也算已回应（Cindy 的「请审阅批准」不应长期滞留）
+        # board draft 被批准/驳回 → 草案对应的审批提醒已处理。
         approved = conn.execute(
-            "SELECT 1 FROM board_drafts WHERE source_task=? AND status='approved' "
+            "SELECT 1 FROM board_drafts WHERE source_task=? "
+            "AND status IN ('approved','rejected') "
             "AND decided_at IS NOT NULL AND decided_at > ? LIMIT 1",
             (tid, r["created_at"]),
         ).fetchone()
         if handled or approved:
             continue
-        # A done task has no agent waiting for a human reply. Info-only mentions
-        # (e.g. "planning complete, no further workflow changes") stay in the
-        # timeline but must not linger in the actionable inbox.
-        task_status = conn.execute(
-            "SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
-        if task_status and task_status["status"] == "done":
+        # 终态/归档任务没有 agent 在等人类回复。
+        if r["task_status"] in ("done", "closed") or r["archived_at"]:
+            continue
+        # 人类确认/跳过简报/编辑简报后，早于该动作的澄清提醒不再需要处理；
+        # 晚于 clarification_confirmed_at 的新 mention 仍然保留。
+        confirmed_at = r["clarification_confirmed_at"]
+        if confirmed_at and str(confirmed_at) > str(r["created_at"]):
             continue
         p = jloads(r["payload_json"], {})
         msg = str(p.get("message", ""))
@@ -137,8 +147,7 @@ def _mentions(conn: sqlite3.Connection) -> list[dict]:
             if st and st["status"] != "failed":
                 continue  # 已 retry/重新决策，升级提醒不再滞留
         if r["role_slug"] == "workflow" and "工作流全部步骤完成" in msg:
-            tst = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
-            if tst and tst["status"] in ("in_review", "done"):
+            if r["task_status"] in ("in_review", "done"):
                 continue
         if p.get("event") == "step_failed" or "执行失败" in msg:
             if p.get("event") == "step_failed":
@@ -159,14 +168,25 @@ def _mentions(conn: sqlite3.Connection) -> list[dict]:
         sender = r["role_slug"] or "human"
         is_system = sender in SYSTEM_SENDERS
         who = SYSTEM_SENDERS.get(sender, sender)
-        out.append({
+        needs_brief_confirm = (
+            r["clarification_status"] == "in_progress"
+            and "简报卡" in msg
+            and ("确认" in msg or "跳过" in msg)
+        )
+        detail = ("系统通知，请处理" if is_system
+                  else "请在任务简报卡确认或跳过" if needs_brief_confirm
+                  else "需要你回复后 agent 才继续")
+        meta = {"action_hint": "confirm_brief"} if needs_brief_confirm else None
+        item = {
             "id": f"mention:{tid}:{r['aid']}", "kind": "mention",
             "title": f"{who}：{p.get('message', '')}",
-            "detail": "系统通知，请处理" if is_system
-            else "需要你回复后 agent 才继续",
+            "detail": detail,
             "task_id": tid,
             "created_at": r["created_at"],
-        })
+        }
+        if meta:
+            item["meta"] = meta
+        out.append(item)
     return out
 
 
@@ -201,22 +221,46 @@ def _drafts(conn: sqlite3.Connection) -> list[dict]:
             meta["running_workflow_id"] = running["id"] if running else None
             meta["running_execution_no"] = running["execution_no"] if running else None
         if kind == "role_suggestion":
+            from . import board as board_service
+            from . import roles as roles_service
             roles = tree.get("suggested_roles") or tree.get("roles") or []
             missing = tree.get("missing_capabilities") or []
-            detail = f"by {r['created_by']} · 建议 {len(roles)} 个角色"
+            mode = board_service.role_suggestion_apply_mode(tree)
+            requested = tree.get("requested_assignees") or [
+                x.get("slug") for x in roles if isinstance(x, dict) and x.get("slug")]
+            requested = [str(x) for x in requested if str(x).strip()]
+            bound = {x["role_slug"] for x in conn.execute(
+                "SELECT role_slug FROM task_assignees WHERE task_id=?",
+                (r["source_task"],))} if r["source_task"] else set()
+            running_id, running_roles = (board_service.running_workflow_roles(
+                conn, r["source_task"]) if r["source_task"] else (None, set()))
+            covered = set(requested) <= running_roles if running_id else None
+            if mode == board_service.ROLE_SUGGESTION_AUTHORIZE:
+                detail = (f"by {r['created_by']} · 授权制：请求 {len(requested)} 个角色"
+                          " · 批准后由规划者创建/绑定")
+                title = f"角色追加授权 — {r['goal']}"
+            else:
+                detail = f"by {r['created_by']} · 建议 {len(roles)} 个角色"
+                title = f"角色建议 — {r['goal']}"
             if missing:
                 detail += " · 缺失能力：" + "、".join(str(x) for x in missing[:6])
             meta.update({
                 "assessment": tree.get("assessment") or "",
                 "missing_capabilities": missing,
+                "apply_mode": mode,
+                "requested_assignees": requested,
+                "already_bound": [slug for slug in requested if slug in bound],
+                "covered_by_running_workflow": covered,
                 "suggested_roles": [
                     {"slug": x.get("slug"), "display_name": x.get("display_name"),
-                     "description": x.get("description")}
+                     "description": x.get("description"),
+                     "exists": roles_service.get(conn, str(x.get("slug") or "")) is not None,
+                     "bound": str(x.get("slug") or "") in bound}
                     for x in roles if isinstance(x, dict)
                 ],
             })
-            title = f"角色建议 — {r['goal']}"
         elif kind == "workflow_revision":
+            from . import board as board_service
             impact = tree.get("impact") or {}
             detail = f"by {r['created_by']} · {impact.get('summary') or '增量修订'}"
             meta["workflow_revision"] = {
@@ -224,11 +268,18 @@ def _drafts(conn: sqlite3.Connection) -> list[dict]:
                 "base_workflow_id": tree.get("base_workflow_id"),
                 "impact": impact,
             }
+            if r["source_task"]:
+                meta["role_suggestion_blockers"] = board_service.role_suggestion_blockers(
+                    conn, r["source_task"], include_unconsumed=False)
             title = f"工作流修订 — {r['goal']}"
         elif kind == "workflow":
+            from . import board as board_service
             n = len(tree.get("steps") or [])
             detail = f"by {r['created_by']} · {n} 个步骤 · 批准后按依赖自动派发"
             meta["step_count"] = n
+            if r["source_task"]:
+                meta["role_suggestion_blockers"] = board_service.role_suggestion_blockers(
+                    conn, r["source_task"], include_unconsumed=True)
             title = f"工作流草案 — {r['goal']}"
         else:
             n = len(tree.get("children") or [])

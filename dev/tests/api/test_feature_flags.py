@@ -63,3 +63,26 @@ def test_flag_override_persists_across_apply(tmp_path, monkeypatch):
         )["overridden"] is False
     finally:
         conn.close()
+
+
+async def test_toggling_back_to_default_clears_override(client):
+    """把开关切回默认值即恢复默认，不再保留“已覆盖”状态。"""
+    flags = (await client.get(f"{API}/features", headers=auth_headers())).json()["flags"]
+    capture = next(item for item in flags if item["key"] == "experience_capture")
+    assert capture["default"] is True
+    changed = await client.put(
+        f"{API}/features/experience_capture",
+        json={"value": False}, headers=human_headers())
+    assert changed.status_code == 200
+    assert changed.json()["overridden"] is True
+
+    restored = await client.put(
+        f"{API}/features/experience_capture",
+        json={"value": True}, headers=human_headers())
+    assert restored.status_code == 200
+    body = restored.json()
+    assert body["value"] is True
+    assert body["overridden"] is False
+    listed = (await client.get(f"{API}/features", headers=human_headers())).json()["flags"]
+    assert next(item for item in listed
+                if item["key"] == "experience_capture")["overridden"] is False

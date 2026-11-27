@@ -127,8 +127,12 @@ export function Lobby() {
   const panel = usePanelLayout({ storageKey: "lobby" });
   const now = useNow(30_000); // 运行时长按系统当前时间刷新
 
-  const runtimeByRole = new Map(roleRuntimes.map((rt) => [rt.role_slug, rt]));
-  const activeRoles = roles.filter((role) => !role.deleted);
+  const runtimeByRole = useMemo(
+    () => new Map(roleRuntimes.map((rt) => [rt.role_slug, rt])),
+    [roleRuntimes],
+  );
+  const activeRoles = useMemo(
+    () => roles.filter((role) => !role.deleted), [roles]);
   // 一个角色同一时刻只保留一个实时会话：优先当前上下文任务，其次最近创建的 run。
   // 已完成任务遗留的 suspended run 仍会留在数据库，但不再重复占据实时面板。
   const visibleRuns = useMemo(() => {
@@ -221,28 +225,38 @@ export function Lobby() {
 
   const refresh = async () => {
     try {
-      const [t, r, n, rt, cs] = await Promise.all([
+      // 先只拉任务卡必需的数据，任务一返回就渲染；角色运行时和逐任务状态
+      // 放到第二批异步补齐，避免它们拖慢首屏。
+      const [t, r, n, cs] = await Promise.all([
         api.listTasks(),
         api.listRoles({ includeDeleted: true }),
         api.listActiveRuns(),
-        api.listRoleRuntimes().catch(() => [] as RoleRuntimeStatus[]),
         api.listChannels().catch(() => [] as Channel[]),
       ]);
       setTasks(t);
       setRoles(r);
       const activeSlugs = new Set(r.filter((role) => !role.deleted).map((role) => role.slug));
       setRuns(n.filter((run) => activeSlugs.has(run.role_slug)));
-      setRoleRuntimes(rt);
       setChannels(cs);
       const ids = t.map((task) => task.id);
-      const [summaries, roleStateRes] = await Promise.all([
-        ids.length ? api.getTaskStatusSummaries(ids).catch(() => []) : Promise.resolve([]),
-        ids.length
-          ? api.getTaskRoleStatesBatch(ids).catch(() => ({ tasks: {} as Record<string, TaskRoleState[]> }))
-          : Promise.resolve({ tasks: {} as Record<string, TaskRoleState[]> }),
+      // 两个批量接口服务端上限都是 200；超过时分片并行取，避免 >200 条时
+      // role-states 返回 422 被静默吞掉、后面任务卡永远没有角色状态。
+      const chunks: string[][] = [];
+      for (let i = 0; i < ids.length; i += 200) chunks.push(ids.slice(i, i + 200));
+      const [summaryGroups, roleStateGroups, rt] = await Promise.all([
+        Promise.all(chunks.map((chunk) =>
+          api.getTaskStatusSummaries(chunk).catch(() => []))),
+        Promise.all(chunks.map((chunk) =>
+          api.getTaskRoleStatesBatch(chunk)
+            .catch(() => ({ tasks: {} as Record<string, TaskRoleState[]> })))),
+        api.listRoleRuntimes().catch(() => [] as RoleRuntimeStatus[]),
       ]);
+      const summaries = summaryGroups.flat();
+      const roleStateTasks: Record<string, TaskRoleState[]> = {};
+      for (const group of roleStateGroups) Object.assign(roleStateTasks, group.tasks);
+      setRoleRuntimes(rt);
       setTaskSummaries(new Map(summaries.map((s) => [s.task_id, s])));
-      setTaskRoleStates(new Map(Object.entries(roleStateRes.tasks).map(
+      setTaskRoleStates(new Map(Object.entries(roleStateTasks).map(
         ([tid, rows]) => [tid, Object.fromEntries(rows.map((row) => [row.role_slug, row]))],
       )));
     } catch (e) {
@@ -262,7 +276,8 @@ export function Lobby() {
 
   useLiveRefresh(refresh, {
     topics: ["task", "tick", "run"],
-    tickMinGapMs: 10_000,
+    minGapMs: 2_000,
+    tickMinGapMs: 15_000,
     pollMs: 30_000,
     initial: false,
     onEvent: (ev) => {
@@ -300,7 +315,16 @@ export function Lobby() {
 
   // 大厅固定展示全部未归档任务（归档由后端默认过滤）；频道内任务在频道页查看。
   // workflow 步骤不是 task，这里只展示高层任务。
-  const boardTasks = tasks.filter((t) => !t.parent_id);
+  const boardTasksByStatus = useMemo(() => {
+    const grouped: Record<Task["status"], Task[]> = {
+      todo: [], in_progress: [], in_review: [], done: [], closed: [],
+    };
+    for (const task of tasks) {
+      if (task.parent_id) continue;
+      grouped[task.status]?.push(task);
+    }
+    return grouped;
+  }, [tasks]);
   const channelName = (id?: string | null) => {
     if (!id) return "未归属频道";
     return channels.find((c) => c.id === id)?.name ?? id.slice(0, 8);
@@ -333,8 +357,8 @@ export function Lobby() {
           </>
         }
       />
-      <p className="muted" style={{ marginBottom: 12 }}>
-        全部未归档任务。选择参与成员后创建；多角色任务会先由 Cindy 规划工作流。
+      <p className="muted lobby-hint">
+        全部未归档任务；选择参与成员后创建，多角色任务先由 Cindy 规划。
       </p>
 
       {error && <p className="error">{error}</p>}
@@ -355,9 +379,9 @@ export function Lobby() {
               >
                 <h2>
                   {TASK_STATUS_META[status].label}
-                  <span className="n">{boardTasks.filter((t) => t.status === status).length}</span>
+                  <span className="n">{boardTasksByStatus[status].length}</span>
                 </h2>
-                {boardTasks.filter((t) => t.status === status).map((t) => {
+                {boardTasksByStatus[status].map((t) => {
                   const summary = taskSummaries.get(t.id);
                   return (
                   <div
@@ -484,7 +508,7 @@ export function Lobby() {
                   </div>
                   );
                 })}
-                {boardTasks.filter((t) => t.status === status).length === 0 && (
+                {boardTasksByStatus[status].length === 0 && (
                   <p className="muted kanban-empty">暂无任务</p>
                 )}
               </div>

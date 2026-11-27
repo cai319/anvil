@@ -10,6 +10,7 @@ Cindy 在首次规划前与 human 共同收敛出的结构化任务意图记录�
 非目标、约束、验收标准、假设、开放问题、流程强度与计划形态。DB 中是
 `tasks.intent_brief_json`，版本历史在 `task_brief_versions`；任务工作区投影为
 `.anvil/intent-brief.json` / `.md`。human 可编辑，确认后作为 planner 的唯一意图源。
+决策见本地 ADR-0001（`docs/adr/`，不随仓库发布）。
 
 避免说法：需求文档、PRD、任务描述（这些是输入，不是简报）。
 
@@ -28,8 +29,8 @@ Cindy 首次规划前的对话阶段，状态存于 `tasks.clarification_status`
 ### 澄清 run（Clarify Run）
 
 以 `[anvil:clarify]` 标记启动的 Cindy run，只负责提问、更新简报草稿、@human 挂起。
-不包含 `PLANNING_PROTOCOL`，不创建草案。每次 human 回复启动新一轮，轮次上限 6，
-第 6 轮起 `must_conclude=true`。
+不包含 `PLANNING_PROTOCOL`，不创建草案。每次 human 回复启动新一轮，**软上限 6 轮**，
+每轮 1–3 问；简报足够完整可提前收束，第 6 轮起 `must_conclude=true`。
 
 ### 首次规划阶段（First Planning Phase）
 
@@ -54,7 +55,8 @@ acceptance、base_branch），且任务尚未产生 workflow 时，`clarificatio
 执行严格度：`light | standard | strict`，中文展示为「轻量 / 标准 / 严格」。
 现有实现：`tasks.workflow_weight` 人工覆盖、Cindy 草案 `weight` + `weight_rationale`、
 `weights.resolve()` 优先级 human > Cindy > 启发式。澄清阶段确认后写入
-`workflow_weight`（source=human）；工作流页的调整入口降级为「高级 → 仅影响下一次执行」。
+`workflow_weight`（source=human）；工作流页的调整入口降级为「高级：调整流程强度」，
+只影响下一次执行。
 
 避免说法：投入档位（口语可用，但文档统一写流程强度）。
 
@@ -72,11 +74,40 @@ acceptance、base_branch），且任务尚未产生 workflow 时，`clarificatio
 `workflow` / `workflow_revision` 草案，并拒绝直接执行 run。保证未确认简报
 不可能产出 workflow。已有 workflow 的修订不受此门禁影响。
 
-### 已运行任务（Executed Task）
+### 角色建议（Role Suggestion）
 
-已经产生过任何 workflow、或已有执行 run、或状态非 `todo` 的任务。澄清子系统对
-这类任务完全惰性：不触发、不判 stale、不设门禁、不改变现有 dispatch / revision /
-re-plan 行为。
+planner/Cindy 在任务缺少能力时提交的 `role_suggestion` 草案。`apply_mode` 有两种：
+
+- `create_bind`（历史缺省也按此处理）：批准时创建缺失角色并绑定到任务；
+- `authorize`：批准只授权，由 planner 后续 `role expand` + `task assign` 创建/绑定。
+
+非法 `apply_mode` 返回 409。`create+bind` 视为 `create_bind` 的别名。
+
+### 角色门禁（Role Suggestion Gate）
+
+工作流审批前的角色约束：pending `role_suggestion` 会阻塞 workflow 与
+workflow_revision 审批；已批准但未消费的 `authorize` 建议还要求角色已创建并绑定，
+否则 workflow 审批保持锁定。`workflow_revision` 只受 pending 建议阻塞，避免修订
+引入新角色时死锁。
+
+### 收件箱 @human 生命周期（Human Mention Lifecycle）
+
+`@human` 提醒按 `(task_id, role_slug)` 各自保留最新一条；只有该提醒之后
+`role_slug=human` 的活动才算回应，agent/system/workflow 的评论不清除。简报确认/
+跳过、board 草案批准/驳回、任务关闭/归档，以及失败事件已解决时，对应提醒自动隐藏。
+
+## 界面与工具治理
+
+### 工具子页（Tooling Tabs）
+
+`/tooling` 的四个查询参数子页：`config`（工具配置，默认）、`import`（工具导入）、
+`flags`（功能开关）、`proposals`（运行时提案）。`?tab=` 记忆当前子页；旧
+`?rip=<id>` 兼容为 `proposals` 并选中提案。
+
+### 功能开关覆盖（Feature Override）
+
+功能开关的持久化覆盖存于 `settings`。把开关切回默认值会删除覆盖记录并返回
+`overridden=false`，界面恢复「默认开启/关闭」，不再显示「已覆盖」。
 
 ## 角色
 
@@ -92,4 +123,4 @@ Anvil 的内置 onboarding planner（slug `cindy`）。只规划、不实现；�
 `definition.runtime.effort`，展示为 低 / 中 / 高 / 最高。Cindy 默认 `max`，
 其他角色默认 `high`。Claude Code 通过 `--effort` 传入；不支持
 `thinking_effort` 能力的运行时忽略该值。入口：角色 → 运行时 → 思考强度。
-决策见 ADR-0002。
+决策见本地 ADR-0002（`docs/adr/`，不随仓库发布）。

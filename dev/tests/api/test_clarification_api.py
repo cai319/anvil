@@ -177,6 +177,43 @@ async def test_planner_agent_can_write_brief_draft(client, seeded, app):
     assert resp.json()["brief"]["goal"] == "实现登录"
 
 
+async def test_confirm_replaces_suspended_clarify_run(client, seeded, app):
+    """确认时必须放弃挂起的 clarify run，并创建真正的 planner run。"""
+    from anvil.db import open_conn
+
+    tid = await _create_task(client)
+    await _dispatch(client, tid)
+    conn = open_conn(app.state.db_path)
+    try:
+        conn.execute(
+            "UPDATE runs SET status='suspended' WHERE task_id=? AND "
+            "role_slug='cindy' AND origin='clarify'", (tid,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    await client.put(
+        f"{API}/tasks/{tid}/clarification/draft", headers=human_headers(),
+        json={"brief": _brief()})
+    confirmed = await client.post(
+        f"{API}/tasks/{tid}/clarification/confirm", headers=human_headers(),
+        json={})
+    assert confirmed.status_code == 200, confirmed.text
+    assert "[anvil:plan]" in confirmed.json()["run"]["prompt"]
+
+    conn = open_conn(app.state.db_path)
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT status, origin, prompt FROM runs WHERE task_id=? "
+            "AND role_slug='cindy' ORDER BY started_at", (tid,))]
+    finally:
+        conn.close()
+    clarify_rows = [r for r in rows if r["origin"] == "clarify"]
+    plan_rows = [r for r in rows if "[anvil:plan]" in (r["prompt"] or "")]
+    assert clarify_rows and all(r["status"] == "abandoned" for r in clarify_rows)
+    assert plan_rows
+
+
 async def test_confirmed_weight_normalizes_workflow_draft(client, seeded):
     tid = await _create_task(client)
     await _dispatch(client, tid)

@@ -300,6 +300,37 @@ def _brief_block(task: dict) -> str:
     return "\n".join(lines)
 
 
+def _role_authorization_block(conn: sqlite3.Connection, task_id: str,
+                               assignees: list[str]) -> str:
+    """human 已批准但尚未创建/绑定的角色追加授权（planner 的持久待办）。"""
+    try:
+        from . import board as board_service
+        approved = sorted(
+            board_service.authorized_assignee_additions(conn, task_id)
+            - set(assignees))
+    except Exception:  # noqa: BLE001 —— 授权块失败不应阻断规划
+        return ""
+    if not approved:
+        return ""
+    existing = [slug for slug in approved if roles_service.get(conn, slug) is not None]
+    missing = [slug for slug in approved if slug not in existing]
+    lines = [
+        "human 已批准以下角色追加授权，但角色尚未全部创建并绑定；这是本轮的硬约束：",
+        "- 批准角色：" + "、".join(approved),
+        "- 已存在待绑定：" + ("、".join(existing) or "无"),
+        "- 不存在待创建：" + ("、".join(missing) or "无"),
+        "规则：只创建批准清单中不存在的角色；把全部批准角色绑定到任务；"
+        "如果当前 running workflow 不覆盖这些角色，先说明需要 workflow 修订，"
+        "不要静默绑定没有步骤的参与者。已有 pending 工作流草案时不要重复提交。",
+    ]
+    pending = conn.execute(
+        "SELECT id FROM board_drafts WHERE source_task=? AND kind='workflow' "
+        "AND status='pending' ORDER BY created_at DESC LIMIT 1", (task_id,)).fetchone()
+    if pending:
+        lines.append(f"当前 pending 工作流草案：{pending['id']}；确认它覆盖上述角色。")
+    return "\n".join(lines)
+
+
 def start_planner_run(conn: sqlite3.Connection, db_path: str, orchestrator,
                       task_id: str, planner: str, assignees: list[str] | None = None,
                       extra_constraint: str = "",
@@ -332,7 +363,13 @@ def start_planner_run(conn: sqlite3.Connection, db_path: str, orchestrator,
     else:
         existing = runs_service.find_active_run(conn, task_id, planner, slice_key=None)
         if existing:
-            return existing
+            # clarify run 不是 planner run：确认后必须放弃它并真正创建规划 run，
+            # 否则会复用挂起的澄清会话，任务看起来“已确认但没有人在规划”。
+            if str(existing.get("origin") or "") == "clarify":
+                runs_service.set_status(
+                    conn, existing["id"], "abandoned", ended_at=now_iso())
+            else:
+                return existing
 
     roster = build_roster(conn, task_id, assignees)
     prompt = (
@@ -351,6 +388,9 @@ def start_planner_run(conn: sqlite3.Connection, db_path: str, orchestrator,
     brief_block = _brief_block(task)
     if brief_block:
         prompt += "\n\n## 已确认任务简报（必须遵守）\n" + brief_block
+    role_authorization = _role_authorization_block(conn, task_id, assignees)
+    if role_authorization:
+        prompt += "\n\n## 已批准但未完成的角色追加（必须处理）\n" + role_authorization
     try:
         from . import templates as template_service
         seed_block = template_service.render_seed_for_prompt(conn, task)

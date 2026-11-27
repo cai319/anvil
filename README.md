@@ -1,14 +1,14 @@
 # Anvil · 本地多 Agent 编排系统
 
-Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已安装的 CLI Agent（Claude Code、Codex CLI、Gemini CLI 等）抽象成长期存在的**角色**，由 Cindy 规划工作流，角色执行步骤，人类在关键节点审批。数据、记忆和日志都留在本机。
+Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已安装的 CLI Agent（Claude Code、Codex CLI、Gemini CLI 等）抽象成长期存在的**角色**；Cindy 先澄清意图、再规划工作流，角色执行步骤，人类在关键节点审批。数据、记忆和日志都留在本机。
 
 - **后端**：FastAPI + SQLite（WAL）+ 文件系统
 - **前端**：React + TypeScript + Vite
 - **Agent CLI**：`anvil`，Agent 在自己的工具循环里调用它上报状态
 - **地址**：`http://127.0.0.1:7317`（仅回环）
-- **当前版本**：v1.50.1（任务会话默认「对话」、面向自然人的沟通规范）
+- **当前版本**：v1.51.1（Cindy 规划前澄清、角色建议门禁、收件箱与工具治理改进）
 
-> 内部架构、设计与实现状态文档仅本地保留，不随仓库发布。
+> 内部架构、设计、ADR 与实现状态文档仅本地保留，不随仓库发布。
 
 ## 目录
 
@@ -25,10 +25,11 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 ## 1. 核心特性
 
 - **运行时发现**：内置 Claude Code / Codex CLI / Gemini CLI 定义，自动发现，也可用 YAML 扩展。
-- **角色**：独立私有 home（`instruction.md`、`PRINCIPLES.md`、`memory/cards/`、`notes/`、日志），绑定自己的运行时和技能/MCP。
+- **角色**：独立私有 home（`instruction.md`、`PRINCIPLES.md`、`memory/cards/`、`notes/`、日志），绑定自己的运行时和技能/MCP。角色级思考强度 `low | medium | high | max`：Cindy 默认 `max`，其他角色默认 `high`，通过 Claude Code `--effort` 注入。
 - **常驻会话**：每个角色一个长期存活的 CLI 进程；唤醒 = 投递消息；空闲 15 分钟退出，下次 `--resume` 恢复。
 - **上下文与模型窗口**：自动识别实际模型与窗口；支持 `model_pool` / 窗口下限；角色可自主重置上下文。
-- **任务与工作流**：任务板、认领/租约、多角色协作；Cindy 先规划 workflow，人类批准后按依赖执行。
+- **规划前澄清**：Cindy 首次规划前分轮提问（每轮 1–3 问，第 6 轮起收束），产出可确认的任务简报；未确认或过期时服务端拒绝 workflow / workflow_revision 草案。已有 workflow、已执行、非 `todo` 任务不进入澄清。
+- **任务与工作流**：任务板、认领/租约、多角色协作；Cindy 规划 workflow，人类批准后按依赖执行。角色建议必须先于 workflow 审批解决：pending 建议阻塞审批，`authorize` 建议批准后由 planner 创建/绑定角色，完成前审批保持锁定。
 - **切片闭环**：`plan_slices + loop`。Cindy 定义 loop 的角色/阶段；运行期切片只决定粒度与轮数，不能覆盖角色。
 - **记忆与知识**：`PRINCIPLES.md`（耐久准则）+ 角色经验卡 + FTS5 + 分层知识作用域
   （频道 / 主题知识库 / 任务级知识库 / 角色 / 共享）；知识卡模板、审批、版本、过期/复核/冲突检测；
@@ -47,7 +48,9 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
   共享经验、演化提案和总体效果评估；主题知识库页提供待审批队列、批量批准/拒绝、
   晋升/收割入口；具体知识条目显示单条命中次数/最近命中，评估页展示命中覆盖率、零命中、
   治理待处理与任务知识覆盖率。
-- **HITL**：评审、审批、删除、重置等只接受自然人身份，Agent 令牌返回 403。
+- **HITL 与收件箱**：评审、审批、删除、重置等只接受自然人身份，Agent 令牌返回 403。`@human` 提醒按 `(任务, 发送角色)` 各自保留最新一条，只有人类回复/审批才清除；简报确认、board 决策、任务关闭/归档后自动隐藏。
+- **工具治理**：`/tooling` 拆为「工具配置 / 工具导入 / 功能开关 / 运行时提案」四个子页；`?tab=` 记忆当前页，兼容旧 `?rip=` 深链；功能开关切回默认值会自动清除覆盖记录。
+- **大厅与界面**：任务大厅两阶段加载、批量 SQL、200 条分片、gzip 与 SSE 节流；控件密度收紧，新建任务为单列表单，字段说明使用即时 `?` 浮层。
 - **角色 RSI（自进化，默认关闭）**：任务完成写回执，角色在空闲窗口复盘并产出经验卡/
   候选；候选可走隐藏真实任务回放（held-in/held-out 配对统计、噪声门槛、
   `promote/reject/inconclusive`），只有人工批准才会成为 active 演进版本。版本 =
@@ -152,10 +155,15 @@ anvil init
    - **plan_first 或启用问题板**：无论角色数，先由 planner/Cindy 生成 workflow 草案；
    - **1 角色且非 plan_first**：直接唤醒执行；
    - **多角色**：Cindy 设计 workflow，草案进入收件箱；
-5. 人类在收件箱批准草案后，步骤按依赖自动执行；最终由人类评审。
+5. 首次由 Cindy 规划的任务会先进入**澄清**：Cindy 分轮提问，human 在任务会话顶部的
+   简报卡确认或跳过后，才创建 workflow 草案。`clarification_status=in_progress|stale`
+   时，workflow / workflow_revision 草案与直接执行 run 返回 409；
+6. 若出现角色建议，先在收件箱批准或驳回；存在 pending 角色建议时 workflow 审批被锁定。
+   `authorize` 建议批准后由 planner 创建/绑定角色，绑定完成后才放行；
+7. 人类批准 workflow 草案后，步骤按依赖自动执行；最终由人类评审。
 
-> 规划期间（Cindy 正在出草案或已有待审草案）不要直接「指派并执行」；等草案批准或驳回后再操作，
-> 否则会绕过 planner 已生成的 Roster/步骤设计。
+> 规划期间（Cindy 正在澄清、出草案或已有待审草案）不要直接「指派并执行」；等简报与草案
+> 批准或驳回后再操作，否则会绕过意图确认或 planner 已生成的 Roster/步骤设计。
 
 执行过程中，如果某个步骤需要另一个角色独立完成一块边界清晰的工作，可以创建**委派工单**
 （子任务）：必须挂在当前 step 下，写清目标/输入/输出/验收/scope/owner/TTL；目标角色忙时
@@ -168,6 +176,9 @@ anvil init
 ### 3.3 工作流与切片
 
 - Cindy 负责 workflow/loop 的**阶段、角色、顺序、决策与返工规则**；
+- 首次规划前先确认任务简报：目标、真实意图、非目标、约束、验收、假设、开放问题、
+  流程强度（`light | standard | strict`）与计划形态（`flat | slices | auto`）。
+  流程强度与计划形态在简报卡确认，影响本次 workflow；工作流页只保留「高级：调整流程强度」；
 - 大型任务用 `plan_slices + loop`：切片计划步骤只产出“这一片做什么、多少轮”，不写角色；
 - 任务绑定的**每个角色**都必须出现在静态步骤或 loop 阶段中；
 - 执行角色需要调整 loop 结构时，执行：
@@ -183,6 +194,13 @@ anvil init
 收件箱聚合：`in_review` 任务、`@human` 提及、待审 workflow/角色建议、gate 步骤、lesson/提案、操作卡片。
 
 所有审批必须由自然人完成；Agent 调用审批端点会被拒绝。
+
+同一任务多个角色各自 `@human` 时分别保留最新一条提醒；只有该提醒之后 `role_slug=human`
+的回复/审批才算回应，agent/system/workflow 的评论不会清除提醒。简报确认/跳过、board
+草案批准/驳回、任务关闭/归档后，对应提醒自动隐藏；简报更新会补发任务 SSE。
+
+角色建议必须先于 workflow 审批解决：pending 建议会阻塞审批；`authorize` 建议批准后
+planner 才创建/绑定角色，完成前 workflow 审批保持锁定。
 
 需要人类回复的系统通知（最终评审、决策重做耗尽、角色建议被拒）由 **Cindy、任务
 `planner` 字段所指的真实角色或任务 assignee** 发出，而不是 `workflow` 伪角色；任务会话
@@ -270,6 +288,7 @@ anvil inbox check $ANVIL_TASK_ID
 anvil inbox commit $ANVIL_TASK_ID --up-to <id>
 anvil task comment $ANVIL_TASK_ID "进展"          # 也可用 --message "进展"
 anvil task mention $ANVIL_TASK_ID --to <role> "请确认接口"  # 也可用 --message
+anvil task clarify $ANVIL_TASK_ID --file brief.json  # Cindy：更新规划前简报草稿
 anvil task submit $ANVIL_TASK_ID "完成摘要"
 anvil step submit <workflow-id> <step-id> --summary "步骤完成"
 anvil step plan <workflow-id> <plan-step-id> --file slices.json
@@ -345,7 +364,7 @@ anvil knowledge card-validate --file card.json --for-approval
   缺少边界会给出警告；质量分只用于排序，不替代人工。
 - **经验捕获**：完成/失败/返工/驳回自动生成结构化 `proposed` 草稿，缺项可见；
   不会自动批准。
-- **LLM 清洗**：默认关闭（工具页「LLM 知识清洗」）。开启后人工对单张 proposed 卡
+- **LLM 清洗**：默认关闭（工具治理 → 功能开关 →「LLM 知识清洗」）。开启后人工对单张 proposed 卡
   预览字段/正文 diff 与引用，确认后写回 proposed；不自动批准、不编造证据。
   CLI：`anvil knowledge quality`、`anvil knowledge clean`。
 - **反馈/复核**：`anvil knowledge feedback <card-id> --signal helpful|unhelpful`；
@@ -353,7 +372,7 @@ anvil knowledge card-validate --file card.json --for-approval
 
 ### 3.10 问题板外部提交
 
-- 在「工具」页配置问题跟踪服务器 base 地址（如 `http://host/api` 或
+- 在「工具治理 → 工具配置」配置问题跟踪服务器 base 地址（如 `http://host/api` 或
   `http://host:5000`），系统自动追加 `/draft/bulkCreate`；可保存并测试连通性，
   测试只验证接口可达，不创建草稿。
 - 提交/测试超时可用 `ANVIL_ISSUE_TRACKER_TIMEOUT`、`ANVIL_ISSUE_TRACKER_TEST_TIMEOUT`、
@@ -370,7 +389,7 @@ anvil knowledge card-validate --file card.json --for-approval
   `POST {server_url}/draft/bulkCreate`。
 - `description_md` 以外的字段在发送前会检查长度：超过配置值时通过默认 CLI
   运行时的 LLM 精简；LLM 不可用或返回非法结果时本地截断兜底，避免对端 DB
-  string 字段超限。该上限可在「工具」页「单字段最大字符数」调整（默认 512，
+  string 字段超限。该上限可在「工具治理 → 工具配置」的「单字段最大字符数」调整（默认 512，
   范围 64–4096）；`ANVIL_ISSUE_TRACKER_FIELD_MAX_CHARS` 提供环境默认值，
   `ANVIL_ISSUE_TRACKER_COMPACT_TIMEOUT` 控制 LLM 精简超时（默认 60 秒）。
 
@@ -422,12 +441,31 @@ anvil runtime export <RTP-id>
 ```
 
 运行时提案的 Markdown 生成在 `data/runtime-proposals/<id>/proposal.md`；可在「工具治理 →
-运行时提案」板查看、人工流转和导出。检测器 `runtime_proposal_detector` 默认关闭，
+运行时提案」子页查看、人工流转和导出。旧 `/tooling?rip=<id>` 链接仍兼容；Inbox 深链为
+`/tooling?tab=proposals&rip=<id>`。检测器 `runtime_proposal_detector` 默认关闭，
 开启后只建 draft/追加证据，不会自动改运行时。
 
 **注意**：隐藏回放评估 `role_rsi_evaluation` 默认关闭，因为它需要人工准备至少 8+8 条带
 确定性验收的真实任务，且每次评估会跑 baseline/candidate 两臂、消耗较多 token。
 数据不足时只会返回 `inconclusive`，不会为了有结论而晋级。
+
+### 3.12 工具治理
+
+`/tooling` 按查询参数分为四个子页，默认打开「工具配置」：
+
+| 子页 | `?tab=` | 内容 |
+|---|---|---|
+| 工具配置 | `config` | 问题跟踪服务器、单字段上限、只读工具预设、运行时入口 |
+| 工具导入 | `import` | 选择运行时，导入 Skill / MCP 目录或压缩包，覆盖确认与结果 |
+| 功能开关 | `flags` | 知识、上下文、任务隔离、工作流、协作、演化六组开关 |
+| 运行时提案 | `proposals` | RIP/RTP 队列、状态/严重度/组件筛选、Markdown、人工流转与导出 |
+
+- 子页切换使用 `history.replaceState`，不整页刷新；刷新后保持当前子页。
+- 旧 `/tooling?rip=<id>` 自动兼容为「运行时提案」子页并选中提案；标准深链为
+  `/tooling?tab=proposals&rip=<id>`。
+- 功能开关切换立即生效并持久化；把开关切回默认值会删除覆盖记录，界面恢复
+  「默认开启/关闭」而不是「已覆盖」。
+- 运行时提案只供人工流转和导出，不提供 apply 按钮；导出写入服务器文件，不下载到浏览器。
 
 ## 4. 配置
 
@@ -463,6 +501,7 @@ anvil runtime export <RTP-id>
 | `ANVIL_MODEL_CONTEXT_WINDOWS` | `{}` | 模型 id → 窗口 JSON，如 `{"deepseek-flash[1m]":1000000}` |
 | `ANVIL_CONTEXT_WINDOW_FLOOR` | `0` | 全局保守窗口下限 |
 | `ANVIL_ONBOARDING` | `1` | 多角色任务是否启用 Cindy 规划 |
+| `ANVIL_CINDY_CLARIFICATION` | `1` | Cindy 首次规划前是否进入澄清；关闭后直接规划 |
 | `ANVIL_AUTO_DISPATCH` | `0` | 是否自动派发 todo 任务 |
 | `ANVIL_ROLE_RSI` | `0` | 角色 RSI 总开关；开启后仍需角色 `definition.rsi.enabled=true` |
 | `ANVIL_ROLE_RSI_EVALUATION` | `0` | 隐藏回放评估 + 评估队列；需先准备 ≥8+8 真实任务 suite |
@@ -474,10 +513,14 @@ anvil runtime export <RTP-id>
 | `ANVIL_BACKUP` | `1` | 是否每天自动备份 SQLite |
 | `ANVIL_BACKUP_KEEP_DAYS` | `7` | 数据库备份保留天数 |
 
-### 4.1 运行时功能开关（工具页）
+### 4.1 工具治理 → 功能开关
 
-以下开关可在「工具」页直接切换，**无需重启**；修改会持久化到 `settings`，下次启动继续生效。
-环境变量只提供初始默认值，用户覆盖优先。
+功能开关共 **6 组 / 22 项**：知识、上下文、任务隔离、工作流、协作与派遣、角色演化 /
+运行时提案。以下为常用项，完整列表与关闭影响在「工具治理 → 功能开关」中查看。
+
+以下开关可直接切换，**无需重启**；修改会持久化到 `settings`，下次启动继续生效。
+环境变量只提供初始默认值，用户覆盖优先。把开关切回默认值会删除覆盖记录，
+界面恢复「默认开启/关闭」而不是「已覆盖」。
 
 | 开关 | 默认 | 作用 |
 |---|---|---|
@@ -489,10 +532,11 @@ anvil runtime export <RTP-id>
 | 延迟投影 | 开 | 持久会话在实际投递前才写 `CLAUDE.md`，避免跨任务覆盖 |
 | 任务独立工作空间 | 开 | 每个任务使用 `data/task-workspaces/<task-id>/`，隔离代码/产物/知识草稿 |
 | 工作空间自动清理 | 开 | 按保留天数清理已归档任务目录，active 任务不清理 |
+| Cindy 规划前澄清 | 开 | 首次规划前先澄清并确认任务简报；关闭后 Cindy 直接规划 |
 | LLM 知识清洗 | 关 | 人工按需预览/应用 proposed 卡的场景/效果/证据整理；不自动批准 |
 
 API：`GET /api/v1/features`、`PUT/DELETE /api/v1/features/{key}`（人工身份）。
-每个开关的完整说明和关闭影响在工具页悬停问号查看。
+提交值等于默认值时返回 `overridden=false`，并删除持久化覆盖。
 
 ### 4.2 运行日志
 
@@ -534,8 +578,9 @@ cd dev
 pytest tests/ -q
 ```
 
-当前基线：**1005 passed + 63 skipped**（CLI 契约需要 `ANVIL_BIN`，模型评测需要
-`ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。
+当前基线：**1265 passed + 63 skipped**（CLI 契约需要 `ANVIL_BIN`，模型评测需要
+`ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。v1.51.1 覆盖新增的澄清、角色思考强度、
+角色建议门禁、收件箱提醒生命周期、功能开关默认恢复、工具治理与大厅性能。
 
 CLI 契约测试需要安装 `anvil` 并指定可执行文件：
 
@@ -637,6 +682,9 @@ Remove-Item -Recurse -Force dev\dist, dev\build -ErrorAction SilentlyContinue
 | `anvil init` 提示后端未启动 | 先启动 `python run_server.py` |
 | 运行时 `missing` | 检查 CLI 是否在 PATH；Windows 优先原生 `.exe`；重新扫描运行时 |
 | 角色一直“等待授权” | 检查 `ANVIL_DEFAULT_PERMISSION_MODE` 与运行日志 |
+| 创建 workflow 草案 409 | Cindy 澄清未确认/已过期；在简报卡确认或跳过，或检查 `cindy_clarification` |
+| 审批 workflow 409 | 存在 pending 角色建议；先批准/驳回。`authorize` 建议还需 planner 完成角色创建/绑定 |
+| 角色 spawn 报 `--effort` 错误 | Claude Code 版本不支持该参数；升级运行时或暂时调低/移除角色思考强度 |
 | 401 | 检查人类 token：默认在 `data/auth-token`（或 `ANVIL_AUTH_TOKEN`）；Web 首次打开需粘贴该 token 完成配对，CLI 会自动读取同一文件 |
 | 403 | 该操作只接受自然人身份；Agent 改用 `mention --to human` 或 `action prepare` |
 | Agent 调不到 `anvil` | 后端与 CLI 装在同一个 venv；运行时允许 `Bash(anvil:*)` |
@@ -707,11 +755,14 @@ anvil init
 
 ## 9. 文档
 
-> 内部规划、设计、实现状态文档仅本地保留，不随仓库发布。v1.50 角色 RSI 的设计文档
-> 与 Spec 已在 `.gitignore` 中排除，仅保留本地版本；发布说明与 CLI 参考随仓库发布。
+> 内部规划、设计、ADR、实现状态与问题分析文档仅本地保留，不随仓库发布
+> （`.gitignore` 已排除 `docs/adr/`、`docs/superpowers/`、`docs/design/` 等）；
+> 发布说明、CLI 参考、GLOSSARY、运维、故障排查与问题板文档随仓库发布。
 
 - [docs/cli-reference.md](docs/cli-reference.md)：CLI 命令、参数、规则、错误处理与示例
+- [GLOSSARY.md](GLOSSARY.md)：领域术语（任务简报、澄清、角色建议门禁、思考强度等）
 - [dev/README.md](dev/README.md)：开发者入口（源码结构、本地开发与测试）
+- [docs/v1.51.1-release.md](docs/v1.51.1-release.md)：v1.51.1 Cindy 规划前澄清、角色思考强度、角色建议门禁、收件箱与工具治理
 - [docs/v1.50.1-release.md](docs/v1.50.1-release.md)：v1.50.1 任务会话默认「对话」、面向自然人的沟通规范
 - [docs/v1.50.0-release.md](docs/v1.50.0-release.md)：v1.50.0 角色 RSI、隐藏回放评估与运行时改进提案
 - [docs/issue-board.md](docs/issue-board.md)：问题板（安全 findings）字段、状态机与提交/确认流程

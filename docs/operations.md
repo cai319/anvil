@@ -1,6 +1,23 @@
 # 运维、打包与数据管理
 
-> 本文承接 README 的运维细节：打包、备份/迁移/重置、卸载与清理。
+> 本文承接 README 的运维细节：升级、打包、备份/迁移/重置、卸载与清理。
+
+## 升级到 v1.51.1
+
+源码安装（editable）：
+
+1. 停止后端并备份 `data/`；
+2. 在 `dev/.venv` 中重新执行 `pip install -r backend/requirements.txt` 与
+   `pip install -e agentcli`；
+3. 重启后端。`init_schema` 幂等补齐任务澄清字段、`task_brief_versions`、任务工作区投影，
+   以及大厅查询索引 `idx_workflows_task_created`、`idx_runs_task_role_started`；
+4. 重新构建前端：`cd frontend && npm run build`；
+5. 验证 `anvil --version` 为 `1.51.1`，`GET /api/v1/features` 包含
+   `cindy_clarification`；旧 `/tooling?rip=<id>` 深链仍可用。
+
+打包版需重新执行打包流程；打包前先更新 `dev/VERSION`，Vite 会把版本注入前端。
+角色无需迁移：Cindy 自动补齐 `effort=max`，其他角色默认 `high`；Claude Code 需支持
+`--effort`（2.1.332 已验证）。
 
 ## 打包为可执行程序
 
@@ -83,6 +100,7 @@ cd C:\path\to\aliceAgent\dev\dist\anvil-dist
 - `agents/`：角色身份、记忆、日志、产出；
 - `repos/`：共享 Git 仓库；
 - `anvil.db` / `anvil-graph.db`：状态与检查点；
+- `task-workspaces/`：任务隔离工作区与 `.anvil/intent-brief.json|md` 简报投影；
 - `backups/`：历史重置产生的备份。
 
 > **自动备份**：调度器每天做一次 SQLite 在线备份到
@@ -132,8 +150,9 @@ cd C:\path\to\aliceAgent\dev\dist\anvil-dist
 
 ## 卸载与清理资源
 
-> **警告**：删除数据目录不可恢复。执行前请先按第 12 节备份需要保留的角色 home、共享仓库
-> 与数据库。Anvil 不会自动删除你机器上的 Claude Code / Codex / Gemini 等运行时。
+> **警告**：删除数据目录不可恢复。执行前请先按「数据备份、迁移与重置」备份需要保留的
+> 角色 home、共享仓库与数据库。Anvil 不会自动删除你机器上的 Claude Code / Codex /
+> Gemini 等运行时。
 
 ### 停止服务与 Agent 进程
 

@@ -229,6 +229,16 @@ def assign_existing_roles(tid: str, body: dict, request: Request,
                            "human 反馈/批准后，重新执行 anvil task assign。",
             })
 
+    if added:
+        running_id, running_roles = services.board.running_workflow_roles(conn, tid)
+        uncovered = [slug for slug in added if slug not in running_roles]
+        if running_id and uncovered:
+            raise HTTPException(
+                status_code=409,
+                detail=(f"task has a running workflow ({running_id}) that does not "
+                        f"assign roles: {', '.join(uncovered)}. Submit a workflow "
+                        "revision that includes them and get it approved before binding; "
+                        "binding now would create participants with no steps."))
     try:
         result = (services.tasks.add_assignees(conn, tid, roles) if existing
                   else services.tasks.assign_roles(conn, tid, roles))
@@ -290,35 +300,66 @@ def task_status_summary(task_ids: str = Query(default=""), conn=Depends(get_db),
         ids = [tid for tid in ids if access.can_task_read(conn, auth, tid)]
     if not ids:
         return []
+    # 大厅一次性取所有任务的状态：原来逐任务调用 workflow.get_for_task()
+    # 再逐任务查 runs，任务多时是 O(N) 次查询。这里收敛为 3 条批量查询。
+    placeholders = ",".join("?" for _ in ids)
+    workflow_rows = conn.execute(
+        f"""SELECT id, task_id, status FROM (
+                SELECT id, task_id, status,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY task_id
+                           ORDER BY created_at DESC, rowid DESC) AS rn
+                FROM workflows
+                WHERE task_id IN ({placeholders})
+            ) WHERE rn=1""", ids,
+    ).fetchall()
+    workflow_by_task = {row["task_id"]: row for row in workflow_rows}
+    workflow_ids = [row["id"] for row in workflow_rows]
+    steps_by_workflow: dict[str, list[dict]] = {wid: [] for wid in workflow_ids}
+    if workflow_ids:
+        wf_placeholders = ",".join("?" for _ in workflow_ids)
+        for row in conn.execute(
+                f"SELECT workflow_id, step_id, role_slug, status, slice_key, "
+                f"recovery_count, next_retry_at FROM workflow_steps "
+                f"WHERE workflow_id IN ({wf_placeholders}) ORDER BY rowid",
+                workflow_ids,
+        ).fetchall():
+            steps_by_workflow[row["workflow_id"]].append({
+                key: row[key] for key in (
+                    "step_id", "role_slug", "status", "slice_key",
+                    "recovery_count", "next_retry_at")
+            })
+    run_rows = conn.execute(
+        f"""SELECT task_id, role_slug, status, started_at FROM (
+                SELECT task_id, role_slug, status, started_at,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY task_id, role_slug
+                           ORDER BY COALESCE(started_at,'') DESC, rowid DESC) AS rn
+                FROM runs
+                WHERE task_id IN ({placeholders}) AND role_slug IS NOT NULL
+            ) WHERE rn=1""", ids,
+    ).fetchall()
+    statuses_by_task: dict[str, dict[str, dict]] = {tid: {} for tid in ids}
+    for row in run_rows:
+        statuses_by_task[row["task_id"]][row["role_slug"]] = {
+            "status": row["status"],
+            "started_at": row["started_at"],
+        }
     out = []
     for tid in ids:
-        wf = services.workflow.get_for_task(conn, tid)
+        wf = workflow_by_task.get(tid)
         wf_summary = None
         if wf is not None:
             wf_summary = {
-                "id": wf.get("id"),
-                "status": wf.get("status"),
-                "steps": [
-                    {key: step.get(key) for key in (
-                        "step_id", "role_slug", "status", "slice_key",
-                        "recovery_count", "next_retry_at")}
-                    for step in (wf.get("steps") or [])
-                ],
+                "id": wf["id"],
+                "status": wf["status"],
+                "steps": steps_by_workflow.get(wf["id"], []),
             }
-        rows = conn.execute(
-            "SELECT role_slug, status, started_at FROM runs "
-            "WHERE task_id=? AND role_slug IS NOT NULL "
-            "ORDER BY COALESCE(started_at,'') DESC, rowid DESC", (tid,),
-        ).fetchall()
-        statuses: dict[str, dict] = {}
-        for row in rows:
-            role = row["role_slug"]
-            if role not in statuses:
-                statuses[role] = {
-                    "status": row["status"],
-                    "started_at": row["started_at"],
-                }
-        out.append({"task_id": tid, "workflow": wf_summary, "run_statuses": statuses})
+        out.append({
+            "task_id": tid,
+            "workflow": wf_summary,
+            "run_statuses": statuses_by_task.get(tid, {}),
+        })
     return out
 
 
@@ -333,11 +374,18 @@ def task_role_states_batch(task_ids: str = Query(...), conn=Depends(get_db),
     from ..services import role_state as role_state_service
 
     mgr = daemon_service.get_manager()
+    # 同一批任务共享角色运行时与上下文槽快照：原来每个 task×role 都会
+    # manager.status() + 查一次 role_task_sessions，任务多时是 O(N×R)。
+    runtime_cache: dict[str, dict] = {}
+    contexts_cache = role_state_service.preload_contexts(conn)
     tasks: dict[str, list[dict]] = {}
     for tid in ids:
         if not access.can_task_read(conn, auth, tid):
             continue
-        tasks[tid] = role_state_service.task_role_states(conn, tid, mgr)
+        tasks[tid] = role_state_service.task_role_states(
+            conn, tid, mgr,
+            runtime_cache=runtime_cache,
+            contexts_cache=contexts_cache)
     return {"tasks": tasks}
 
 
@@ -1669,7 +1717,8 @@ def confirm_clarification(tid: str, body: dict, request: Request,
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     run = _start_planner_run(
-        conn, request, tid, planner, _assignee_slugs(conn, tid))
+        conn, request, tid, planner, _assignee_slugs(conn, tid),
+        replace_active=True)
     return {"clarification": services.clarification.get_state(conn, tid),
             "run": run}
 
@@ -1690,7 +1739,8 @@ def skip_clarification(tid: str, request: Request, body: dict | None = None,
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     run = _start_planner_run(
-        conn, request, tid, planner, _assignee_slugs(conn, tid))
+        conn, request, tid, planner, _assignee_slugs(conn, tid),
+        replace_active=True)
     return {"clarification": services.clarification.get_state(conn, tid),
             "run": run}
 
@@ -1712,6 +1762,7 @@ def edit_clarification_brief(tid: str, body: dict, conn=Depends(get_db),
         raise HTTPException(status_code=409, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    events.publish("task", {"id": tid, "kind": "clarification_brief"})
     return state
 
 

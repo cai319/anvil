@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api, isOnboardingRole, type BoardDraft, type ClarificationState, type Delegation, type FindingSummary, type Role, type Run, type Task, type TaskChild, type TaskDispatch, type TaskLeases, type TaskRoleState, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate } from "../api/client";
 import { useLiveRefresh } from "../useLiveRefresh";
 import { UNBOUND_CHANNEL_VIEW } from "../channelView";
@@ -36,6 +36,19 @@ import { TaskFindingBoard } from "./TaskFindingBoard";
 const stepAuthority = (st: WorkflowStep): "ai" | "human" | "joint" =>
   st.decision_authority
   || (st.gate ? "human" : st.kind === "decision" ? "ai" : "human");
+
+function draftBlockerText(blockers: BoardDraft["role_suggestion_blockers"]): string {
+  if (!blockers?.length) return "";
+  return blockers.map((b) => {
+    if (b.reason === "pending_role_suggestion") {
+      return `先处理角色建议 ${b.draft_id}（${b.requested_assignees.join("、")}）`;
+    }
+    const missing = b.missing_roles?.length ? `未创建：${b.missing_roles.join("、")}` : "";
+    const unbound = b.unbound_roles?.length ? `未绑定：${b.unbound_roles.join("、")}` : "";
+    return `角色授权已批准，等待 ${b.planner || "planner"} 创建/绑定`
+      + (missing || unbound ? `（${[missing, unbound].filter(Boolean).join("；")}）` : "");
+  }).join("；");
+}
 
 // 系统伪发送者：workflow 引擎/系统通知不是真实 Agent 角色。
 const SYSTEM_SENDERS: Record<string, string> = {
@@ -226,6 +239,7 @@ export function TaskDetail({ id }: { id: string }) {
   const [dispatches, setDispatches] = useState<TaskDispatch[]>([]);
   const [children, setChildren] = useState<TaskChild[]>([]);
   const [plannerActive, setPlannerActive] = useState(false);
+  const [planningActive, setPlanningActive] = useState(false);
   const [runs, setRuns] = useState<Run[]>([]);
   const [wfView, setWfView] = useState<"graph" | "list">("graph");
   const [seedTemplates, setSeedTemplates] = useState<WorkflowTemplate[]>([]);
@@ -340,6 +354,13 @@ export function TaskDetail({ id }: { id: string }) {
         ]);
         const onboarding = new Set(roles.filter(isOnboardingRole).map((r) => r.slug));
         setPlannerActive(runs.some((r) => active.has(r.status)
+          && (r.role_slug === t.planner || r.role_slug === "cindy"
+            || onboarding.has(r.role_slug))));
+        // suspended 的 planner run 通常已经产出草案、在等人工审批；
+        // 不能继续把简报卡显示成「Cindy 正在规划」。
+        const planningNow = new Set(["created", "projecting", "running"]);
+        setPlanningActive(runs.some((r) => planningNow.has(r.status)
+          && r.origin !== "clarify"
           && (r.role_slug === t.planner || r.role_slug === "cindy"
             || onboarding.has(r.role_slug))));
         setGone(false);
@@ -529,6 +550,30 @@ export function TaskDetail({ id }: { id: string }) {
     return ev.kind === tlKind;
   });
   const visibleTimeline = filteredTimeline.slice(-tlLimit);
+  // 澄清问题卡是历史消息：刷新/重进后不能仅靠组件内 sent 状态锁定。
+  // 一条 Cindy 问题消息之后出现人类回复，视为该问题已回答；之后的新问题不受影响。
+  const answeredClarifyKeys = useMemo(() => {
+    const answered = new Set<string>();
+    const pending: string[] = [];
+    const planner = task?.planner || "cindy";
+    for (const ev of timeline) {
+      const payload = ev.payload as Record<string, unknown>;
+      const isCindy = ev.role === "cindy" || ev.role === planner;
+      if (ev.kind === "mention" && isCindy) {
+        const parsed = parseClarifyQuestions(String(payload.message ?? ""));
+        if (parsed.questions.length > 0) pending.push(ev.key);
+        continue;
+      }
+      const target = String(payload.target ?? "");
+      const isHumanReply = ev.role === "human" && ev.kind === "mention"
+        && (target === planner || target === "cindy");
+      if (isHumanReply) {
+        for (const key of pending) answered.add(key);
+        pending.length = 0;
+      }
+    }
+    return answered;
+  }, [timeline, task?.planner]);
 
   if (gone)
     return (
@@ -994,8 +1039,9 @@ export function TaskDetail({ id }: { id: string }) {
           <a href="/"><Icon name="chevron-left" /> 任务大厅</a>
         </p>
         <div className="task-sheet-actions">
-          <a className="small button-like" href={`/tasks/${id}/replay`}>
-            <Icon name="play" size={12} /> 任务回放
+          <a className="small button-like replay-link" href={`/tasks/${id}/replay`}
+            title="打开任务回放">
+            <Icon name="play" size={14} /> 任务回放
           </a>
           {(task.status === "done" || task.status === "closed") && (
             task.archived_at ? (
@@ -1130,6 +1176,9 @@ export function TaskDetail({ id }: { id: string }) {
       {tab === "chat" && (
       <>
       <IntentBriefCard taskId={id} state={clarification}
+        planningActive={planningActive}
+        draftPending={drafts.some((d) => d.status === "pending")}
+        hasWorkflow={Boolean(workflow)}
         onChanged={() => { void refresh(); }} />
       <div
         className={`task-layout ${panel.collapsed ? "panel-collapsed" : ""}`}
@@ -1139,7 +1188,7 @@ export function TaskDetail({ id }: { id: string }) {
         <div className="task-main">
           <div className="session-actions">
             {task.status === "todo" && !task.plan_first && !workflow
-              && drafts.length === 0 && (task.assignees?.length ?? 0) === 0
+              && !drafts.some((d) => d.status === "pending") && (task.assignees?.length ?? 0) === 0
               && !plannerActive && (
               <>
                 <select value={assignee} onChange={(e) => setAssignee(e.target.value)} title="选择要指派的角色">
@@ -1160,13 +1209,14 @@ export function TaskDetail({ id }: { id: string }) {
               </>
             )}
             {task.status === "todo" && clarification?.status !== "in_progress"
-              && clarification?.status !== "stale" && plannerActive && (
+              && clarification?.status !== "stale" && planningActive && (
               <span className="muted">Cindy 正在规划工作流，请到收件箱处理草案。</span>
             )}
             {(task.status === "todo" || task.status === "in_progress")
               && !(workflow && workflow.status === "running")
               && clarification?.status !== "in_progress"
-              && clarification?.status !== "stale" && (
+              && clarification?.status !== "stale"
+              && !planningActive && !drafts.some((d) => d.status === "pending") && (
               <button
                 className="primary"
                 disabled={busy}
@@ -1188,19 +1238,21 @@ export function TaskDetail({ id }: { id: string }) {
                 })}
               >{clarification?.status === "none" && clarification?.can_start
                   ? "启动（Cindy 先澄清）"
-                  : (task.assignees?.length ?? 0) === 0
-                    ? "启动（Cindy 分析并建议角色）"
-                    : (task.assignees?.length ?? 0) >= 2
-                      ? (clarification?.status === "skipped"
-                          ? "启动（直接规划）"
-                          : "启动（先由 Cindy 规划）")
-                      : task.plan_first
-                        ? "启动（先规划工作流）"
-                        : (!task.knowledge_binding_locked
-                            && ["needs_cindy", "suggested", "fallback"].includes(
-                              task.knowledge_binding_state ?? ""))
-                          ? "启动（Cindy 识别知识仓库）"
-                          : "启动并执行"}</button>
+                  : clarification?.status === "confirmed"
+                    ? "启动（Cindy 规划）"
+                    : clarification?.status === "skipped"
+                      ? "启动（直接规划）"
+                      : (task.assignees?.length ?? 0) === 0
+                        ? "启动（Cindy 分析并建议角色）"
+                        : (task.assignees?.length ?? 0) >= 2
+                          ? "启动（先由 Cindy 规划）"
+                          : task.plan_first
+                            ? "启动（先规划工作流）"
+                            : (!task.knowledge_binding_locked
+                                && ["needs_cindy", "suggested", "fallback"].includes(
+                                  task.knowledge_binding_state ?? ""))
+                              ? "启动（Cindy 识别知识仓库）"
+                              : "启动并执行"}</button>
             )}
             {task.status === "in_progress" && (
               <>
@@ -1234,11 +1286,22 @@ export function TaskDetail({ id }: { id: string }) {
 
           {dispatchNote && <p className="muted">{dispatchNote}</p>}
 
-          {drafts.some((d) => d.status === "pending" && d.kind === "role_suggestion") && (
-            <p className="muted">
-              有角色建议待审批，请到收件箱处理；批准只创建/绑定角色，需要继续时在任务会话 @Cindy 或对应角色。
-            </p>
-          )}
+          {drafts.filter((d) => d.status === "pending" && d.kind === "role_suggestion").map((d) => {
+            const mode = d.tree?.apply_mode === "authorize" ? "authorize" : "create_bind";
+            const roles = d.tree?.requested_assignees?.length
+              ? d.tree.requested_assignees
+              : (d.tree?.suggested_roles || []).map((r) => r.slug);
+            return (
+              <p className="muted" key={d.id}>
+                {mode === "authorize" ? "角色追加授权待审批" : "角色建议待审批"}
+                （{roles.join("、") || "无角色"}）。
+                {mode === "authorize"
+                  ? "批准后由规划者创建/绑定；角色未全部创建并绑定前，工作流不能批准。"
+                  : "批准会创建/绑定角色；完成后才能批准工作流。"}
+                {" "}<a href="/inbox">去收件箱处理</a>。
+              </p>
+            );
+          })}
           {drafts.filter((d) => d.status === "pending" && d.kind !== "role_suggestion").length > 0 && (
             <section className="session-thread">
               <h2 className="pane-title">工作流草案 · 待审批</h2>
@@ -1294,6 +1357,11 @@ export function TaskDetail({ id }: { id: string }) {
                   {d.tree?.feedback_rules?.length ? (
                     <div className="muted">反馈路径：{d.tree.feedback_rules.join("；")}</div>
                   ) : null}
+                  {(d.role_suggestion_blockers?.length ?? 0) > 0 && (
+                    <div className="inbox-blocker">
+                      {draftBlockerText(d.role_suggestion_blockers)}
+                    </div>
+                  )}
                   <div className="card-actions">
                     {d.kind === "workflow" && (
                       <a className="small button-like" href={`/templates?draft=${encodeURIComponent(d.id)}`}>
@@ -1302,7 +1370,9 @@ export function TaskDetail({ id }: { id: string }) {
                     )}
                     <button
                       className="primary small"
-                      disabled={busy}
+                      disabled={busy || (d.role_suggestion_blockers?.length ?? 0) > 0}
+                      title={(d.role_suggestion_blockers?.length ?? 0) > 0
+                        ? draftBlockerText(d.role_suggestion_blockers) : undefined}
                       onClick={() => act(async () => {
                         if (d.kind === "workflow_revision") {
                           const rerunNote = d.tree?.impact?.classification === "safe_external"
@@ -1345,9 +1415,10 @@ export function TaskDetail({ id }: { id: string }) {
                           api.listDrafts(id).then(setDrafts).catch(() => {}),
                         ]);
                       })}
-                    >{d.kind === "workflow_revision" ? "应用修订（不重启）"
-                      : d.kind === "workflow" ? "批准并启动工作流"
-                        : "批准并落板（步骤按依赖自动启动）"}</button>
+                    >{(d.role_suggestion_blockers?.length ?? 0) > 0 ? "先处理角色建议"
+                      : d.kind === "workflow_revision" ? "应用修订（不重启）"
+                        : d.kind === "workflow" ? "批准并启动工作流"
+                          : "批准并落板（步骤按依赖自动启动）"}</button>
                   </div>
                 </div>
               ))}
@@ -1492,6 +1563,8 @@ export function TaskDetail({ id }: { id: string }) {
                         taskId={id}
                         planner={task?.planner || "cindy"}
                         questions={clarifyParsed.questions}
+                        answered={answeredClarifyKeys.has(ev.key)}
+                        clarifyStatus={clarification?.status ?? "none"}
                         onAnswered={() => { void refresh(); }}
                       />
                     )}

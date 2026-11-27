@@ -14,6 +14,52 @@ from . import ledger
 
 DRAFT_KINDS = {"tasks", "workflow", "workflow_revision", "role_suggestion"}
 
+ROLE_SUGGESTION_CREATE_BIND = "create_bind"
+ROLE_SUGGESTION_AUTHORIZE = "authorize"
+
+
+def role_suggestion_apply_mode(tree: dict) -> str:
+    """统一 role_suggestion 的两种语义；历史数据缺省按 create_bind 处理。"""
+    raw = str((tree or {}).get("apply_mode") or "").strip().lower()
+    if raw in ("", "create_bind", "create+bind"):
+        return ROLE_SUGGESTION_CREATE_BIND
+    if raw == "authorize":
+        return ROLE_SUGGESTION_AUTHORIZE
+    return ROLE_SUGGESTION_CREATE_BIND
+
+
+def validate_role_suggestion_tree(conn: sqlite3.Connection, tree: dict) -> str:
+    """校验并返回规范化后的 role_suggestion 模式。"""
+    from . import roles as roles_service
+
+    raw = str((tree or {}).get("apply_mode") or "").strip().lower()
+    if raw not in ("", "create_bind", "create+bind", "authorize"):
+        raise ConflictError(
+            f"unsupported role_suggestion apply_mode: {raw or '<empty>'}")
+    mode = role_suggestion_apply_mode(tree)
+    requested = _authorized_slugs(tree)
+    if mode == ROLE_SUGGESTION_AUTHORIZE:
+        if not requested:
+            raise ConflictError("authorize role_suggestion requires requested_assignees")
+        entries = {
+            str(item.get("slug") or "").strip(): item
+            for item in (tree.get("suggested_roles") or [])
+            if isinstance(item, dict)
+        }
+        for slug in requested:
+            if roles_service.get(conn, slug) is not None:
+                continue
+            entry = entries.get(slug) or {}
+            if not (entry.get("display_name") or entry.get("description")
+                    or entry.get("responsibilities")):
+                raise ConflictError(
+                    f"role {slug} does not exist; proposal needs display_name/description")
+    else:
+        suggested = tree.get("suggested_roles") or tree.get("roles") or []
+        if not isinstance(suggested, list) or not suggested:
+            raise ConflictError("role_suggestion has no suggested_roles")
+    return mode
+
 # 工作流模板库（SOP 预设，MetaGPT 思路）：每条是一串「步骤」；步骤线性依赖上一步。
 # 步骤字段：title（前缀）、type、role（角色 slug）。
 WORKFLOW_TEMPLATES: dict[str, list[dict]] = {
@@ -94,6 +140,8 @@ def create_draft(conn: sqlite3.Connection, goal: str, tree: dict,
         raise ConflictError(f"unsupported draft kind: {kind}")
     if kind in ("workflow", "workflow_revision", "role_suggestion") and not source_task:
         raise ConflictError(f"{kind} draft requires source_task")
+    if kind == "role_suggestion":
+        validate_role_suggestion_tree(conn, tree)
     if kind in ("workflow", "workflow_revision") and source_task:
         from . import clarification
         clarification.assert_workflow_allowed(conn, source_task)
@@ -339,6 +387,11 @@ def list_drafts(conn: sqlite3.Connection, workspace_id: str | None = None,
     for r in conn.execute(q, params):
         d = dict(r)
         d["tree"] = jloads(d.get("tree_json"), {})
+        kind = d.get("kind") or "tasks"
+        if kind in ("workflow", "workflow_revision") and d.get("source_task"):
+            d["role_suggestion_blockers"] = role_suggestion_blockers(
+                conn, d["source_task"],
+                include_unconsumed=(kind == "workflow"))
         out.append(d)
     return out
 
@@ -363,7 +416,7 @@ def authorized_assignee_additions(conn: sqlite3.Connection, task_id: str) -> set
         "AND kind='role_suggestion' AND status='approved'", (task_id,)).fetchall()
     for row in rows:
         tree = jloads(row["tree_json"], {})
-        if str(tree.get("apply_mode") or "") == "authorize":
+        if role_suggestion_apply_mode(tree) == ROLE_SUGGESTION_AUTHORIZE:
             out.update(_authorized_slugs(tree))
     return out
 
@@ -386,9 +439,87 @@ def authorized_role_creations(conn: sqlite3.Connection,
     out: set[str] = set()
     for row in rows:
         tree = jloads(row["tree_json"], {})
-        if str(tree.get("apply_mode") or "") == "authorize":
+        if role_suggestion_apply_mode(tree) == ROLE_SUGGESTION_AUTHORIZE:
             out.update(_authorized_slugs(tree))
     return out
+
+
+def running_workflow_roles(conn: sqlite3.Connection,
+                           task_id: str) -> tuple[str | None, set[str]]:
+    """返回 (running workflow id, definition roles)；没有运行中 workflow 时 id=None。"""
+    row = conn.execute(
+        "SELECT id, definition_json FROM workflows WHERE task_id=? AND status='running' "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1", (task_id,)).fetchone()
+    if row is None:
+        return None, set()
+    from . import workflow as workflow_service
+    definition = jloads(row["definition_json"], {})
+    return row["id"], set(workflow_service.definition_roles(definition))
+
+
+class RoleSuggestionGateError(ConflictError):
+    """工作流审批被未解决的角色建议阻塞。"""
+
+    def __init__(self, blockers: list[dict]):
+        ids = "、".join(str(b.get("draft_id") or "?") for b in blockers)
+        super().__init__(f"workflow approval blocked by role suggestions: {ids}")
+        self.impact = {"role_suggestion_blockers": blockers}
+
+
+def role_suggestion_blockers(conn: sqlite3.Connection, task_id: str, *,
+                             include_unconsumed: bool = True) -> list[dict]:
+    """返回阻止工作流批准的角色建议。
+
+    pending 的角色建议无论角色是否已绑定都必须先由 human 批准/驳回；
+    approved + authorize 的建议还要求角色已创建且已绑定到任务。
+    """
+    from . import roles as roles_service
+
+    rows = conn.execute(
+        "SELECT id, status, created_at, tree_json FROM board_drafts "
+        "WHERE source_task=? AND kind='role_suggestion' "
+        "AND status IN ('pending','approved') ORDER BY created_at, id",
+        (task_id,),
+    ).fetchall()
+    if not rows:
+        return []
+    task = conn.execute(
+        "SELECT planner FROM tasks WHERE id=?", (task_id,)).fetchone()
+    planner = task["planner"] if task else None
+    bound = {r["role_slug"] for r in conn.execute(
+        "SELECT role_slug FROM task_assignees WHERE task_id=?", (task_id,))}
+    blockers: list[dict] = []
+    for row in rows:
+        tree = jloads(row["tree_json"], {})
+        mode = role_suggestion_apply_mode(tree)
+        requested = _authorized_slugs(tree)
+        if not requested:
+            continue
+        missing = [slug for slug in requested
+                   if roles_service.get(conn, slug) is None]
+        unbound = [slug for slug in requested if slug not in bound]
+        base = {
+            "draft_id": row["id"],
+            "status": row["status"],
+            "apply_mode": mode,
+            "requested_assignees": requested,
+            "missing_roles": missing,
+            "unbound_roles": unbound,
+            "planner": planner,
+            "created_at": row["created_at"],
+        }
+        if row["status"] == "pending":
+            blockers.append({
+                **base,
+                "reason": "pending_role_suggestion",
+            })
+        elif include_unconsumed and mode == ROLE_SUGGESTION_AUTHORIZE:
+            if missing or unbound:
+                blockers.append({
+                    **base,
+                    "reason": "authorization_not_consumed",
+                })
+    return blockers
 
 
 def propose_assignee_additions(conn: sqlite3.Connection, task_id: str, agent: str,
@@ -417,7 +548,7 @@ def propose_assignee_additions(conn: sqlite3.Connection, task_id: str, agent: st
         (task_id,)
     ).fetchall():
         tree = jloads(row["tree_json"], {})
-        if str(tree.get("apply_mode") or "") == "authorize":
+        if role_suggestion_apply_mode(tree) == ROLE_SUGGESTION_AUTHORIZE:
             pending = (row["id"], tree)
             break
 
@@ -467,8 +598,14 @@ def propose_assignee_additions(conn: sqlite3.Connection, task_id: str, agent: st
 
 
 def _approve_assignee_authorization(conn: sqlite3.Connection, draft: dict,
-                                    task: dict, tree: dict) -> tuple[dict | None, str | None]:
-    """批准「角色追加授权」：不创建/不绑定，只授权 planner 后续自行 assign。"""
+                                    task: dict, tree: dict
+                                    ) -> tuple[dict | None, str | None, dict]:
+    """批准「角色追加授权」：已有角色由 planner 绑定，缺失角色由 planner 创建。
+
+    批准本身仍不创建/不绑定角色，但会返回结构化 outcome，供 API 立即唤醒
+    planner；在工作流审批门禁中，只有 requested_assignees 全部创建并绑定后
+    才能继续批准工作流。
+    """
     from . import roles as roles_service
     from . import tasks as tasks_service
 
@@ -493,8 +630,12 @@ def _approve_assignee_authorization(conn: sqlite3.Connection, draft: dict,
 
     now = now_iso()
     summary = "、".join(requested)
-    conn.execute("UPDATE board_drafts SET status='approved', decided_at=? WHERE id=?",
-                 (now, draft["id"]))
+    cur = conn.execute(
+        "UPDATE board_drafts SET status='approved', decided_at=? "
+        "WHERE id=? AND status='pending'", (now, draft["id"]))
+    if cur.rowcount != 1:
+        raise ConflictError(
+            f"draft {draft['id']} state changed; refresh before approving")
     task_id = task["id"]
     ledger.emit_activity(
         conn, task_id=task_id,
@@ -512,11 +653,34 @@ def _approve_assignee_authorization(conn: sqlite3.Connection, draft: dict,
             f"角色追加提案已批准：{summary}。如需创建角色，执行 "
             f"`anvil role expand --slug <已批准 slug>`（必须是 {summary} 之一），再 "
             f"`anvil task assign {task_id} --assignees {','.join(requested)}`。")
-    return None, f"authorized only; planner must create/bind: {summary}"
 
+    bound = {r["role_slug"] for r in conn.execute(
+        "SELECT role_slug FROM task_assignees WHERE task_id=?", (task_id,))}
+    already_bound = [slug for slug in requested if slug in bound]
+    missing = [slug for slug in requested if roles_service.get(conn, slug) is None]
+    needs_planner = [slug for slug in requested if slug not in bound]
+    already_satisfied = not missing and not needs_planner
+    outcome = {
+        "draft_id": draft["id"],
+        "task_id": task_id,
+        "apply_mode": ROLE_SUGGESTION_AUTHORIZE,
+        "action": "authorized",
+        "authorized": requested,
+        "created": [],
+        "bound": [],
+        "already_bound": already_bound,
+        "needs_creation": missing,
+        "needs_planner": needs_planner,
+        "already_satisfied": already_satisfied,
+        "planner": target,
+        "wake": "not_needed" if already_satisfied else "pending",
+        "warning": None if already_satisfied else (
+            f"authorization approved; planner must create/bind: {summary}"),
+    }
+    return None, outcome["warning"], outcome
 
 def _approve_role_suggestion(conn: sqlite3.Connection, draft: dict,
-                             by: str) -> tuple[dict | None, str | None]:
+                             by: str) -> tuple[dict | None, str | None, dict]:
     from .. import config
     from . import roles as roles_service
     from . import tasks as tasks_service
@@ -528,7 +692,7 @@ def _approve_role_suggestion(conn: sqlite3.Connection, draft: dict,
         raise ConflictError("role_suggestion source_task not found")
 
     tree = draft.get("tree") or {}
-    if str(tree.get("apply_mode") or "") == "authorize":
+    if role_suggestion_apply_mode(tree) == ROLE_SUGGESTION_AUTHORIZE:
         return _approve_assignee_authorization(conn, draft, task, tree)
     suggested = tree.get("suggested_roles") or tree.get("roles") or []
     if not isinstance(suggested, list) or not suggested:
@@ -575,12 +739,23 @@ def _approve_role_suggestion(conn: sqlite3.Connection, draft: dict,
         definition.setdefault("concurrency", {"max_parallel": 2})
         to_create.append((slug, display, definition))
 
+    bind = list(dict.fromkeys(existing_slugs + [s for s, _, _ in to_create]))
+    running_id, running_roles = running_workflow_roles(conn, task_id)
+    uncovered = [slug for slug in bind if slug not in running_roles]
+    if running_id and uncovered:
+        raise ConflictError(
+            f"task has a running workflow ({running_id}) that does not assign roles: "
+            f"{', '.join(uncovered)}. Submit a workflow revision that includes them "
+            "and get it approved before binding these roles.")
+
     current_roles = conn.execute("SELECT COUNT(*) AS n FROM roles").fetchone()["n"]
     if current_roles + len(to_create) > config.MAX_ROLES:
         raise ConflictError(
             f"role limit {config.MAX_ROLES} would be exceeded "
             f"({current_roles} + {len(to_create)})")
 
+    prior_bound = {r["role_slug"] for r in conn.execute(
+        "SELECT role_slug FROM task_assignees WHERE task_id=?", (task_id,))}
     created: list[str] = []
     try:
         for slug, display, definition in to_create:
@@ -590,7 +765,6 @@ def _approve_role_suggestion(conn: sqlite3.Connection, draft: dict,
         roles_service.rollback_created(conn, created)
         raise ConflictError(f"failed to create suggested roles: {exc}") from exc
 
-    bind = list(dict.fromkeys(existing_slugs + [s for s, _, _ in to_create]))
     try:
         tasks_service.add_assignees(conn, task_id, bind)
     except Exception as exc:  # noqa: BLE001
@@ -614,7 +788,22 @@ def _approve_role_suggestion(conn: sqlite3.Connection, draft: dict,
     # 批准本身只落角色，不替自然人 @ 任何角色、不启动重规划 run。
     # 自然人后续在任务会话里自己 @ 规划者/执行角色；mention 端点负责唤醒对应角色。
     warning = None if to_create else f"all suggested roles already exist; bound only: {summary}"
-    return None, warning
+    outcome = {
+        "draft_id": draft["id"],
+        "task_id": task_id,
+        "apply_mode": ROLE_SUGGESTION_CREATE_BIND,
+        "action": "created_and_bound" if created else "bound_existing",
+        "created": created,
+        "bound": bind,
+        "already_bound": [slug for slug in bind if slug in prior_bound],
+        "needs_creation": [],
+        "needs_planner": [],
+        "already_satisfied": True,
+        "planner": task.get("planner"),
+        "wake": "not_needed",
+        "warning": warning,
+    }
+    return None, warning, outcome
 
 
 def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
@@ -624,6 +813,7 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
     replans: list[dict] = []
     warnings: list[str] = []
     participants_added: dict[str, list[str]] = {}
+    role_suggestions: dict[str, dict] = {}
     # 批量审批先 preflight：任一 draft 已失效就整批拒绝，避免部分落地后
     # 后面的 draft 再报 409。
     drafts: list[dict] = []
@@ -633,6 +823,19 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
             raise ConflictError(
                 f"draft {did} is missing or not pending; refresh before approving")
         drafts.append(draft)
+    # 角色建议必须先于工作流审批解决。preflight 在任何写入前拦截，
+    # 防止 workflow 先执行、角色建议后批准变成无声 no-op。
+    for draft in drafts:
+        kind = draft.get("kind") or "tasks"
+        if kind not in ("workflow", "workflow_revision"):
+            continue
+        task_id = draft.get("source_task")
+        if not task_id:
+            continue
+        blockers = role_suggestion_blockers(
+            conn, task_id, include_unconsumed=(kind == "workflow"))
+        if blockers:
+            raise RoleSuggestionGateError(blockers)
     for draft in drafts:
         did = draft["id"]
         kind = draft.get("kind") or "tasks"
@@ -644,6 +847,10 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
             wid = str(tree.get("base_workflow_id") or "")
             if not wid:
                 raise ConflictError("workflow_revision missing base_workflow_id")
+            blockers = role_suggestion_blockers(
+                conn, draft.get("source_task"), include_unconsumed=False)
+            if blockers:
+                raise RoleSuggestionGateError(blockers)
             # apply_revision 自己执行 BEGIN IMMEDIATE；同一批里前面的 tasks/workflow
             # 草案可能已在本连接留下未提交 DML。先提交，避免嵌套事务直接抛
             # OperationalError（批量批准时前者已落库，失败不会静默丢失）。
@@ -678,6 +885,10 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
                 raise ConflictError(
                     "task already has a running workflow; workflow replacement is not allowed. "
                     "Confirm restart_running to terminate the current execution and restart.")
+            blockers = role_suggestion_blockers(
+                conn, draft["source_task"], include_unconsumed=True)
+            if blockers:
+                raise RoleSuggestionGateError(blockers)
             from . import knowledge_binding
             from . import workflow as workflow_service
             # 创建草案时校验过显式 hint，审批是另一条入口；旧草案/人工编辑过的
@@ -720,8 +931,9 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
             landed.append(did)
             continue
         if kind == "role_suggestion":
-            replan, warning = _approve_role_suggestion(conn, draft, by)
+            replan, warning, outcome = _approve_role_suggestion(conn, draft, by)
             landed.append(did)
+            role_suggestions[did] = outcome
             if replan:
                 replans.append(replan)
             if warning:
@@ -759,7 +971,8 @@ def approve(conn: sqlite3.Connection, draft_ids: list[str], by: str = "human",
     except Exception:  # noqa: BLE001
         pass
     return {"landed": landed, "replans": replans, "warnings": warnings,
-            "participants_added": participants_added}
+            "participants_added": participants_added,
+            "role_suggestions": role_suggestions}
 
 
 def reject(conn: sqlite3.Connection, draft_id: str, by: str = "human",
@@ -810,7 +1023,7 @@ def reject(conn: sqlite3.Connection, draft_id: str, by: str = "human",
                 payload=jdumps({"body": f"角色建议被驳回：{feedback}"}),
                 now=now)
         tree = draft.get("tree") or {}
-        if str(tree.get("apply_mode") or "") == "authorize":
+        if role_suggestion_apply_mode(tree) == ROLE_SUGGESTION_AUTHORIZE:
             creator = str(draft.get("created_by") or "").strip()
             if creator.startswith("agent:"):
                 creator = creator[6:]

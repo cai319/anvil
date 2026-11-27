@@ -19,9 +19,12 @@
 
 - Web 页面**不代写** finding：填写是审核者的职责，页面只做展示与人工决策。
 - Agent 创建子任务时不能启用问题板；启用后任务强制 `plan_first=True`，由 Cindy 规划。
+  首次规划若满足条件会先进入 Cindy 澄清；未确认/过期简报无法创建 workflow 草案。
 - reviewer 必须是已存在、启用、非 onboarding 角色，且**每个** reviewer 都出现在当前
   workflow 的角色集合中；否则 workflow 草案创建/批准会被 409 拒绝。新增 reviewer 时若已有
   running workflow 且该角色未被覆盖，同样 409。
+- v1.51 起，pending `role_suggestion` 会阻止 workflow / workflow_revision 审批；
+  `authorize` 建议批准后由 planner 创建/绑定角色，完成前审批保持锁定。
 
 ## 2. Finding 字段
 
@@ -77,6 +80,8 @@ in_progress ──reviewer complete（workflow 已结束 + 无 draft/changes_req
 
 - 问题板 `completed` 且所有 finding 为 `confirmed` / `false_positive` 时，
   `POST /tasks/{id}/review {approve:true}` 才允许通过。
+- 澄清未确认（`in_progress|stale`）时不能创建 workflow / workflow_revision 草案；
+  pending `role_suggestion` 会阻止 workflow 审批。两者都解决后才进入执行。
 - **workflow 仍在 running 时不得 complete 问题板**（返回 409）。多切片/多步骤任务必须
   等所有切片执行完，`_finalize_if_done` 将 workflow 置为 done 并创建 `[anvil:findings]`
   run 后，reviewer 再收口；这样后续切片不会因为问题板提前完成而写不进 finding。
@@ -90,12 +95,14 @@ in_progress ──reviewer complete（workflow 已结束 + 无 draft/changes_req
 
 启用问题板后，Cindy 在 `PLANNING_PROTOCOL` 中收到额外要求：
 
-1. 优先从用户勾选的角色中寻找审核/审计/安全/测试类角色作为 reviewer；
-2. 没有合适角色时，绑定现有合适角色（写审计），或提交 `role_suggestion` 让 human 批准新建；
-3. 用 `anvil task reviewers <task-id> --assignees <role>` 指定；
-4. workflow 必须覆盖 reviewer：flat steps 优先给 reviewer 的步骤 `gate=1`；
+1. 若任务满足首次规划澄清条件，先完成澄清与任务简报确认（或由 human 跳过）；
+2. 优先从用户勾选的角色中寻找审核/审计/安全/测试类角色作为 reviewer；
+3. 没有合适角色时，绑定现有合适角色（写审计），或提交 `role_suggestion` 让 human 批准新建；
+   pending 角色建议解决前不能批准 workflow；
+4. 用 `anvil task reviewers <task-id> --assignees <role>` 指定；
+5. workflow 必须覆盖 reviewer：flat steps 优先给 reviewer 的步骤 `gate=1`；
    plan_slices/loop 内禁止 gate，由任务最终评审承担 human 审核；
-5. 不允许静默启用一个无人填写的问题板。
+6. 不允许静默启用一个无人填写的问题板。
 
 ## 5. API
 
@@ -157,3 +164,5 @@ submit 缺字段返回 422，`detail.missing_fields` 列出待补字段；task r
   workflow 覆盖 reviewer、flag/reviewer 权限。
 - `tests/test_workflow.py`：workflow/问题板完成顺序无关、reviewer 必须被 workflow 覆盖。
 - `tests/cli/test_cli_contract.py`：finding 命令映射、模板字段、`--issue-board` 透传。
+- v1.51 交叉覆盖：`tests/api/test_clarification_api.py`、`tests/api/test_role_gate_api.py`；
+  全量基线 **1265 passed / 63 skipped**。

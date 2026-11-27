@@ -1233,6 +1233,11 @@ def _definition_roles(definition: dict) -> set[str]:
     return roles
 
 
+def definition_roles(definition: dict) -> set[str]:
+    """公开只读视图：workflow definition 中声明的全部角色。"""
+    return _definition_roles(definition)
+
+
 def preview_participant_sync(conn: sqlite3.Connection, task_id: str,
                              definition: dict) -> dict:
     """最终审批前预览：workflow 角色 vs 任务参与者。"""

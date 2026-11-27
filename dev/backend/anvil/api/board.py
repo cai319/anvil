@@ -190,16 +190,18 @@ def approve_drafts(body: dict, request: Request, conn=Depends(get_db),
             raise HTTPException(status_code=409, detail={
                 "message": str(exc), "impact": impact})
         raise HTTPException(status_code=409, detail=str(exc))
+    _wake_role_approval_planners(conn, request, result)
     seen_tasks: set[str] = set()
     for did in draft_ids:
         row = conn.execute(
-            "SELECT source_task FROM board_drafts WHERE id=?", (did,)).fetchone()
+            "SELECT source_task, status FROM board_drafts WHERE id=?", (did,)).fetchone()
         task_id = row["source_task"] if row else None
         if task_id and task_id not in seen_tasks:
             seen_tasks.add(task_id)
             _audit_human_decision(conn, task_id, "board.approve", request, {
                 "draft_ids": draft_ids,
                 "landed": result.get("landed", []),
+                "role_suggestions": result.get("role_suggestions") or {},
                 "human_decision": True,
                 "restart_running": bool(body.get("restart_running")),
                 "restart_reason": body.get("restart_reason"),
@@ -207,10 +209,129 @@ def approve_drafts(body: dict, request: Request, conn=Depends(get_db),
         events.publish("task", {
             "id": task_id,
             "kind": "board_draft",
-            "status": "approved",
+            "status": row["status"] if row else "approved",
             "draft_id": did,
         })
     return result
+
+
+def _wake_role_approval_planners(conn, request: Request, result: dict) -> None:
+    """authorize 角色建议批准后唤醒 planner 去创建/绑定角色。
+
+    批准本身只授权；planner 必须把这些角色真正创建并加入任务后，工作流审批
+    门禁才会放行。唤醒失败不回滚批准，只把结果写回 outcome/warnings。
+    """
+    outcomes = result.get("role_suggestions") or {}
+    groups: dict[tuple[str, str], dict] = {}
+    for did, outcome in outcomes.items():
+        if outcome.get("action") != "authorized" or outcome.get("already_satisfied"):
+            continue
+        task_id = str(outcome.get("task_id") or "")
+        planner = str(outcome.get("planner") or "").strip()
+        if not task_id or not planner:
+            outcome["wake"] = "skipped"
+            outcome["wake_reason"] = "no planner to wake"
+            result.setdefault("warnings", []).append(
+                f"{did}: role authorization approved but no planner is available")
+            continue
+        if planner == "human":
+            outcome["wake"] = "skipped"
+            outcome["wake_reason"] = "planner is human"
+            continue
+        task = conn.execute(
+            "SELECT status, archived_at FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if task is None or task["status"] in ("done", "closed") or task["archived_at"]:
+            outcome["wake"] = "skipped"
+            outcome["wake_reason"] = "task is terminal or archived"
+            continue
+        role = services.roles.get(conn, planner)
+        if (planner != services.roles.ONBOARDING_SLUG
+                and (role is None or not role.get("enabled", True))):
+            outcome["wake"] = "skipped"
+            outcome["wake_reason"] = "planner role is missing or disabled"
+            continue
+        clar = conn.execute(
+            "SELECT clarification_status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if (clar and clar["clarification_status"] in ("in_progress", "stale")):
+            outcome["wake"] = "skipped"
+            outcome["wake_reason"] = "clarification is active"
+            continue
+        key = (task_id, planner)
+        group = groups.setdefault(key, {
+            "task_id": task_id,
+            "planner": planner,
+            "draft_ids": [],
+            "authorized": [],
+            "needs_creation": [],
+            "needs_planner": [],
+            "outcomes": [],
+        })
+        group["draft_ids"].append(did)
+        group["authorized"].extend(outcome.get("authorized") or [])
+        group["needs_creation"].extend(outcome.get("needs_creation") or [])
+        group["needs_planner"].extend(outcome.get("needs_planner") or [])
+        group["outcomes"].append(outcome)
+
+    for (task_id, planner), group in groups.items():
+        authorized = list(dict.fromkeys(group["authorized"]))
+        missing = list(dict.fromkeys(group["needs_creation"]))
+        unbound = list(dict.fromkeys(group["needs_planner"]))
+        assignees = [r["role_slug"] for r in conn.execute(
+            "SELECT role_slug FROM task_assignees WHERE task_id=? ORDER BY joined_at",
+            (task_id,))]
+        pending_wf = conn.execute(
+            "SELECT id FROM board_drafts WHERE source_task=? AND kind='workflow' "
+            "AND status='pending' ORDER BY created_at DESC LIMIT 1",
+            (task_id,)).fetchone()
+        running_id, running_roles = services.board.running_workflow_roles(
+            conn, task_id)
+        uncovered = [slug for slug in authorized if slug not in running_roles] \
+            if running_id else []
+        lines = [
+            "human 已批准角色追加授权，但尚未完成创建/绑定：",
+            "批准清单：" + "、".join(authorized),
+            "已存在待绑定：" + ("、".join(unbound) or "无"),
+            "不存在待创建：" + ("、".join(missing) or "无"),
+            "",
+            "请在本任务内完成：",
+            '1. 只对批准清单中不存在的角色执行 `anvil role expand --brief "<定位>" --slug <slug>`；',
+            f"2. 执行 `anvil task assign {task_id} --assignees {','.join(authorized)}` 绑定全部批准角色；",
+        ]
+        if pending_wf:
+            lines.append(
+                f"3. 当前已有 pending 工作流草案 {pending_wf['id']}；不要重复提交草案。"
+                "确认该草案覆盖上述角色；如果不覆盖，comment 说明需由 human 驳回后重规划。")
+        else:
+            lines.append("3. 如需新工作流，按正常规划流程提交草案。")
+        if running_id and uncovered:
+            lines.append(
+                f"4. 当前 running workflow {running_id} 未覆盖角色：{', '.join(uncovered)}。"
+                "不要直接绑定这些角色；先 comment 告知 human 需要 workflow 修订。")
+        lines.append("完成后用 `anvil task comment` 汇报创建/绑定结果。")
+        try:
+            run = services.planning.start_planner_run(
+                conn, request.app.state.db_path,
+                getattr(request.app.state, "orchestrator", None),
+                task_id, planner, assignees=assignees,
+                extra_constraint="\n".join(lines), replace_active=True)
+        except Exception as exc:  # noqa: BLE001
+            for outcome in group["outcomes"]:
+                outcome["wake"] = "failed"
+                outcome["wake_reason"] = str(exc)
+            result.setdefault("warnings", []).append(
+                f"{planner}: role authorization approved but planner wake failed: {exc}")
+            continue
+        for outcome in group["outcomes"]:
+            outcome["wake"] = "started"
+            outcome["wake_reason"] = None
+            outcome["run_id"] = run.get("id")
+        result.setdefault("replans", []).append({
+            "draft_id": group["draft_ids"][0],
+            "run_id": run.get("id"),
+            "planner": planner,
+            "authorized": authorized,
+        })
+        events.publish("task", {"id": task_id, "kind": "plan", "planner": planner})
 
 
 def _wake_rejected_planner(conn, request: Request, draft: dict,

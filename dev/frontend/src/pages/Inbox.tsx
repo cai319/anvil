@@ -1,13 +1,16 @@
 import { useEffect, useState } from "react";
 import {
   api,
+  type InboxDraftMeta,
   type InboxItem,
   type Lesson,
   type Role,
+  type RoleSuggestionOutcome,
 } from "../api/client";
 import { useLiveRefresh } from "../useLiveRefresh";
 import { completionLabel } from "../knowledgeCard";
 import { formatDateTime } from "../time";
+import { toolingHref } from "./tooling/toolingRoute";
 import { PageHeader } from "../components/ui";
 import { GateReviewDrawer } from "../components/GateReviewDrawer";
 import { confirmDialog, promptDialog } from "../components/dialogs";
@@ -66,10 +69,46 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "runtime_proposal", label: "运行时提案" },
 ];
 
+function roleBlockerText(blockers: InboxDraftMeta["role_suggestion_blockers"]): string {
+  if (!blockers?.length) return "";
+  return blockers.map((b) => {
+    if (b.reason === "pending_role_suggestion") {
+      return `先处理角色建议 ${b.draft_id}（${b.requested_assignees.join("、")}）`;
+    }
+    const missing = b.missing_roles?.length ? `未创建：${b.missing_roles.join("、")}` : "";
+    const unbound = b.unbound_roles?.length ? `未绑定：${b.unbound_roles.join("、")}` : "";
+    return `角色授权已批准，等待 ${b.planner || "planner"} 创建/绑定`
+      + (missing || unbound ? `（${[missing, unbound].filter(Boolean).join("；")}）` : "");
+  }).join("；");
+}
+
+function roleOutcomeNotice(outcomes: Record<string, RoleSuggestionOutcome> | undefined): string {
+  if (!outcomes || Object.keys(outcomes).length === 0) return "";
+  return Object.values(outcomes).map((o) => {
+    if (o.action === "authorized") {
+      const parts = [`已授权 ${o.planner || "planner"}`];
+      if (o.needs_creation.length) parts.push(`待创建 ${o.needs_creation.join("、")}`);
+      if (o.needs_planner.length) parts.push(`待绑定 ${o.needs_planner.join("、")}`);
+      if (o.wake === "started") parts.push("已唤醒 planner");
+      else if (o.wake === "skipped" || o.wake === "failed") {
+        parts.push(`未唤醒${o.wake_reason ? `：${o.wake_reason}` : ""}`);
+      }
+      if (o.already_satisfied) parts.push("角色均已创建并绑定，可直接审批工作流");
+      return parts.join("；");
+    }
+    if (o.action === "created_and_bound") {
+      return `已创建并绑定：${o.created.join("、") || "无新角色"}`
+        + (o.already_bound.length ? `；已存在：${o.already_bound.join("、")}` : "");
+    }
+    return `已绑定已有角色：${o.bound.join("、") || o.already_bound.join("、") || "无"}`;
+  }).join(" | ");
+}
+
 export function Inbox() {
   const [items, setItems] = useState<InboxItem[]>([]);
   const [tab, setTab] = useState<Tab>("all");
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [reviewTarget, setReviewTarget] = useState<{ wid: string; sid: string } | null>(null);
   const [lessonDetail, setLessonDetail] = useState<Lesson | null>(null);
@@ -139,14 +178,16 @@ export function Inbox() {
     }
   };
 
-  const act = async (id: string, fn: () => Promise<unknown>) => {
+  const act = async <T,>(id: string, fn: () => Promise<T>): Promise<T | undefined> => {
     setBusyId(id);
     setError(null);
     try {
-      await fn();
+      const result = await fn();
       await refresh();
+      return result;
     } catch (e) {
       setError(String(e));
+      return undefined;
     } finally {
       setBusyId(null);
     }
@@ -157,6 +198,44 @@ export function Inbox() {
 
   const approveDraftItem = (it: InboxItem, raw: string) => {
     const meta = it.meta;
+    const blockers = meta?.role_suggestion_blockers || [];
+    if (blockers.length > 0) {
+      setNotice(roleBlockerText(blockers));
+      return;
+    }
+    const showResult = async (result: Awaited<ReturnType<typeof api.approveDraft>> | undefined) => {
+      if (!result) return;
+      const roleNotice = roleOutcomeNotice(result.role_suggestions);
+      const warnings = result.warnings?.length ? result.warnings.join("；") : "";
+      setNotice([roleNotice, warnings].filter(Boolean).join(" | ") || null);
+    };
+    if (meta?.draft_kind === "role_suggestion") {
+      const mode = meta.apply_mode || "create_bind";
+      const roles = meta.requested_assignees?.length
+        ? meta.requested_assignees
+        : (meta.suggested_roles || []).map((r) => r.slug);
+      const roleText = roles.join("、");
+      const missing = (meta.suggested_roles || [])
+        .filter((r) => r.exists === false).map((r) => r.slug);
+      const message = mode === "authorize"
+        ? `将授权规划者创建/绑定：${roleText}。`
+          + (missing.length ? ` 需要新建：${missing.join("、")}。` : "")
+          + " 审批本身不会立即改 Roster；角色创建并绑定前，工作流批准会保持锁定。"
+        : `将创建不存在的角色并绑定：${roleText}。`
+          + (meta.covered_by_running_workflow === false
+            ? " 当前 running workflow 未覆盖这些角色，批准会被拒绝，需先提交工作流修订。"
+            : " 批准后工作流即可进入审批。");
+      void confirmDialog({
+        title: mode === "authorize" ? "批准角色追加授权？" : "批准并创建角色？",
+        message,
+        confirmLabel: mode === "authorize" ? "批准授权" : "批准并创建",
+      }).then(async (ok) => {
+        if (!ok) return;
+        const result = await act(it.id, () => api.approveDraft([raw]));
+        await showResult(result);
+      });
+      return;
+    }
     if (meta?.draft_kind === "workflow_revision") {
       const impact = meta.workflow_revision?.impact;
       const rerunNote = impact?.classification === "safe_external"
@@ -166,8 +245,10 @@ export function Inbox() {
         title: "应用工作流增量修订？",
         message: `${impact?.summary || ""}\n当前执行会继续，不会终止或从头重跑。${rerunNote}`,
         confirmLabel: "应用修订",
-      }).then((ok) => {
-        if (ok) void act(it.id, () => api.approveDraft([raw]));
+      }).then(async (ok) => {
+        if (!ok) return;
+        const result = await act(it.id, () => api.approveDraft([raw]));
+        await showResult(result);
       });
       return;
     }
@@ -188,14 +269,15 @@ export function Inbox() {
           input: { placeholder: "为什么需要重新执行？" },
         });
         if (reason === null) return;
-        void act(it.id, () => api.approveDraft([raw], {
+        const result = await act(it.id, () => api.approveDraft([raw], {
           restart_running: true,
           restart_reason: reason.trim() || undefined,
         }));
+        await showResult(result);
       })();
       return;
     }
-    void act(it.id, () => api.approveDraft([raw]));
+    void act(it.id, () => api.approveDraft([raw])).then(showResult);
   };
 
   const renderActions = (it: InboxItem) => {
@@ -241,13 +323,18 @@ export function Inbox() {
         );
       case "draft": {
         const isRoleSuggestion = it.meta?.draft_kind === "role_suggestion";
+        const blockers = it.meta?.role_suggestion_blockers || [];
+        const blocked = blockers.length > 0;
         return (
           <>
-            <button className="primary small" disabled={disabled}
+            <button className="primary small" disabled={disabled || blocked}
+              title={blocked ? roleBlockerText(blockers) : undefined}
               onClick={() => approveDraftItem(it, raw)}>
-              {isRoleSuggestion ? "批准并创建角色"
-                : it.meta?.draft_kind === "workflow_revision" ? "应用修订（不重启）"
-                  : it.meta?.running_workflow ? "终止并重新执行" : "批准落板"}
+              {blocked ? "先处理角色建议"
+                : isRoleSuggestion
+                  ? (it.meta?.apply_mode === "authorize" ? "批准授权" : "批准并创建角色")
+                  : it.meta?.draft_kind === "workflow_revision" ? "应用修订（不重启）"
+                    : it.meta?.running_workflow ? "终止并重新执行" : "批准落板"}
             </button>
             <button className="small danger" disabled={disabled}
               onClick={() => {
@@ -309,8 +396,8 @@ export function Inbox() {
         return (
           <>
             <a className="primary small button-like"
-              href={`/tooling?rip=${encodeURIComponent(raw)}`}>去处理</a>
-            <a className="small" href="/tooling">打开工具页</a>
+              href={toolingHref("proposals", raw)}>去处理</a>
+            <a className="small" href={toolingHref("proposals")}>打开工具页</a>
           </>
         );
       case "action": {
@@ -363,6 +450,7 @@ export function Inbox() {
       />
 
       {error && <p className="error">{error}</p>}
+      {notice && <p className="inbox-notice">{notice}</p>}
 
       <div className="role-picker" style={{ marginBottom: 12 }}>
         {TABS.map((t) => (
@@ -409,6 +497,11 @@ export function Inbox() {
           {it.kind !== "lesson" && (
             <div className="muted inbox-detail" title={it.detail}>{it.detail}</div>
           )}
+          {(it.meta?.role_suggestion_blockers?.length ?? 0) > 0 && (
+            <div className="inbox-blocker">
+              {roleBlockerText(it.meta?.role_suggestion_blockers)}
+            </div>
+          )}
           {it.kind === "lesson" && (
             <div className="inbox-lesson-meta">
               {it.meta?.tags?.length ? (
@@ -430,8 +523,11 @@ export function Inbox() {
           )}
           {it.meta?.draft_kind === "role_suggestion" && (it.meta.suggested_roles?.length ?? 0) > 0 && (
             <div className="muted" style={{ marginBottom: 8 }}>
-              建议角色：
-              {it.meta.suggested_roles!.map((r) => `${r.display_name || r.slug}（${r.slug}）`).join("、")}
+              {it.meta.apply_mode === "authorize" ? "请求角色：" : "建议角色："}
+              {it.meta.suggested_roles!.map((r) => {
+                const state = r.exists === false ? "待创建" : r.bound ? "已绑定" : "已存在待绑定";
+                return `${r.display_name || r.slug}（${r.slug} · ${state}）`;
+              }).join("、")}
               {it.meta.assessment ? ` · ${it.meta.assessment}` : ""}
             </div>
           )}

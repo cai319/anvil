@@ -14,6 +14,9 @@ dev/frontend/dist/
 dev/build/
 dev/dist/
 
+# Local release artifacts (large Windows/portable bundles)
+/release/
+
 # 运行时临时
 *.pid
 
@@ -27,24 +30,47 @@ log/
 # Superpowers local brainstorm/cache
 .superpowers/
 
-# Local-only planning / design / internal docs (not published)
+# Local-only planning / design / ADR / internal docs (not published)
+/CLAUDE.md
+/docs/agents/
+/docs/adr/
 /docs/superpowers/
 /docs/design/
 /docs/anvil-roadmap-*.pptx
 /docs/v1.30-channel-knowledge.md
 /docs/v1.50-role-rsi.md
 /docs/workflow-revision.md
+/docs/*-design.md
+/docs/design-*.md
+/docs/*-spec.md
+/docs/spec-*.md
+/docs/*-plan.md
+/docs/plan-*.md
+/docs/*-analysis.md
+/docs/analysis-*.md
+/docs/roadmap-*.md
+/docs/plans/
+/docs/rfc/
 /design.md
 /optimization-roadmap.md
+/anvil-orchestration-model-analysis.md
+/*-design.md
+/*-roadmap.md
+/*-analysis.md
 /dev/anvil-next-stage-implementation-plan.md
-/dev/plan-p0-reliability-and-plan-first.md
+/dev/plan-*.md
+/dev/*-plan.md
 /dev/architecture-*.md
-/dev/implementation-status.md
-/dev/acceptance-tests.md
+/dev/implementation-*.md
+/dev/acceptance-*.md
 /dev/issues-*.md
 /dev/raft-gap-analysis.md
 /dev/spec-*.md
 /dev/*-design.md
+/dev/*-spec.md
+/dev/*-analysis.md
+/dev/analysis-*.md
+/dev/roadmap*.md
 
 # Local-only Anvil executive demo package (not published)
 /docs/demo/README.md
@@ -54,3 +80,6 @@ log/
 /docs/demo/live-demo-runbook.md
 /docs/demo/live-demo/
 /docs/demo/assets/
+
+# Keep tracked recovery evidence and the published demo HTML; do not add broad
+# /recovered/ or /docs/demo/ ignores without explicit file exceptions.

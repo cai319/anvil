@@ -356,25 +356,33 @@ def set_flag(conn: sqlite3.Connection, key: str, value: object, *,
         raise LookupError(key)
     enabled = _bool(value)
     previous = bool(getattr(config, flag.attr))
+    default = _BASE_VALUES[flag.attr]
     setattr(config, flag.attr, enabled)
     now = now_iso()
-    conn.execute(
-        "INSERT INTO settings (key, value, updated_at) VALUES (?,?,?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-        (_setting_key(flag), "1" if enabled else "0", now))
+    # 切换回默认值等价于恢复默认：删除持久化覆盖，避免“值已回默认但
+    # overridden 仍为 true”的隐性状态。
+    restored_default = enabled == default
+    if restored_default:
+        conn.execute("DELETE FROM settings WHERE key=?", (_setting_key(flag),))
+    else:
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (_setting_key(flag), "1" if enabled else "0", now))
     ledger.emit_audit(
         conn, role_slug=actor,
         task_id=None,
         action="feature.toggle",
         payload=jdumps({
             "key": key, "value": enabled, "previous": previous,
+            "restored_default": restored_default,
         }),
         now=now)
     conn.commit()
     logger.info(
-        "feature toggle actor=%s key=%s previous=%s value=%s",
-        actor, key, previous, enabled)
-    return _flag_payload(flag, value=enabled, overridden=True)
+        "feature toggle actor=%s key=%s previous=%s value=%s restored_default=%s",
+        actor, key, previous, enabled, restored_default)
+    return _flag_payload(flag, value=enabled, overridden=not restored_default)
 
 
 def reset_flag(conn: sqlite3.Connection, key: str, *,

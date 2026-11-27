@@ -61,8 +61,8 @@
   --content-pad: clamp(16px, 1.2vw, 36px);
   --header-h: clamp(56px, 3.2vw, 76px);
   --nav-item-h: clamp(40px, 2.6vw, 56px);
-  --control-h: clamp(34px, 2.2vw, 48px);
-  --control-h-sm: clamp(28px, 1.8vw, 38px);
+  --control-h: clamp(30px, 1.7vw, 36px);
+  --control-h-sm: clamp(24px, 1.3vw, 28px);
 
   /* 头像尺度：按场景取档，不随正文盲目等比放大。 */
   --avatar-sm: clamp(28px, 1.9vw, 38px);
@@ -73,6 +73,9 @@
   --fs-meta: clamp(12.5px, 0.26vw + 8.8px, 19px);
   --fs-sm: clamp(13px, 0.3vw + 8.8px, 20px);
   --fs-base: clamp(15px, 0.38vw + 10px, 24px);
+  /* 控件文字不跟随正文无限放大；按钮在大屏上保持紧凑。 */
+  --fs-control: clamp(12.5px, 0.2vw + 9px, 15px);
+  --fs-control-sm: clamp(11px, 0.15vw + 8.4px, 13px);
   /* 任务卡：列表密度高于正文，标题与辅助信息分开取档。 */
   --fs-card-title: clamp(13.5px, 0.3vw + 9.2px, 17px);
   --fs-card-meta: clamp(10.5px, 0.15vw + 8.5px, 12.5px);

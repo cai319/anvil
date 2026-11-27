@@ -111,12 +111,25 @@ export interface RuntimeProposal {
   id: string;
   component_type: string;
   component_key: string;
+  runtime_id?: string | null;
   title: string;
   severity: string;
   status: string;
+  origin?: string | null;
+  origin_role?: string | null;
   summary: string;
+  root_cause_hypothesis?: string | null;
+  proposed_change_md?: string | null;
+  verification_md?: string | null;
+  risk_md?: string | null;
   evidence_count: number;
   markdown_path?: string | null;
+  export_path?: string | null;
+  decision_note?: string | null;
+  decided_by?: string | null;
+  decided_at?: string | null;
+  applied_ref?: string | null;
+  verified_at?: string | null;
   created_at: string;
   updated_at: string;
   evidence?: Record<string, unknown>;
@@ -539,6 +552,7 @@ export const api = {
     restart_running?: boolean; restart_reason?: string; restart_note?: string;
   } = {}): Promise<{
     landed: string[]; replans?: unknown[]; warnings?: string[]; runs?: Run[];
+    role_suggestions?: Record<string, RoleSuggestionOutcome>;
   }> =>
     req("POST", "/board/drafts/approve", { draft_ids: draftIds, ...options })
       .then((r) => json(r)),
@@ -1491,6 +1505,37 @@ export interface RevisionImpact {
   diff?: Record<string, unknown>;
 }
 
+export interface RoleSuggestionBlocker {
+  draft_id: string;
+  status: "pending" | "approved";
+  apply_mode: "create_bind" | "authorize";
+  requested_assignees: string[];
+  missing_roles?: string[];
+  unbound_roles?: string[];
+  reason: "pending_role_suggestion" | "authorization_not_consumed";
+  planner?: string | null;
+  created_at: string;
+}
+
+export interface RoleSuggestionOutcome {
+  draft_id: string;
+  task_id?: string;
+  apply_mode: "create_bind" | "authorize";
+  action: "created_and_bound" | "bound_existing" | "authorized";
+  authorized?: string[];
+  created: string[];
+  bound: string[];
+  already_bound: string[];
+  needs_creation: string[];
+  needs_planner: string[];
+  already_satisfied: boolean;
+  planner?: string | null;
+  wake: "pending" | "started" | "skipped" | "failed" | "not_needed";
+  wake_reason?: string | null;
+  run_id?: string | null;
+  warning?: string | null;
+}
+
 export interface InboxDraftMeta {
   draft_kind?: "tasks" | "workflow" | "workflow_revision" | "role_suggestion";
   workflow_revision?: {
@@ -1500,7 +1545,15 @@ export interface InboxDraftMeta {
   };
   assessment?: string;
   missing_capabilities?: string[];
-  suggested_roles?: { slug: string; display_name?: string; description?: string }[];
+  suggested_roles?: {
+    slug: string; display_name?: string; description?: string;
+    exists?: boolean; bound?: boolean;
+  }[];
+  apply_mode?: "create_bind" | "authorize";
+  requested_assignees?: string[];
+  already_bound?: string[];
+  covered_by_running_workflow?: boolean | null;
+  role_suggestion_blockers?: RoleSuggestionBlocker[];
   step_count?: number;
   tags?: string[];
   knowledge_repos?: { repo: string; reason?: string | null }[];
@@ -1844,6 +1897,7 @@ export interface BoardDraft {
   goal: string;
   status: "pending" | "approved" | "rejected";
   kind?: "tasks" | "workflow" | "workflow_revision" | "role_suggestion";
+  role_suggestion_blockers?: RoleSuggestionBlocker[];
   created_by: string;
   source_task: string | null;
   tree: {
@@ -1860,6 +1914,8 @@ export interface BoardDraft {
     verification?: { cell: string; method: string; verifier_role?: string }[];
     assessment?: string;
     missing_capabilities?: string[];
+    apply_mode?: "create_bind" | "authorize";
+    requested_assignees?: string[];
     suggested_roles?: {
       slug: string;
       display_name?: string;

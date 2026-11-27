@@ -78,6 +78,8 @@ netstat -ano | findstr :7317
 ### Q10. 测试全部 skipped
 
 venv 缺少 `langgraph`。执行 `pip install -r backend/requirements.txt`，再运行测试。
+完整基线为 **1265 passed / 63 skipped**；未设置 `ANVIL_BIN` 或
+`ANVIL_COLLAB_EVAL_CMD` 时，CLI 契约与模型评测用例会增加跳过数。
 
 ### Q11. 修改了任务但 Agent 看不到最新配置
 
@@ -349,8 +351,9 @@ legacy 控制台 I/O 的 `PYTHONLEGACYWINDOWSSTDIO`。
 
 - 换会话前 Anvil 会自动把任务的工作流步骤摘要、最近结论与交接写入
   `data/agents/<slug>/notes/knowledge/`，并建立 `notes_fts` 索引；
-- 新会话的 CIC 注入本角色 `MEMORY.md` 尾部、知识库索引、按任务检索的可复用知识、
-  当前任务快照、工作流决策与最近消息；
+- 新会话的 CIC 以角色画像、工作方式与可用 skill/MCP 清单开头，再注入耐久准则
+  （`PRINCIPLES.md`）、按 tag/相关性检索的经验卡与主题知识卡、任务工作集、工作流决策
+  与最近消息；不再整段注入 `MEMORY.md`；
 - 私有记忆按角色隔离：`data/agents/<slug>/MEMORY.md`、`notes/`、`notes/knowledge/` 与
   FTS 检索都只属于该角色；跨角色共享只通过人工批准的 lessons 通道；
 - 知识按 scope 隔离：`notes/knowledge/<task>/` 是 task scope，只进入**同一任务**的
@@ -365,6 +368,9 @@ legacy 控制台 I/O 的 `PYTHONLEGACYWINDOWSSTDIO`。
 > 用 `anvil knowledge reindex` 同步（`--dry-run` 预览，`--prune` 删除已不存在的文件行）。
 
 ### Q18. 角色被 @ 了但没被唤醒 / @ 没标黄
+
+> 收件箱里的 `@human` 提醒是另一套生命周期：按 `(task, role)` 保留、只认人类回应。
+> 提醒不消失或误消失见 Q25。
 
 **1. 评论里的 @ 不是 mention**
 
@@ -423,7 +429,7 @@ ORDER BY id DESC LIMIT 10;
 
 | slug | 显示名 | 用途 |
 |---|---|---|
-| `workflow` | 工作流引擎 | 工作流最终评审、角色建议被拒、旧版步骤失败通知 |
+| `workflow` | 工作流引擎 | 旧版步骤失败通知；新版本不再用它发送需要人类回复的通知 |
 | `system` | 系统 | 上游任务完成等系统通知 |
 
 它们没有 `roles` 行、没有 `data/agents/<slug>/` home、没有 session/run，不会消耗 token。
@@ -452,11 +458,11 @@ FROM roles WHERE slug IN ('workflow','system','human');
 ### Q20. 问题板提交/「测试连接」超时（504）
 
 问题板的外部提交是 **Anvil 后端 → 问题跟踪服务器**，浏览器不会直接请求 tracker，
-因此浏览器 CORS 不是根因。工具页「测试连接」即使 tracker 不可达也返回 HTTP 200 +
+因此浏览器 CORS 不是根因。工具治理 → 工具配置的「测试连接」即使 tracker 不可达也返回 HTTP 200 +
 `{"ok": false, "message": ...}`；如果这个请求本身返回 504，504 通常来自 Anvil 前面的
 网关/反向代理，而不是 Anvil 业务代码。
 
-先看工具页测试结果里的 `error_type` 和耗时：
+先看工具治理 → 工具配置测试结果里的 `error_type` 和耗时：
 
 - `ConnectTimeout`：Anvil 后端无法与 tracker 建立 TCP 连接。检查 DNS、防火墙、
   安全组、地址/端口；确认 tracker 是从 **Anvil 后端所在机器**可访问，
@@ -470,7 +476,7 @@ FROM roles WHERE slug IN ('workflow','system','human');
 在 Anvil 后端所在机器直接验证（不要把 URL 写死为示例）：
 
 ```bash
-# 正式接口通常以 /draft/bulkCreate 结尾；工具页填 base（例如 http://host:5000）
+# 正式接口通常以 /draft/bulkCreate 结尾；工具配置填 base（例如 http://host:5000）
 curl -v --max-time 30 -X POST 'http://<tracker>/draft/bulkCreate' \
   -H 'Content-Type: application/json' \
   -d '{"source":"anvil-probe","list":[]}'
@@ -495,7 +501,7 @@ Tracker 请求**固定直连**：不读取 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_P
 | `ANVIL_ISSUE_TRACKER_TIMEOUT` | 30 | 正式批量提交的读写超时（秒） |
 | `ANVIL_ISSUE_TRACKER_TEST_TIMEOUT` | 10 | 「测试连接」的空 list 探测超时（秒） |
 | `ANVIL_ISSUE_TRACKER_CONNECT_TIMEOUT` | 5 | TCP 建连超时（秒）；与读超时分开，便于定位 |
-| `ANVIL_ISSUE_TRACKER_FIELD_MAX_CHARS` | 512 | 除 `description_md` 外单字段最大字符数的环境默认值；工具页可覆盖（64–4096） |
+| `ANVIL_ISSUE_TRACKER_FIELD_MAX_CHARS` | 512 | 除 `description_md` 外单字段最大字符数的环境默认值；工具配置可覆盖（64–4096） |
 | `ANVIL_ISSUE_TRACKER_COMPACT_TIMEOUT` | 60 | LLM 字段精简超时（秒）；失败则本地截断兜底 |
 
 发送前会检查 `description_md` 以外的字段：超过上限时调用默认 CLI 运行时做一次
@@ -540,6 +546,52 @@ Select-String -Path .\log\anvil.log -Pattern 'tracker|http id=|ERROR|Traceback'
 如果日志里 `target_local_ip` 为 `127.0.0.1`，说明请求走了本机代理/本机地址；
 如果是某个网卡 IP，就用该 IP 对应网卡抓包。`proxy_source=env:HTTP_PROXY` 等字段
 可确认实际使用的代理变量。
+
+### Q22. 创建 workflow 草案返回 409 / Cindy 一直停在澄清
+
+- 查 `tasks.clarification_status`：
+  - `in_progress`：澄清进行中；在任务会话顶部的简报卡确认或跳过，才允许创建
+    workflow / workflow_revision 草案。
+  - `stale`：确认后任务定义又发生材料性变更（标题/描述/验收/scope/repo/type/
+    base_branch）；重新确认或跳过。
+  - `confirmed` / `skipped`：门禁已放行；检查是否还有 pending 角色建议或 planner run。
+- 确认/跳过是 human-only 的 Web 动作；CLI 的 `anvil task clarify` 只更新草稿。
+- 不确定是否该触发时，检查 `cindy_clarification` 开关（默认开）与任务是否满足首次规划条件：
+  `todo`、从未有 workflow、无执行 run、planner 是 Cindy、非派生子任务。
+- 已有 workflow、已执行、非 `todo` 的任务不会进入澄清，也不会被此门禁阻塞。
+
+### Q23. 审批 workflow 返回 409 `role_suggestion_blockers`
+
+- 收件箱或任务页存在 pending `role_suggestion`：先批准或驳回；审批 workflow 前必须解决。
+- 已批准的 `authorize` 建议：planner 必须完成角色创建与 `task assign` 绑定。检查返回的
+  `role_suggestions[*].outcome`：
+  - `wake=started`：planner 已被唤醒，等待其完成；
+  - `wake=skipped`：查看 `wake_reason`（任务终态/已归档、planner 缺失或禁用、澄清仍活跃）；
+  - `wake=failed`：看 `warnings` 与 run 日志。
+- `workflow_revision` 只受 pending 建议阻塞；已批准但未消费的 `authorize` 不阻塞修订。
+- 若 running workflow 未覆盖要绑定的角色，先提交包含该角色的 workflow 修订并审批通过，
+  再绑定；直接 `task assign` 会 409。
+
+### Q24. Claude Code 启动时报 `--effort` 参数错误
+
+- 角色思考强度通过 Claude Code `--effort low|medium|high|max` 注入；低于支持该参数的
+  版本会在 spawn 时失败。升级到已验证版本（2.1.332+），或在角色 → 运行时把 effort
+  调回运行时支持的值。
+- 修改 effort 不会热切换已有常驻进程，需下一次 spawn/resume 或空闲回收后生效。
+- Codex/Gemini 等未声明 `thinking_effort` 能力的运行时会忽略该字段。
+
+### Q25. 收件箱 `@human` 提醒不消失 / 误消失
+
+- 每个 `(task_id, role_slug)` 只保留最新一条 `@human`；不同角色各自等待，不会互相覆盖。
+- 只有该 mention 之后 `activities.role_slug='human'` 的活动才算回应；agent/system/workflow
+  的 comment 不会清除提醒。
+- 以下情况会自动隐藏：
+  - 简报确认/跳过或编辑后，早于 `clarification_confirmed_at` 的澄清提醒；
+  - 对应 board draft 已批准/驳回；
+  - 任务 `done`/`closed` 或已归档；
+  - `role_suggestion_rejected` 后已绑定角色，或失败步骤已重试/重新决策。
+- 若提醒仍不消失，查该任务的 `activities` 时间线：确认 mention 之后没有人类活动，
+  且任务未处于终态；`PUT /clarification/brief` 会补发 task SSE，可先刷新页面。
 
 ---
 

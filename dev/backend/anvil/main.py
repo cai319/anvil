@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -339,6 +340,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     app.add_middleware(_LocalTokenMiddleware)
     app.add_middleware(_SecurityHeadersMiddleware)
+    # 大厅/列表 JSON 在远程 Windows 客户端上会达到数 MB；gzip 可与访问日志共存。
+    # Starlette 默认排除 text/event-stream，不会缓冲 SSE。
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
     # 访问日志必须在鉴权外层，才能记录 401/403 等用户操作结果。
     app.add_middleware(AccessLogMiddleware)
 

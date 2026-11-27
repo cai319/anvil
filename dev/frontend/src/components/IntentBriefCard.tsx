@@ -75,10 +75,13 @@ function BriefSummary({
 }
 
 export function IntentBriefCard({
-  taskId, state, onChanged,
+  taskId, state, planningActive, draftPending, hasWorkflow, onChanged,
 }: {
   taskId: string;
   state: ClarificationState | null;
+  planningActive: boolean;
+  draftPending: boolean;
+  hasWorkflow: boolean;
   onChanged: () => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -316,8 +319,12 @@ export function IntentBriefCard({
                     onClick={saveConfirmed}>保存修改</button>
                 )}
               </>
-            ) : (
+            ) : planningActive ? (
               <span className="muted ibc-note">Cindy 正在规划工作流…</span>
+            ) : draftPending ? (
+              <span className="muted ibc-note">规划草案已提交，等待审批</span>
+            ) : hasWorkflow ? null : (
+              <span className="muted ibc-note">简报已确认，等待启动规划</span>
             )
           )}
 

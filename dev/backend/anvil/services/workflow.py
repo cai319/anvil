@@ -34,6 +34,7 @@ from .workflow_definition import (  # noqa: F401
     _slice_context, _loop_spec, _join_instructions, _dynamic_slice_steps,
     _validate_generated_deps, apply_slice_plan, _apply_slice_plan_locked, _phase_role,
     _workflow_roles, _validate_issue_board, _participant_roles, _definition_roles,
+    definition_roles,
     preview_participant_sync, sync_workflow_participants, validate_role_coverage,
     validate_definition, terminate_running_workflows, _terminate_running_workflow,
     _clear_restarted_slice_contexts, create_workflow, _create_workflow_locked
@@ -66,7 +67,8 @@ __all__ = [
     'workflow_lifecycle_lock', 'logger', 'normalize_definition', 'LOOP_PHASES',
     'LOOP_HINT_PHASES', 'SLICE_ID_RE', 'LOOP_RESERVED_IDS', 'SLICE_COLLAB_RULE',
     'apply_slice_plan', 'preview_participant_sync', 'sync_workflow_participants',
-    'validate_role_coverage', 'validate_definition', 'terminate_running_workflows',
+    'definition_roles', 'validate_role_coverage', 'validate_definition',
+    'terminate_running_workflows',
     'create_workflow', 'RevisionConflict', 'preview_revision', 'apply_revision',
     'explain_dispatch', 'step_prompt', 'advance', 'resume_runs_for_task',
     'renew_step_lease_for_run', 'submit_step', 'retry_step', 'check_step_run_restart',

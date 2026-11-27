@@ -139,11 +139,18 @@ def _runtime_or_empty(manager, role: str) -> dict[str, Any]:
     return {}
 
 
-def _task_contexts(conn, role: str, task_id: str) -> list[dict]:
+def preload_contexts(conn) -> dict[str, list[dict]]:
+    """批量角色状态用：一次读出所有角色的任务上下文槽，避免按任务重复查询。"""
+    grouped: dict[str, list[dict]] = {}
+    for row in conn.execute("SELECT * FROM role_task_sessions").fetchall():
+        item = dict(row)
+        grouped.setdefault(str(item.get("role_slug") or ""), []).append(item)
+    return grouped
+
+
+def _contexts_from_rows(rows: list[dict], task_id: str) -> list[dict]:
     from . import daemon as daemon_service
 
-    rows = [dict(r) for r in conn.execute(
-        "SELECT * FROM role_task_sessions WHERE role_slug=?", (role,)).fetchall()]
     contexts = []
     for row in rows:
         tid = row.get("task_id")
@@ -157,7 +164,15 @@ def _task_contexts(conn, role: str, task_id: str) -> list[dict]:
     return contexts
 
 
-def task_role_states(conn, task_id: str, manager=None) -> list[dict]:
+def _task_contexts(conn, role: str, task_id: str) -> list[dict]:
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM role_task_sessions WHERE role_slug=?", (role,)).fetchall()]
+    return _contexts_from_rows(rows, task_id)
+
+
+def task_role_states(conn, task_id: str, manager=None, *,
+                     runtime_cache: dict[str, dict] | None = None,
+                     contexts_cache: dict[str, list[dict]] | None = None) -> list[dict]:
     """任务内每个角色一份 {role_slug, state, queued, working_here, busy_elsewhere}。"""
     from . import tasks as tasks_service
     from . import workflow as workflow_service
@@ -194,8 +209,16 @@ def task_role_states(conn, task_id: str, manager=None) -> list[dict]:
 
     out = []
     for role in roles:
-        runtime = _runtime_or_empty(manager, role)
-        contexts = _task_contexts(conn, role, task_id)
+        if runtime_cache is not None:
+            if role not in runtime_cache:
+                runtime_cache[role] = _runtime_or_empty(manager, role)
+            runtime = runtime_cache[role]
+        else:
+            runtime = _runtime_or_empty(manager, role)
+        if contexts_cache is not None:
+            contexts = _contexts_from_rows(contexts_cache.get(role, []), task_id)
+        else:
+            contexts = _task_contexts(conn, role, task_id)
         has_context = any(c.get("session_id") for c in contexts)
         wf_slice = None
         if contexts:

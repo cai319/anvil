@@ -60,6 +60,45 @@ async def test_inbox_mention_lifecycle(client, seeded):
     assert all(i["kind"] != "mention" for i in body["items"])
 
 
+async def test_inbox_keeps_latest_human_mention_per_sender(client, seeded):
+    """不同角色各自 @human 时不能被同任务的另一条提醒覆盖。"""
+    await client.post("/api/v1/roles", json=role_payload("qa"), headers=auth_headers())
+    await client.post("/api/v1/tasks", json=task_payload(
+        id="T-MULTI-MEN", assignees=["pm", "qa"]), headers=auth_headers())
+    await client.post("/api/v1/tasks/T-MULTI-MEN/mention",
+                      json={"target": "human", "message": "PM 的问题"},
+                      headers=auth_headers("pm"))
+    await client.post("/api/v1/tasks/T-MULTI-MEN/mention",
+                      json={"target": "human", "message": "QA 的问题"},
+                      headers=auth_headers("qa"))
+    mens = [i for i in (await _inbox(client))["items"] if i["kind"] == "mention"]
+    assert len(mens) == 2
+    titles = " ".join(i["title"] for i in mens)
+    assert "PM 的问题" in titles and "QA 的问题" in titles
+
+    # 人类任一次回复都晚于两条提醒 → 两条都消失。
+    await client.post("/api/v1/tasks/T-MULTI-MEN/comment",
+                      json={"body": "两个问题都已确认"}, headers=human_headers())
+    assert all(i["kind"] != "mention" for i in (await _inbox(client))["items"])
+
+
+async def test_inbox_mention_reply_cutoff_is_per_sender(client, seeded):
+    """回复只清掉其之前的角色提醒，不会误清之后的新提醒。"""
+    await client.post("/api/v1/roles", json=role_payload("qa"), headers=auth_headers())
+    await client.post("/api/v1/tasks", json=task_payload(
+        id="T-CUTOFF", assignees=["pm", "qa"]), headers=auth_headers())
+    await client.post("/api/v1/tasks/T-CUTOFF/mention",
+                      json={"target": "human", "message": "先问 PM"},
+                      headers=auth_headers("pm"))
+    await client.post("/api/v1/tasks/T-CUTOFF/comment",
+                      json={"body": "回复 PM"}, headers=human_headers())
+    await client.post("/api/v1/tasks/T-CUTOFF/mention",
+                      json={"target": "human", "message": "QA 后问"},
+                      headers=auth_headers("qa"))
+    mens = [i for i in (await _inbox(client))["items"] if i["kind"] == "mention"]
+    assert len(mens) == 1 and "QA 后问" in mens[0]["title"]
+
+
 async def test_inbox_mention_clears_when_human_replies_to_sender(client, seeded):
     await client.post("/api/v1/tasks", json=task_payload(id="T-REPLY"), headers=auth_headers())
     await client.post("/api/v1/tasks/T-REPLY/mention",
@@ -214,3 +253,62 @@ async def test_inbox_delegation_review_item(client, app, seeded):
     assert accepted.status_code == 200, accepted.text
     assert not [i for i in (await _inbox(client))["items"]
                 if i["kind"] == "delegation"]
+
+
+async def test_agent_comment_does_not_clear_human_mention(client, seeded):
+    """agent 自己的进度 comment 不能替人类清掉待办提醒。"""
+    await client.post("/api/v1/tasks", json=task_payload(
+        id="T-AGENT", assignees=["pm"]), headers=auth_headers())
+    await client.post("/api/v1/tasks/T-AGENT/mention",
+                      json={"target": "human", "message": "请确认是否继续"},
+                      headers=auth_headers("pm"))
+    await client.post("/api/v1/tasks/T-AGENT/comment",
+                      json={"body": "我先继续做别的步骤"},
+                      headers=auth_headers("pm"))
+    mens = [i for i in (await _inbox(client))["items"] if i["kind"] == "mention"]
+    assert len(mens) == 1 and mens[0]["task_id"] == "T-AGENT"
+
+    await client.post("/api/v1/tasks/T-AGENT/comment",
+                      json={"body": "确认，继续"}, headers=human_headers())
+    assert all(i["kind"] != "mention" for i in (await _inbox(client))["items"])
+
+
+async def test_clarification_confirmation_suppresses_older_mention(client, seeded, app):
+    """confirm/skip 更新 clarification_confirmed_at 后，旧提醒应消失，新提醒保留。"""
+    await client.post("/api/v1/tasks", json=task_payload(
+        id="T-CLAR-INBOX", assignees=["pm"]), headers=auth_headers())
+    await client.post("/api/v1/tasks/T-CLAR-INBOX/mention",
+                      json={"target": "human", "message": "请在任务简报卡确认或跳过"},
+                      headers=auth_headers("pm"))
+    assert any(i["kind"] == "mention" for i in (await _inbox(client))["items"])
+
+    conn = open_conn(app.state.db_path)
+    try:
+        conn.execute(
+            "UPDATE tasks SET clarification_status='confirmed', "
+            "clarification_confirmed_at=? WHERE id=?",
+            (now_iso(), "T-CLAR-INBOX"))
+        conn.commit()
+    finally:
+        conn.close()
+    assert all(i["kind"] != "mention" for i in (await _inbox(client))["items"])
+
+    await client.post("/api/v1/tasks/T-CLAR-INBOX/mention",
+                      json={"target": "human", "message": "确认后再问一个新的问题"},
+                      headers=auth_headers("pm"))
+    assert any(i["kind"] == "mention" for i in (await _inbox(client))["items"])
+
+
+async def test_closed_task_mention_hidden(client, seeded, app):
+    await client.post("/api/v1/tasks", json=task_payload(
+        id="T-CLOSED-MEN", assignees=["pm"]), headers=auth_headers())
+    await client.post("/api/v1/tasks/T-CLOSED-MEN/mention",
+                      json={"target": "human", "message": "请处理"},
+                      headers=auth_headers("pm"))
+    conn = open_conn(app.state.db_path)
+    try:
+        conn.execute("UPDATE tasks SET status='closed' WHERE id='T-CLOSED-MEN'")
+        conn.commit()
+    finally:
+        conn.close()
+    assert all(i["kind"] != "mention" for i in (await _inbox(client))["items"])

@@ -75,12 +75,12 @@ pip install --force-reinstall <anvil-cli-wheel-or-sdist>
 | 命令 | 用途 |
 |---|---|
 | `anvil --version` | 查看 CLI 版本 |
-| `anvil task ...` | 任务：列表/创建/委派工单/验收/认领/评论/提交/归档/任务知识 |
+| `anvil task ...` | 任务：列表/创建/澄清/委派工单/验收/认领/评论/提交/归档/任务知识 |
 | `anvil step ...` | 工作流步骤：show/plan/submit/decide/escalate/packet |
 | `anvil finding ...` | 问题板：安全 finding 的填写/提交/完成（reviewer） |
 | `anvil knowledge ...` | 角色知识：检索/索引/补全/仓库/知识卡 |
 | `anvil note write` | 写入角色笔记（实践门控） |
-| `anvil role ...` | 角色：list/propose/expand/export/import |
+| `anvil role ...` | 角色：list/propose/expand/export/import；思考强度走 Web/API |
 | `anvil rsi ...` | 角色 RSI：show/observations/trigger/retro/candidates/eval |
 | `anvil runtime ...` | 运行时改进提案：propose/evidence/proposals/show/export |
 | `anvil workspace ...` | 频道与频道知识卡 |
@@ -143,13 +143,19 @@ anvil task knowledge-delete <id> --id <knowledge-id>   # human
   上下文，避免只 resume 旧 prompt 而看不到新消息。
 - **规划前澄清**：只有 Cindy 的首次规划阶段会触发。Cindy 用
   `anvil task clarify <id> --file brief.json` 更新简报草稿，再用
-  `anvil task mention <id> --to human` 通知；确认/跳过是 human-only，
-  CLI 不提供确认/跳过命令。
+  `anvil task mention <id> --to human` 通知。`--file` 只接受任务简报 JSON，
+  只更新草稿，不会确认或跳过；确认/跳过是 human-only 的 Web 动作，CLI 不提供。
+  任务定义材料性变更（标题/描述/验收/scope/repo/type/base_branch）会把已确认简报
+  置为 `stale`。`cindy_clarification` 默认开启。
+- **角色建议门禁**：pending `role_suggestion` 会阻止 workflow / workflow_revision
+  审批；`create_bind` 在批准时创建并绑定角色，`authorize` 只授权 planner 创建/绑定，
+  完成前审批保持锁定。已有 running workflow 时，绑定未被 workflow 覆盖的角色会被拒绝。
 - **工作流步骤不要调用 `task claim` / `task submit`**；用 `anvil step`。
 - 工作流任务仍有 running workflow 时，`task submit` 默认 409；人类强制收口会在 Web 二次确认后
   先终止 workflow（abandon 正在跑的 run），再让 task 进入最终评审。
-- 规划期间（`plan_first`、planner run 活跃或存在待审草案）不接受 human
-  `task assign` 或手动 `POST /runs`；先等草案批准/驳回，或改走 `task dispatch`。
+- 规划期间（`clarification_status=in_progress|stale`、`plan_first`、planner run 活跃
+  或存在待审草案）不接受 human `task assign` 或手动 `POST /runs`；先确认/跳过简报，
+  等待草案批准/驳回，或改走 `task dispatch`。
 - **协作方式先判断**（`COLLABORATION_PROTOCOL`）：先查 workflow 是否已由其他步骤/阶段
   承担该产出；已执行/执行中 → `mention` 负责角色；尚未启动且本 step 需要 →
   记录 workflow 缺口 + `@cindy`/`@human`，评估是否新增委派；尚未启动且本 step 不需要 →
@@ -432,9 +438,14 @@ anvil role import --preview <file.anvil.zip> [--json]
   human 可以反馈/驳回，直到一致后批准。
 - 批准后再 `role expand --slug <已批准 slug>` 创建角色（继承创建者 runtime/permission_mode；
   新角色为普通 member，每日配额有限），然后用 `task assign` 加入任务。只能创建提案中
-  已批准的 slug；多角色提案必须用 `--slug` 指定。
+  已批准的 slug；多角色提案必须用 `--slug` 指定。`apply_mode=authorize` 的追加提案
+  在批准后仍由 planner 负责创建/绑定；完成前 workflow 审批保持锁定。
 - 任务已有 Roster 时，`task assign` 只追加新角色；未获批准会自动生成追加提案，
   human 反馈/批准后重试，不会覆盖已有 assignees。
+- **思考强度**：角色级 `definition.runtime.effort = low|medium|high|max` 通过 Web
+  「角色 → 运行时」或 `PUT /roles/{slug}/runtime` 配置，没有独立 CLI 命令。Cindy
+  默认 `max`，其他角色默认 `high`；修改在下次 spawn/resume 生效，运行时需支持
+  Claude Code `--effort`（当前 2.1.332 已验证）。
 - `role export` 导出 evolution 版本的 Strategy/Experience + manifest + Charter 引用；
   只支持演进版本（`kind=evolution`），需要 human token。
 - `role import` 默认 `new_role`，导入为 `source=import` 的基线且**不自动启用/切换**；
@@ -575,14 +586,18 @@ anvil action list
 | `stale_run` | 旧 run 的 token 已失效 | 等新 run 唤醒；不要用旧上下文重试 |
 | `lease_expired` / `lease_fenced` | 步骤租约失效 | 等待自动恢复；先 `step show` 确认 |
 | `step ... already expanded` | 切片计划已应用 | 查看现有切片，不要重复 plan |
+| `409 clarification ... not confirmed` | 任务简报未确认或已过期 | 在任务简报卡确认/跳过，或重新澄清 |
+| `409 workflow approval blocked by role suggestions` | 存在未解决的 `role_suggestion` | 先批准/驳回角色建议；`authorize` 还需 planner 完成创建/绑定 |
 | `409` 其他 | 状态冲突 | 先 show/查询当前状态，再决定是否重试 |
 | `403 this operation requires a human` | 人类专属操作 | 用 `mention --to human` 或 `action prepare` |
 
 ## 12. 最小自检
 
 ```bash
+anvil --version             # 预期 anvil 1.51.1
 anvil -h                    # 命令总览与规则
 anvil task -h               # 任务动作与示例
+anvil task clarify -h       # 规划前简报草稿
 anvil step -h               # 工作流步骤顺序
 anvil knowledge -h          # 知识动作
 anvil role list             # 系统现有角色
