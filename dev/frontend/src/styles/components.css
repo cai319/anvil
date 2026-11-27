@@ -3,6 +3,25 @@
 /* ===== 文本上下文 ===== */
 .muted { color: var(--text-on-ink-muted); }
 .page-loading { padding: 24px 4px; }
+
+.asset-reload-banner {
+  position: fixed;
+  z-index: 5000;
+  left: 50%;
+  bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100vw - 24px);
+  padding: 10px 12px;
+  border: var(--stroke) solid var(--ink-900);
+  border-radius: 8px;
+  background: var(--yellow);
+  color: var(--ink-900);
+  font-size: var(--fs-hint);
+  box-shadow: var(--shadow-2);
+  transform: translateX(-50%);
+}
 .card .muted,
 .role-card .muted,
 .run-card .muted,

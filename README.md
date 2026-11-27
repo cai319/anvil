@@ -687,6 +687,7 @@ Remove-Item -Recurse -Force dev\dist, dev\build -ErrorAction SilentlyContinue
 | 现象 | 处理 |
 |---|---|
 | 打开 7317 是 404/空白 | `cd dev/frontend && npm install && npm run rebuild`，重启后端 |
+| rebuild 后旧页面点击无响应 | 旧标签页仍引用已删除的 hash chunk；刷新页面即可。新版会在懒加载失败时自动重载，连续失败会显示「重新加载」提示 |
 | `anvil init` 提示后端未启动 | 先启动 `python run_server.py` |
 | 运行时 `missing` | 检查 CLI 是否在 PATH；Windows 优先原生 `.exe`；重新扫描运行时 |
 | 角色一直“等待授权” | 检查 `ANVIL_DEFAULT_PERMISSION_MODE` 与运行日志 |

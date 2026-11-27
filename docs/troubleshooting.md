@@ -595,6 +595,17 @@ Select-String -Path .\log\anvil.log -Pattern 'tracker|http id=|ERROR|Traceback'
 - 若提醒仍不消失，查该任务的 `activities` 时间线：确认 mention 之后没有人类活动，
   且任务未处于终态；`PUT /clarification/brief` 会补发 task SSE，可先刷新页面。
 
+### Q26. `npm run rebuild` 后旧页面点击没有响应
+
+- 现象：部署/重建前端后，不刷新页面，点击侧栏某个页面一直停在「加载中」或无反应。
+- 原因：旧标签页里的主 bundle 仍引用上一版的 `assets/<Page>-<hash>.js`；重建会删除
+  旧 hash 文件，浏览器请求时得到 404，动态 import 失败。
+- 当前版本：`vite:preloadError` 会触发一次自动页面重载，加载新版本后继续操作；
+  如果 10 秒内再次失败，页面底部显示「前端资源已更新，需要重新加载页面」和重载按钮。
+- 手动恢复：刷新页面（或 Cmd/Ctrl+Shift+R）。`npm run clean` 只能保证构建目录干净，
+  无法让已经打开、仍持有旧 bundle 的标签页自动更新。
+- 若重载后仍 404，检查后端是否仍指向旧 `dist`，以及是否在构建完成前就刷新了页面。
+
 ---
 
 ## 工作流步骤一直 running / 委派不唤醒 / subagent 显示中断

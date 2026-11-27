@@ -20,6 +20,9 @@
 角色无需迁移：Cindy 自动补齐 `effort=max`，其他角色默认 `high`；Claude Code 需支持
 `--effort`（2.1.332 已验证）。
 
+> `npm run rebuild` 会改变带 hash 的 chunk 文件名。已打开的旧页面如果仍引用旧 chunk，
+> 下一次懒加载会触发一次自动重载；连续失败时页面底部显示「重新加载」按钮。
+
 ## 打包为可执行程序
 
 打包使用 PyInstaller **单目录**（onedir）模式，产物包含 `anvil` 与 `anvil-server` 两个可执行文件，前端静态资源与内置运行时 YAML 一并打入。
