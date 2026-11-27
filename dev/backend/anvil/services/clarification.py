@@ -35,6 +35,7 @@ BASIS_FIELDS = (
     "title", "description", "type", "repo", "scope_paths", "acceptance", "base_branch")
 ACTIVE_RUN_STATUSES = (
     "created", "projecting", "running", "submitted", "reviewing", "suspended")
+THINKING_RUN_STATUSES = ("created", "projecting", "running")
 CONFIRM_REQUIRED_TEXT = ("goal", "true_intent")
 CONFIRM_REQUIRED_LIST = ("acceptance",)
 
@@ -81,6 +82,29 @@ def _has_active_run(conn: sqlite3.Connection, task_id: str) -> bool:
         f"SELECT 1 FROM runs WHERE task_id=? AND status IN ({placeholders}) LIMIT 1",
         (task_id, *ACTIVE_RUN_STATUSES),
     ).fetchone() is not None
+
+
+def _is_thinking(conn: sqlite3.Connection, task: dict, status: str) -> bool:
+    """Cindy 是否正在处理：clarify run 在跑，或确认后的 planner run 在跑。
+
+    suspended 表示已发完消息、等待 human，不算思考；failed/abandoned 也不算。
+    """
+    planner = str(task.get("planner") or "cindy")
+    placeholders = ",".join("?" for _ in THINKING_RUN_STATUSES)
+    if status == "in_progress":
+        return conn.execute(
+            f"SELECT 1 FROM runs WHERE task_id=? AND role_slug=? "
+            f"AND origin='clarify' AND status IN ({placeholders}) LIMIT 1",
+            (task["id"], planner, *THINKING_RUN_STATUSES),
+        ).fetchone() is not None
+    if status == "confirmed":
+        return conn.execute(
+            f"SELECT 1 FROM runs WHERE task_id=? AND role_slug=? "
+            f"AND COALESCE(origin,'') != 'clarify' "
+            f"AND status IN ({placeholders}) LIMIT 1",
+            (task["id"], planner, *THINKING_RUN_STATUSES),
+        ).fetchone() is not None
+    return False
 
 
 def _has_execution_run(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -308,6 +332,7 @@ def get_state(conn: sqlite3.Connection, task_id: str) -> dict:
         "plan_shape": plan_shape,
         "stale_reason": "任务定义已变更" if status == "stale" else None,
         "waiting_for_human": waiting_for_human,
+        "thinking": _is_thinking(conn, task, status),
         "can_start": status in ("none", "stale", "skipped")
         and can_clarify(conn, task_id),
         "can_confirm": status in ACTIVE_STATUSES and ready,

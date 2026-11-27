@@ -7,6 +7,7 @@ import {
   type WorkflowWeight,
 } from "../api/client";
 import { confirmDialog } from "./dialogs";
+import { Icon } from "./Icon";
 
 const STATUS_LABEL: Record<string, string> = {
   none: "待澄清",
@@ -60,16 +61,14 @@ function BriefSummary({
       <dt>流程强度</dt>
       <dd>
         {WEIGHT_LABEL[weight]}
-        {brief.weight !== weight
-          ? "（已按你的选择，确认后生效）"
-          : brief.weight_rationale ? `（${brief.weight_rationale}）` : ""}
+        {brief.weight === weight && brief.weight_rationale
+          ? `（${brief.weight_rationale}）` : ""}
       </dd>
       <dt>计划形态</dt>
       <dd>
         {SHAPE_LABEL[planShape]}
-        {brief.plan_shape !== planShape
-          ? "（已按你的选择，确认后生效）"
-          : brief.plan_shape_rationale ? `（${brief.plan_shape_rationale}）` : ""}
+        {brief.plan_shape === planShape && brief.plan_shape_rationale
+          ? `（${brief.plan_shape_rationale}）` : ""}
       </dd>
     </dl>
   );
@@ -125,6 +124,7 @@ export function IntentBriefCard({
   // 无简报时不显示卡片：任务启动按钮就是「Cindy 先澄清再规划」的唯一入口。
   if (state.status === "none") return null;
 
+  const thinking = busy || state.thinking;
   const active = state.status === "in_progress" || state.status === "stale";
   const openQuestions = state.brief?.open_questions ?? [];
 
@@ -205,9 +205,17 @@ export function IntentBriefCard({
         {state.status === "stale" && (
           <span className="ibc-warn">{state.stale_reason || "任务定义已变更"}</span>
         )}
-        {state.brief_version > 0 && (
-          <span className="muted ibc-version">v{state.brief_version}</span>
-        )}
+        <span className="ibc-head-right">
+          {thinking && (
+            <span className="ibc-thinking" title="Cindy 正在思考"
+              aria-label="Cindy 正在思考">
+              <Icon name="hourglass" size={15} className="ibc-hourglass" />
+            </span>
+          )}
+          {state.brief_version > 0 && (
+            <span className="muted">v{state.brief_version}</span>
+          )}
+        </span>
       </div>
 
       <BriefSummary brief={state.brief} weight={weight} planShape={planShape} />
@@ -274,11 +282,6 @@ export function IntentBriefCard({
               跳过澄清，直接规划
             </button>
           </div>
-          {!state.ready && !editing && (
-            <p className="muted">
-              简报尚未达到可确认状态；Cindy 会继续提问，你也可以直接在会话中补充。
-            </p>
-          )}
         </>
       )}
 

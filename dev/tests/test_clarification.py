@@ -237,6 +237,7 @@ def test_state_flags(conn):
     _task(conn)
     state = clarification.start(conn, "T1")
     assert state["status"] == "in_progress"
+    assert state["thinking"] is False
     assert state["can_skip"] is True
     assert state["can_confirm"] is False
     clarification.save_draft(conn, "T1", _brief(), actor="cindy")
@@ -413,6 +414,7 @@ def test_start_clarify_run_prompt_and_round(conn, tmp_path):
     assert "规划前澄清" in run["prompt"]
     assert "[anvil:plan]" not in run["prompt"]
     assert tasks.get(conn, "T1")["clarification_round"] == 1
+    assert clarification.get_state(conn, "T1")["thinking"] is True
 
     run2 = clarification.start_clarify_run(
         conn, str(tmp_path / "c.db"), None, "T1", "cindy",

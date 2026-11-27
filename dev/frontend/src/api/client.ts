@@ -1723,6 +1723,7 @@ export interface ClarificationState {
   weight_source: string | null;
   plan_shape: ClarificationPlanShape | null;
   waiting_for_human: boolean;
+  thinking: boolean;
   stale_reason: string | null;
   can_start: boolean;
   can_confirm: boolean;

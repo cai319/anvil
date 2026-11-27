@@ -1909,8 +1909,25 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
   gap: 8px;
   flex-wrap: wrap;
 }
-.ibc-head .ibc-version {
+.ibc-head-right {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.ibc-thinking {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent, #facc15);
+}
+.ibc-hourglass {
+  animation: ibc-hourglass-flip 1.6s ease-in-out infinite;
+  transform-origin: 50% 50%;
+}
+@keyframes ibc-hourglass-flip {
+  0%, 30% { transform: perspective(40px) rotateY(0deg); }
+  50%, 80% { transform: perspective(40px) rotateY(180deg); }
+  100% { transform: perspective(40px) rotateY(360deg); }
 }
 .ibc-warn {
   color: var(--amber);
