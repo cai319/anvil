@@ -203,6 +203,8 @@ def _render_persistent(conn: sqlite3.Connection, run: dict, task: dict | None,
     if not isinstance(rt_cfg, dict):
         rt_cfg = {}
     permission_mode = rt_cfg.get("permission_mode") or config.DEFAULT_PERMISSION_MODE
+    effort = (rt_cfg.get("effort")
+              or roles_service.runtime_effort((role or {}).get("definition") or {}))
     model_pool = rt_cfg.get("model_pool") or []
     context_window_floor = rt_cfg.get("context_window_floor")
     sess = definition.get("session") or {}
@@ -210,6 +212,7 @@ def _render_persistent(conn: sqlite3.Connection, run: dict, task: dict | None,
     timeout = float(inv.get("timeout_seconds") or 3600)
     ctx = {
         "permission_mode": permission_mode,
+        "effort": effort,
         "workspace_path": workspace_path,
         "task_id": task["id"] if task else "",
         "agent_slug": run["role_slug"],
@@ -508,6 +511,9 @@ def _run_prompt_kind(conn: sqlite3.Connection, run: dict,
         return "findings"
     if prompt.startswith("[anvil:rsi-reflect]"):
         return "rsi_reflect"
+    from ..services import clarification as clarification_service
+    if prompt.startswith(clarification_service.CLARIFY_MARKER):
+        return "clarify"
     if run.get("step_id"):
         return "step"
     from ..services import planning as planning_service
@@ -540,6 +546,8 @@ def _protocols_for_run(conn: sqlite3.Connection, run: dict,
         return "\n\n".join(parts)
     if kind == "planning":
         return render.PLANNING_PROTOCOL + "\n\n" + render.REVISION_PROTOCOL
+    if kind == "clarify":
+        return render.CLARIFY_PROTOCOL
     if kind == "reply":
         return render.REPLY_PROTOCOL
     return render.PROTOCOL
@@ -584,6 +592,14 @@ def _prompt_for_run(conn: sqlite3.Connection, run: dict, task: dict | None) -> s
             parts.append(hint)
         parts.append(_protocols_for_run(conn, run, task, kind))
         return _with_wake_note(run, "\n\n".join(p for p in parts if p))
+    if kind == "clarify":
+        # 澄清 run：只澄清、不规划；协议已在 run prompt 里，不能再拼通用 PROTOCOL。
+        from ..services import clarification as clarification_service
+        body = prompt[len(clarification_service.CLARIFY_MARKER):].strip()
+        base = _prompt(task, _conversation_transcript(
+            conn, run.get("task_id"), task_wide=True), body, protocol=None)
+        hint = _knowledge_hint(conn, run, task)
+        return _with_wake_note(run, "\n\n".join(p for p in (base, hint) if p))
     if kind == "planning":
         # 规划 run（Cindy / planner）：不能因为任务已有 workflow 就被误判为回复。
         from ..services import planning as planning_service
@@ -630,6 +646,8 @@ def _render_invocation(conn: sqlite3.Connection, run: dict, task: dict | None,
     executable = runtime_service.effective_executable(executable) or executable
     rt_cfg = (effective.get("projection") or {}).get("runtime") or {}
     permission_mode = (rt_cfg.get("permission_mode") if isinstance(rt_cfg, dict) else None) or config.DEFAULT_PERMISSION_MODE
+    effort = ((rt_cfg.get("effort") if isinstance(rt_cfg, dict) else None)
+              or roles_service.runtime_effort((role or {}).get("definition") or {}))
 
     # 运行级会话令牌（design §10 末段）：绑定 role + task，Agent 无法自填 X-Anvil-Role 冒充。
     token = secrets.token_urlsafe(24)
@@ -645,6 +663,7 @@ def _render_invocation(conn: sqlite3.Connection, run: dict, task: dict | None,
 
     ctx = {
         "permission_mode": permission_mode,
+        "effort": effort,
         "prompt": _prompt_for_run(conn, run, task),
         "workspace_path": workspace_path,
         "task_id": task["id"] if task else "",

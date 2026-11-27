@@ -1281,27 +1281,34 @@ def mention_task(tid: str, body: dict, request: Request, conn=Depends(get_db), a
         if not target_exists:
             pass  # 角色不存在/已禁用：只记录 mention，不唤醒
         elif is_planner and task.get("status") not in ("done", "closed"):
-            # 自然人或其它角色 @planner/Cindy：由 planner 自己判断如何处理。
-            # 这是“让有职责的角色处理”，不是系统替人决策。
-            try:
-                services.planning.start_planner_run(
-                    conn,
-                    request.app.state.db_path,
-                    getattr(request.app.state, "orchestrator", None),
-                    tid,
-                    target,
-                    assignees=_assignee_slugs(conn, tid),
-                    extra_constraint=(
-                        f"{sender} 通过 @{target} 指示：\n{message}\n\n"
-                        "请按你的规划职责判断下一步：能用增量修订表达时先用 "
-                        "`anvil workflow revise --preview` 判断并提交修订草案；"
-                        "否则提交/修订完整 workflow 草案；不需要时直接回复并说明理由。"
-                        "角色分配只能由 planner 在 workflow/loop 模板中定义。"),
-                    replace_active=True,
-                )
-                events.publish("task", {"id": tid, "kind": "plan", "planner": target})
-            except Exception:  # noqa: BLE001 —— 规划失败不阻断已记录的 mention
-                pass
+            # 自然人或其它角色 @planner/Cindy：首次规划阶段先澄清；已有 workflow 的
+            # 任务仍走原来的规划/修订判断。
+            clarified = _clarify_if_needed(
+                conn, request, tid, target, _assignee_slugs(conn, tid),
+                human_message=f"{sender} 通过 @{target} 指示：\n{message}",
+                sender=sender)
+            if clarified is None:
+                # 由 planner 自己判断如何处理，不是系统替人决策。
+                try:
+                    services.planning.start_planner_run(
+                        conn,
+                        request.app.state.db_path,
+                        getattr(request.app.state, "orchestrator", None),
+                        tid,
+                        target,
+                        assignees=_assignee_slugs(conn, tid),
+                        extra_constraint=(
+                            f"{sender} 通过 @{target} 指示：\n{message}\n\n"
+                            "请按你的规划职责判断下一步：能用增量修订表达时先用 "
+                            "`anvil workflow revise --preview` 判断并提交修订草案；"
+                            "否则提交/修订完整 workflow 草案；不需要时直接回复并说明理由。"
+                            "角色分配只能由 planner 在 workflow/loop 模板中定义。"),
+                        replace_active=True,
+                    )
+                    events.publish(
+                        "task", {"id": tid, "kind": "plan", "planner": target})
+                except Exception:  # noqa: BLE001 —— 规划失败不阻断已记录的 mention
+                    pass
         else:
             _wake_mentioned_role(
                 conn, request, task, target, message,
@@ -1364,6 +1371,51 @@ def _assignee_slugs(conn, tid: str) -> list[str]:
         "SELECT role_slug FROM task_assignees WHERE task_id=? ORDER BY joined_at", (tid,))]
 
 
+def _clarify_if_needed(conn, request: Request, tid: str, planner: str,
+                       assignees: list[str], *, human_message: str | None = None,
+                       sender: str = "human", reason: str | None = None):
+    """首次规划阶段优先进入澄清；返回响应 dict，或 None 表示继续规划。"""
+    task = services.tasks.get(conn, tid)
+    if task is None or not services.clarification.can_clarify(
+            conn, tid, planner=planner):
+        return None
+    status = str(task.get("clarification_status") or "none")
+    if status in ("none", "stale"):
+        services.clarification.start(
+            conn, tid, planner=planner, actor=sender, reason=reason)
+    elif status == "in_progress":
+        if human_message is None:
+            return {
+                "mode": "clarifying",
+                "planner": planner,
+                "clarification": services.clarification.get_state(conn, tid),
+            }
+    else:
+        return None
+    run = services.clarification.start_clarify_run(
+        conn, request.app.state.db_path,
+        getattr(request.app.state, "orchestrator", None),
+        tid, planner, assignees=assignees, human_message=human_message,
+        replace_active=True, reason=reason)
+    state = services.clarification.get_state(conn, tid)
+    events.publish(
+        "task", {"id": tid, "kind": "clarify", "round": state["round"]})
+    return {"mode": "clarifying", "planner": planner,
+            "clarification": state, "run": run}
+
+
+def _clarification_planner(conn, task: dict) -> str:
+    planner = str(task.get("planner") or "")
+    if planner:
+        return planner
+    planner = services.roles.ensure_onboarding(conn)["slug"]
+    conn.execute(
+        "UPDATE tasks SET planner=?, updated_at=? WHERE id=?",
+        (planner, now_iso(), task["id"]))
+    conn.commit()
+    return planner
+
+
 def _start_planner_run(conn, request: Request, tid: str, planner: str,
                        assignees: list[str], extra_constraint: str = "",
                        replace_active: bool = False):
@@ -1411,6 +1463,9 @@ def plan_task(tid: str, request: Request, conn=Depends(get_db),
     # onboarding 助理（Cindy）不是任务参与角色，但可以为任意任务做规划。
     if planner not in assignees and not services.roles.is_onboarding(conn, planner):
         raise HTTPException(status_code=409, detail=f"planner {planner} is not a task assignee")
+    clarified = _clarify_if_needed(conn, request, tid, planner, assignees)
+    if clarified:
+        return clarified
     return _start_planner_run(conn, request, tid, planner, assignees)
 
 
@@ -1510,6 +1565,9 @@ def dispatch_task(tid: str, request: Request, conn=Depends(get_db),
     if planner:
         if planner not in assignees and not services.roles.is_onboarding(conn, planner):
             raise HTTPException(status_code=409, detail=f"planner {planner} is not a task assignee")
+        clarified = _clarify_if_needed(conn, request, tid, planner, assignees)
+        if clarified:
+            return clarified
         run = _start_planner_run(conn, request, tid, planner, assignees)
         return {"mode": "planning", "planner": planner, "run": run}
 
@@ -1525,6 +1583,145 @@ def dispatch_task(tid: str, request: Request, conn=Depends(get_db),
                 pass
         runs.append(run)
     return {"mode": "direct", "runs": runs}
+
+
+@router.get("/{tid}/clarification")
+def get_clarification(tid: str, conn=Depends(get_db), auth: Auth = Depends(get_auth)):
+    """读取任务简报与澄清状态。"""
+    _assert_session_task(conn, auth, tid)
+    try:
+        return services.clarification.get_state(conn, tid)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="task not found")
+
+
+@router.post("/{tid}/clarification/start", status_code=201)
+def start_clarification(tid: str, request: Request, body: dict | None = None,
+                        conn=Depends(get_db), auth: Auth = Depends(require_human)):
+    """human 主动开始/重新开始首次规划前的澄清。"""
+    _assert_session_task(conn, auth, tid)
+    task = services.tasks.get(conn, tid)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    planner = _clarification_planner(conn, task)
+    reason = str((body or {}).get("reason") or "") or None
+    try:
+        services.clarification.start(
+            conn, tid, planner=planner, actor="human", reason=reason)
+        run = services.clarification.start_clarify_run(
+            conn, request.app.state.db_path,
+            getattr(request.app.state, "orchestrator", None),
+            tid, planner, assignees=_assignee_slugs(conn, tid), reason=reason)
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    events.publish("task", {"id": tid, "kind": "clarify"})
+    return {"clarification": services.clarification.get_state(conn, tid),
+            "run": run}
+
+
+@router.put("/{tid}/clarification/draft")
+def save_clarification_draft(tid: str, body: dict, conn=Depends(get_db),
+                             auth: Auth = Depends(get_auth)):
+    """Cindy 通过 CLI 更新简报草稿；human 也可代写。"""
+    _assert_session_task(conn, auth, tid)
+    task = services.tasks.get(conn, tid)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    if auth.role != "human":
+        planner = str(task.get("planner") or "")
+        if not (auth.role == planner
+                or services.roles.is_onboarding(conn, auth.role or "")):
+            raise HTTPException(
+                status_code=403,
+                detail="only the task planner can write the brief draft")
+    brief = body.get("brief")
+    if not isinstance(brief, dict):
+        raise HTTPException(status_code=422, detail="brief is required")
+    try:
+        state = services.clarification.save_draft(
+            conn, tid, brief, actor=auth.role or "cindy")
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    events.publish("task", {"id": tid, "kind": "clarification_brief"})
+    return state
+
+
+@router.post("/{tid}/clarification/confirm")
+def confirm_clarification(tid: str, body: dict, request: Request,
+                          conn=Depends(get_db), auth: Auth = Depends(require_human)):
+    """human 确认简报：写版本/强度，自动启动 planner run。"""
+    _assert_session_task(conn, auth, tid)
+    task = services.tasks.get(conn, tid)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    planner = _clarification_planner(conn, task)
+    try:
+        services.clarification.confirm(
+            conn, tid, brief=body.get("brief"), weight=body.get("weight"),
+            plan_shape=body.get("plan_shape"),
+            acknowledge_open_questions=bool(
+                body.get("acknowledge_open_questions")),
+            actor="human", reason=body.get("reason"))
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    run = _start_planner_run(
+        conn, request, tid, planner, _assignee_slugs(conn, tid))
+    return {"clarification": services.clarification.get_state(conn, tid),
+            "run": run}
+
+
+@router.post("/{tid}/clarification/skip")
+def skip_clarification(tid: str, request: Request, body: dict | None = None,
+                       conn=Depends(get_db), auth: Auth = Depends(require_human)):
+    """human 跳过澄清：按今天的行为启动 planner（无简报）。"""
+    _assert_session_task(conn, auth, tid)
+    task = services.tasks.get(conn, tid)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    planner = _clarification_planner(conn, task)
+    try:
+        services.clarification.skip(
+            conn, tid, actor="human",
+            reason=str((body or {}).get("reason") or "") or None)
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    run = _start_planner_run(
+        conn, request, tid, planner, _assignee_slugs(conn, tid))
+    return {"clarification": services.clarification.get_state(conn, tid),
+            "run": run}
+
+
+@router.put("/{tid}/clarification/brief")
+def edit_clarification_brief(tid: str, body: dict, conn=Depends(get_db),
+                             auth: Auth = Depends(require_human)):
+    """human 编辑已确认简报；有活跃 planner run / pending 草案时拒绝。"""
+    _assert_session_task(conn, auth, tid)
+    brief = body.get("brief")
+    if not isinstance(brief, dict):
+        raise HTTPException(status_code=422, detail="brief is required")
+    try:
+        state = services.clarification.update_brief(
+            conn, tid, brief, actor="human", reason=body.get("reason"))
+    except LookupError:
+        raise HTTPException(status_code=404, detail="task not found")
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return state
+
+
+@router.get("/{tid}/clarification/versions")
+def clarification_versions(tid: str, conn=Depends(get_db),
+                           auth: Auth = Depends(get_auth)):
+    _assert_session_task(conn, auth, tid)
+    if services.tasks.get(conn, tid) is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    return services.clarification.versions(conn, tid)
 
 
 @router.post("/{tid}/deps", response_model=TaskOut)

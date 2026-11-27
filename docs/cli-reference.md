@@ -117,6 +117,7 @@ anvil task comment <id> "正文"                 # 也可 --message
 anvil task note <id> --for-step <step-id> "正文"  # 系统备注：带入未来步骤上下文，不唤醒
 anvil task mention <id> --to <role|human> "正文"  # 也可 --message
   [--slice <slice-key>] [--context-mode auto|reuse|switch|dispatch]
+anvil task clarify <id> --file <brief.json>      # 更新规划前澄清简报草稿（不确认/不跳过）
 anvil task dispatch <id> --to <role> "正文" [--slice <slice-key>] \
   [--acceptance "验收1;验收2"] [--scope-paths src/a,src/b] \
   [--title "..."] [--context-mode auto|reuse|switch|dispatch] [--force]
@@ -140,6 +141,10 @@ anvil task knowledge-delete <id> --id <knowledge-id>   # human
   slice 切回该槽；`--context-mode` 可显式覆盖（`reuse/switch/dispatch`）。
 - `--slice` 标记来源切片；跨 task/跨切片的请求会通过一次性 wake_note 带入目标
   上下文，避免只 resume 旧 prompt 而看不到新消息。
+- **规划前澄清**：只有 Cindy 的首次规划阶段会触发。Cindy 用
+  `anvil task clarify <id> --file brief.json` 更新简报草稿，再用
+  `anvil task mention <id> --to human` 通知；确认/跳过是 human-only，
+  CLI 不提供确认/跳过命令。
 - **工作流步骤不要调用 `task claim` / `task submit`**；用 `anvil step`。
 - 工作流任务仍有 running workflow 时，`task submit` 默认 409；人类强制收口会在 Web 二次确认后
   先终止 workflow（abandon 正在跑的 run），再让 task 进入最终评审。

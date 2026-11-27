@@ -20,6 +20,10 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "evolution", label: "演化" },
 ];
 
+const EFFORT_LABELS: Record<string, string> = {
+  low: "低", medium: "中", high: "高", max: "最高",
+};
+
 // slug 会进入 agents/<slug>/ 路径、分支名与 CLI 参数；只允许 ASCII。
 const SLUG_RE = /^[a-z0-9][a-z0-9_-]{1,63}$/;
 const SLUG_HINT = "slug 只能使用小写英文字母、数字、-、_（2-64 位，且以字母或数字开头）；"
@@ -173,6 +177,7 @@ export function Roles() {
   const [runtimes, setRuntimes] = useState<Runtime[]>([]);
   const [runtimeId, setRuntimeId] = useState("");
   const [roleRuntimeId, setRoleRuntimeId] = useState("");
+  const [roleEffort, setRoleEffort] = useState("high");
   const generateSeq = useRef(0);
 
   const refresh = () => api.listRoles().then((items) => {
@@ -247,6 +252,7 @@ export function Roles() {
       setConfig(c);
       const rt = (c.projection as Record<string, any> | undefined)?.runtime;
       setRoleRuntimeId(typeof rt === "string" ? rt : (rt?.id ?? ""));
+      setRoleEffort(String((typeof rt === "object" && rt?.effort) || "high"));
       const tools = (c.projection as Record<string, any> | undefined)?.tools ?? {};
       setToolsForm({
         preset: tools.preset ?? "",
@@ -417,7 +423,7 @@ export function Roles() {
   const saveRuntime = async () => {
     if (!selected || !roleRuntimeId) return;
     try {
-      await api.updateRoleRuntime(selected, roleRuntimeId);
+      await api.updateRoleRuntime(selected, roleRuntimeId, roleEffort);
       const c = await api.getEffectiveConfig(selected);
       setConfig(c);
       await refresh();
@@ -1601,13 +1607,27 @@ export function Roles() {
                         <option key={r.id} value={r.id}>{r.display_name} · {r.status}</option>
                       ))}
                     </select>
-                    <button className="primary" onClick={saveRuntime} disabled={!roleRuntimeId}>保存绑定</button>
+                    <select value={roleEffort} onChange={(e) => setRoleEffort(e.target.value)}>
+                      <option value="low">思考强度：低</option>
+                      <option value="medium">思考强度：中</option>
+                      <option value="high">思考强度：高</option>
+                      <option value="max">思考强度：最高</option>
+                    </select>
+                    <button className="primary" onClick={saveRuntime} disabled={!roleRuntimeId}>保存运行时设置</button>
                   </div>
+                  <p className="muted">
+                    思考强度对应 Claude Code 的 <code>--effort</code> 参数，控制角色每次运行时的
+                    reasoning effort。Cindy 默认“最高”，其他角色默认“高”；不支持 effort 的运行时忽略该值。
+                  </p>
                   <section className="role-info-card">
                     <div className="role-info-grid">
                       <div className="role-info-item">
                         <span>当前运行时</span>
                         <code>{currentRuntime}</code>
+                      </div>
+                      <div className="role-info-item">
+                        <span>当前思考强度</span>
+                        <code>{EFFORT_LABELS[String(projection.runtime?.effort || "high")] || "高"}</code>
                       </div>
                     </div>
                   </section>

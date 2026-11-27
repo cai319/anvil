@@ -355,7 +355,7 @@ export interface paths {
         get: operations["role_runtime_api_v1_roles__slug__runtime_get"];
         /**
          * Update Role Runtime
-         * @description 把角色绑定到指定运行时；保留其它角色配置（system_prompt 等）。
+         * @description 绑定运行时并/或设置思考强度；保留 permission_mode 等其它运行时字段。
          */
         put: operations["update_role_runtime_api_v1_roles__slug__runtime_put"];
         post?: never;
@@ -1413,6 +1413,143 @@ export interface paths {
          *     - 已有待审草案 → 返回 pending_review（不重复规划）。
          */
         post: operations["dispatch_task_api_v1_tasks__tid__dispatch_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{tid}/clarification": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Clarification
+         * @description 读取任务简报与澄清状态。
+         */
+        get: operations["get_clarification_api_v1_tasks__tid__clarification_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{tid}/clarification/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start Clarification
+         * @description human 主动开始/重新开始首次规划前的澄清。
+         */
+        post: operations["start_clarification_api_v1_tasks__tid__clarification_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{tid}/clarification/draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save Clarification Draft
+         * @description Cindy 通过 CLI 更新简报草稿；human 也可代写。
+         */
+        put: operations["save_clarification_draft_api_v1_tasks__tid__clarification_draft_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{tid}/clarification/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm Clarification
+         * @description human 确认简报：写版本/强度，自动启动 planner run。
+         */
+        post: operations["confirm_clarification_api_v1_tasks__tid__clarification_confirm_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{tid}/clarification/skip": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Skip Clarification
+         * @description human 跳过澄清：按今天的行为启动 planner（无简报）。
+         */
+        post: operations["skip_clarification_api_v1_tasks__tid__clarification_skip_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{tid}/clarification/brief": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Edit Clarification Brief
+         * @description human 编辑已确认简报；有活跃 planner run / pending 草案时拒绝。
+         */
+        put: operations["edit_clarification_brief_api_v1_tasks__tid__clarification_brief_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{tid}/clarification/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Clarification Versions */
+        get: operations["clarification_versions_api_v1_tasks__tid__clarification_versions_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -7062,6 +7199,35 @@ export interface components {
             /** Planner */
             planner?: string | null;
             plan_seed?: components["schemas"]["PlanSeedOut"] | null;
+            /** Workflow Weight */
+            workflow_weight?: string | null;
+            /** Workflow Weight Source */
+            workflow_weight_source?: string | null;
+            /** Workflow Weight Reason */
+            workflow_weight_reason?: string | null;
+            /**
+             * Clarification Status
+             * @default none
+             */
+            clarification_status: string;
+            /** Intent Brief */
+            intent_brief?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Intent Brief Version
+             * @default 0
+             */
+            intent_brief_version: number;
+            /**
+             * Clarification Round
+             * @default 0
+             */
+            clarification_round: number;
+            /** Clarification Confirmed At */
+            clarification_confirmed_at?: string | null;
+            /** Clarification Basis Hash */
+            clarification_basis_hash?: string | null;
             /** Role Claims */
             role_claims?: components["schemas"]["TaskRoleClaimOut"][];
             /** Lease Expires At */
@@ -11251,6 +11417,274 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_clarification_api_v1_tasks__tid__clarification_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                tid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_clarification_api_v1_tasks__tid__clarification_start_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                tid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                } | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    save_clarification_draft_api_v1_tasks__tid__clarification_draft_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                tid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    confirm_clarification_api_v1_tasks__tid__clarification_confirm_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                tid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    skip_clarification_api_v1_tasks__tid__clarification_skip_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                tid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                } | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    edit_clarification_brief_api_v1_tasks__tid__clarification_brief_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                tid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    clarification_versions_api_v1_tasks__tid__clarification_versions_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Anvil-Session"?: string | null;
+                "X-Anvil-Role"?: string | null;
+            };
+            path: {
+                tid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };

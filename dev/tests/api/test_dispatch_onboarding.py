@@ -1,4 +1,4 @@
-"""计划先行默认化：多角色任务由 onboarding 助理（Cindy）先规划；单角色直接派发。"""
+"""计划先行默认化：Cindy 首次规划前先澄清；单角色无 planner 时直接派发。"""
 from __future__ import annotations
 
 import sqlite3
@@ -26,28 +26,33 @@ async def _create_task(client, tid, assignees):
     assert r.status_code == 201, r.text
 
 
-async def test_multi_role_dispatch_plans_with_cindy(client, seeded):
+async def test_multi_role_dispatch_clarifies_with_cindy(client, seeded):
     await _create_task(client, "T-MULTI", ["pm", "developer", "tester"])
     r = await client.post("/api/v1/tasks/T-MULTI/dispatch", headers=human_headers())
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body["mode"] == "planning"
+    assert body["mode"] == "clarifying"
     assert body["planner"] == "cindy"
+    assert body["clarification"]["status"] == "in_progress"
+    assert body["clarification"]["round"] == 1
     assert body["run"]["role_slug"] == "cindy"
+    assert body["run"]["origin"] == "clarify"
+    assert "[anvil:clarify]" in body["run"]["prompt"]
+    assert "[anvil:plan]" not in body["run"]["prompt"]
     # Cindy 是自动创建的内置 onboarding 角色
     role = await client.get("/api/v1/roles/cindy", headers=auth_headers())
     assert role.status_code == 200
-    # 只拉起 planner，参与角色没有被直接派发
+    # 只拉起 clarify run，参与角色没有被直接派发
     runs = (await client.get("/api/v1/runs", headers=human_headers())).json()
     assert [x["role_slug"] for x in runs if x.get("task_id") == "T-MULTI"] == ["cindy"]
 
 
-async def test_zero_assignee_dispatch_plans_with_cindy(client, seeded):
+async def test_zero_assignee_dispatch_clarifies_with_cindy(client, seeded):
     await _create_task(client, "T-NOROLE", [])
     r = await client.post("/api/v1/tasks/T-NOROLE/dispatch", headers=human_headers())
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body["mode"] == "planning"
+    assert body["mode"] == "clarifying"
     assert body["planner"] == "cindy"
 
 
@@ -60,14 +65,14 @@ async def test_single_role_dispatch_is_direct(client, seeded):
     assert [x["role_slug"] for x in body["runs"]] == ["developer"]
 
 
-async def test_plan_first_single_role_dispatch_plans_with_cindy(client, seeded):
+async def test_plan_first_single_role_dispatch_clarifies_with_cindy(client, seeded):
     r = await client.post("/api/v1/tasks", headers=auth_headers(), json=task_payload(
         id="T-PF-SINGLE", assignees=["developer"], plan_first=True))
     assert r.status_code == 201, r.text
     r = await client.post("/api/v1/tasks/T-PF-SINGLE/dispatch", headers=human_headers())
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body["mode"] == "planning"
+    assert body["mode"] == "clarifying"
     assert body["planner"] == "cindy"
     task = (await client.get("/api/v1/tasks/T-PF-SINGLE", headers=auth_headers())).json()
     assert task["planner"] == "cindy"
@@ -85,12 +90,12 @@ def _mark_planner_active(app, tid: str) -> None:
 
 
 async def test_planning_blocks_human_assign_and_direct_run(client, seeded, app):
-    """Cindy 规划期间，human 不能绕过 planner 直接改 Roster / 拉起 run。"""
+    """Cindy 澄清/规划期间，human 不能绕过 planner 直接改 Roster / 拉起 run。"""
     await _create_task(client, "T-PLANNING", ["pm", "developer"])
     dispatched = await client.post(
         "/api/v1/tasks/T-PLANNING/dispatch", headers=human_headers())
     assert dispatched.status_code == 201, dispatched.text
-    assert dispatched.json()["mode"] == "planning"
+    assert dispatched.json()["mode"] == "clarifying"
     _mark_planner_active(app, "T-PLANNING")
 
     assigned = await client.post(
@@ -105,7 +110,7 @@ async def test_planning_blocks_human_assign_and_direct_run(client, seeded, app):
 
 
 @pytest.mark.asyncio
-async def test_single_role_tagless_dispatch_plans_with_cindy(client, seeded, monkeypatch):
+async def test_single_role_tagless_dispatch_clarifies_with_cindy(client, seeded, monkeypatch):
     monkeypatch.setattr(config, "KNOWLEDGE_BINDING_MODE", "auto")
     monkeypatch.setattr(config, "KNOWLEDGE_CINDY_MODE", "tagless")
     repo_catalog.invalidate_catalog()
@@ -115,7 +120,7 @@ async def test_single_role_tagless_dispatch_plans_with_cindy(client, seeded, mon
     r = await client.post("/api/v1/tasks/T-TAGLESS/dispatch", headers=human_headers())
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body["mode"] == "planning"
+    assert body["mode"] == "clarifying"
     assert body["planner"] == "cindy"
 
 

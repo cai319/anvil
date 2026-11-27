@@ -287,6 +287,20 @@ FLAGS: tuple[FeatureFlag, ...] = (
         ),
         category="evolution",
     ),
+    FeatureFlag(
+        key="cindy_clarification",
+        attr="CINDY_CLARIFICATION_ENABLED",
+        title="Cindy 规划前澄清",
+        summary="Cindy 首次规划任务前先澄清意图、确认任务简报与流程强度。",
+        description=(
+            "开启后：Cindy 在首次规划阶段先进入澄清对话（每轮 1-3 个带推荐答案的问题），"
+            "产出结构化任务简报；human 在任务会话的简报卡确认或跳过后，才允许创建 workflow "
+            "草案并启动 planner。流程强度在澄清阶段选择，未确认简报时服务端拒绝 workflow 草案。"
+            "只影响 Cindy 的首次规划阶段；已有 workflow、已执行、非 todo 任务完全不受影响。"
+            "关闭后：Cindy 回到直接规划，已有澄清状态不影响已启动的 run。"
+        ),
+        category="workflow",
+    ),
 )
 
 _BY_KEY = {flag.key: flag for flag in FLAGS}

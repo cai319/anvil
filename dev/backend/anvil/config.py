@@ -245,6 +245,8 @@ KNOWLEDGE_HARVEST_REMINDER_ENABLED = _env(
 # 知识质量：人工按需 LLM 清洗（默认关闭；不自动批准）。
 KNOWLEDGE_LLM_CLEANING_ENABLED = _env(
     "ANVIL_KNOWLEDGE_LLM_CLEANING", "0") == "1"
+# v1.51 Cindy 规划前澄清：首次规划阶段先澄清再规划；默认开启。
+CINDY_CLARIFICATION_ENABLED = _env("ANVIL_CINDY_CLARIFICATION", "1") != "0"
 
 # v1.50 角色 RSI：默认全关，按角色试点后开启（见 docs/v1.50-role-rsi.md）。
 ROLE_RSI_ENABLED = _env("ANVIL_ROLE_RSI", "0") == "1"

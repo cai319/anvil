@@ -493,10 +493,34 @@ export const api = {
   planTask: (id: string): Promise<Run> =>
     req("POST", `/tasks/${id}/plan`).then((r) => json<Run>(r)),
   dispatchTask: (id: string): Promise<{
-    mode: "planning" | "pending_review" | "direct";
+    mode: "planning" | "clarifying" | "pending_review" | "direct";
     planner?: string; run?: Run; runs?: Run[]; draft_id?: string;
     draft_kind?: "tasks" | "workflow" | "role_suggestion";
+    clarification?: ClarificationState;
   }> => req("POST", `/tasks/${id}/dispatch`).then((r) => json(r)),
+  getClarification: (taskId: string): Promise<ClarificationState> =>
+    authFetch(`${BASE}/tasks/${taskId}/clarification`).then((r) => json<ClarificationState>(r)),
+  startClarification: (taskId: string, reason?: string): Promise<{
+    clarification: ClarificationState; run: Run;
+  }> => req("POST", `/tasks/${taskId}/clarification/start`, { reason }).then((r) => json(r)),
+  saveClarificationDraft: (taskId: string, brief: IntentBrief): Promise<ClarificationState> =>
+    req("PUT", `/tasks/${taskId}/clarification/draft`, { brief })
+      .then((r) => json<ClarificationState>(r)),
+  confirmClarification: (taskId: string, body: {
+    brief?: IntentBrief;
+    weight?: WorkflowWeight;
+    plan_shape?: ClarificationPlanShape;
+    acknowledge_open_questions?: boolean;
+    reason?: string;
+  }): Promise<{ clarification: ClarificationState; run: Run }> =>
+    req("POST", `/tasks/${taskId}/clarification/confirm`, body).then((r) => json(r)),
+  skipClarification: (taskId: string, reason?: string): Promise<{
+    clarification: ClarificationState; run: Run;
+  }> => req("POST", `/tasks/${taskId}/clarification/skip`, { reason }).then((r) => json(r)),
+  updateClarificationBrief: (taskId: string, brief: IntentBrief,
+                             reason?: string): Promise<ClarificationState> =>
+    req("PUT", `/tasks/${taskId}/clarification/brief`, { brief, reason })
+      .then((r) => json<ClarificationState>(r)),
   autoCreateRole: (brief: string, runtimeId?: string, avatar?: string | null): Promise<Role> =>
     req("POST", "/roles/auto", {
       brief,
@@ -684,8 +708,8 @@ export const api = {
     }).then((r) => json<Role>(r)),
   updateRoleAvatar: (slug: string, avatar: string | null): Promise<Role> =>
     req("PUT", `/roles/${slug}/avatar`, { avatar }).then((r) => json<Role>(r)),
-  updateRoleRuntime: (slug: string, runtimeId: string): Promise<Role> =>
-    req("PUT", `/roles/${slug}/runtime`, { id: runtimeId }).then((r) => json<Role>(r)),
+  updateRoleRuntime: (slug: string, runtimeId: string, effort?: string): Promise<Role> =>
+    req("PUT", `/roles/${slug}/runtime`, { id: runtimeId, effort }).then((r) => json<Role>(r)),
   getRoleRuntime: (slug: string): Promise<RoleRuntimeStatus> =>
     authFetch(`${BASE}/roles/${slug}/runtime`).then((r) => json<RoleRuntimeStatus>(r)),
   listRoleRuntimes: (): Promise<RoleRuntimeStatus[]> =>
@@ -1663,6 +1687,47 @@ export interface TaskWeightResult {
   running_workflow_id: string | null;
   running_execution_no: number | null;
   running_weight: WorkflowWeight | null;
+}
+
+export type ClarificationStatus =
+  | "none" | "in_progress" | "confirmed" | "skipped" | "stale";
+export type ClarificationPlanShape = "flat" | "slices" | "auto";
+
+export interface IntentBrief {
+  goal?: string;
+  true_intent?: string;
+  non_goals?: string[];
+  constraints?: string[];
+  acceptance?: string[];
+  assumptions?: string[];
+  open_questions?: string[];
+  weight?: WorkflowWeight;
+  weight_rationale?: string;
+  plan_shape?: ClarificationPlanShape;
+  plan_shape_rationale?: string;
+  risks?: string[];
+  basis_hash?: string;
+  confirmed_at?: string;
+  confirmed_by?: string;
+}
+
+export interface ClarificationState {
+  task_id: string;
+  status: ClarificationStatus;
+  round: number;
+  max_rounds: number;
+  brief: IntentBrief | null;
+  brief_version: number;
+  ready: boolean;
+  weight: WorkflowWeight | null;
+  weight_source: string | null;
+  plan_shape: ClarificationPlanShape | null;
+  waiting_for_human: boolean;
+  stale_reason: string | null;
+  can_start: boolean;
+  can_confirm: boolean;
+  can_skip: boolean;
+  can_edit: boolean;
 }
 
 export type WorkflowHistoryItem = Required<Schemas["WorkflowHistoryOut"]>;

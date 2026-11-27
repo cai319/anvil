@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { api, isOnboardingRole, type BoardDraft, type Delegation, type FindingSummary, type Role, type Run, type Task, type TaskChild, type TaskDispatch, type TaskLeases, type TaskRoleState, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate } from "../api/client";
+import { api, isOnboardingRole, type BoardDraft, type ClarificationState, type Delegation, type FindingSummary, type Role, type Run, type Task, type TaskChild, type TaskDispatch, type TaskLeases, type TaskRoleState, type TimelineEvent, type Workflow, type WorkflowGraphResponse, type WorkflowHistoryItem, type WorkflowMetrics, type WorkflowStep, type WorkflowTemplate } from "../api/client";
 import { useLiveRefresh } from "../useLiveRefresh";
 import { UNBOUND_CHANNEL_VIEW } from "../channelView";
 import { RoleSessions } from "./RoleSessions";
@@ -14,6 +14,7 @@ import { TaskHeader } from "../components/TaskHeader";
 import { SubtasksPanel } from "../components/SubtasksPanel";
 import { WorkflowSummary } from "../components/WorkflowSummary";
 import { WorkflowWeightDialog } from "../components/WorkflowWeightDialog";
+import { IntentBriefCard } from "../components/IntentBriefCard";
 import { DraftParticipants } from "../components/DraftParticipants";
 import {
   ChannelKnowledgePanel, KNOWLEDGE_MODE_LABEL, KnowledgeRepoPanel,
@@ -177,6 +178,7 @@ function readInitialTaskRoute(): { tab: TaskTab; finding: string | null } {
 export function TaskDetail({ id }: { id: string }) {
   const initialRoute = useRef(readInitialTaskRoute()).current;
   const [task, setTask] = useState<Task | null>(null);
+  const [clarification, setClarification] = useState<ClarificationState | null>(null);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
   const [assignee, setAssignee] = useState("");
@@ -325,11 +327,13 @@ export function TaskDetail({ id }: { id: string }) {
     }).catch(() => setRoleStates({}));
 
   const refresh = () =>
-    Promise.all([api.getTask(id), api.getTaskTimeline(id), api.listTaskRuns(id)])
-      .then(([t, tl, runs]) => {
+    Promise.all([api.getTask(id), api.getTaskTimeline(id), api.listTaskRuns(id),
+      api.getClarification(id).catch(() => null)])
+      .then(([t, tl, runs, clar]) => {
         setTask(t);
         setTimeline(tl);
         setRuns(runs);
+        setClarification(clar);
         const active = new Set([
           "created", "projecting", "running", "submitted", "reviewing", "suspended",
         ]);
@@ -1119,6 +1123,9 @@ export function TaskDetail({ id }: { id: string }) {
         />
       )}
       {tab === "chat" && (
+      <>
+      <IntentBriefCard taskId={id} state={clarification}
+        onChanged={() => { void refresh(); }} />
       <div
         className={`task-layout ${panel.collapsed ? "panel-collapsed" : ""}`}
         style={panel.style}
@@ -1147,32 +1154,49 @@ export function TaskDetail({ id }: { id: string }) {
                 >指派并执行</button>
               </>
             )}
-            {task.status === "todo" && plannerActive && (
+            {task.status === "todo" && clarification?.status === "in_progress" && (
+              <span className="muted">
+                Cindy 正在澄清需求：请在上方简报卡确认/跳过，或在会话中回复。
+              </span>
+            )}
+            {task.status === "todo" && clarification?.status === "stale" && (
+              <span className="muted">
+                任务定义已变更：请在上方简报卡重新确认或跳过。
+              </span>
+            )}
+            {task.status === "todo" && clarification?.status !== "in_progress"
+              && clarification?.status !== "stale" && plannerActive && (
               <span className="muted">Cindy 正在规划工作流，请到收件箱处理草案。</span>
             )}
             {(task.status === "todo" || task.status === "in_progress")
-              && !(workflow && workflow.status === "running") && (
+              && !(workflow && workflow.status === "running")
+              && clarification?.status !== "in_progress"
+              && clarification?.status !== "stale" && (
               <button
                 className="primary"
                 disabled={busy}
-                title="0 角色时 Cindy 会先分析并建议角色；plan_first 或多角色任务先由 planner/Cindy 规划工作流；单角色任务若无标签或知识仓库匹配较弱，也会先由 Cindy 识别知识仓库。草案经你批准后执行。这是启动/规划入口，不是派遣子任务。"
+                title="0 角色时 Cindy 会先分析并建议角色；plan_first 或多角色任务先由 planner/Cindy 澄清需求并规划工作流；单角色任务若无标签或知识仓库匹配较弱，也会先由 Cindy 识别知识仓库。草案经你批准后执行。这是启动/规划入口，不是派遣子任务。"
                 onClick={() => act(async () => {
                   const res = await api.dispatchTask(id);
                   setDispatchNote(
-                    res.mode === "planning"
-                      ? (task.assignees?.length
-                          ? `规划助理 ${res.planner} 正在分析任务并设计工作流…草案将出现在收件箱，批准后自动启动步骤执行。`
-                          : `规划助理 ${res.planner} 正在分析任务与角色缺口；若角色不足，会先提交角色建议等待你审批。`)
-                      : res.mode === "pending_review"
-                        ? (res.draft_kind === "role_suggestion"
-                            ? "已有待审角色建议，请到收件箱审阅批准。"
-                            : "已有待审工作流草案，请到收件箱审阅批准。")
-                        : "已直接启动参与角色执行。");
+                    res.mode === "clarifying"
+                      ? `Cindy 正在澄清需求（第 ${res.clarification?.round ?? 1} 轮）…请在上方简报卡确认/跳过，或在会话中回复。`
+                      : res.mode === "planning"
+                        ? (task.assignees?.length
+                            ? `规划助理 ${res.planner} 正在分析任务并设计工作流…草案将出现在收件箱，批准后自动启动步骤执行。`
+                            : `规划助理 ${res.planner} 正在分析任务与角色缺口；若角色不足，会先提交角色建议等待你审批。`)
+                        : res.mode === "pending_review"
+                          ? (res.draft_kind === "role_suggestion"
+                              ? "已有待审角色建议，请到收件箱审阅批准。"
+                              : "已有待审工作流草案，请到收件箱审阅批准。")
+                          : "已直接启动参与角色执行。");
                 })}
               >{(task.assignees?.length ?? 0) === 0
                   ? "启动（Cindy 分析并建议角色）"
                   : (task.assignees?.length ?? 0) >= 2
-                    ? "启动（先由 Cindy 规划）"
+                    ? (clarification?.status === "none"
+                        ? "启动（Cindy 先澄清）"
+                        : "启动（先由 Cindy 规划）")
                     : task.plan_first
                       ? "启动（先规划工作流）"
                       : (!task.knowledge_binding_locked
@@ -1660,6 +1684,7 @@ export function TaskDetail({ id }: { id: string }) {
           </ul>
         </aside>
       </div>
+      </>
       )}
 
       {tab === "workflow" && (
@@ -1678,7 +1703,8 @@ export function TaskDetail({ id }: { id: string }) {
             {displayWorkflow && (
               <>
                 <button className="small" disabled={busy}
-                  onClick={() => setShowWeight(true)}>调整流程强度</button>
+                  title="主决策在澄清阶段的简报卡；此处只影响下一次执行"
+                  onClick={() => setShowWeight(true)}>高级：调整流程强度</button>
                 <button className="small" disabled={dossierBusy}
                   onClick={async () => {
                     setDossierBusy(true); setError(null);

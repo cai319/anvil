@@ -58,8 +58,10 @@ async def test_plan_endpoint_falls_back_to_cindy(client, seeded):
         id="T-PF5", assignees=["pm"], plan_first=True), headers=auth_headers())
     r = await client.post("/api/v1/tasks/T-PF5/plan", headers=human_headers())
     assert r.status_code == 201, r.text
-    run = r.json()
-    assert run["role_slug"] == "cindy"
+    body = r.json()
+    assert body["mode"] == "clarifying"
+    assert body["planner"] == "cindy"
+    assert body["run"]["role_slug"] == "cindy"
     task = (await client.get("/api/v1/tasks/T-PF5", headers=auth_headers())).json()
     assert task["planner"] == "cindy"
 

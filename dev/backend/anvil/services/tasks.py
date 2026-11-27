@@ -446,6 +446,9 @@ def planning_conflict(conn: sqlite3.Connection, task: dict | None) -> str | None
     """计划期锁定：human 直接改 Roster/拉起角色 run 会与 Cindy 的规划竞态。"""
     if task is None:
         return None
+    if str(task.get("clarification_status") or "none") in ("in_progress", "stale"):
+        return ("task is being clarified; confirm or skip the intent brief before "
+                "changing assignees or starting execution")
     running = conn.execute(
         "SELECT 1 FROM workflows WHERE task_id=? AND status='running' LIMIT 1",
         (task["id"],)).fetchone()
@@ -567,6 +570,11 @@ def update(conn: sqlite3.Connection, tid: str, **fields) -> dict | None:
     cols = ", ".join(f"{c}=?" for c in assign)
     conn.execute(f"UPDATE tasks SET {cols} WHERE id=?", (*assign.values(), tid))
     conn.commit()
+    if any(field in fields for field in (
+            "title", "description", "type", "repo", "scope_paths",
+            "acceptance", "base_branch")):
+        from . import clarification
+        clarification.mark_stale(conn, tid)
     if board_enabled:
         from . import findings as findings_service
         findings_service.ensure_board(conn, tid)
@@ -2027,6 +2035,7 @@ def _row(r) -> dict:
     d["scope_paths"] = jloads(d.pop("scope_paths_json"), [])
     d["acceptance"] = jloads(d.pop("acceptance_json"), [])
     d["plan_seed"] = jloads(d.pop("plan_seed_json", None), None)
+    d["intent_brief"] = jloads(d.pop("intent_brief_json", None), None)
     if "issue_board_enabled" in d:
         d["issue_board_enabled"] = bool(d["issue_board_enabled"])
     return d

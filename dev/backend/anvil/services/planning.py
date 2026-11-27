@@ -13,7 +13,8 @@ import json
 import sqlite3
 
 from .. import config
-from ..util import now_iso
+from ..util import ConflictError, now_iso
+from . import clarification as clarification_service
 from . import repo_catalog
 from . import roles as roles_service
 from . import runs as runs_service
@@ -264,6 +265,41 @@ def _workflow_summary(wf: dict) -> str:
     return "\n".join(lines)
 
 
+def _brief_block(task: dict) -> str:
+    """已确认任务简报 → planner prompt 的强约束块。"""
+    if str(task.get("clarification_status") or "") != "confirmed":
+        return ""
+    brief = task.get("intent_brief")
+    if not isinstance(brief, dict):
+        return ""
+    lines = ["以下简报已由 human 在澄清阶段确认，是本次规划的唯一意图源。"]
+    if brief.get("goal"):
+        lines.append(f"- 目标：{brief['goal']}")
+    if brief.get("true_intent"):
+        lines.append(f"- 真实意图：{brief['true_intent']}")
+    for key, label in (
+            ("non_goals", "非目标"), ("constraints", "约束"),
+            ("acceptance", "验收标准"), ("assumptions", "假设"),
+            ("open_questions", "开放问题"), ("risks", "风险")):
+        values = brief.get(key) or []
+        if values:
+            lines.append(f"- {label}：" + "；".join(str(v) for v in values))
+    if brief.get("weight"):
+        lines.append(
+            f"- 流程强度（human 确认）：{brief['weight']}"
+            + (f"（{brief['weight_rationale']}）" if brief.get("weight_rationale") else ""))
+    if brief.get("plan_shape"):
+        lines.append(
+            f"- 计划形态（human 确认）：{brief['plan_shape']}"
+            + (f"（{brief['plan_shape_rationale']}）"
+               if brief.get("plan_shape_rationale") else ""))
+    lines.append(
+        "- 规则：不得重复拷问已确认内容；遵守确认的强度与计划形态；"
+        "若本轮 human 消息与简报冲突，不要产草案，先 `anvil task mention --to human` "
+        "说明冲突并等待重新澄清。")
+    return "\n".join(lines)
+
+
 def start_planner_run(conn: sqlite3.Connection, db_path: str, orchestrator,
                       task_id: str, planner: str, assignees: list[str] | None = None,
                       extra_constraint: str = "",
@@ -279,6 +315,12 @@ def start_planner_run(conn: sqlite3.Connection, db_path: str, orchestrator,
         roles_service.ensure_onboarding(conn)
     if assignees is None:
         assignees = _assignees(conn, task_id)
+    task = tasks_service.get(conn, task_id) or {}
+    if (str(task.get("clarification_status") or "none")
+            in clarification_service.ACTIVE_STATUSES
+            and clarification_service.can_clarify(conn, task_id, planner=planner)):
+        raise ConflictError(
+            "clarification is in progress; confirm or skip the intent brief first")
 
     if replace_active:
         for row in conn.execute(
@@ -300,13 +342,15 @@ def start_planner_run(conn: sqlite3.Connection, db_path: str, orchestrator,
         + "\n\n## 参与角色（Roster）\n"
         + render_roster(conn, task_id, roster)
     )
-    task = tasks_service.get(conn, task_id) or {}
     size_block = _task_size_block(task)
     if size_block:
         prompt += "\n\n## 任务规模信息（用于判断是否需要切片）\n" + size_block
     knowledge_block = _task_knowledge_block(conn, task)
     if knowledge_block:
         prompt += "\n\n## 任务知识与仓库上下文\n" + knowledge_block
+    brief_block = _brief_block(task)
+    if brief_block:
+        prompt += "\n\n## 已确认任务简报（必须遵守）\n" + brief_block
     try:
         from . import templates as template_service
         seed_block = template_service.render_seed_for_prompt(conn, task)

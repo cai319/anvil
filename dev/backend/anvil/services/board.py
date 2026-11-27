@@ -94,6 +94,9 @@ def create_draft(conn: sqlite3.Connection, goal: str, tree: dict,
         raise ConflictError(f"unsupported draft kind: {kind}")
     if kind in ("workflow", "workflow_revision", "role_suggestion") and not source_task:
         raise ConflictError(f"{kind} draft requires source_task")
+    if kind in ("workflow", "workflow_revision") and source_task:
+        from . import clarification
+        clarification.assert_workflow_allowed(conn, source_task)
     if kind == "workflow_revision":
         raise ConflictError("workflow_revision must be created via the revision endpoint")
     if kind == "workflow" and source_task:
@@ -151,6 +154,8 @@ def create_revision_draft(conn: sqlite3.Connection, wid: str, intent: dict,
     if wf is None:
         raise ConflictError(f"workflow {wid} not found")
     task_id = wf["task_id"]
+    from . import clarification
+    clarification.assert_workflow_allowed(conn, task_id)
     # 预览和落库必须在同一把 task 生命周期锁内：否则 scheduler 可能在两步之间
     # 启动目标步骤，草案一创建就已经 stale。
     with workflow_service.workflow_lifecycle_lock(

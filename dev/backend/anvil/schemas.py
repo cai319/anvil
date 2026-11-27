@@ -542,6 +542,15 @@ class TaskOut(BaseModel):
     plan_first: bool = False
     planner: str | None = None
     plan_seed: PlanSeedOut | None = None
+    workflow_weight: str | None = None
+    workflow_weight_source: str | None = None
+    workflow_weight_reason: str | None = None
+    clarification_status: str = "none"
+    intent_brief: dict | None = None
+    intent_brief_version: int = 0
+    clarification_round: int = 0
+    clarification_confirmed_at: str | None = None
+    clarification_basis_hash: str | None = None
     role_claims: list[TaskRoleClaimOut] = Field(default_factory=list)
     lease_expires_at: str | None = None
     claimed_at: str | None = None

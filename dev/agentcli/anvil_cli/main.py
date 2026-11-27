@@ -196,6 +196,7 @@ TASK_EPILOG = """\b
   note <id> --for-step <step> "正文"    系统备注：带入未来步骤上下文，不唤醒
   mention <id> --to <role> "正文"       @提及并唤醒；自动复用/切换切片上下文
           [--slice S] [--context-mode auto|reuse|switch|dispatch]
+  clarify <id> --file <brief.json>      更新规划前澄清简报草稿（不确认、不跳过）
   dispatch <id> --to <role> "正文"      创建来源 task 下的派遣子任务（不阻塞，submit 即 done）
           [--slice S] [--context-mode dispatch] [--acceptance "a;b"]
   archive | unarchive <id>              归档/取消归档（human）
@@ -215,6 +216,7 @@ TASK_EPILOG = """\b
   anvil task comment $ANVIL_TASK_ID "已完成接口联调"
   anvil task mention $ANVIL_TASK_ID --to tester "请复跑回归"        # 同切片复核：复用上下文
   anvil task mention $ANVIL_TASK_ID --to developer --slice A "A 模块异常，请复核"
+  anvil task clarify $ANVIL_TASK_ID --file brief.json           # 规划前澄清：更新简报草稿
   anvil task dispatch $ANVIL_TASK_ID --to developer --slice A \\
     -m "修复另一个领域的缓存问题" --acceptance "问题复现;修复完成"
 
@@ -833,6 +835,9 @@ def task_cmd(
         None, "--for-step",
         help="note：该备注面向的未来步骤 id",
         rich_help_panel="执行 / 协作"),
+    file: str = typer.Option(
+        None, "--file", help="clarify：任务简报 JSON 文件",
+        rich_help_panel="执行 / 协作"),
     message: str = typer.Option(None, "--message", "-m",
                                 help="comment/mention：正文（等价位置参数 body）",
                                 rich_help_panel="执行 / 协作"),
@@ -858,14 +863,14 @@ def task_cmd(
     json_out: bool = typer.Option(False, "--json", help="输出 JSON",
                                   rich_help_panel="输出"),
 ):
-    """anvil task <list|show|delegations|create|assign|reviewers|claim|unclaim|heartbeat|submit|comment|mention|dispatch|delegation-accept|delegation-reject|cancel|reopen|delete|block|archive|unarchive|knowledge-list|knowledge-write|knowledge-delete> …"""
+    """anvil task <list|show|delegations|create|assign|reviewers|claim|unclaim|heartbeat|submit|comment|mention|clarify|dispatch|delegation-accept|delegation-reject|cancel|reopen|delete|block|archive|unarchive|knowledge-list|knowledge-write|knowledge-delete> …"""
     tid = target or DEFAULT_TASK
     needs_target = {"show", "delegations", "delegation-list", "note",
                     "claim", "unclaim", "heartbeat", "submit", "comment", "mention",
                     "dispatch", "delegation-accept", "delegation-reject",
                     "cancel", "reopen", "delete", "block", "assign", "reviewers",
                     "archive", "unarchive", "knowledge-list", "knowledge-write",
-                    "knowledge-delete"}
+                    "knowledge-delete", "clarify"}
     if action in needs_target and not tid:
         _usage_error(
             f"task {action} 需要任务 id",
@@ -1026,6 +1031,21 @@ def task_cmd(
         if force:
             payload["force"] = True
         method, path = "POST", f"/api/v1/tasks/{tid}/mention"
+    elif action == "clarify":
+        if not file:
+            _usage_error(
+                "task clarify 需要 --file <brief.json>",
+                "例如 `anvil task clarify $ANVIL_TASK_ID --file brief.json`；"
+                "只更新简报草稿，不确认、不跳过。")
+        try:
+            brief = json.loads(_read_text_file(file))
+        except (OSError, json.JSONDecodeError) as exc:
+            _usage_error(f"无法读取简报 JSON: {exc}",
+                         "检查文件路径与 JSON 语法。")
+        if not isinstance(brief, dict):
+            _usage_error("简报必须是 JSON 对象", "顶层必须是 {...}。")
+        method, path, payload = (
+            "PUT", f"/api/v1/tasks/{tid}/clarification/draft", {"brief": brief})
     elif action == "cancel":
         method, path, payload = "POST", f"/api/v1/tasks/{tid}/cancel", {}
     elif action == "reopen":

@@ -56,6 +56,7 @@ def validate_slug(slug: str) -> str:
 def create(conn: sqlite3.Connection, *, slug: str, display_name: str,
            definition: dict) -> dict:
     slug = validate_slug(slug)
+    definition = _with_effort_default(definition)
     now = now_iso()
     home = _ensure_home(slug, display_name, definition)
     conn.execute(
@@ -134,6 +135,46 @@ def repair_home_paths(conn: sqlite3.Connection) -> int:
 # 依赖顺序、反馈/升级路径），人工批准后再交给参与角色执行——而不是无中心群聊。
 ONBOARDING_SLUG = "cindy"
 
+# 角色级思考强度（runtime effort）：low|medium|high|max。
+# Cindy 默认 max；其他角色默认 high。运行时是否生效由 runtime YAML 的
+# capabilities.thinking_effort 与 invocation/session 参数决定。
+EFFORT_LEVELS = ("low", "medium", "high", "max")
+DEFAULT_ROLE_EFFORT = "high"
+ONBOARDING_EFFORT = "max"
+
+
+def normalize_effort(value: object) -> str | None:
+    text = str(value or "").strip().lower()
+    return text if text in EFFORT_LEVELS else None
+
+
+def default_effort(definition: dict | None) -> str:
+    if isinstance(definition, dict) and definition.get("kind") == "onboarding":
+        return ONBOARDING_EFFORT
+    return DEFAULT_ROLE_EFFORT
+
+
+def runtime_effort(definition: dict | None) -> str:
+    definition = definition or {}
+    runtime = definition.get("runtime")
+    value = runtime.get("effort") if isinstance(runtime, dict) else None
+    return normalize_effort(value) or default_effort(definition)
+
+
+def _with_effort_default(definition: dict) -> dict:
+    """确保角色定义里的 runtime.effort 有合法值；不改写已设置的值。"""
+    out = dict(definition or {})
+    runtime = out.get("runtime")
+    if isinstance(runtime, dict):
+        runtime = dict(runtime)
+        if normalize_effort(runtime.get("effort")) is None:
+            runtime["effort"] = default_effort(out)
+        out["runtime"] = runtime
+    elif runtime:
+        out["runtime"] = {"id": str(runtime), "effort": default_effort(out)}
+    return out
+
+
 ONBOARDING_DEFINITION: dict = {
     "kind": "onboarding",
     "description": (
@@ -144,7 +185,8 @@ ONBOARDING_DEFINITION: dict = {
     "skill_description": "任务分析、角色 Roster 评估、工作流/切片设计、依赖编排、风险与升级路径设计。",
     # 与其它角色一致：本地单用户环境用 bypassPermissions；否则 --print 模式下
     # 无法交互授权，会停在「等待授权」而不执行 anvil CLI。
-    "runtime": {"id": "claude-code", "permission_mode": "bypassPermissions"},
+    "runtime": {"id": "claude-code", "permission_mode": "bypassPermissions",
+                "effort": "max"},
     "workspace": {"repos": []},
     "tools": {},
     "concurrency": {"max_parallel": 1},
@@ -198,6 +240,9 @@ def ensure_onboarding(conn: sqlite3.Connection) -> dict:
             changed = True
         if runtime.get("permission_mode") != "bypassPermissions":
             runtime["permission_mode"] = "bypassPermissions"
+            changed = True
+        if normalize_effort(runtime.get("effort")) is None:
+            runtime["effort"] = ONBOARDING_EFFORT
             changed = True
         if changed:
             definition["runtime"] = runtime
@@ -531,6 +576,7 @@ def backfill_snapshots(conn: sqlite3.Connection) -> int:
 def update(conn: sqlite3.Connection, slug: str, **fields) -> dict | None:
     definition = fields.pop("definition", None)
     if definition is not None:
+        definition = _with_effort_default(definition)
         if "avatar" in definition:
             avatar = definition.get("avatar")
             if is_valid_avatar(avatar):
@@ -851,7 +897,15 @@ def effective_config(conn: sqlite3.Connection, slug: str) -> dict | None:
     definition = jloads(role["definition_json"], {})
     tools = get_tools(conn, slug)
     runtime = definition.get("runtime")
-    runtime_id = runtime.get("id") if isinstance(runtime, dict) else runtime
+    if isinstance(runtime, dict):
+        runtime = dict(runtime)
+    elif runtime:
+        runtime = {"id": runtime}
+    else:
+        runtime = {}
+    if normalize_effort(runtime.get("effort")) is None:
+        runtime["effort"] = default_effort(definition)
+    runtime_id = runtime.get("id")
     capabilities: dict = {}
     if runtime_id:
         row = conn.execute("SELECT capabilities FROM runtimes WHERE id=?", (runtime_id,)).fetchone()

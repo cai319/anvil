@@ -1891,3 +1891,73 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
   gap: 8px;
   margin-left: auto;
 }
+
+/* ---- 规划前澄清：任务简报卡 ---- */
+.intent-brief-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface, var(--bg-soft));
+  padding: 12px 14px;
+  margin: 0 0 12px;
+}
+.intent-brief-card.is-stale {
+  border-color: var(--amber);
+}
+.ibc-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ibc-head .ibc-version {
+  margin-left: auto;
+}
+.ibc-warn {
+  color: var(--amber);
+  font-weight: 600;
+}
+.ibc-summary {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 8px 0;
+  font-size: var(--fs-hint);
+}
+.ibc-summary dt {
+  color: var(--muted);
+}
+.ibc-summary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.ibc-open {
+  margin: 6px 0;
+  padding-left: 18px;
+  color: var(--amber);
+  font-size: var(--fs-hint);
+}
+.ibc-controls {
+  align-items: center;
+}
+.field-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-hint);
+  color: var(--muted);
+}
+.checkline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-hint);
+  color: var(--amber);
+}
+.ibc-editor {
+  width: 100%;
+  min-height: 180px;
+  box-sizing: border-box;
+  font-family: var(--mono);
+  font-size: var(--fs-hint);
+  margin: 8px 0;
+}

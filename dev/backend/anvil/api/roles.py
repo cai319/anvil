@@ -344,17 +344,34 @@ def update_role_avatar(slug: str, body: dict, conn=Depends(get_db),
 @router.put("/roles/{slug}/runtime", response_model=RoleOut)
 def update_role_runtime(slug: str, body: dict, conn=Depends(get_db),
                         auth: Auth = Depends(require_human)):
-    """把角色绑定到指定运行时；保留其它角色配置（system_prompt 等）。"""
+    """绑定运行时并/或设置思考强度；保留 permission_mode 等其它运行时字段。"""
     role = services.roles.get(conn, slug)
     if role is None:
         raise HTTPException(status_code=404, detail="role not found")
-    rid = str(body.get("id") or "").strip()
-    if not rid:
-        raise HTTPException(status_code=422, detail="id is required")
-    if services.runtime.get(conn, rid) is None:
-        raise HTTPException(status_code=404, detail="runtime not found")
     definition = role.get("definition") or {}
-    definition["runtime"] = {"id": rid}
+    runtime = definition.get("runtime")
+    if isinstance(runtime, dict):
+        runtime = dict(runtime)
+    elif runtime:
+        runtime = {"id": str(runtime)}
+    else:
+        runtime = {}
+    rid = str(body.get("id") or "").strip()
+    if rid:
+        if services.runtime.get(conn, rid) is None:
+            raise HTTPException(status_code=404, detail="runtime not found")
+        runtime["id"] = rid
+    elif not runtime.get("id") and body.get("effort") is None:
+        raise HTTPException(status_code=422, detail="id or effort is required")
+    if body.get("effort") is not None:
+        effort = services.roles.normalize_effort(body.get("effort"))
+        if effort is None:
+            raise HTTPException(
+                status_code=422,
+                detail="invalid effort; expected one of "
+                       + ", ".join(services.roles.EFFORT_LEVELS))
+        runtime["effort"] = effort
+    definition["runtime"] = runtime
     services.roles.update(conn, slug, display_name=role["display_name"], definition=definition)
     return services.roles.get(conn, slug)  # type: ignore[return-value]
 

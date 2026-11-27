@@ -430,6 +430,15 @@ export function Lobby() {
                             : t.knowledge_mode === "temp" ? "临时知识空间"
                               : "主题知识库"
                         }>◎ {t.repo || "临时知识"}</span>
+                        {t.clarification_status === "in_progress" && (
+                          <span className="card-tag" title="Cindy 正在澄清需求">✎ 澄清中</span>
+                        )}
+                        {t.clarification_status === "confirmed" && (
+                          <span className="card-tag" title="任务简报已确认">✓ 简报已确认</span>
+                        )}
+                        {t.clarification_status === "stale" && (
+                          <span className="card-tag" title="任务定义已变更，需重新确认简报">! 简报待确认</span>
+                        )}
                       </div>
                       {t.updated_at && (
                         <div className="card-foot">
@@ -454,8 +463,14 @@ export function Lobby() {
                           className="small"
                           onClick={() => act(t.id, () => moveTask(t, "in_progress"))}
                           disabled={busy === t.id}
-                          title={t.assignees.length >= 2 ? "先由 Cindy 规划工作流，批准后按依赖执行" : "直接启动该角色执行"}
-                        >{t.assignees.length >= 2 ? "启动（Cindy 规划）" : "启动并执行"}</button>
+                          title={t.assignees.length >= 2
+                            ? "先由 Cindy 澄清需求并规划工作流，批准后按依赖执行"
+                            : "直接启动该角色执行"}
+                        >{t.assignees.length >= 2
+                            ? (["confirmed", "skipped"].includes(t.clarification_status)
+                                ? "启动（Cindy 规划）"
+                                : "启动（Cindy 澄清）")
+                            : "启动并执行"}</button>
                       </div>
                     )}
                     {status === "in_review" && (

@@ -1348,6 +1348,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_repo_split_v1(conn)
     _migrate_knowledge_completion_v1(conn)
     _migrate_rsi_v150(conn)
+    _migrate_clarification_v1(conn)
     conn.commit()
 
 
@@ -2972,3 +2973,36 @@ def _migrate_rsi_v150(conn: sqlite3.Connection) -> None:
     _add_column(conn, "notes", "source_cycle_id TEXT")
     _add_column(conn, "notes", "source_role_version INTEGER")
     _add_column(conn, "notes", "last_modified_by TEXT")
+
+
+def _migrate_clarification_v1(conn: sqlite3.Connection) -> None:
+    """v1.51 Cindy 规划前澄清：任务简报、澄清状态与版本历史（幂等）。
+
+    只新增 tasks 字段与 task_brief_versions；不改 5 态任务状态机。
+    存量任务默认 clarification_status='none'，澄清子系统对它们保持惰性。
+    """
+    for ddl in (
+        "clarification_status TEXT NOT NULL DEFAULT 'none'",
+        "intent_brief_json TEXT",
+        "intent_brief_version INTEGER NOT NULL DEFAULT 0",
+        "clarification_round INTEGER NOT NULL DEFAULT 0",
+        "clarification_confirmed_at TEXT",
+        "clarification_basis_hash TEXT",
+    ):
+        _add_column(conn, "tasks", ddl)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS task_brief_versions (
+            id         TEXT PRIMARY KEY,
+            task_id    TEXT NOT NULL,
+            version    INTEGER NOT NULL,
+            kind       TEXT NOT NULL,   -- draft | confirmed | human_edit | skipped
+            brief_json TEXT NOT NULL,
+            actor      TEXT NOT NULL,   -- cindy | human | system
+            reason     TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE (task_id, version)
+        )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_task_brief_versions_task "
+        "ON task_brief_versions(task_id, version DESC)")
+    conn.commit()
