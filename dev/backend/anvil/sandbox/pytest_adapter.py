@@ -134,6 +134,13 @@ def classify(*, exit_code: int | None, signal: str | None = None,
     if exit_code is None:
         return _result("harness_error", "missing_exit_code")
     if exit_code == 0:
+        # 绿色通过也必须守住锁定的测试数基线：收集数变少（如 importorskip、
+        # 删测试或 skip 整模块）意味着这次通过的不是锁定的检查。
+        if baseline_count is not None:
+            if collected_count is None:
+                return _result("harness_error", "collected_count_missing")
+            if collected_count < baseline_count:
+                return _result("harness_error", "collected_count_regressed")
         return _result("passed")
     if exit_code == 5:
         return _result("harness_error", "no_tests_collected")

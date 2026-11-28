@@ -101,6 +101,32 @@ def test_passing_exit_zero_is_passed():
     assert _classify(JUNIT_PASS, exit_code=0)["classification"] == "passed"
 
 
+def test_passing_run_with_shrunken_collection_is_harness_error():
+    """锁定的测试数基线被绕过（如 importorskip）时，绿色通过不算数。"""
+    result = pa.classify(
+        exit_code=0, signal=None, timed_out=False,
+        junit=pa.parse_junit_text(JUNIT_PASS),
+        collected_count=1, baseline_count=2)
+    assert result["classification"] == "harness_error"
+    assert result["cause"] == "collected_count_regressed"
+
+
+def test_passing_run_without_collected_count_or_baseline_stays_passed():
+    no_baseline = pa.classify(
+        exit_code=0, junit=pa.parse_junit_text(JUNIT_PASS),
+        collected_count=2, baseline_count=None)
+    assert no_baseline["classification"] == "passed"
+    no_collected = pa.classify(
+        exit_code=0, junit=pa.parse_junit_text(JUNIT_PASS),
+        collected_count=None, baseline_count=None)
+    assert no_collected["classification"] == "passed"
+    missing_count = pa.classify(
+        exit_code=0, junit=pa.parse_junit_text(JUNIT_PASS),
+        collected_count=None, baseline_count=2)
+    assert missing_count["classification"] == "harness_error"
+    assert missing_count["cause"] == "collected_count_missing"
+
+
 def test_other_exception_type_is_harness_error():
     result = _classify(JUNIT_VALUE_ERROR)
     assert result["classification"] == "harness_error"

@@ -165,6 +165,46 @@ def test_scope_submit_accepts_spec_and_runs_test_kind_check(scope_env):
     assert view["evidence"]["check"]["classification"] == "valid_red"
 
 
+def test_runtime_slice_scope_requires_slice_spec(scope_env):
+    """运行期切片 scope 不带 spec 提交会绕过锁定/红跑/判定链，必须拒绝。"""
+    conn, _db_path, wid = scope_env
+    with pytest.raises(ConflictError) as excinfo:
+        wf_service.submit_step(
+            conn, wid, "P1.auth.scope", "lead", "no spec")
+    assert "slice_spec_required" in str(excinfo.value)
+    step = _scope_step(conn, wid)
+    assert step["status"] == "running"
+    assert not step.get("slice_spec")
+    assert not step.get("slice_lock")
+    assert sandbox.list_jobs(conn, task_id="T1", kind="check") == []
+
+
+def test_scope_submit_quota_failure_rolls_back_partial_jobs(scope_env):
+    """检查作业配额不足时不得留下已提交步骤或半套红跑作业。"""
+    from anvil.sandbox.errors import QuotaExceeded
+
+    conn, _db_path, wid = scope_env
+    for i in range(20):
+        conn.execute(
+            "INSERT INTO sandbox_jobs (id, kind, task_id, created_by, spec_json, "
+            "spec_hash, status, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (f"queued{i}", "poc", "T1", "lead", "{}", "h", "queued",
+             f"2026-01-01T00:00:{i:02d}Z", "2026-01-01T00:00:00Z"))
+    conn.commit()
+
+    with pytest.raises(QuotaExceeded):
+        wf_service.submit_step(
+            conn, wid, "P1.auth.scope", "lead", "spec ready",
+            slice_spec=_slice_spec())
+    step = _scope_step(conn, wid)
+    assert step["status"] == "running"
+    assert not step.get("slice_spec")
+    assert not step.get("slice_lock")
+    # 没有部分创建的红跑作业。
+    assert sandbox.list_jobs(conn, task_id="T1", kind="check") == []
+
+
 def test_scope_submit_rejects_invalid_spec(scope_env):
     conn, _db_path, wid = scope_env
     bad = _slice_spec()

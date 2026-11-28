@@ -389,6 +389,19 @@ def _advance_locked(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
                 pass
         if any(by_id.get(d, {}).get("status") not in STEP_DONE for d in s["depends_on"]):
             continue
+        # 绿跑尚未终态时先不派发 decide（含 human authority 的开包）：等到
+        # 作业结束后调度器下一轮 advance 自然重派，判定链看到的是终态证据。
+        if s.get("kind") == "decision":
+            pending_green = _pending_green_checks(conn, wf, s)
+            if pending_green:
+                ledger.emit(
+                    conn, "dispatch.deferred", task_id=wf["task_id"],
+                    workflow_id=wid, execution_no=wf.get("execution_no"),
+                    step_id=s["step_id"], slice_key=s.get("slice_key"),
+                    actor_type="system", actor="scheduler",
+                    payload={"reason": "green_checks_pending",
+                             "jobs": pending_green})
+                continue
         # human authority decision: no AI decider run at all — dependencies are
         # enough to open the packet and put it in the human inbox.
         if s.get("kind") == "decision" and reviews.authority_of(s) == "human":
@@ -601,8 +614,35 @@ def _slice_final_verify(conn: sqlite3.Connection, wid: str, step: dict) -> bool:
     return step["step_id"] in set(jloads(row["depends_on_json"], []))
 
 
+def _pending_green_checks(conn: sqlite3.Connection, wf: dict,
+                          step: dict) -> list[str]:
+    """本切片仍未终态的绿跑作业。
+
+    decide 必须在绿跑终态后才派发：queued/running 在判定链里映射为 unknown，
+    提前派发会让 decide 卡在 verdict_unknown 且不会自动重派。
+    """
+    slice_key = str(step.get("slice_key") or "").strip()
+    if not slice_key:
+        return []
+    rows = conn.execute(
+        "SELECT id, spec_json FROM sandbox_jobs WHERE task_id=? AND kind='check' "
+        "AND status IN ('queued','running','waiting_approval')",
+        (str(wf["task_id"]),)).fetchall()
+    pending: list[str] = []
+    for row in rows:
+        spec = jloads(row["spec_json"] or "{}", {})
+        ref = spec.get("green_ref") if isinstance(spec, dict) else None
+        if not isinstance(ref, dict):
+            continue
+        if (str(ref.get("workflow_id") or "") == str(wf["id"])
+                and str(ref.get("slice_key") or "") == slice_key):
+            pending.append(str(row["id"]))
+    return pending
+
+
 def _maybe_create_green_checks(conn: sqlite3.Connection, wf: dict,
-                               step: dict, role: str | None) -> None:
+                               step: dict, role: str | None,
+                               commit: bool = True) -> None:
     """切片最终验证门提交后，由引擎在 final 代码上重跑锁定检查。"""
     if not _slice_final_verify(conn, wf["id"], step):
         return
@@ -624,7 +664,7 @@ def _maybe_create_green_checks(conn: sqlite3.Connection, wf: dict,
     sandbox_service.create_slice_green_checks(
         conn, task_id=str(wf["task_id"]), workflow_id=wf["id"],
         slice_key=slice_key, scope_step_id=scope_step_id, spec=spec,
-        lock=lock, actor_role=role)
+        lock=lock, actor_role=role, commit=commit)
 
 
 def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
@@ -714,6 +754,14 @@ def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: 
         raise ConflictError(
             "slice_spec_required: resubmit the slice spec after a replan "
             "so red checks are re-run")
+    elif (step.get("source_step_id")
+          and str(step.get("slice_key") or "").strip()
+          and step_id.endswith(".scope")):
+        # 运行期动态切片的 scope 必须带结构化 spec，否则会绕过锁定、红跑与
+        # decide 逐项判定。存量静态切片（无 source_step_id）保持 legacy 路径。
+        raise ConflictError(
+            "slice_spec_required: a runtime slice scope step must submit "
+            "a slice spec so red checks, lock and verdicts apply")
     # scope 锁定时固定锁定集合并校验与 execute scope_paths 不相交；冲突不落库。
     slice_lock_json = None
     if parsed_spec is not None:
@@ -802,23 +850,26 @@ def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: 
     cap_report = run_caps.evaluate(conn, wf, {**step, "diff_stats": diff_stats})
     run_caps.escalate(conn, wf, {**step, "diff_stats": diff_stats}, cap_report)
     leases.release(conn, step.get("lease_id"), commit=False)
-    conn.commit()
+    # 提交与随之产生的检查作业必须在同一事务里：配额不足等失败时整体回滚，
+    # 不留下「步骤已提交、作业只建了一半」的状态。作业创建使用 commit=False。
     if parsed_spec is not None:
         # 引擎在 base 上按切片 spec 的 test 项创建红跑作业；证据只由引擎写入。
         from . import sandbox as sandbox_service
         sandbox_service.create_slice_checks(
             conn, task_id=wf["task_id"], step_id=step_id,
             slice_key=str(step.get("slice_key") or ""), spec=parsed_spec,
-            workflow_id=wid, actor_role=role, actor_is_human=False)
+            workflow_id=wid, actor_role=role, actor_is_human=False, commit=False)
     elif (str(step.get("slice_key") or "").strip()
           and any(_is_dependency_path(p) for p in changed)):
         # 执行/修复改动了依赖声明：记录 delta；测试闭包变化升级人工。
         from . import sandbox as sandbox_service
         sandbox_service.evaluate_dependencies(
             conn, task_id=wf["task_id"], workflow_id=wid,
-            slice_key=str(step.get("slice_key") or ""), actor_role=role)
+            slice_key=str(step.get("slice_key") or ""), actor_role=role,
+            commit=False)
     # 最终验证门提交：引擎在 final 代码上重跑锁定检查（绿跑）。
-    _maybe_create_green_checks(conn, wf, step, role)
+    _maybe_create_green_checks(conn, wf, step, role, commit=False)
+    conn.commit()
     _finalize_if_done(conn, wid)
     return get_workflow(conn, wid)  # type: ignore[return-value]
 

@@ -59,6 +59,16 @@ JUNIT_PASS = """<?xml version="1.0" encoding="utf-8"?>
   <testcase classname="tests.test_auth" name="test_login"/>
 </testsuite></testsuites>
 """
+JUNIT_NOT_IMPLEMENTED_TWO = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="2">
+  <testcase classname="tests.test_auth" name="test_login">
+    <failure message="NotImplementedError: stub">traceback</failure>
+  </testcase>
+  <testcase classname="tests.test_auth" name="test_logout">
+    <failure message="NotImplementedError: stub">traceback</failure>
+  </testcase>
+</testsuite></testsuites>
+"""
 
 
 def _slice_spec(*, manual: int = 0) -> dict:
@@ -252,6 +262,61 @@ def test_verify_cannot_submit_pass_verdict_or_slice_spec(slice_env):
     assert "slice_spec" in str(excinfo.value)
     # verify 提交不会产生任何决策记录或逐项 verdict。
     assert reviews.decisions_for_step(conn, wid, "P1.auth.verify") == []
+
+
+def test_green_run_below_locked_baseline_is_harness_error(slice_env):
+    """绿跑即使退出 0，收集数低于红跑锁定基线也不能算 met。"""
+    conn, db_path, wid, _ws = slice_env
+    _to_verify2(conn, wid, _slice_spec())
+    _run_checks(conn, db_path, FakePytestRunner(
+        junit=JUNIT_NOT_IMPLEMENTED_TWO, collected=2))
+    lock = next(s for s in wf_service.get_workflow(conn, wid)["steps"]
+                if s["step_id"] == "P1.auth.scope")["slice_lock"]
+    assert next(c for c in lock["checks"]
+                if c["id"] == "P1.auth.scope.a1")["test_count_baseline"] == 2
+
+    _submit_final_verify(conn, wid)
+    _run_checks(conn, db_path, FakePytestRunner(
+        exit_code=0, junit=JUNIT_PASS, collected=1))
+    green = _green_jobs(conn)[0]
+    result = sandbox.job_view(conn, green["id"])["check_result"]
+    assert result["classification"] == "harness_error"
+    assert result["cause"] == "collected_count_regressed"
+    assert result["min_collected"] == 2
+
+    _to_decide(conn, wid)
+    with pytest.raises(ConflictError) as excinfo:
+        _decide(conn, wid)
+    assert "verdict_unknown" in str(excinfo.value)
+
+
+def test_decide_dispatch_waits_for_queued_green_jobs_to_finish(slice_env):
+    """final verify 提交后绿跑仍在排队时，decide 不能被提前派发。
+
+    否则 decide 看到 queued/running → unknown 而卡在 verdict_unknown，且不会重派。
+    """
+    conn, db_path, wid, _ws = slice_env
+    _to_verify2(conn, wid, _slice_spec())
+    _run_checks(conn, db_path, FakePytestRunner())  # red run
+    _submit_final_verify(conn, wid)
+    queued = _green_jobs(conn)
+    assert len(queued) == 1 and queued[0]["status"] == "queued"
+
+    _advance(conn, wid, 7)
+    decide = next(s for s in wf_service.get_workflow(conn, wid)["steps"]
+                  if s["step_id"] == "P1.auth.decide")
+    assert decide["status"] == "pending"
+
+    # 绿跑终态后，调度器下一轮即可派发 decide。
+    _run_checks(conn, db_path, FakePytestRunner(exit_code=0, junit=JUNIT_PASS))
+    _advance(conn, wid, 8)
+    decide = next(s for s in wf_service.get_workflow(conn, wid)["steps"]
+                  if s["step_id"] == "P1.auth.decide")
+    assert decide["status"] == "running"
+
+    wf = _decide(conn, wid)
+    assert next(s for s in wf["steps"]
+                if s["step_id"] == "P1.auth.decide")["status"] == "approved"
 
 
 def test_environment_mismatch_skips_green_run_leaving_unknown(slice_env, monkeypatch):

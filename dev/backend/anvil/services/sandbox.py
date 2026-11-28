@@ -414,11 +414,11 @@ def _job_dict(row) -> dict | None:
 
 def create_job(conn, *, spec_raw: dict, actor_role: str | None,
                actor_is_human: bool, check_available: bool = True,
-               kind: str = "poc") -> dict:
+               kind: str = "poc", commit: bool = True) -> dict:
     if kind == "check":
         return _create_check_job(
             conn, spec_raw=spec_raw, actor_role=actor_role,
-            actor_is_human=actor_is_human)
+            actor_is_human=actor_is_human, commit=commit)
     if kind != "poc":
         raise ValueError("kind must be poc or check")
     spec = sandbox_jobs.parse_spec(spec_raw)
@@ -483,7 +483,7 @@ def create_job(conn, *, spec_raw: dict, actor_role: str | None,
 
 
 def _create_check_job(conn, *, spec_raw: dict, actor_role: str | None,
-                      actor_is_human: bool) -> dict:
+                      actor_is_human: bool, commit: bool = True) -> dict:
     """创建检查作业：绑定任务工作区、不要求 finding、默认标准档 network=none。
 
     生产检查按 ADR-0005 使用标准档；这里不要求严格档后端可用。
@@ -526,7 +526,8 @@ def _create_check_job(conn, *, spec_raw: dict, actor_role: str | None,
                      "check_id": (spec.get("check") or {}).get("id")})
     except Exception:  # noqa: BLE001
         pass
-    conn.commit()
+    if commit:
+        conn.commit()
     return _job_dict(conn.execute(
         "SELECT * FROM sandbox_jobs WHERE id=?", (job_id,)).fetchone())  # type: ignore[return-value]
 
@@ -552,7 +553,8 @@ def _engine_check(item: dict, check_id: str) -> dict:
 def create_slice_checks(conn, *, task_id: str, step_id: str, slice_key: str,
                         spec: dict, workflow_id: str | None = None,
                         actor_role: str | None = None,
-                        actor_is_human: bool = False) -> list[dict]:
+                        actor_is_human: bool = False,
+                        commit: bool = True) -> list[dict]:
     """为切片 spec 中可机械化的验收项创建引擎红跑作业。
 
     test / command / file_assert 由引擎执行并写入验收证据；manual 项不创建
@@ -571,14 +573,15 @@ def create_slice_checks(conn, *, task_id: str, step_id: str, slice_key: str,
             raw["lock_ref"] = {"workflow_id": workflow_id, "step_id": step_id}
         created.append(create_job(
             conn, spec_raw=raw, actor_role=actor_role,
-            actor_is_human=actor_is_human, kind="check"))
+            actor_is_human=actor_is_human, kind="check", commit=commit))
     return created
 
 
 def create_slice_green_checks(conn, *, task_id: str, workflow_id: str,
                               slice_key: str, scope_step_id: str,
                               spec: dict, lock: dict,
-                              actor_role: str | None = None) -> list[dict]:
+                              actor_role: str | None = None,
+                              commit: bool = True) -> list[dict]:
     """verify 阶段由引擎重跑锁定检查（绿跑）。
 
     绿跑前用红跑记录的锁定集合校验基础环境哈希；不一致时跳过该检查，不产生
@@ -587,13 +590,23 @@ def create_slice_green_checks(conn, *, task_id: str, workflow_id: str,
     from . import env_integrity
     from .slice_spec import engine_checks
 
+    locked_baselines = {
+        str(entry.get("id") or ""): entry.get("test_count_baseline")
+        for entry in (lock or {}).get("checks") or []
+        if isinstance(entry, dict)
+    }
     created: list[dict] = []
     for item in engine_checks(spec):
         check_id = f"{scope_step_id}.{item['id']}"
+        check = _engine_check(item, check_id)
+        # 绿跑必须对照红跑锁定的测试数基线，而不只是本次运行的 collect 输出。
+        locked_baseline = locked_baselines.get(check_id)
+        if locked_baseline is not None:
+            check["min_collected"] = int(locked_baseline)
         raw = {
             "task_id": task_id,
             "reason": f"slice {slice_key} green run {item['id']}",
-            "check": _engine_check(item, check_id),
+            "check": check,
             "green_ref": {
                 "workflow_id": workflow_id,
                 "slice_key": slice_key,
@@ -609,12 +622,13 @@ def create_slice_green_checks(conn, *, task_id: str, workflow_id: str,
             continue
         created.append(create_job(
             conn, spec_raw=raw, actor_role=actor_role,
-            actor_is_human=False, kind="check"))
+            actor_is_human=False, kind="check", commit=commit))
     return created
 
 
 def evaluate_dependencies(conn, *, task_id: str, workflow_id: str,
-                          slice_key: str, actor_role: str | None = None) -> dict | None:
+                          slice_key: str, actor_role: str | None = None,
+                          commit: bool = True) -> dict | None:
     """比较锁定依赖集与当前依赖集，记录 delta；测试闭包变化升级人工。
 
     依赖可变化但必须记录；测试依赖闭包变化不自动拒绝，而是作为评审触发项。
@@ -639,7 +653,10 @@ def evaluate_dependencies(conn, *, task_id: str, workflow_id: str,
     if delta["production_changed"]:
         signals.append("dependency_production_changed")
     added = [*delta["production"]["added"], *delta["test"]["added"]]
-    pytest11 = env_integrity.pytest11_signals(added)
+    # pytest11 信号必须反映任务环境（wheelhouse / 任务 venv），而不是 Anvil
+    # 服务器自身已安装的发行版。
+    pytest11 = env_integrity.pytest11_signals(
+        added, entry_points=env_integrity.task_entry_points(workspace))
     if pytest11:
         signals.append("dependency_pytest11_plugin")
     report = {
@@ -659,9 +676,10 @@ def evaluate_dependencies(conn, *, task_id: str, workflow_id: str,
         _create_counterfactual_jobs(
             conn, report=report, lock=lock, workflow_id=workflow_id,
             step_id=step_id, slice_key=slice_key, task_id=task_id,
-            current=current, actor_role=actor_role)
+            current=current, actor_role=actor_role, commit=commit)
     lock_set.set_dependency_integrity(conn, workflow_id, step_id, report)
-    conn.commit()
+    if commit:
+        conn.commit()
     return report
 
 
@@ -669,7 +687,8 @@ def _create_counterfactual_jobs(conn, *, report: dict, lock: dict,
                                 workflow_id: str, step_id: str,
                                 slice_key: str, task_id: str,
                                 current: dict,
-                                actor_role: str | None) -> None:
+                                actor_role: str | None,
+                                commit: bool = True) -> None:
     """生产依赖变化：在 base 快照 + 新依赖集上重跑同一检查。"""
     from .slice_spec import test_checks
 
@@ -704,8 +723,13 @@ def _create_counterfactual_jobs(conn, *, report: dict, lock: dict,
                 "check_id": check_id,
             },
         }
+        if install:
+            # 反事实重跑需要在 base 快照上安装新生产依赖；network=none 会让
+            # pip 无法安装，批准后也必然变成 harness_error。人工审批门仍由
+            # create_job 依据 install.network_required 触发。
+            raw["network"] = "bridge"
         job = create_job(conn, spec_raw=raw, actor_role=actor_role,
-                         actor_is_human=False, kind="check")
+                         actor_is_human=False, kind="check", commit=commit)
         report["counterfactual_jobs"][check_id] = job["id"]
 
 

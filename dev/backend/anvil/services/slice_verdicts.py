@@ -137,10 +137,16 @@ def _green_outcome(job: dict | None) -> str:
     classification = check.get("classification")
     if status in ("queued", "running", "waiting_approval"):
         return "unknown"
-    if classification == "passed" or status == "succeeded":
+    # 分类优先于作业状态：退出 0 但收集数低于锁定基线等情况会被判为
+    # harness_error，此时作业状态仍是 succeeded，不能据此算 met。
+    if classification == "passed":
         return "met"
     if classification in ("valid_red", "trivial_red"):
         return "unmet"
+    if classification is not None:
+        return "unknown"
+    if status == "succeeded":
+        return "met"
     # harness_error、sandbox 崩溃、取消等都无法证明目标行为满足。
     return "unknown"
 

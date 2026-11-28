@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import re
 import tomllib
+import zipfile
 from pathlib import Path
 
 PRODUCTION_REQUIREMENTS_FILES = (
@@ -119,37 +120,104 @@ def _package_name(spec: str) -> str:
     return _requirement_name(spec)
 
 
-def _installed_entry_points() -> list[dict]:
-    from importlib import metadata
+def _dist_name_to_package(stem: str) -> str:
+    """``rich-13.0.0`` / ``rich-13.0.0.dist-info`` → ``rich``。"""
+    stem = str(stem or "").strip().rstrip("/")
+    if stem.endswith(".dist-info"):
+        stem = stem[: -len(".dist-info")]
+    return stem.rsplit("-", 1)[0] if "-" in stem else stem
 
+
+def _parse_entry_points_text(text: str, package: str) -> list[dict]:
     out: list[dict] = []
-    try:
-        distributions = list(metadata.distributions())
-    except Exception:  # noqa: BLE001 —— 扫描失败不得影响检查
-        return out
-    for dist in distributions:
-        try:
-            package = (dist.metadata or {}).get("Name") or getattr(dist, "name", "")
-            for entry in dist.entry_points:
-                out.append({"package": str(package), "group": entry.group,
-                            "plugin": entry.name, "value": entry.value})
-        except Exception:  # noqa: BLE001
+    group = None
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
             continue
+        if line.startswith("[") and line.endswith("]"):
+            group = line[1:-1].strip()
+            continue
+        if group is None or "=" not in line:
+            continue
+        plugin, value = (part.strip() for part in line.split("=", 1))
+        if plugin and value:
+            out.append({"package": package, "group": group,
+                        "plugin": plugin, "value": value})
+    return out
+
+
+def entry_points_from_dist_infos(root: Path) -> list[dict]:
+    """读取任务环境 site-packages 中已安装发行版的 entry points。"""
+    root = Path(root)
+    out: list[dict] = []
+    if not root.is_dir():
+        return out
+    for dist_info in sorted(root.glob("*.dist-info")):
+        target = dist_info / "entry_points.txt"
+        if not target.is_file():
+            continue
+        try:
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        out.extend(_parse_entry_points_text(
+            text, _dist_name_to_package(dist_info.name)))
+    return out
+
+
+def entry_points_from_wheels(directory: Path) -> list[dict]:
+    """读取本地 wheelhouse 中新增依赖 wheel 的 entry points。
+
+    wheel 是 zip：``<name>-<version>.dist-info/entry_points.txt``。只读任务侧
+    产物，不扫描 Anvil 服务器已安装的发行版，避免把服务端插件当成检查环境信号。
+    """
+    directory = Path(directory)
+    out: list[dict] = []
+    if not directory.is_dir():
+        return out
+    for wheel in sorted(directory.glob("*.whl")):
+        try:
+            with zipfile.ZipFile(wheel) as archive:
+                for member in archive.namelist():
+                    if not member.endswith(".dist-info/entry_points.txt"):
+                        continue
+                    package = _dist_name_to_package(member.split("/", 1)[0])
+                    text = archive.read(member).decode(
+                        "utf-8", errors="replace")
+                    out.extend(_parse_entry_points_text(text, package))
+        except (OSError, zipfile.BadZipFile):
+            continue
+    return out
+
+
+def task_entry_points(workspace: Path) -> list[dict]:
+    """任务环境（本地 wheelhouse 或 workspace venv）里的 entry points。"""
+    workspace = Path(workspace)
+    out: list[dict] = []
+    for wheel_dir in (workspace / ".anvil" / "wheelhouse",
+                      workspace / "wheelhouse"):
+        out.extend(entry_points_from_wheels(wheel_dir))
+    for pattern in (".venv/lib/python*/site-packages",
+                    ".venv/lib64/python*/site-packages",
+                    "venv/lib/python*/site-packages"):
+        for site_packages in workspace.glob(pattern):
+            out.extend(entry_points_from_dist_infos(site_packages))
     return out
 
 
 def pytest11_signals(packages, entry_points=None) -> list[dict]:
     """扫描新增依赖中的 ``pytest11`` entry point，作为评审信号。
 
-    ``entry_points`` 可注入（安装完成后由引擎传入实际元数据）；缺省时读取当前
-    已安装发行版的 entry points。
+    ``entry_points`` 必须是任务侧元数据（wheelhouse / 任务环境安装后的
+    entry points）；缺省时不扫描 Anvil 服务器自身，返回空信号。
     """
     wanted = {_package_name(str(p)) for p in packages or [] if str(p).strip()}
     if not wanted:
         return []
-    points = entry_points if entry_points is not None else _installed_entry_points()
+    points = entry_points or []
     found: dict[tuple[str, str], dict] = {}
-    for point in points or []:
+    for point in points:
         if not isinstance(point, dict):
             continue
         group = str(point.get("group") or "pytest11")
@@ -177,7 +245,13 @@ def guard_green_environment(lock: dict, check_id: str, green_spec: dict) -> str:
                   if c.get("id") == check_id), None)
     expected = (entry or {}).get("env_hash")
     actual = jobs.environment_hash(green_spec)
-    if expected is not None and actual != expected:
+    # fail closed：红跑没有记录基础环境哈希（检查不存在或未跑完）时无法证明
+    # 同一环境，必须视为不一致并跳过绿跑，让该检查保持 unknown。
+    if not expected:
+        raise EnvironmentMismatch(
+            f"missing red environment hash for {check_id}; "
+            "cannot run green checks without a recorded red baseline")
+    if actual != expected:
         raise EnvironmentMismatch(
             f"base environment mismatch for {check_id}: "
             f"red={expected} green={actual}")
