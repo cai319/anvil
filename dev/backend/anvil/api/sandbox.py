@@ -4,9 +4,10 @@ Agent 不需要读这些路径/能力信息；状态与自检仅 human token 可
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from ..deps import Auth, get_db, require_human
+from ..sandbox.errors import SandboxUnavailable
 from ..services import ledger as ledger_service
 from ..services import sandbox as sandbox_service
 
@@ -26,3 +27,20 @@ def sandbox_self_check(conn=Depends(get_db), auth: Auth = Depends(require_human)
         action="sandbox.self_check", payload=result)
     conn.commit()
     return result
+
+
+@router.post("/sandbox/provision")
+def sandbox_provision(body: dict | None = None, conn=Depends(get_db),
+                      auth: Auth = Depends(require_human)):
+    """Windows WSL 一次性准备；必须显式 consent=true。"""
+    consent = bool((body or {}).get("consent"))
+    try:
+        return sandbox_service.provision_strict(conn, consent=consent)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SandboxUnavailable as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "sandbox_provision_unavailable",
+                    "message": str(exc)},
+        ) from exc

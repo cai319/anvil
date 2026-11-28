@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type SandboxSelfCheck, type SandboxStatus } from "../api/client";
 import { formatDateTime } from "../time";
 import { PageHeader } from "../components/ui";
+import { confirmDialog } from "../components/dialogs";
 import { useLiveRefresh } from "../useLiveRefresh";
 
 interface AuditRow {
@@ -58,6 +59,8 @@ export function Governance() {
   const [sandbox, setSandbox] = useState<SandboxStatus | null>(null);
   const [selfCheck, setSelfCheck] = useState<SandboxSelfCheck | null>(null);
   const [checking, setChecking] = useState(false);
+  const [provisioning, setProvisioning] = useState(false);
+  const [provisionLog, setProvisionLog] = useState<string | null>(null);
   const [limits, setLimits] = useState({
     max_parallel_system: 6,
     max_parallel_runtime: 4,
@@ -116,6 +119,28 @@ export function Governance() {
       setFrozen(r.frozen);
     } catch (e) {
       setError(String(e));
+    }
+  };
+
+  const provisionWsl = async () => {
+    const ok = await confirmDialog({
+      title: "准备 WSL 沙箱？",
+      message:
+        "会在默认 WSL2 发行版中以 root 安装 bubblewrap/工具链，并创建专用用户 anvil-sbx。"
+        + "该操作记录审计；完成后严格档 PoC 才能运行。",
+      confirmLabel: "开始准备",
+    });
+    if (!ok) return;
+    setProvisioning(true);
+    setProvisionLog(null);
+    try {
+      const r = await api.provisionSandbox(true);
+      setProvisionLog(r.log || (r.ok ? "准备完成。" : "准备失败。"));
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setProvisioning(false);
     }
   };
 
@@ -197,6 +222,17 @@ export function Governance() {
                 ? sandbox.strict.backend
                 : `未启用（${sandbox.strict.detail}）`}
             </p>
+            {sandbox.substrates.wsl === true && !sandbox.strict.available && (
+              <div className="toolbar">
+                <button disabled={provisioning} onClick={provisionWsl}>
+                  {provisioning ? "准备中…" : "准备 WSL 沙箱"}
+                </button>
+                <span className="muted">
+                  一次性 root 配置：bubblewrap + 工具链 + 专用用户
+                </span>
+              </div>
+            )}
+            {provisionLog && <pre className="poc-pre">{provisionLog}</pre>}
             {sandbox.warnings.length > 0 && (
               <p className="sandbox-warning">
                 能力/模式提示：{sandbox.warnings.join(" · ")}

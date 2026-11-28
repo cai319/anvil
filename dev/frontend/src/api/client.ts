@@ -758,6 +758,10 @@ export const api = {
     authFetch(`${BASE}/sandbox/status`).then((r) => json<SandboxStatus>(r)),
   runSandboxSelfCheck: (): Promise<SandboxSelfCheck> =>
     req("POST", "/sandbox/self-check").then((r) => json<SandboxSelfCheck>(r)),
+  provisionSandbox: (consent = true): Promise<{
+    ok: boolean; distro?: string; returncode?: number; log?: string;
+  }> =>
+    req("POST", "/sandbox/provision", { consent }).then((r) => json(r)),
   getRunTimeline: (id: string): Promise<TimelineEvent[]> =>
     authFetch(`${BASE}/runs/${id}/timeline`).then((r) => json<TimelineEvent[]>(r)),
   getRunLog: (id: string): Promise<{ run_id: string; exists: boolean; content: string }> =>
@@ -1628,7 +1632,12 @@ export interface SandboxStatus {
   mode: string;
   enabled: boolean;
   standard: { available: boolean; backend: string; capabilities: SandboxCapabilities };
-  strict: { available: boolean; backend: string | null; detail: string };
+  strict: {
+    available: boolean;
+    backend: string | null;
+    substrate?: string;
+    detail: string;
+  };
   substrates: Record<string, boolean | string>;
   warnings: string[];
   counts: Record<string, number>;

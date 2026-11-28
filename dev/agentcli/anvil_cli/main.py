@@ -2067,6 +2067,42 @@ def poc_cancel(job: str = typer.Argument(...), json_out: bool = typer.Option(Fal
     _emit(_call("POST", f"/api/v1/poc-jobs/{job}/cancel", {}), json_out)
 
 
+# ---- sandbox（执行沙箱状态 / Windows WSL 准备）------------------------------
+
+
+sandbox_app = typer.Typer(
+    help="执行沙箱：查看底座/自检；Windows 上一次性准备 WSL2 严格档。",
+    context_settings=HELP_CTX)
+app.add_typer(sandbox_app, name="sandbox")
+
+
+@sandbox_app.command("status")
+def sandbox_status_cmd(json_out: bool = typer.Option(False, "--json")):
+    """查看标准档/严格档后端、能力与警告。"""
+    _emit(_call("GET", "/api/v1/sandbox/status"), json_out)
+
+
+@sandbox_app.command("self-check")
+def sandbox_self_check_cmd(json_out: bool = typer.Option(False, "--json")):
+    """运行沙箱自检（Seatbelt profile 等）。"""
+    _emit(_call("POST", "/api/v1/sandbox/self-check", {}), json_out)
+
+
+@sandbox_app.command("provision")
+def sandbox_provision_cmd(
+    consent: bool = typer.Option(
+        False, "--consent",
+        help="确认在默认 WSL2 发行版执行 root 准备（安装 bubblewrap/工具链）"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """Windows：一次性准备 WSL2 严格档（human，需 --consent）。"""
+    if not consent:
+        _usage_error(
+            "缺少 --consent",
+            "该操作会以 root 在默认 WSL2 发行版安装软件包并创建 anvil-sbx 用户。")
+    _emit(_call("POST", "/api/v1/sandbox/provision", {"consent": True}), json_out)
+
+
 # ---- action（Action Cards：Agent 准备，人类执行）---------------------------
 
 

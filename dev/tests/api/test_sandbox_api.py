@@ -5,6 +5,7 @@ import pytest
 
 from anvil.db import open_conn
 from anvil.services import runs as runs_service
+from anvil.services import sandbox as sandbox_service
 from tests.conftest import auth_headers, human_headers
 
 
@@ -31,6 +32,21 @@ async def test_sandbox_self_check_records_audit(client):
     denied = await client.post(
         "/api/v1/sandbox/self-check", headers=auth_headers("pm"))
     assert denied.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_provision_requires_consent_and_returns_result(client, monkeypatch):
+    no = await client.post(
+        "/api/v1/sandbox/provision", json={}, headers=human_headers())
+    assert no.status_code == 400
+    monkeypatch.setattr(
+        sandbox_service, "provision_strict",
+        lambda conn, consent: {"ok": True, "distro": "Ubuntu", "log": "done"})
+    ok = await client.post(
+        "/api/v1/sandbox/provision", json={"consent": True},
+        headers=human_headers())
+    assert ok.status_code == 200
+    assert ok.json()["ok"] is True
 
 
 @pytest.mark.asyncio

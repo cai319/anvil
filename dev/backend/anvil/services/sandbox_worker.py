@@ -10,7 +10,8 @@ import threading
 
 from .. import config
 from ..db import open_conn
-from ..sandbox.backends.docker import DockerRunner, kill_container
+from ..sandbox.backends import strict as strict_backend
+from ..sandbox.backends.docker import kill_container
 from ..sandbox.jobs import execute_job
 from . import sandbox as sandbox_service
 
@@ -20,7 +21,7 @@ logger = logging.getLogger("anvil.sandbox.worker")
 class SandboxJobWorker:
     def __init__(self, db_path: str, runner=None) -> None:
         self.db_path = db_path
-        self.runner = runner or DockerRunner()
+        self.runner = runner or strict_backend.select_runner()[0]
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.current_job_id: str | None = None

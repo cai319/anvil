@@ -121,6 +121,8 @@ SANDBOX_INSTANCES_DIR = DATA_DIR / "sandbox" / "instances"
 SANDBOX_JOBS_DIR = DATA_DIR / "sandbox" / "jobs"
 SANDBOX_IMAGE = _env("ANVIL_SANDBOX_IMAGE", "anvil-toolchain:1.60.0")
 SANDBOX_JOB_POLL_SECONDS = float(_env("ANVIL_SANDBOX_JOB_POLL_SECONDS", "2"))
+SANDBOX_WSL_DISTRO = _env("ANVIL_WSL_DISTRO", "").strip() or None
+SANDBOX_WSL_USER = _env("ANVIL_WSL_USER", "anvil-sbx").strip() or "anvil-sbx"
 
 # 角色未显式配置 permission_mode 时的默认值。本地单用户环境用 bypassPermissions；
 # --print 模式下没有交互授权通道，default 会让 agent 停在「等待授权」。

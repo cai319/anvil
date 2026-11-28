@@ -25,6 +25,7 @@ from ..sandbox import jobs as sandbox_jobs
 from ..sandbox import monitor as sandbox_monitor
 from ..sandbox.backends import make_backend
 from ..sandbox.backends import docker as docker_backend
+from ..sandbox.backends import strict as strict_backend
 from ..sandbox.errors import QuotaExceeded, SandboxUnavailable
 
 logger = logging.getLogger("anvil.sandbox")
@@ -239,7 +240,7 @@ def status(conn=None) -> dict:
         warnings.append("host_unsafe")
     if config.SANDBOX_MODE == "enforce" and backend.name == "host":
         warnings.append("standard_degraded")
-    strict_ok, strict_detail = strict_available()
+    strict_runner, strict_ok, strict_detail = strict_backend.select_runner()
     if not strict_ok:
         warnings.append("strict_unavailable")
     counts: dict = {}
@@ -262,7 +263,8 @@ def status(conn=None) -> dict:
         },
         "strict": {
             "available": bool(strict_ok),
-            "backend": "docker" if strict_ok else None,
+            "backend": strict_runner.name if strict_ok else None,
+            "substrate": strict_runner.name,
             "detail": strict_detail,
         },
         "substrates": substrates,
@@ -318,7 +320,32 @@ def run_view(conn, run: dict) -> dict:
 # ---- 严格档作业（M2a） -----------------------------------------------------
 
 def strict_available() -> tuple[bool, str]:
-    return docker_backend.available()
+    _runner, ok, detail = strict_backend.select_runner()
+    return ok, detail
+
+
+def provision_strict(conn, *, consent: bool) -> dict:
+    """Windows WSL 一次性准备（human 显式同意，root 配置，记审计）。"""
+    if not consent:
+        raise ValueError("provisioning requires explicit consent")
+    runner, _ok, _detail = strict_backend.select_runner()
+    if getattr(runner, "name", None) != "wsl_bwrap":
+        raise SandboxUnavailable("provisioning is only required for Windows WSL")
+    try:
+        result = runner.provision()
+    except RuntimeError as exc:
+        raise SandboxUnavailable(str(exc)) from exc
+    try:
+        from . import ledger
+        ledger.emit_audit(
+            conn, role_slug="human", task_id=None, action="sandbox.provision",
+            payload={"ok": result.get("ok"), "distro": result.get("distro"),
+                     "returncode": result.get("returncode"),
+                     "log_tail": str(result.get("log") or "")[-1000:]})
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        pass
+    return result
 
 
 def _job_dict(row) -> dict | None:
