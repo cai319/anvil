@@ -98,6 +98,9 @@ export function GateReviewDrawer({
     () => (packet?.acceptance ?? []).filter(
       (a) => a.source === "manual" && a.id),
     [packet]);
+  const planReview = packet?.plan_review && (packet.plan_review.slices?.length ?? 0) > 0
+    ? packet.plan_review
+    : null;
   const reworkChoices = useMemo(() => {
     if (!step || isDecision) return step?.on_reject ?? [];
     return [...new Set([step.step_id, ...(step.depends_on ?? [])])];
@@ -330,6 +333,109 @@ export function GateReviewDrawer({
                   ))}
                 </ul>
               </section>
+
+              {planReview && (
+                <>
+                  <section className="gate-section">
+                    <h4>切片表 <span className="muted">{planReview.slices.length}</span></h4>
+                    <table className="gate-plan-table">
+                      <thead>
+                        <tr>
+                          <th>切片</th><th>范围</th><th>验收</th><th>标记</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {planReview.slices.map((slice) => (
+                          <tr key={slice.id}>
+                            <td>
+                              <span className="mono">{slice.id}</span>
+                              <span>{slice.title}</span>
+                            </td>
+                            <td className="muted">
+                              {slice.scope_paths.length > 0
+                                ? slice.scope_paths.join("、") : "—"}
+                            </td>
+                            <td className="muted">{slice.acceptance.join("、") || "—"}</td>
+                            <td>
+                              {slice.enabling && (
+                                <span className="badge gate-risk">enabling</span>
+                              )}
+                              {slice.enabling && (
+                                <span className="muted"> → {slice.enables.join("、")}</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </section>
+
+                  <section className="gate-section">
+                    <h4>Brief 覆盖矩阵 <span className="muted">{planReview.coverage.length}</span></h4>
+                    {planReview.coverage.length === 0 && (
+                      <p className="muted">未确认 Brief 或没有验收条目。</p>
+                    )}
+                    <ul className="gate-plan-coverage">
+                      {planReview.coverage.map((row) => (
+                        <li key={`${row.index}-${row.acceptance}`}>
+                          <span className={`gate-plan-status is-${row.status}`}>
+                            {row.status === "covered" ? "覆盖" : row.status === "deferred" ? "延期" : "未覆盖"}
+                          </span>
+                          <span>{row.acceptance}</span>
+                          <span className="muted">
+                            {row.status === "covered"
+                              ? `切片 ${row.slices.join("、")}`
+                              : row.status === "deferred"
+                                ? `理由：${row.deferred_reason || "未填写"}`
+                                : "无切片覆盖"}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    {planReview.non_goal_conflicts.length > 0 && (
+                      <div className="gate-plan-blocking">
+                        非目标冲突：
+                        {planReview.non_goal_conflicts.map((conflict) => (
+                          <div key={`${conflict.non_goal}-${conflict.slice_id}`}>
+                            {conflict.non_goal} ↔ {conflict.slice_id}（
+                            {conflict.scope_paths.join("、")}）
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {planReview.blocking.length > 0 && (
+                      <div className="gate-tags">
+                        {planReview.blocking.map((item) => (
+                          <span key={item} className="badge gate-risk">{item}</span>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+
+                  <section className="gate-section">
+                    <h4>manual 预估与 enabling</h4>
+                    <p className="muted">
+                      manual {planReview.manual_estimate.manual}/
+                      {planReview.manual_estimate.total}
+                      （{(planReview.manual_estimate.ratio * 100).toFixed(0)}%，
+                      阈值 {(planReview.manual_estimate.threshold * 100).toFixed(0)}%）
+                      {planReview.manual_estimate.exceeds_threshold ? " · 超过阈值" : ""}
+                    </p>
+                    {planReview.enabling.length === 0 ? (
+                      <p className="muted">没有 enabling 切片。</p>
+                    ) : (
+                      <div className="gate-tags">
+                        {planReview.enabling.map((entry) => (
+                          <span key={entry.slice_id} className="badge">
+                            {entry.slice_id} → {entry.enables.join("、")} ·
+                            {entry.checks.join("/")}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+                </>
+              )}
 
               {packet.upstream.length > 0 && (
                 <section className="gate-section">

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from ..util import ConflictError, jdumps, now_iso
+from ..util import ConflictError, jdumps, jloads, now_iso
 from . import dossier, leases, ledger, reviews
 from .workflow_common import (
     STEP_DONE, _assert_current_run, _assert_delegations_done, _mention,
@@ -375,6 +375,7 @@ def _review_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
                 f"step {step_id} is {step['status']}, expected submitted")
         targets = sorted({step_id, *[str(x) for x in (rework_targets or [])]})
         by_id = {s["step_id"]: s for s in wf["steps"]}
+        is_plan_gate = step.get("kind") == "plan_slices"
         if not approve:
             ancestors: set[str] = set()
             stack = [str(x) for x in step.get("depends_on") or []]
@@ -390,7 +391,10 @@ def _review_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
                 if target not in allowed:
                     raise ConflictError(
                         f"rework target {target} is not an ancestor of step {step_id}")
-                if (by_id.get(target) or {}).get("kind") == "plan_slices":
+                # 已展开的 plan_slices 步骤不能被更宽范围的返工重置；只有 plan 门
+                # 自身（尚未展开）可以在驳回时回到 pending 等待重新提交。
+                if ((by_id.get(target) or {}).get("kind") == "plan_slices"
+                        and target != step_id):
                     raise ConflictError(
                         f"rework target {target} is a plan_slices step and "
                         "cannot be reset")
@@ -404,6 +408,16 @@ def _review_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
                 and not acknowledge_stale and not override_reason:
             raise ConflictError(
                 "evidence_stale: acknowledge stale evidence or refresh the packet")
+        if approve and is_plan_gate:
+            from .workflow_definition import build_plan_review
+            plan = jloads(step.get("plan_json") or "{}", {})
+            if not isinstance(plan, dict) or not isinstance(plan.get("slices"), list):
+                raise ConflictError(
+                    "plan_gate_blocked: plan is missing a `slices` list")
+            review = build_plan_review(conn, wf, plan)
+            if review["blocking"]:
+                raise ConflictError(
+                    "plan_gate_blocked: " + "; ".join(review["blocking"]))
 
         now = now_iso()
         reset_ids: set[str] = set()
@@ -416,6 +430,10 @@ def _review_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
             if cur.rowcount != 1:
                 raise ConflictError(
                     f"step {step_id} state changed; refresh before reviewing")
+            if is_plan_gate:
+                # 人工批准后才展开切片并改挂下游依赖。
+                from .workflow_definition import expand_approved_plan
+                expand_approved_plan(conn, wf, step, now)
             _step_activity(conn, wf["task_id"], "human", step, "approved",
                            feedback or step.get("summary"))
         else:
@@ -448,6 +466,12 @@ def _review_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
                     "WHERE workflow_id=? AND step_id=? "
                     "AND status IN ('pending_human','pending_ai')",
                     (wid, sid))
+                if target_step.get("kind") == "plan_slices":
+                    # 计划被驳回：清空 plan_json 与 packet 指针，角色可重新提交。
+                    conn.execute(
+                        "UPDATE workflow_steps SET plan_json=NULL, packet_id=NULL, "
+                        "submitted_at=NULL WHERE workflow_id=? AND step_id=?",
+                        (wid, sid))
             _step_activity(conn, wf["task_id"], "human", step, "rejected",
                            feedback or "请按评审意见修改后重新提交")
         reviews.record_decision(
@@ -501,7 +525,7 @@ def gates(conn: sqlite3.Connection) -> list[dict]:
              JOIN workflows w ON w.id = s.workflow_id
              LEFT JOIN tasks t ON t.id = w.task_id
             WHERE s.gate=1 AND s.status='submitted' AND w.status='running'
-              AND COALESCE(s.kind,'task')='task'
+              AND COALESCE(s.kind,'task') IN ('task','plan_slices')
             ORDER BY s.updated_at"""
     ).fetchall()
     return [dict(r) for r in rows]

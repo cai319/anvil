@@ -7,7 +7,7 @@ import sqlite3
 from .. import config
 from ..util import ConflictError, jdumps, jloads, new_id, now_iso
 from ..workflow_payload import normalize_definition_payload
-from . import dossier, leases, ledger, weights
+from . import dossier, leases, ledger, reviews, weights
 from .workflow_common import (
     _assert_current_run, _assert_delegations_done, _step_activity,
     close_step_delegations, get_workflow, logger, workflow_lifecycle_lock,
@@ -447,8 +447,12 @@ def _plan_steps(conn: sqlite3.Connection, steps: list[dict], *,
         on_reject: list[str] = []
         max_rework = 0
         if kind == "plan_slices":
-            if gate:
-                raise ConflictError(f"plan_slices step {sid} cannot be a human gate")
+            # plan_slices 允许作为可选人工门（v1.62 唯一的门禁规则放宽）：
+            # 门开启后只有 plan_json 与评审包落库，人工批准后才展开切片。
+            if gate and authority in ("ai", "joint"):
+                raise ConflictError(
+                    f"plan_slices step {sid}: a plan gate cannot use "
+                    f"{authority} authority; human approval is required")
             if s.get("on_reject"):
                 raise ConflictError(f"step {sid}: on_reject is only valid for decision steps")
         elif kind == "decision":
@@ -702,7 +706,8 @@ def _join_instructions(spec: dict, context: str, extra: str = "") -> str:
 def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict,
                          slices: list[dict], existing_ids: set[str],
                          weight: str = "standard",
-                         previous_decide: str | None = None) -> list[dict]:
+                         previous_decide: str | None = None,
+                         known_slice_ids: set[str] | None = None) -> list[dict]:
     """按 loop 模板把运行期切片展开成每片小闭环。
 
     生成 ID：<plan_step>.<slice_id>.<phase>，便于决策步骤按切片前缀汇总。
@@ -746,6 +751,9 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
         # 只认 Cindy 的 loop 模板；运行期切片计划不得覆盖提示编排。
         return _hint_flag((spec or {}).get("subagent_hint"), "workflow loop phase")
 
+    declared_ids = set(known_slice_ids or ())
+    declared_ids.update(str(s.get("id") or "").strip()
+                        for s in slices if isinstance(s, dict))
     for raw_slice in slices:
         if not isinstance(raw_slice, dict):
             raise ConflictError("each slice must be an object")
@@ -755,6 +763,22 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
                 f"invalid slice id {slice_id!r}: use letters/digits/_/-, max 64 chars")
         title = str(raw_slice.get("title") or slice_id).strip()
         slice_acceptance = _merge_unique(raw_slice.get("acceptance"))
+        # enabling 切片：在 plan 审批时显式声明，必须写明它支撑的下游切片，
+        # 并由检查保证「现有测试保持通过」。运行时不得追加（修订层会拒绝）。
+        enabling = bool(raw_slice.get("enabling"))
+        if enabling:
+            enables = [str(x).strip() for x in _as_list(raw_slice.get("enables"))
+                       if str(x).strip()]
+            missing = [x for x in enables if x == slice_id or x not in declared_ids]
+            if not enables:
+                raise ConflictError(
+                    f"enabling slice {slice_id}: `enables` must declare the "
+                    "downstream slices it supports")
+            if missing:
+                raise ConflictError(
+                    f"enabling slice {slice_id}: declared downstream slices do not "
+                    f"exist in this plan: {', '.join(missing)}")
+            slice_acceptance = _merge_unique(slice_acceptance, ["现有测试保持通过"])
         context = _slice_context(raw_slice)
 
         # 角色分配是 Cindy（planner）在 loop 模板中的专属职责；运行期切片计划
@@ -987,6 +1011,329 @@ def _validate_generated_deps(generated: list[dict], known_ids: set[str]) -> None
         visit(sid, [])
 
 
+# ---- plan gate：Brief 覆盖矩阵与评审包 ------------------------------------
+
+_PATHISH_RE = re.compile(r"[/*\\]")
+
+
+def _acceptance_text(item) -> str:
+    if isinstance(item, dict):
+        return str(item.get("criterion") or item.get("text") or "").strip()
+    return str(item or "").strip()
+
+
+def _acceptance_kind(item) -> str:
+    if isinstance(item, dict):
+        return str(item.get("kind") or item.get("type") or "").strip().lower()
+    return ""
+
+
+def _norm_text(text) -> str:
+    return " ".join(str(text or "").split()).strip().lower()
+
+
+def _slice_acceptance_texts(raw_slice: dict) -> list[str]:
+    items = list(_as_list(raw_slice.get("acceptance")))
+    for execute in _as_list(raw_slice.get("execute_steps")):
+        if isinstance(execute, dict):
+            items.extend(_as_list(execute.get("acceptance")))
+    return [text for text in (_acceptance_text(x) for x in items) if text]
+
+
+def _slice_brief_refs(raw_slice: dict) -> list[str]:
+    for key in ("brief_refs", "covers", "addresses", "verifies", "coverage"):
+        if raw_slice.get(key) is not None:
+            return [str(x).strip() for x in _as_list(raw_slice.get(key))
+                    if str(x).strip()]
+    return []
+
+
+def _deferred_reason(entry: dict) -> tuple[str, str]:
+    """返回 (brief 验收引用, deferred 理由)。"""
+    ref = ""
+    for key in ("acceptance", "criterion", "item", "ref", "text"):
+        if entry.get(key) is not None:
+            ref = str(entry.get(key)).strip()
+            break
+    return ref, str(entry.get("reason") or entry.get("rationale") or "").strip()
+
+
+def _looks_like_path(text) -> bool:
+    return bool(_PATHISH_RE.search(str(text)))
+
+
+def _path_prefix(pattern: str) -> str:
+    text = str(pattern).strip().rstrip("/")
+    for token in ("/**", "/*", "*"):
+        if text.endswith(token):
+            text = text[: -len(token)]
+    return text.rstrip("/")
+
+
+def _paths_overlap(left: str, right: str) -> bool:
+    """粗略判断两个 glob 路径是否可能覆盖同一路径。"""
+    if str(left).strip() == str(right).strip():
+        return True
+    a, b = _path_prefix(left), _path_prefix(right)
+    if not a or not b:
+        return False
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def build_plan_review(conn: sqlite3.Connection, wf: dict, plan: dict) -> dict:
+    """生成 plan 审批评审数据：切片表、Brief 覆盖矩阵、manual 预估、enabling 标记。
+
+    只在 plan 人工门（gate=1）时用于阻断批准；未覆盖的 Brief 验收必须被显式
+    deferred 并写明理由，non-goals 与切片 out-of-scope / scope_paths 交叉校验。
+    """
+    from . import clarification as clarification_service
+
+    slices = [s for s in _as_list(plan.get("slices")) if isinstance(s, dict)]
+    brief = clarification_service.confirmed_brief(conn, wf.get("task_id"))
+    acceptance_items: list[dict] = []
+    non_goals: list[str] = []
+    if brief:
+        for index, raw in enumerate(_as_list(brief.get("acceptance"))):
+            text = _acceptance_text(raw)
+            if text:
+                acceptance_items.append({"index": index + 1, "text": text})
+        non_goals = [str(x).strip() for x in _as_list(brief.get("non_goals"))
+                     if str(x).strip()]
+
+    deferred_entries = [d for d in _as_list(plan.get("deferred"))
+                        if isinstance(d, dict)]
+    # 兼容按切片声明延期理由的写法。
+    for raw_slice in slices:
+        deferred_entries.extend(
+            d for d in _as_list(raw_slice.get("deferred")) if isinstance(d, dict))
+    coverage: list[dict] = []
+    for item in acceptance_items:
+        text = item["text"]
+        normalized = _norm_text(text)
+        covering: list[str] = []
+        for raw_slice in slices:
+            refs = _slice_brief_refs(raw_slice)
+            accepted = _slice_acceptance_texts(raw_slice)
+            if (text in refs or str(item["index"]) in refs
+                    or text in accepted
+                    or normalized in {_norm_text(x) for x in accepted}):
+                covering.append(str(raw_slice.get("id") or ""))
+        deferred_reason = None
+        deferred_valid = False
+        for entry in deferred_entries:
+            ref, reason = _deferred_reason(entry)
+            if ref in (text, str(item["index"])) or _norm_text(ref) == normalized:
+                deferred_reason = reason
+                deferred_valid = bool(reason)
+                break
+        if covering:
+            status = "covered"
+        elif deferred_valid:
+            status = "deferred"
+        else:
+            status = "uncovered"
+        coverage.append({
+            "acceptance": text,
+            "index": item["index"],
+            "status": status,
+            "slices": covering,
+            "deferred_reason": deferred_reason,
+        })
+
+    non_goal_conflicts: list[dict] = []
+    for non_goal in non_goals:
+        if not _looks_like_path(non_goal):
+            continue
+        for raw_slice in slices:
+            sid = str(raw_slice.get("id") or "")
+            acknowledged = {_norm_text(x)
+                            for x in _as_list(raw_slice.get("out_of_scope"))}
+            if _norm_text(non_goal) in acknowledged:
+                continue
+            paths = [str(x) for x in _as_list(raw_slice.get("scope_paths"))]
+            hits = [p for p in paths if _paths_overlap(non_goal, p)]
+            if hits:
+                non_goal_conflicts.append({
+                    "non_goal": non_goal, "slice_id": sid, "scope_paths": hits})
+
+    manual = total = 0
+    table: list[dict] = []
+    enabling: list[dict] = []
+    for raw_slice in slices:
+        items = list(_as_list(raw_slice.get("acceptance")))
+        for execute in _as_list(raw_slice.get("execute_steps")):
+            if isinstance(execute, dict):
+                items.extend(_as_list(execute.get("acceptance")))
+        texts = [t for t in (_acceptance_text(x) for x in items) if t]
+        total += len(texts)
+        manual += sum(1 for x in items if _acceptance_kind(x) == "manual")
+        sid = str(raw_slice.get("id") or "")
+        enables = [str(x) for x in _as_list(raw_slice.get("enables"))]
+        is_enabling = bool(raw_slice.get("enabling"))
+        table.append({
+            "id": sid,
+            "title": str(raw_slice.get("title") or sid),
+            "scope_paths": [str(x) for x in _as_list(raw_slice.get("scope_paths"))],
+            "out_of_scope": [str(x) for x in _as_list(raw_slice.get("out_of_scope"))],
+            "acceptance": texts,
+            "brief_refs": _slice_brief_refs(raw_slice),
+            "enabling": is_enabling,
+            "enables": enables,
+            "execute_steps": len(_as_list(raw_slice.get("execute_steps"))),
+        })
+        if is_enabling:
+            enabling.append({
+                "slice_id": sid,
+                "title": str(raw_slice.get("title") or sid),
+                "enables": enables,
+                "scope_paths": [str(x) for x in _as_list(raw_slice.get("scope_paths"))],
+                "checks": ["existing_tests_green", "downstream_exists"],
+            })
+
+    ratio = (manual / total) if total else 0.0
+    blocking: list[str] = []
+    for entry in coverage:
+        if entry["status"] == "uncovered":
+            blocking.append(
+                f"brief_acceptance_uncovered: {entry['acceptance']}")
+    for conflict in non_goal_conflicts:
+        blocking.append(
+            f"non_goal_conflict: {conflict['non_goal']} "
+            f"vs slice {conflict['slice_id']}")
+    return {
+        "brief": {
+            "present": bool(brief),
+            "acceptance_count": len(acceptance_items),
+            "non_goals": non_goals,
+        },
+        "slices": table,
+        "slice_table": table,
+        "coverage": coverage,
+        "coverage_matrix": coverage,
+        "manual_estimate": {
+            "total": total,
+            "manual": manual,
+            "ratio": round(ratio, 4),
+            "threshold": 0.3,
+            "exceeds_threshold": ratio > 0.3,
+        },
+        "enabling": enabling,
+        "enabling_slices": enabling,
+        "non_goal_conflicts": non_goal_conflicts,
+        "blocking": blocking,
+    }
+
+
+def _generated_steps_for_plan(conn: sqlite3.Connection, wf: dict, step_id: str,
+                              plan: dict) -> list[dict]:
+    loop = (wf.get("definition") or {}).get("loop")
+    if not isinstance(loop, dict):
+        raise ConflictError("workflow has no loop template")
+    existing = {s["step_id"] for s in wf["steps"]}
+    generated = _dynamic_slice_steps(
+        conn, step_id, loop, plan["slices"], existing,
+        weight=str(wf.get("weight") or "standard"))
+    _validate_generated_deps(generated, existing)
+    return generated
+
+
+def _insert_generated_steps(conn: sqlite3.Connection, wid: str, step_id: str,
+                            generated: list[dict], now: str) -> str | None:
+    """落库生成的切片步骤，并把依赖 plan 步骤的下游静态步骤改挂到最后一片 decide。"""
+    last_decide = None
+    for raw_step in generated:
+        conn.execute(
+            "INSERT INTO workflow_steps (workflow_id, step_id, title, role_slug, "
+            "instructions, depends_on_json, acceptance_json, gate, reviewer, contract, "
+            "kind, on_reject_json, max_rework, rework_count, source_step_id, slice_key, "
+            "evidence_required, subagent_hint, status, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (wid, raw_step["id"], raw_step.get("title") or raw_step["id"],
+             raw_step.get("role") or "", raw_step.get("instructions") or "",
+             jdumps(raw_step.get("depends_on") or []),
+             jdumps(raw_step.get("acceptance") or []),
+             1 if raw_step.get("gate") else 0,
+             raw_step.get("reviewer"), raw_step.get("contract"),
+             raw_step.get("kind") or "task",
+             jdumps(raw_step.get("on_reject") or []),
+             int(raw_step.get("max_rework") or 0), 0,
+             raw_step.get("source_step_id"), raw_step.get("slice_key"),
+             1 if raw_step.get("evidence_required") else 0,
+             1 if raw_step.get("subagent_hint") else 0,
+             "pending", now),
+        )
+        if str(raw_step.get("kind") or "task") == "decision":
+            last_decide = raw_step["id"]
+
+    # 依赖 plan 步骤的静态下游步骤：改挂到最后一片 decide；没有切片则解除依赖。
+    for row in conn.execute(
+        "SELECT step_id, depends_on_json FROM workflow_steps WHERE workflow_id=? "
+        "AND COALESCE(source_step_id,'')='' AND step_id<>? "
+        "AND COALESCE(kind,'task')<>'external'",
+        (wid, step_id),
+    ).fetchall():
+        deps = jloads(row["depends_on_json"], [])
+        if step_id not in deps:
+            continue
+        if last_decide:
+            new_deps = [last_decide if str(d) == step_id else d for d in deps]
+        else:
+            new_deps = [d for d in deps if str(d) != step_id]
+        conn.execute(
+            "UPDATE workflow_steps SET depends_on_json=?, updated_at=? "
+            "WHERE workflow_id=? AND step_id=?",
+            (jdumps(new_deps), now, wid, row["step_id"]))
+    return last_decide
+
+
+def _complete_plan_run(conn: sqlite3.Connection, wf: dict, step: dict,
+                       step_id: str, now: str) -> None:
+    if not step["run_id"]:
+        return
+    run_row = conn.execute(
+        "SELECT status FROM runs WHERE id=?", (step["run_id"],)).fetchone()
+    conn.execute("UPDATE runs SET status='completed', ended_at=? WHERE id=?",
+                 (now, step["run_id"]))
+    ledger.emit(
+        conn, "run.status_changed", task_id=wf["task_id"], workflow_id=wf["id"],
+        execution_no=wf.get("execution_no"), step_id=step_id,
+        run_id=step["run_id"], actor_type="role", actor=step["role_slug"],
+        payload={"status": "completed",
+                 "prev": run_row["status"] if run_row else None},
+        mirror_activity=True, activity_kind="run",
+        activity_role=step["role_slug"],
+    )
+
+
+def expand_approved_plan(conn: sqlite3.Connection, wf: dict, step: dict,
+                         now: str) -> str | None:
+    """人工批准 plan 门后展开切片；调用方负责事务与步骤状态。"""
+    step_id = step["step_id"]
+    plan = jloads(step.get("plan_json") or "{}", {})
+    slices = plan.get("slices")
+    if not isinstance(slices, list):
+        raise ConflictError("approved plan has no `slices` list")
+    existing = conn.execute(
+        "SELECT 1 FROM workflow_steps WHERE workflow_id=? AND source_step_id=? LIMIT 1",
+        (wf["id"], step_id)).fetchone()
+    if existing is not None:
+        return None  # 幂等：已展开
+    fresh = get_workflow(conn, wf["id"])
+    if fresh is None:
+        raise LookupError(wf["id"])
+    generated = _generated_steps_for_plan(conn, fresh, step_id, plan)
+    last_decide = _insert_generated_steps(conn, wf["id"], step_id, generated, now)
+    titles = "、".join(str(s.get("title") or s.get("id")) for s in slices[:8])
+    summary = f"切片计划：{len(slices)} 片"
+    if titles:
+        summary += f"（{titles}{'…' if len(slices) > 8 else ''}）"
+    conn.execute(
+        "UPDATE workflow_steps SET summary=?, updated_at=? "
+        "WHERE workflow_id=? AND step_id=?",
+        (summary, now, wf["id"], step_id))
+    return last_decide
+
+
 def apply_slice_plan(conn: sqlite3.Connection, wid: str, step_id: str,
                      role: str | None, plan: dict, run_id: str | None = None) -> dict:
     wf = get_workflow(conn, wid)
@@ -1044,6 +1391,10 @@ def _apply_slice_plan_locked(conn: sqlite3.Connection, wid: str, step_id: str,
         if applied:
             conn.commit()
             return get_workflow(conn, wid)  # type: ignore[return-value]
+        # 门禁模式下计划已提交待人工批准：重复提交保持幂等，不重复建 packet。
+        if step.get("gate") and step["status"] == "submitted" and step.get("plan_json"):
+            conn.commit()
+            return get_workflow(conn, wid)  # type: ignore[return-value]
         # workflow/修订草案待审时，禁止继续按旧 loop 展开切片；等待审批结果。
         pending = conn.execute(
             "SELECT 1 FROM board_drafts WHERE source_task=? "
@@ -1056,80 +1407,55 @@ def _apply_slice_plan_locked(conn: sqlite3.Connection, wid: str, step_id: str,
         if step["status"] != "running":
             raise ConflictError(f"step {step_id} is {step['status']}, expected running")
 
-        loop = (wf.get("definition") or {}).get("loop")
-        if not isinstance(loop, dict):
-            raise ConflictError("workflow has no loop template")
-
-        generated = _dynamic_slice_steps(
-            conn, step_id, loop, slices, {s["step_id"] for s in wf["steps"]},
-            weight=str(wf.get("weight") or "standard"))
-        _validate_generated_deps(generated, {s["step_id"] for s in wf["steps"]})
-        last_decide = None
-        for raw_step in generated:
-            conn.execute(
-                "INSERT INTO workflow_steps (workflow_id, step_id, title, role_slug, "
-                "instructions, depends_on_json, acceptance_json, gate, reviewer, contract, "
-                "kind, on_reject_json, max_rework, rework_count, source_step_id, slice_key, "
-                "evidence_required, subagent_hint, status, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (wid, raw_step["id"], raw_step.get("title") or raw_step["id"],
-                 raw_step.get("role") or "", raw_step.get("instructions") or "",
-                 jdumps(raw_step.get("depends_on") or []),
-                 jdumps(raw_step.get("acceptance") or []),
-                 1 if raw_step.get("gate") else 0,
-                 raw_step.get("reviewer"), raw_step.get("contract"),
-                 raw_step.get("kind") or "task",
-                 jdumps(raw_step.get("on_reject") or []),
-                 int(raw_step.get("max_rework") or 0), 0,
-                 raw_step.get("source_step_id"), raw_step.get("slice_key"),
-                 1 if raw_step.get("evidence_required") else 0,
-                 1 if raw_step.get("subagent_hint") else 0,
-                 "pending", now),
-            )
-            if str(raw_step.get("kind") or "task") == "decision":
-                last_decide = raw_step["id"]
-
-        # 依赖 plan 步骤的静态下游步骤：改挂到最后一片 decide；没有切片则解除依赖。
-        for row in conn.execute(
-            "SELECT step_id, depends_on_json FROM workflow_steps WHERE workflow_id=? "
-            "AND COALESCE(source_step_id,'')='' AND step_id<>? "
-            "AND COALESCE(kind,'task')<>'external'",
-            (wid, step_id),
-        ).fetchall():
-            deps = jloads(row["depends_on_json"], [])
-            if step_id not in deps:
-                continue
-            if last_decide:
-                new_deps = [last_decide if str(d) == step_id else d for d in deps]
-            else:
-                new_deps = [d for d in deps if str(d) != step_id]
-            conn.execute(
-                "UPDATE workflow_steps SET depends_on_json=?, updated_at=? "
-                "WHERE workflow_id=? AND step_id=?",
-                (jdumps(new_deps), now, wid, row["step_id"]))
+        # 先校验切片结构并生成步骤（也验证 enabling 的声明的下游切片存在），
+        # 但只有非门禁路径才立即落库；门禁路径要等人工批准。
+        generated = _generated_steps_for_plan(conn, wf, step_id, plan)
+        review = build_plan_review(conn, wf, plan)
+        gated = bool(step.get("gate"))
 
         titles = "、".join(str(s.get("title") or s.get("id")) for s in slices[:8])
         summary = f"切片计划：{len(slices)} 片"
         if titles:
             summary += f"（{titles}{'…' if len(slices) > 8 else ''}）"
+
+        if gated:
+            # 未批准不产生任何可执行步骤：只保存 plan_json 与评审包。
+            conn.execute(
+                "UPDATE workflow_steps SET status='submitted', summary=?, plan_json=?, "
+                "submitted_at=?, updated_at=? WHERE workflow_id=? AND step_id=?",
+                (summary + "（待人工批准）", jdumps(plan), now, now, wid, step_id))
+            updated = next(s for s in get_workflow(conn, wid)["steps"]
+                           if s["step_id"] == step_id)
+            reviews.ensure_packet(
+                conn, wf, updated, created_by=role or "system", commit=False,
+                plan_review=review, force=True)
+            _complete_plan_run(conn, wf, step, step_id, now)
+            _step_activity(
+                conn, wf["task_id"], step["role_slug"], step, "submitted",
+                "切片计划已提交，等待人工批准后展开",
+                extra={"slice_ids": [str(s.get("id")) for s in slices]})
+            leases.release(conn, step.get("lease_id"), commit=False)
+            conn.commit()
+            return get_workflow(conn, wid)  # type: ignore[return-value]
+
+        # 非门禁 = 自动批准：没有人工审批可阻断，但 enabling 切片仍不得与
+        # Brief 非目标冲突。
+        if not gated:
+            enabling_ids = {entry["slice_id"] for entry in review["enabling"]}
+            hard = [conflict for conflict in review["non_goal_conflicts"]
+                    if conflict["slice_id"] in enabling_ids]
+            if hard:
+                raise ConflictError(
+                    "plan_gate_blocked: " + "; ".join(
+                        f"non_goal_conflict: {c['non_goal']} "
+                        f"vs slice {c['slice_id']}" for c in hard))
+
+        _insert_generated_steps(conn, wid, step_id, generated, now)
         conn.execute(
             "UPDATE workflow_steps SET status='approved', summary=?, plan_json=?, "
             "ended_at=?, updated_at=? WHERE workflow_id=? AND step_id=?",
             (summary, jdumps(plan), now, now, wid, step_id))
-        if step["run_id"]:
-            run_row = conn.execute(
-                "SELECT status FROM runs WHERE id=?", (step["run_id"],)).fetchone()
-            conn.execute("UPDATE runs SET status='completed', ended_at=? WHERE id=?",
-                         (now, step["run_id"]))
-            ledger.emit(
-                conn, "run.status_changed", task_id=wf["task_id"], workflow_id=wid,
-                execution_no=wf.get("execution_no"), step_id=step_id,
-                run_id=step["run_id"], actor_type="role", actor=step["role_slug"],
-                payload={"status": "completed",
-                         "prev": run_row["status"] if run_row else None},
-                mirror_activity=True, activity_kind="run",
-                activity_role=step["role_slug"],
-            )
+        _complete_plan_run(conn, wf, step, step_id, now)
         _step_activity(
             conn, wf["task_id"], step["role_slug"], step, "planned", summary,
             extra={"slice_ids": [str(s.get("id")) for s in slices]})
