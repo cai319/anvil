@@ -574,6 +574,23 @@ export function TaskDetail({ id }: { id: string }) {
     }
     return answered;
   }, [timeline, task?.planner]);
+  // 后端已把 waiting_for_human 置真（mention 已落库），但问题消息要等下一次刷新
+  // 才进入 timeline。这段空窗期继续显示沙漏，避免误以为 Cindy 已说完、轮到自己输入。
+  const cindyMentionVisible = useMemo(() => {
+    const planner = task?.planner || "cindy";
+    let lastHuman = -1;
+    timeline.forEach((ev, index) => {
+      if (ev.role === "human") lastHuman = index;
+    });
+    return timeline.slice(lastHuman + 1).some((ev) => ev.kind === "mention"
+      && (ev.role === "cindy" || ev.role === planner));
+  }, [task?.planner, timeline]);
+  const awaitingQuestionMessage = Boolean(
+    clarification?.status === "in_progress"
+    && clarification.waiting_for_human
+    && (clarification.brief?.open_questions?.length ?? 0) > 0
+    && !cindyMentionVisible);
+  const cindyPending = Boolean(clarification?.thinking) || awaitingQuestionMessage;
 
   if (gone)
     return (
@@ -1179,6 +1196,7 @@ export function TaskDetail({ id }: { id: string }) {
         planningActive={planningActive}
         draftPending={drafts.some((d) => d.status === "pending")}
         hasWorkflow={Boolean(workflow)}
+        pendingQuestions={awaitingQuestionMessage}
         onChanged={() => { void refresh(); }} />
       <div
         className={`task-layout ${panel.collapsed ? "panel-collapsed" : ""}`}
@@ -1609,7 +1627,9 @@ export function TaskDetail({ id }: { id: string }) {
                   blurTimerRef.current = window.setTimeout(() => setMention(null), 150);
                 }}
                 placeholder={clarification?.status === "in_progress"
-                  ? "输入你的回答，发送后进入下一轮澄清（自动 @Cindy）"
+                  ? cindyPending
+                    ? "Cindy 正在整理澄清问题，问题出现后再回答；也可直接补充说明"
+                    : "输入你的回答，发送后进入下一轮澄清（自动 @Cindy）"
                   : "输入消息；输入 @ 选择角色（界面显示昵称，后台用 slug 激活）"}
               />
               {mention && mentionCandidates.length > 0 && (
@@ -1639,7 +1659,11 @@ export function TaskDetail({ id }: { id: string }) {
           </div>
           <p className="muted hint" style={{ margin: "4px 2px 0" }}>
             {clarification?.status === "in_progress" ? (
-              <>澄清中：直接发送会唤醒 Cindy 并进入下一轮；只想评论不唤醒时，请先确认或跳过澄清。</>
+              cindyPending ? (
+                <>Cindy 仍在思考并整理问题；问题卡出现后再选择回答。直接发送会让 Cindy 提前进入下一轮。</>
+              ) : (
+                <>澄清中：直接发送会唤醒 Cindy 并进入下一轮；只想评论不唤醒时，请先确认或跳过澄清。</>
+              )
             ) : (
               <>
                 提示：输入 <strong>@</strong> 会弹出角色选择（上下键选择，Enter 确认）；选中后按 Enter 发送。

@@ -34,7 +34,8 @@ async def test_multi_role_dispatch_clarifies_with_cindy(client, seeded):
     assert body["mode"] == "clarifying"
     assert body["planner"] == "cindy"
     assert body["clarification"]["status"] == "in_progress"
-    assert body["clarification"]["round"] == 1
+    # 轮次只统计 Cindy 主动发出的问题批次，run 启动本身不计数。
+    assert body["clarification"]["round"] == 0
     assert body["run"]["role_slug"] == "cindy"
     assert body["run"]["origin"] == "clarify"
     assert "[anvil:clarify]" in body["run"]["prompt"]

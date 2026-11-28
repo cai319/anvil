@@ -82,7 +82,8 @@ async def test_mention_continues_clarification(client, seeded):
     state = (await client.get(
         f"{API}/tasks/{tid}/clarification", headers=human_headers())).json()
     assert state["status"] == "in_progress"
-    assert state["round"] == 2
+    # human 主动补充/追问不消耗澄清轮次。
+    assert state["round"] == 0
 
     runs = (await client.get(f"{API}/runs", headers=human_headers())).json()
     clarify_runs = [x for x in runs if x.get("task_id") == tid
@@ -90,6 +91,36 @@ async def test_mention_continues_clarification(client, seeded):
     assert len(clarify_runs) >= 2
     assert any("补充：必须支持 SSO" in (x.get("prompt") or "")
                for x in clarify_runs)
+
+
+async def test_cindy_question_mention_consumes_round(client, seeded):
+    tid = await _create_task(client)
+    await _dispatch(client, tid)
+    marker = '```anvil-questions\n{"questions":[{"text":"范围？"}]}\n```'
+    r = await client.post(
+        f"{API}/tasks/{tid}/mention", headers=auth_headers("cindy"),
+        json={"target": "human", "message": f"请确认\n{marker}"})
+    assert r.status_code == 200, r.text
+    state = (await client.get(
+        f"{API}/tasks/{tid}/clarification", headers=human_headers())).json()
+    assert state["round"] == 1
+
+    # 普通对话不计数；再发一批问题才进入第 2 轮。
+    r = await client.post(
+        f"{API}/tasks/{tid}/mention", headers=auth_headers("cindy"),
+        json={"target": "human", "message": "补充说明，不提问"})
+    assert r.status_code == 200, r.text
+    state = (await client.get(
+        f"{API}/tasks/{tid}/clarification", headers=human_headers())).json()
+    assert state["round"] == 1
+
+    r = await client.post(
+        f"{API}/tasks/{tid}/mention", headers=auth_headers("cindy"),
+        json={"target": "human", "message": f"还有问题\n{marker}"})
+    assert r.status_code == 200, r.text
+    state = (await client.get(
+        f"{API}/tasks/{tid}/clarification", headers=human_headers())).json()
+    assert state["round"] == 2
 
 
 async def test_confirm_starts_planner_with_brief(client, seeded):

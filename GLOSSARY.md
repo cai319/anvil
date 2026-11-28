@@ -29,8 +29,10 @@ Cindy 首次规划前的对话阶段，状态存于 `tasks.clarification_status`
 ### 澄清 run（Clarify Run）
 
 以 `[anvil:clarify]` 标记启动的 Cindy run，只负责提问、更新简报草稿、@human 挂起。
-不包含 `PLANNING_PROTOCOL`，不创建草案。每次 human 回复启动新一轮，**软上限 6 轮**，
-每轮 1–3 问；简报足够完整可提前收束，第 6 轮起 `must_conclude=true`。
+不包含 `PLANNING_PROTOCOL`，不创建草案。每次 human 回复都会启动新的 clarify run，
+但 run 本身不消耗轮次：**只有 Cindy 主动发出一批结构化 grill 问题才计一轮，软上限 10 轮**，
+每轮 1–3 问；human 的主动发言、追问和修正不计数。简报足够完整可提前收束，
+已提出 10 轮问题后 `must_conclude=true`。
 
 ### 首次规划阶段（First Planning Phase）
 

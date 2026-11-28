@@ -6,7 +6,7 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **前端**：React + TypeScript + Vite
 - **Agent CLI**：`anvil`，Agent 在自己的工具循环里调用它上报状态
 - **地址**：`http://127.0.0.1:7317`（仅回环）
-- **当前版本**：v1.60.1（执行沙箱、受控 PoC 运行、Windows WSL2 严格档、MCP/RSI 沙箱化；修复角色下拉与 PoC 实时日志）
+- **当前版本**：v1.60.2（执行沙箱、受控 PoC、Windows WSL2 严格档、MCP/RSI 沙箱化；修复下拉居中、澄清问题送达提示与轮次口径）
 
 > 内部架构、设计、ADR 与实现状态文档仅本地保留，不随仓库发布。
 
@@ -28,7 +28,7 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **角色**：独立私有 home（`instruction.md`、`PRINCIPLES.md`、`memory/cards/`、`notes/`、日志），绑定自己的运行时和技能/MCP。角色级思考强度 `low | medium | high | max`：Cindy 默认 `max`，其他角色默认 `high`，通过 Claude Code `--effort` 注入。
 - **常驻会话**：每个角色一个长期存活的 CLI 进程；唤醒 = 投递消息；空闲 15 分钟退出，下次 `--resume` 恢复。
 - **上下文与模型窗口**：自动识别实际模型与窗口；支持 `model_pool` / 窗口下限；角色可自主重置上下文。
-- **规划前澄清**：Cindy 首次规划前分轮提问（每轮 1–3 问，第 6 轮起收束），产出可确认的任务简报；未确认或过期时服务端拒绝 workflow / workflow_revision 草案。已有 workflow、已执行、非 `todo` 任务不进入澄清。
+- **规划前澄清**：Cindy 首次规划前分轮提问（每轮 1–3 问，Cindy 主动提问最多 10 轮，第 10 轮后收束；human 的追问与修正不消耗轮次），产出可确认的任务简报；未确认或过期时服务端拒绝 workflow / workflow_revision 草案。已有 workflow、已执行、非 `todo` 任务不进入澄清。
 - **任务与工作流**：任务板、认领/租约、多角色协作；Cindy 规划 workflow，人类批准后按依赖执行。角色建议必须先于 workflow 审批解决：pending 建议阻塞审批，`authorize` 建议批准后由 planner 创建/绑定角色，完成前审批保持锁定。
 - **切片闭环**：`plan_slices + loop`。Cindy 定义 loop 的角色/阶段；运行期切片只决定粒度与轮数，不能覆盖角色。
 - **记忆与知识**：`PRINCIPLES.md`（耐久准则）+ 角色经验卡 + FTS5 + 分层知识作用域
@@ -587,8 +587,9 @@ cd dev
 pytest tests/ -q
 ```
 
-当前基线：**1344 passed + 64 skipped**（CLI 契约需要 `ANVIL_BIN`，模型评测需要
-`ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。v1.60.1 修复角色下拉与 PoC 实时日志；
+当前基线：**1346 passed + 64 skipped**（CLI 契约需要 `ANVIL_BIN`，模型评测需要
+`ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。v1.60.2 修复下拉居中、澄清问题送达
+提示与轮次口径；v1.60.1 修复角色下拉与 PoC 实时日志；
 v1.60.0 覆盖执行沙箱与受控 PoC；v1.51.1 覆盖新增的澄清、角色思考强度、
 角色建议门禁、收件箱提醒生命周期、功能开关默认恢复、工具治理与大厅性能。
 
@@ -780,6 +781,7 @@ anvil init
 - [docs/cli-reference.md](docs/cli-reference.md)：CLI 命令、参数、规则、错误处理与示例
 - [GLOSSARY.md](GLOSSARY.md)：领域术语（任务简报、澄清、角色建议门禁、思考强度等）
 - [dev/README.md](dev/README.md)：开发者入口（源码结构、本地开发与测试）
+- [docs/v1.60.2-release.md](docs/v1.60.2-release.md)：v1.60.2 修复下拉菜单居中、澄清问题送达提示与澄清轮次口径
 - [docs/v1.60.1-release.md](docs/v1.60.1-release.md)：v1.60.1 修复任务角色下拉与 PoC 实时日志
 - [docs/v1.60.0-release.md](docs/v1.60.0-release.md)：v1.60.0 执行沙箱、受控 PoC、Windows WSL2 严格档、MCP/RSI 沙箱化
 - [docs/v1.51.1-release.md](docs/v1.51.1-release.md)：v1.51.1 Cindy 规划前澄清、角色思考强度、角色建议门禁、收件箱与工具治理

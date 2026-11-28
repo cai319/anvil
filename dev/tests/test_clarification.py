@@ -413,7 +413,8 @@ def test_start_clarify_run_prompt_and_round(conn, tmp_path):
     assert run["prompt"].startswith("[anvil:clarify]")
     assert "规划前澄清" in run["prompt"]
     assert "[anvil:plan]" not in run["prompt"]
-    assert tasks.get(conn, "T1")["clarification_round"] == 1
+    # run 本身不消耗轮次；只有 Cindy 发出结构化问题时才推进。
+    assert tasks.get(conn, "T1")["clarification_round"] == 0
     assert clarification.get_state(conn, "T1")["thinking"] is True
 
     run2 = clarification.start_clarify_run(
@@ -421,17 +422,41 @@ def test_start_clarify_run_prompt_and_round(conn, tmp_path):
         human_message="补充：必须支持 SSO", replace_active=True)
     assert "human 本轮回复" in run2["prompt"]
     assert "补充：必须支持 SSO" in run2["prompt"]
+    assert tasks.get(conn, "T1")["clarification_round"] == 0
+
+
+def test_question_round_only_counts_cindy_question_batches(conn):
+    _task(conn)
+    clarification.start(conn, "T1")
+    marker = "```anvil-questions\n{\"questions\":[{\"text\":\"范围？\"}]}\n```"
+    tasks.mention(conn, "T1", "cindy", "human", "没有结构化问题")
+    assert clarification.get_state(conn, "T1")["round"] == 0
+    # human 主动发言/追问，即使正文提到问题块，也不计数。
+    tasks.mention(conn, "T1", "human", "cindy", marker)
+    assert clarification.get_state(conn, "T1")["round"] == 0
+    tasks.mention(conn, "T1", "cindy", "human", marker)
+    assert clarification.get_state(conn, "T1")["round"] == 1
+    tasks.mention(conn, "T1", "cindy", "human", marker)
+    assert clarification.get_state(conn, "T1")["round"] == 2
     assert tasks.get(conn, "T1")["clarification_round"] == 2
 
 
 def test_start_clarify_run_must_conclude(conn, tmp_path):
     _task(conn)
     clarification.start(conn, "T1")
-    conn.execute("UPDATE tasks SET clarification_round=5 WHERE id='T1'")
-    conn.commit()
+    marker = "```anvil-questions\n{\"questions\":[{\"text\":\"范围？\"}]}\n```"
+    for _ in range(9):
+        tasks.mention(conn, "T1", "cindy", "human", marker)
+    run = clarification.start_clarify_run(
+        conn, str(tmp_path / "c.db"), None, "T1", "cindy")
+    assert "must_conclude：false" in run["prompt"]
+    assert "已提出的 grill 问题轮次：9/10" in run["prompt"]
+
+    tasks.mention(conn, "T1", "cindy", "human", marker)
     run = clarification.start_clarify_run(
         conn, str(tmp_path / "c.db"), None, "T1", "cindy")
     assert "must_conclude：true" in run["prompt"]
+    assert "已达 grill 问题上限" in run["prompt"]
 
 
 def test_thinking_stops_when_waiting_for_human(conn, tmp_path):

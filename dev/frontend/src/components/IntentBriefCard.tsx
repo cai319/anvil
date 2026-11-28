@@ -75,13 +75,16 @@ function BriefSummary({
 }
 
 export function IntentBriefCard({
-  taskId, state, planningActive, draftPending, hasWorkflow, onChanged,
+  taskId, state, planningActive, draftPending, hasWorkflow, pendingQuestions,
+  onChanged,
 }: {
   taskId: string;
   state: ClarificationState | null;
   planningActive: boolean;
   draftPending: boolean;
   hasWorkflow: boolean;
+  /** Cindy 已发出问题，但问题消息尚未进入时间线：保持沙漏，避免误以为已轮到我方。 */
+  pendingQuestions?: boolean;
   onChanged: () => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -133,7 +136,8 @@ export function IntentBriefCard({
   // 无简报时不显示卡片：任务启动按钮就是「Cindy 先澄清再规划」的唯一入口。
   if (state.status === "none") return null;
 
-  const thinking = busy || state.thinking;
+  const thinking = busy || state.thinking || Boolean(pendingQuestions);
+  const thinkingLabel = pendingQuestions ? "Cindy 正在整理澄清问题" : "Cindy 正在思考";
   const active = state.status === "in_progress" || state.status === "stale";
   const openQuestions = state.brief?.open_questions ?? [];
 
@@ -211,8 +215,9 @@ export function IntentBriefCard({
           <span className="badge">{STATUS_LABEL[state.status] ?? state.status}</span>
           {state.status === "in_progress" && (
             <span className="muted"
-              title={`${state.max_rounds} 轮是软上限，不是固定议程：每轮最多 3 个问题；`
-                + "简报足够完整会提前结束；最后一轮只收束、不再开新问题。"}>
+              title={`${state.max_rounds} 轮是 Cindy 主动提问的软上限，不是固定议程：`
+                + "每轮最多 3 个问题；简报足够完整会提前结束；"
+                + "已达上限后只收束、不再开新问题。human 的追问与修正不消耗轮次。"}>
               第 {Math.max(1, state.round)} 轮（上限 {state.max_rounds}）
             </span>
           )}
@@ -223,8 +228,8 @@ export function IntentBriefCard({
             <span className="ibc-warn-dot" title="有开放问题需展开简报接受" />
           )}
           {thinking && (
-            <span className="ibc-thinking" title="Cindy 正在思考"
-              aria-label="Cindy 正在思考">
+            <span className="ibc-thinking" title={thinkingLabel}
+              aria-label={thinkingLabel}>
               <Icon name="hourglass" size={15} className="ibc-hourglass" />
             </span>
           )}

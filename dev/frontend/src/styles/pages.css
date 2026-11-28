@@ -2066,6 +2066,11 @@ dl { grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); }
   box-sizing: border-box;
   line-height: 1.2;
 }
+/* 简报栏下拉：文字跟随控件字号，固定 32px 高度内不再继承正文/提示大字号；
+   垂直居中由 type-scale.css 末尾的全局 select 规则统一处理（去掉上下 padding）。 */
+.ibc-bar select.ibc-control {
+  font-size: var(--fs-control);
+}
 .ibc-warn-dot {
   width: 8px;
   height: 8px;

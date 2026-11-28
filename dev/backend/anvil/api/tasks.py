@@ -1297,6 +1297,11 @@ def mention_task(tid: str, body: dict, request: Request, conn=Depends(get_db), a
     result = services.tasks.mention(
         conn, tid, auth.role or "human", target, message,
         slice_key=source_ctx["slice_key"])
+    # 只有 Cindy 主动发给 human 的结构化问题才消耗澄清轮次；human 的追问、
+    # 补充和修正不计数，避免同一轮内多次交互被重复计费。
+    if target == "human" and auth.role and auth.role != "human":
+        services.clarification.record_question_round(
+            conn, tid, actor=auth.role)
     # workflow/system 是系统伪发送者，不是真实角色；即使历史数据里有同名 role 行，
     # 也不允许通过 @ 唤醒它。
     pseudo_targets = {"workflow", "system"}

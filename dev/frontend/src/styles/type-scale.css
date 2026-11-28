@@ -3772,3 +3772,19 @@ details.replay-event-body > div { margin-top: 4px; }
 @media (max-width: 899px) {
   .proposal-actionbar { position: static; }
 }
+
+/* ── 原生 select 文字垂直居中修正 ─────────────────────────────
+   原生 <select> 的选中值由浏览器在“内容盒”内垂直居中，且该对齐不受 line-height 控制。
+   全局控件尺度给 select 固定了高度（--control-h / --control-h-sm 等），又给了 6px/5px 的
+   上下 padding；而 select 的 font-size 继承自正文（--fs-base 最大 24px）。border-box 下
+   内容盒高度 = 控件高度 − 上下 padding − 边框，常小于文字行高，于是文字上下被裁切
+   （表现为“偏上/偏下、上下被遮住”）。
+   正确做法是去掉 select 的垂直 padding（保留左右 padding），让内容盒尽量高，由浏览器在
+   内容盒内自然垂直居中。固定高度、各页面有意设置的字号与高度均保持不变。
+   频道/模板/新建任务等紧凑表单规则的优先级高于单个 select 选择器，故用 !important 一次性
+   锁定这两条声明，避免逐页打补丁；多选列表（<select multiple>，如 repo-editor）保留其
+   列表内边距，不在此列。 */
+select:not([multiple]) {
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+}

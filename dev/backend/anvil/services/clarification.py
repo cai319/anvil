@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -23,8 +24,10 @@ from . import ledger, roles as roles_service, task_workspace, tasks as tasks_ser
 
 STATUSES = ("none", "in_progress", "confirmed", "skipped", "stale")
 ACTIVE_STATUSES = ("in_progress", "stale")
-MAX_ROUNDS = 6
+MAX_ROUNDS = 10
 CLARIFY_MARKER = "[anvil:clarify]"
+QUESTION_BLOCK_RE = re.compile(
+    r"```anvil-questions\s*\n?(.*?)```", re.IGNORECASE | re.DOTALL)
 PLAN_SHAPES = ("flat", "slices", "auto")
 LIST_FIELDS = (
     "non_goals", "constraints", "acceptance", "assumptions", "open_questions", "risks")
@@ -319,10 +322,13 @@ def get_state(conn: sqlite3.Connection, task_id: str) -> dict:
         status == "in_progress"
         and tasks_service.waiting_for_human(
             conn, task_id, str(task.get("planner") or "cindy")))
+    # 轮次是派生值：按实际 grill 问题消息校准，兼容旧版按对话次数累计的数据。
+    round_no = (sync_question_rounds(conn, task) if status == "in_progress"
+                else int(task.get("clarification_round") or 0))
     return {
         "task_id": task_id,
         "status": status,
-        "round": int(task.get("clarification_round") or 0),
+        "round": round_no,
         "max_rounds": MAX_ROUNDS,
         "brief": brief,
         "brief_version": int(task.get("intent_brief_version") or 0),
@@ -638,6 +644,81 @@ def enforce_plan_shape(conn: sqlite3.Connection, task_id: str, tree: dict) -> No
             "a loop template")
 
 
+def _question_block_questions(message: str) -> list[Any] | None:
+    """解析消息里的结构化问题块；无效或为空返回 None。"""
+    match = QUESTION_BLOCK_RE.search(message or "")
+    if match is None:
+        return None
+    try:
+        payload = json.loads(match.group(1).strip())
+    except (TypeError, ValueError):
+        return None
+    questions = payload.get("questions") if isinstance(payload, dict) else None
+    return questions if isinstance(questions, list) and questions else None
+
+
+def count_question_rounds(conn: sqlite3.Connection, task: dict) -> int:
+    """按实际消息统计 Cindy 主动发出的 grill 问题批次。
+
+    只数本轮澄清（最近一次 clarification.started 之后）中 planner/onboarding
+    发给 human、且带合法 anvil-questions 块的消息；human 的追问与修正不计数。
+    """
+    started = conn.execute(
+        "SELECT ts FROM events WHERE task_id=? AND event_type='clarification.started' "
+        "ORDER BY ts DESC LIMIT 1", (task["id"],)).fetchone()
+    since = str(started["ts"]) if started else ""
+    planner = str(task.get("planner") or "cindy")
+    rows = conn.execute(
+        "SELECT role_slug, payload_json, created_at FROM activities "
+        "WHERE task_id=? AND kind='mention' AND created_at>=? "
+        "ORDER BY created_at, id", (task["id"], since)).fetchall()
+    count = 0
+    for row in rows:
+        role = str(row["role_slug"] or "")
+        if role != planner and not roles_service.is_onboarding(conn, role):
+            continue
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict) or payload.get("target") != "human":
+            continue
+        message = str(payload.get("message") or "")
+        if _question_block_questions(message) is not None:
+            count += 1
+    return min(count, MAX_ROUNDS)
+
+
+def sync_question_rounds(conn: sqlite3.Connection, task: dict) -> int:
+    """把 tasks.clarification_round 校准为实际问题批次数（兼容旧数据/升级）。"""
+    current = int(task.get("clarification_round") or 0)
+    if str(task.get("clarification_status") or "none") != "in_progress":
+        return current
+    actual = count_question_rounds(conn, task)
+    if actual != current:
+        conn.execute(
+            "UPDATE tasks SET clarification_round=? "
+            "WHERE id=? AND clarification_status='in_progress'",
+            (actual, task["id"]))
+        conn.commit()
+    return actual
+
+
+def record_question_round(conn: sqlite3.Connection, task_id: str, *,
+                          actor: str) -> int:
+    """mention 落库后校准轮次；只有实际新增问题批次时才写事件。"""
+    task = _require_task(conn, task_id)
+    current = int(task.get("clarification_round") or 0)
+    round_no = sync_question_rounds(conn, task)
+    if round_no > current:
+        ledger.emit(
+            conn, "clarification.question_round", task_id=task_id,
+            actor_type="role", actor=actor,
+            payload={"round": round_no, "max_rounds": MAX_ROUNDS})
+        conn.commit()
+    return round_no
+
+
 def start_clarify_run(conn: sqlite3.Connection, db_path: str,
                       orchestrator, task_id: str, planner: str, *,
                       assignees: list[str] | None = None,
@@ -647,8 +728,9 @@ def start_clarify_run(conn: sqlite3.Connection, db_path: str,
     """启动一轮 clarify run。
 
     每次 human 回复都新建 run（replace_active=True abandon 旧的 suspended run），
-    round+1；第 MAX_ROUNDS 轮起 prompt 带 must_conclude。run 以 `[anvil:clarify]`
-    开头，graph/nodes 据此注入 CLARIFY_PROTOCOL，而不是 PLANNING_PROTOCOL。
+    但 run 本身不消耗轮次；轮次按 Cindy 实际发出的 grill 问题批次派生并校准。
+    第 MAX_ROUNDS 轮起 prompt 带 must_conclude。
+    run 以 `[anvil:clarify]` 开头，graph/nodes 据此注入 CLARIFY_PROTOCOL。
     """
     from ..graph.render import CLARIFY_PROTOCOL
     from . import planning as planning_service
@@ -680,13 +762,13 @@ def start_clarify_run(conn: sqlite3.Connection, db_path: str,
 
     now = now_iso()
     cur = conn.execute(
-        "UPDATE tasks SET clarification_round=clarification_round+1, updated_at=? "
+        "UPDATE tasks SET updated_at=? "
         "WHERE id=? AND clarification_status='in_progress'",
         (now, task_id))
     if cur.rowcount != 1:
         raise ConflictError("clarification state changed; retry")
     task = _require_task(conn, task_id)
-    round_no = int(task.get("clarification_round") or 0)
+    round_no = sync_question_rounds(conn, task)
     must_conclude = round_no >= MAX_ROUNDS
     if assignees is None:
         assignees = planning_service._assignees(conn, task_id)
@@ -698,7 +780,8 @@ def start_clarify_run(conn: sqlite3.Connection, db_path: str,
     prompt = CLARIFY_MARKER + "\n" + CLARIFY_PROTOCOL
     prompt += (
         "\n\n## 当前澄清状态\n"
-        f"- 轮次：{round_no}/{MAX_ROUNDS}\n"
+        f"- 已提出的 grill 问题轮次：{round_no}/{MAX_ROUNDS}\n"
+        f"- 本轮如提出新一批问题，将记为第 {min(round_no + 1, MAX_ROUNDS)} 轮\n"
         f"- must_conclude：{'true' if must_conclude else 'false'}\n")
     if brief:
         prompt += ("\n## 当前简报草稿（在此基础上修正，不要丢失已确认内容）\n"
@@ -717,12 +800,13 @@ def start_clarify_run(conn: sqlite3.Connection, db_path: str,
         prompt += "\n\n## human 本轮回复\n" + str(human_message).strip()
     if must_conclude:
         prompt += (
-            "\n\n## 本轮强制收束\n已达轮次上限：不再开新问题。"
+            "\n\n## 本轮强制收束\n已达 grill 问题上限：不再开新问题。"
             "写最终简报并用 anvil task mention 请求 human 确认。\n")
     else:
         prompt += (
             "\n\n## 本轮要求\n先更新简报草稿，再用 anvil task mention 通知 human；"
-            "然后结束回合。\n")
+            "然后结束回合。human 的追问/修正不消耗轮次；只有你在消息中附带新的 "
+            "anvil-questions 问题块时，才记为新一轮。\n")
     if reason:
         prompt += f"\n## 触发原因\n{reason}\n"
 

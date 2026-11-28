@@ -57,7 +57,7 @@ pip install pytest pytest-asyncio
 pytest tests/ -q
 ```
 
-当前基线：**1344 passed / 64 skipped**。`dev/.venv` 必须安装 `langgraph`，否则
+当前基线：**1346 passed / 64 skipped**。`dev/.venv` 必须安装 `langgraph`，否则
 `conftest` 的 `importorskip` 会静默跳过全部用例；CLI 契约测试需要 `ANVIL_BIN`，
 模型评测需要 `ANVIL_COLLAB_EVAL_CMD`。
 
@@ -106,5 +106,5 @@ Windows 安装、运行时发现和 `claude.exe` 注意事项见根 README 的�
 - CLI：[docs/cli-reference.md](../docs/cli-reference.md)
 - 问题板：[docs/issue-board.md](../docs/issue-board.md)
 - 术语：[GLOSSARY.md](../GLOSSARY.md)
-- 变更记录：`docs/v*-release.md`；最新 [v1.51.1](../docs/v1.51.1-release.md)
+- 变更记录：`docs/v*-release.md`；最新 [v1.60.2](../docs/v1.60.2-release.md)
 - 测试说明：[tests/README.md](tests/README.md)
