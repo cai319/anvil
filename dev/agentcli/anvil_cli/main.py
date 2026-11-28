@@ -2214,9 +2214,17 @@ def sandbox_status_cmd(json_out: bool = typer.Option(False, "--json")):
 
 
 @sandbox_app.command("self-check")
-def sandbox_self_check_cmd(json_out: bool = typer.Option(False, "--json")):
-    """运行沙箱自检（Seatbelt profile 等）。"""
-    _emit(_call("POST", "/api/v1/sandbox/self-check", {}), json_out)
+def sandbox_self_check_cmd(
+    force: bool = typer.Option(
+        False, "--force", help="忽略金丝雀缓存重跑（修复环境后使用）"),
+    runtime_id: str = typer.Option(
+        None, "--runtime", help="只检查指定运行时（默认 DEFAULT_RUNTIME）"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """运行沙箱自检：profile 预检 + 目标运行时的真实 Bash 金丝雀。"""
+    _emit(_call("POST", "/api/v1/sandbox/self-check", {
+        "force": bool(force), "runtime_id": runtime_id,
+    }), json_out)
 
 
 @sandbox_app.command("provision")

@@ -51,6 +51,8 @@ export function childFromDelegation(d: Delegation): TaskChild {
     run_id: d.run_id,
     run_status: d.run_status,
     run_failure_class: d.run_failure_class,
+    run_failure_message: d.run_failure_message,
+    run_suspend_kind: d.run_suspend_kind,
     blocking: true,
     dispatch_status: null,
     return_pending: false,
@@ -85,6 +87,8 @@ export function childFromDispatch(d: TaskDispatch): TaskChild {
     run_id: null,
     run_status: null,
     run_failure_class: null,
+    run_failure_message: null,
+    run_suspend_kind: null,
     blocking: false,
     dispatch_status: d.status,
     return_pending: d.status === "return_ready" || d.status === "returning",
@@ -161,7 +165,11 @@ export function ChildTaskCard({ c, onChanged }: { c: TaskChild; onChanged: () =>
         </span>
         <span className={`status status-${state.cls}`}>{state.label}</span>
         {c.run_failure_class && (
-          <span className="badge badge-in_progress" title="失败分类">{c.run_failure_class}</span>
+          <span className="badge badge-in_progress"
+            title={c.run_failure_message || "失败分类"}>
+            {c.run_failure_class === "runtime_env_error"
+              ? "运行时环境错误" : c.run_failure_class}
+          </span>
         )}
       </div>
       <div className="delegation-meta">

@@ -352,6 +352,8 @@ def list_delegations(conn: sqlite3.Connection, parent_id: str) -> list[dict]:
                   ws.title AS step_title,
                   r.id AS run_id, r.status AS run_status,
                   r.failure_class AS run_failure_class,
+                  r.failure_message AS run_failure_message,
+                  r.suspend_kind AS run_suspend_kind,
                   COALESCE(
                     (SELECT c.summary FROM task_role_claims c
                       WHERE c.task_id=t.id AND c.summary IS NOT NULL

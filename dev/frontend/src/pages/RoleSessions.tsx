@@ -356,7 +356,13 @@ export function RoleSessions({
                 <div className="rs-detail-meta">
                   <span className="mono">run {run.id.slice(0, 8)}</span>
                   <span className={`status status-${run.status}`}>{runStatusLabel(run.status)}</span>
-                  {run.failure_class && <span className="badge badge-in_progress">{run.failure_class}</span>}
+                  {run.failure_class && (
+                    <span className="badge badge-in_progress"
+                      title={run.failure_message || "失败分类"}>
+                      {run.failure_class === "runtime_env_error"
+                        ? "运行时环境错误（修复后可重试）" : run.failure_class}
+                    </span>
+                  )}
                   <a href={`/runs/${run.id}`}>打开完整会话页 <Icon name="chevron-right" size={12} /></a>
                 </div>
                 {subagents.length > 0 && (

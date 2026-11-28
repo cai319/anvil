@@ -45,6 +45,7 @@ class ContextEngineMixin:
                 "queue_len": 0,
                 "queue": [],
                 "switching": False,
+                "runtime_env_error": None,
                 "active_subagents": [],
             }
         alive = r.proc is not None and r.proc.poll() is None
@@ -65,6 +66,7 @@ class ContextEngineMixin:
             "context_slice_key": slice_key_of(r.context_key),
             "context_key": r.context_key,
             "switching": bool(r.switching),
+            "runtime_env_error": r.runtime_env_error,
             "queue_len": len(r.queue),
             "queue": [
                 {"run_id": q.run_id, "task_id": q.task_id, "slice_key": q.slice_key}
@@ -696,8 +698,20 @@ class ContextEngineMixin:
                         conn, run_id, "completed", ended_at=now_iso(),
                         from_statuses=("running",))
                 else:
+                    # 分类挂起：等人回复（不自动恢复）与其它空闲/系统原因分开。
+                    kind = runs_service.SUSPEND_IDLE
+                    if task_id:
+                        try:
+                            from . import tasks as tasks_service
+                            if tasks_service.waiting_for_human(
+                                    conn, task_id, r.role,
+                                    slice_key_of(r.context_key)):
+                                kind = runs_service.SUSPEND_WAITING_HUMAN
+                        except Exception:  # noqa: BLE001 —— 分类失败退回 idle
+                            pass
                     runs_service.set_status(
-                        conn, run_id, "suspended", from_statuses=("running",))
+                        conn, run_id, "suspended", from_statuses=("running",),
+                        suspend_kind=kind)
             with r.lock:
                 if proc is not None and r.proc is not proc:
                     return

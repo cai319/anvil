@@ -24,7 +24,8 @@ from .services import board as board_service
 from .services import daemon as daemon_service
 from .services import dispatch as dispatch_service
 from .services import (governance, knowledge_completion, knowledge_harvest, leases,
-                       ledger, runs as runs_service, tasks as tasks_service)
+                       ledger, runs as runs_service, sandbox as sandbox_service,
+                       tasks as tasks_service)
 from .services import wake as wake_service
 from .services import workflow as workflow_service
 from .util import ConflictError, now_iso
@@ -355,7 +356,10 @@ class Scheduler:
         ).fetchall()
         for r in rows:
             fc = r["failure_class"] or r["rs"]
-            category = "environment" if fc in ("platform_timeout", "spawn_error") else "agent_error"
+            category = (
+                "environment"
+                if fc in ("platform_timeout", "spawn_error", "runtime_env_error")
+                else "agent_error")
             workflow_service.fail_step(conn, r["workflow_id"], r["step_id"], fc, category,
                                        failure_class=fc)
         self._nudge_stalled(conn)
@@ -723,7 +727,8 @@ class Scheduler:
         rows = conn.execute(
             """SELECT s.workflow_id, s.step_id, s.role_slug, s.run_id, s.last_nudge_at,
                       s.nudge_count, r.status AS run_status,
-                      r.slice_key AS run_slice_key, w.task_id AS task_id,
+                      r.slice_key AS run_slice_key, r.suspend_kind AS run_suspend_kind,
+                      w.task_id AS task_id,
                       (SELECT MAX(a.created_at) FROM activities a WHERE a.run_id=s.run_id) AS last_act,
                       s.started_at
                  FROM workflow_steps s
@@ -759,8 +764,13 @@ class Scheduler:
             if rs != "suspended":
                 continue  # 仍在运行/投影中
             # 等待人类决策不是“卡住”：保持挂起，human 回复后由 mention 端点唤醒。
-            if r["task_id"] and self._waiting_for_human(
-                    conn, r["task_id"], r["role_slug"], r["run_slice_key"]):
+            # suspend_kind=waiting_human 是权威分类；即使 @human 提醒已被别的活动
+            # 隐藏，也不得走自动恢复。
+            if not runs_service.suspended_auto_recoverable(conn, {
+                "task_id": r["task_id"], "role_slug": r["role_slug"],
+                "slice_key": r["run_slice_key"],
+                "suspend_kind": r["run_suspend_kind"],
+            }):
                 continue
             # 等待另一个角色且对方仍在运行：同样不打断。
             if r["task_id"] and self._waiting_for_busy_role(
@@ -871,6 +881,16 @@ class Scheduler:
             slice_key = run.get("slice_key")
             attempts = int(run.get("recovery_count") or 0) + 1
             fc = str(run.get("failure_class") or "")
+            # 环境错误只有在修复后（金丝雀重新通过）才允许自动恢复；否则反复重试
+            # 只会继续烧模型调用。这里不消耗恢复预算，等 human 修复后自然恢复。
+            if fc == "runtime_env_error":
+                try:
+                    ready, _msg = sandbox_service.runtime_dispatch_guard(
+                        conn, role_slug=role, task=tasks_service.get(conn, task_id))
+                except Exception:  # noqa: BLE001 —— 检查失败按不可恢复处理
+                    ready = False
+                if not ready:
+                    continue
             if fc in self._RUN_NON_RETRYABLE:
                 conn.execute(
                     "UPDATE runs SET recovery_exhausted=1 WHERE id=?", (run["id"],))
@@ -979,10 +999,16 @@ class Scheduler:
                     # 否则会把正在规划的 run 误标 agent_exit_process。
                     if _elapsed_seconds(r["started_at"]) < config.RUN_DEAD_GRACE_SECONDS:
                         continue
-                    self._pump(r["id"], "process_exit", {
-                        "exit_code": 1, "failure_class": "agent_exit_process",
+                    env_error = st.get("runtime_env_error")
+                    payload = {
+                        "exit_code": 1,
+                        "failure_class": ("runtime_env_error" if env_error
+                                          else "agent_exit_process"),
                         "observed_started_at": r["started_at"],
-                    })
+                    }
+                    if env_error:
+                        payload["failure_message"] = str(env_error)
+                    self._pump(r["id"], "process_exit", payload)
                     continue
                 # 只有 daemon 真正绑定的 current_run 才拥有这个进程的 busy 计时。
                 # 仅比较 task_id 不够：同一 task 可能有两个 run，global run 也没有 task_id。
@@ -1189,7 +1215,8 @@ class Scheduler:
                     pass
             from .services import runs as runs_service
             if not runs_service.set_status(
-                    conn, row["id"], "suspended", from_statuses=("running",)):
+                    conn, row["id"], "suspended", from_statuses=("running",),
+                    suspend_kind=runs_service.SUSPEND_ENVIRONMENT):
                 continue
             try:
                 mgr.clear_current(row["role_slug"], row["id"])

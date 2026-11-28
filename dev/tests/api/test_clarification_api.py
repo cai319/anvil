@@ -71,6 +71,56 @@ async def test_dispatch_starts_clarification_and_blocks_drafts_and_runs(
     assert run.status_code == 409, run.text
 
 
+async def test_workspace_brief_preview_then_import_requires_human_and_confirm(
+        client, seeded, tmp_path):
+    """工作区 brief.json 不自动导入；human 查看后导入为草稿，仍需结构化确认。"""
+    import json
+
+    from anvil.services import task_workspace
+
+    tid = await _create_task(client, "T-IMPORT")
+    await _dispatch(client, tid)
+    ws = task_workspace.path_for(tid)
+    (ws / "brief.json").write_text(json.dumps(_brief()), encoding="utf-8")
+
+    # agent 不能看/导入
+    # 测试鉴权的 qa-role 是 human 旁路；这里用普通 agent 身份验证 human-only。
+    agent_headers = auth_headers("developer")
+    agent_preview = await client.get(
+        f"{API}/tasks/{tid}/clarification/workspace-brief", headers=agent_headers)
+    assert agent_preview.status_code in (401, 403)
+    agent_import = await client.post(
+        f"{API}/tasks/{tid}/clarification/import", headers=agent_headers,
+        json={"reviewed": True, "brief": _brief()})
+    assert agent_import.status_code in (401, 403)
+
+    # human 先只读预览；DB 不变
+    preview = await client.get(
+        f"{API}/tasks/{tid}/clarification/workspace-brief", headers=human_headers())
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["exists"] is True and body["brief"]["goal"] == "实现登录"
+    state = (await client.get(
+        f"{API}/tasks/{tid}/clarification", headers=human_headers())).json()
+    assert state["brief"] is None
+
+    # 未标记 reviewed 不能导入
+    missing_review = await client.post(
+        f"{API}/tasks/{tid}/clarification/import", headers=human_headers(),
+        json={"brief": body["brief"]})
+    assert missing_review.status_code == 422
+
+    imported = await client.post(
+        f"{API}/tasks/{tid}/clarification/import", headers=human_headers(),
+        json={"reviewed": True, "brief": body["brief"]})
+    assert imported.status_code == 200, imported.text
+    result = imported.json()
+    assert result["imported"] is True
+    assert result["requires_confirmation"] is True
+    assert result["clarification"]["status"] == "in_progress"
+    assert result["clarification"]["brief"].get("confirmed_by") is None
+
+
 async def test_mention_continues_clarification(client, seeded):
     tid = await _create_task(client)
     await _dispatch(client, tid)

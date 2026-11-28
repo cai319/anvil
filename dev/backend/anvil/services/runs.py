@@ -199,13 +199,17 @@ def find_running_step_run(conn: sqlite3.Connection, task_id: str,
 
 def set_status(conn: sqlite3.Connection, run_id: str, status: str, ended_at: str | None = None,
                failure_class: str | None = None,
-               from_statuses: tuple[str, ...] | list[str] | None = None) -> bool:
+               from_statuses: tuple[str, ...] | list[str] | None = None,
+               failure_message: str | None = None,
+               suspend_kind: str | None = None) -> bool:
     """迁移 run 状态，并把迁移作为 activity 事件落库（供任务时间线/会话视图消费）。
 
     `from_statuses` 提供 compare-and-set 语义：只有当前状态在允许集合内才写入，
     否则返回 False。用于 turn 结束、投递、溢出恢复等可能与 scheduler 竞争的路径。
 
-    failure_class 仅在显式传入时更新（不清空语义：终态后再迁移不抹掉失败归因）。
+    failure_class / failure_message 仅在显式传入时更新（不清空语义：终态后再迁移
+    不抹掉失败归因）。``suspend_kind`` 只在 ``status='suspended'`` 时保留；其它状态
+    自动清空，避免 failed/completed 留下过期的挂起分类。
     """
     prev = conn.execute(
         "SELECT status, task_id, role_slug, workflow_id, step_id, slice_key "
@@ -220,14 +224,23 @@ def set_status(conn: sqlite3.Connection, run_id: str, status: str, ended_at: str
         allowed = tuple(str(s) for s in from_statuses)
         where += " AND status IN (" + ",".join("?" * len(allowed)) + ")"
         params.extend(allowed)
+    sets = ["status=?", "ended_at=?"]
+    values: list = [status, ended_at]
     if failure_class is not None:
-        cur = conn.execute(
-            f"UPDATE runs SET status=?, ended_at=?, failure_class=? WHERE {where}",
-            (status, ended_at, failure_class, *params))
+        sets.append("failure_class=?")
+        values.append(failure_class)
+    if failure_message is not None:
+        sets.append("failure_message=?")
+        values.append(failure_message)
+    if status == "suspended":
+        if suspend_kind is not None:
+            sets.append("suspend_kind=?")
+            values.append(suspend_kind)
     else:
-        cur = conn.execute(
-            f"UPDATE runs SET status=?, ended_at=? WHERE {where}",
-            (status, ended_at, *params))
+        sets.append("suspend_kind=NULL")
+    cur = conn.execute(
+        f"UPDATE runs SET {', '.join(sets)} WHERE {where}",
+        (*values, *params))
     if cur.rowcount != 1:
         conn.commit()
         return False
@@ -381,6 +394,47 @@ def register_context_overflow(conn: sqlite3.Connection, run_id: str, *,
     return outcome
 
 
+SUSPEND_WAITING_HUMAN = "waiting_human"
+SUSPEND_ENVIRONMENT = "environment"
+SUSPEND_SYSTEM_RESTART = "system_restart"
+SUSPEND_IDLE = "idle"
+
+
+def suspend_kind_for(conn: sqlite3.Connection, run: dict) -> str:
+    """挂起原因分类：等人回复 / 环境 / 系统重启 / 空闲等待。"""
+    if str(run.get("suspend_kind") or ""):
+        return str(run["suspend_kind"])
+    task_id = run.get("task_id")
+    role = run.get("role_slug")
+    if task_id and role:
+        try:
+            if tasks_service.waiting_for_human(
+                    conn, task_id, role, run.get("slice_key")):
+                return SUSPEND_WAITING_HUMAN
+        except Exception:  # noqa: BLE001 —— 分类失败按普通挂起处理
+            pass
+    return SUSPEND_IDLE
+
+
+def suspended_auto_recoverable(conn: sqlite3.Connection, run: dict) -> bool:
+    """suspended run 是否允许调度器自动唤醒。
+
+    ``waiting_human`` 必须由 human 的回复/评审推动，绝不能走自动恢复；
+    environment/system_restart/idle 可在环境修复或外部事件后恢复。
+    """
+    kind = suspend_kind_for(conn, run)
+    if kind == SUSPEND_WAITING_HUMAN:
+        return False
+    if run.get("task_id") and run.get("role_slug"):
+        try:
+            if tasks_service.waiting_for_human(
+                    conn, run["task_id"], run["role_slug"], run.get("slice_key")):
+                return False
+        except Exception:  # noqa: BLE001
+            pass
+    return True
+
+
 def suspend_active(conn: sqlite3.Connection) -> int:
     """优雅停机：活跃 run（running/projecting）终止子进程并转 suspended（可 @mention 唤醒续跑）。
 
@@ -398,7 +452,8 @@ def suspend_active(conn: sqlite3.Connection) -> int:
                 pm.terminate(r["native_session_id"])
             except Exception:  # noqa: BLE001 —— 停机路径尽力而为
                 pass
-        set_status(conn, r["id"], "suspended")
+        set_status(conn, r["id"], "suspended",
+                   suspend_kind=SUSPEND_SYSTEM_RESTART)
         n += 1
     conn.commit()
     return n
@@ -421,7 +476,8 @@ def heal_stale_runs(conn: sqlite3.Connection) -> dict:
                     terminated += 1
             except Exception:  # noqa: BLE001
                 pass
-        set_status(conn, r["id"], "suspended")
+        set_status(conn, r["id"], "suspended",
+                   suspend_kind=SUSPEND_SYSTEM_RESTART)
         healed += 1
     conn.commit()
     return {"healed": healed, "terminated": terminated}

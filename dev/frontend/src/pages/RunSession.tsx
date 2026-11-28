@@ -81,7 +81,20 @@ export function RunSession({ id }: { id: string }) {
               : undefined}
           >{runStatusLabel(run.status)}</span>
           {run.failure_class && (
-            <span className="badge badge-in_progress" title="失败分类（P0-4）">{run.failure_class}</span>
+            <span className="badge badge-in_progress"
+              title={run.failure_message || "失败分类（P0-4）"}>
+              {run.failure_class === "runtime_env_error"
+                ? "运行时环境错误（修复后可重试）" : run.failure_class}
+            </span>
+          )}
+          {run.status === "suspended" && run.suspend_kind && (
+            <span className="badge badge-in_progress" title="挂起分类">
+              {run.suspend_kind === "waiting_human"
+                ? "等待人工回复（不自动恢复）"
+                : run.suspend_kind === "environment"
+                  ? "环境异常（修复后可恢复）"
+                  : "系统挂起（可恢复）"}
+            </span>
           )}
         </div>
         <div className="session-meta">

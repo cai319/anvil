@@ -28,14 +28,16 @@ from ..platform import factory
 from ..services import (
     context_manifest as context_manifest_service,
     knowledge as knowledge_service,
+    ledger,
     memory as memory_service,
     roles as roles_service,
     runs as runs_service,
     runtime as runtime_service,
+    sandbox as sandbox_service,
     tasks as tasks_service,
     tooling as tooling_service,
 )
-from ..util import jloads, now_iso, read_text_file
+from ..util import jdumps, jloads, now_iso, read_text_file
 
 logger = logging.getLogger("anvil.nodes")
 from . import render
@@ -933,6 +935,23 @@ def spawn_node(state: dict, config) -> dict:
         from ..sandbox import policy as sandbox_policy
         sandbox_policy_dict = sandbox_policy.as_dict(
             sandbox_policy.resolve_for_run(effective, task))
+        # 派发前最后一道门：runtime+policy+OS+backend 的金丝雀不可用时，
+        # 不拉起进程，直接失败并留下可操作原因（而不是静默 suspend）。
+        ready, message = sandbox_service.runtime_dispatch_guard(
+            conn, role_slug=run["role_slug"], task=task,
+            policy=sandbox_policy.resolve_for_run(effective, task))
+        if not ready:
+            runs_service.set_status(
+                conn, run_id, "failed", ended_at=now_iso(),
+                failure_class="runtime_env_error", failure_message=message,
+                from_statuses=("created", "projecting"))
+            ledger.emit_activity(
+                conn, task_id=run.get("task_id"), role_slug="system",
+                run_id=run_id, kind="comment",
+                payload=jdumps({"body": f"运行时环境不可用，已拒绝启动：{message}"}),
+                now=now_iso())
+            conn.commit()
+            return {}
         workspace_path = _run_workspace_path(conn, run, role, effective)
         # 常驻会话模式：唤醒 = 向角色进程 stdin 投递消息（进程存活则复用，不新建）
         persistent = _persistent_session(conn, effective)
@@ -1136,18 +1155,40 @@ def process_exit_node(state: dict, config) -> dict:
         if (last_error.startswith("context overflow")
                 and ("run=" not in last_error or f"run={run_id}" in last_error)):
             return {}
+        exit_code = payload.get("exit_code")
+        # 工具级 EPERM/ENOENT/sandbox deny：这是运行时环境坏了，必须失败而不是
+        # suspend；即使 CLI 退出码为 0 也不能被“等待回复”守卫吞掉。
+        payload_failure = payload.get("failure_class")
+        if payload_failure == "runtime_env_error":
+            message = str(payload.get("failure_message")
+                          or "运行时环境不可用；修复后重试该 run。")
+            runs_service.set_status(
+                conn, run_id, "failed", ended_at=now_iso(),
+                failure_class="runtime_env_error", failure_message=message)
+            _clear_terminal_role_state(run, run_id)
+            ledger.emit_activity(
+                conn, task_id=run.get("task_id"), role_slug="system",
+                run_id=run_id, kind="comment",
+                payload=jdumps({"body": (
+                    f"运行时环境错误：{message}\n"
+                    "本次 run 已失败（不是等待人工）。修复环境后运行 "
+                    "`anvil sandbox self-check --force`，再重试该任务/步骤。")}),
+                now=now_iso())
+            conn.commit()
+            return {}
         # 挂起：若该角色最后 @提及了某个角色（等待响应），则保持 running，等 @回来再 resume。
         if _waiting_for_reply(
                 conn, run.get("task_id"), run["role_slug"],
                 slice_key=run.get("slice_key")):
             return {}
-        exit_code = payload.get("exit_code")
         # §7.4：退出但未 submit 永不 completed；非零→failed，否则 abandoned。
         # 失败分类（P0-4）：优先用泵入的分类（如 platform_timeout），否则按退出码归因。
         if exit_code not in (None, 0):
-            failure_class = payload.get("failure_class") or f"agent_exit_{exit_code}"
-            runs_service.set_status(conn, run_id, "failed", ended_at=now_iso(),
-                                    failure_class=failure_class)
+            failure_class = payload_failure or f"agent_exit_{exit_code}"
+            runs_service.set_status(
+                conn, run_id, "failed", ended_at=now_iso(),
+                failure_class=failure_class,
+                failure_message=payload.get("failure_message"))
         else:
             runs_service.set_status(conn, run_id, "abandoned", ended_at=now_iso())
         _clear_terminal_role_state(run, run_id)

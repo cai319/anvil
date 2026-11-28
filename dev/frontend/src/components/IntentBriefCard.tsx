@@ -95,6 +95,12 @@ export function IntentBriefCard({
   const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [workspacePreview, setWorkspacePreview] = useState<{
+    exists: boolean;
+    relative_path: string | null;
+    brief: IntentBrief | null;
+    error: string | null;
+  } | null>(null);
   const weightTouched = useRef(false);
   const shapeTouched = useRef(false);
   const lastScope = useRef("");
@@ -105,6 +111,7 @@ export function IntentBriefCard({
     setAckOpen(false);
     setEditing(false);
     setError(null);
+    setWorkspacePreview(null);
   }, [state?.task_id, state?.status, state?.brief_version]);
 
   // 换任务或状态变化时回到紧凑栏；用户主动展开/编辑才占用会话高度。
@@ -173,6 +180,29 @@ export function IntentBriefCard({
     const brief = parseDraft();
     if (!brief) return;
     void run(() => api.saveClarificationDraft(taskId, brief));
+  };
+
+  // 工作区 brief.json 只做“查看 → 人工导入为草稿”，绝不会自动进入 DB。
+  const previewWorkspaceBrief = () => {
+    setBusy(true);
+    setError(null);
+    void api.previewWorkspaceBrief(taskId)
+      .then((preview) => {
+        setWorkspacePreview(preview);
+        if (preview.error) setError(preview.error);
+        setExpanded(true);
+      })
+      .catch((e) => setError(String(e)))
+      .finally(() => setBusy(false));
+  };
+
+  const importWorkspaceBrief = () => {
+    const brief = workspacePreview?.brief;
+    if (!brief) return;
+    void run(async () => {
+      await api.importWorkspaceBrief(taskId, brief);
+      setWorkspacePreview(null);
+    });
   };
 
   const confirm = () => {
@@ -292,6 +322,11 @@ export function IntentBriefCard({
                 onClick={() => { setExpanded(true); setEditing((v) => !v); }}>
                 {editing ? "完成编辑" : "编辑"}
               </button>
+              <button className="small ibc-control" disabled={busy}
+                title="只读查看工作区里的 brief.json；导入后仍需结构化确认"
+                onClick={previewWorkspaceBrief}>
+                查看工作区简报
+              </button>
               {state.status === "in_progress" && editing && (
                 <button className="small ibc-control" disabled={busy} onClick={saveDraft}>
                   保存草稿
@@ -362,6 +397,36 @@ export function IntentBriefCard({
           {editing && (active || state.status === "confirmed") && (
             <textarea className="ibc-editor mono" value={draftText} disabled={busy}
               onChange={(e) => setDraftText(e.target.value)} rows={12} />
+          )}
+        </div>
+      )}
+
+      {expanded && workspacePreview && (
+        <div className="ibc-body">
+          <p className="muted">
+            工作区简报
+            {workspacePreview.relative_path
+              ? `（${workspacePreview.relative_path}，只读预览）` : ""}
+          </p>
+          {workspacePreview.exists && workspacePreview.brief ? (
+            <>
+              <textarea className="ibc-editor mono" readOnly rows={12}
+                value={JSON.stringify(workspacePreview.brief, null, 2)} />
+              {state.status === "in_progress" ? (
+                <button className="small ibc-control" disabled={busy}
+                  onClick={importWorkspaceBrief}>
+                  导入为草稿（仍需确认）
+                </button>
+              ) : (
+                <p className="muted">
+                  先启动澄清，才能把工作区简报导入为草稿。
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="muted">
+              {workspacePreview.error || "工作区没有 brief.json。"}
+            </p>
           )}
         </div>
       )}
