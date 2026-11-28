@@ -6,6 +6,8 @@ out-of-scope、contract、交付物路径与 stub 签名。校验只做结构与
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 
 ACCEPTANCE_KINDS = ("test", "command", "file_assert", "manual")
@@ -342,3 +344,80 @@ def assert_lockable(spec: dict) -> None:
     violations = lock_violations(spec)
     if violations:
         raise SliceSpecError(violations[0])
+
+
+# ---- replan 弱化检测（v1.62 #10）------------------------------------------
+
+ENGINE_CHECK_KINDS = frozenset({"test", "command", "file_assert"})
+
+
+def spec_hash(spec: dict) -> str:
+    """切片 spec 的规范化哈希；replan 审计记录新旧哈希。"""
+    canonical = json.dumps(spec or {}, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _acceptance_map(spec: dict) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for item in (spec or {}).get("acceptance") or []:
+        if isinstance(item, dict) and item.get("id"):
+            out[str(item["id"])] = item
+    return out
+
+
+def _assertion(item: dict) -> str:
+    """检查断言的稳定签名：kind + 判据 + 验证方式。"""
+    return json.dumps({
+        "kind": item.get("kind"),
+        "criterion": item.get("criterion"),
+        "verification": item.get("verification"),
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _red_covered(item_id: str, red_evidence) -> bool:
+    """该检查是否已附新的引擎红证据。
+
+    ``red_evidence`` 可以是检查 id 列表，或以检查 id 为键的映射。
+    """
+    if not red_evidence:
+        return False
+    if isinstance(red_evidence, dict):
+        return item_id in red_evidence or item_id in {
+            str(k) for k in red_evidence.keys()}
+    if isinstance(red_evidence, str):
+        return item_id == red_evidence
+    return item_id in {str(x) for x in red_evidence}
+
+
+def weakening_diff(old_spec: dict, new_spec: dict, *,
+                   red_evidence=None) -> list[dict]:
+    """返回 replan 的弱化项；空列表表示未弱化。
+
+    弱化形态：
+    - ``check_removed``：删除验收检查；
+    - ``downgraded_to_manual``：引擎检查降级为 manual；
+    - ``assertion_changed_without_red_evidence``：修改断言但没有新的红证据。
+
+    新增检查、收紧断言、修改 seam / out-of-scope / contract 等不算弱化。
+    """
+    old_items = _acceptance_map(old_spec)
+    new_items = _acceptance_map(new_spec)
+    diff: list[dict] = []
+    for item_id, old in old_items.items():
+        new = new_items.get(item_id)
+        if new is None:
+            diff.append({"id": item_id, "type": "check_removed"})
+            continue
+        old_kind = str(old.get("kind") or "")
+        new_kind = str(new.get("kind") or "")
+        if old_kind in ENGINE_CHECK_KINDS and new_kind == "manual":
+            diff.append({"id": item_id, "type": "downgraded_to_manual"})
+            continue
+        if (old_kind in ENGINE_CHECK_KINDS
+                and new_kind in ENGINE_CHECK_KINDS
+                and _assertion(old) != _assertion(new)
+                and not _red_covered(item_id, red_evidence)):
+            diff.append({"id": item_id,
+                         "type": "assertion_changed_without_red_evidence"})
+    return diff

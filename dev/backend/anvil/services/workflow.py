@@ -57,7 +57,8 @@ from .workflow_execution import (  # noqa: F401
 
 from .workflow_review import (  # noqa: F401
     decide_step, _decide_step_locked, escalate_step, _escalate_step_locked,
-    review_step, _review_step_locked, gates, task_review_blocker,
+    review_step, _review_step_locked, replan_slice, replan_step,
+    _replan_slice_locked, gates, task_review_blocker,
     finalize_task_review_if_ready, _finalize_if_done
 )
 
@@ -73,5 +74,6 @@ __all__ = [
     'explain_dispatch', 'step_prompt', 'advance', 'resume_runs_for_task',
     'renew_step_lease_for_run', 'submit_step', 'retry_step', 'check_step_run_restart',
     'rebind_run_to_step', 'fail_step', 'decide_step', 'escalate_step', 'review_step',
+    'replan_slice', 'replan_step',
     'gates', 'task_review_blocker', 'finalize_task_review_if_ready'
 ]
