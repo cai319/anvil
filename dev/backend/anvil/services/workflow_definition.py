@@ -89,6 +89,20 @@ def _effective_hint(conn: sqlite3.Connection, role_slug: str | None, value,
     return 0
 
 
+def _decide_stage(decision_role: str, verify_role: str,
+                  verify2_role: str | None = None) -> str | None:
+    """decide 与验证角色重合时返回 stage 槽名。
+
+    上下文隔离只避免同一会话自判，并不隔离模型错误：相同角色的两段会话
+    仍是同一模型，可能犯同类错误。
+    """
+    role = str(decision_role or "").strip()
+    if role and role in {str(verify_role or "").strip(),
+                         str(verify2_role or "").strip()}:
+        return "decide"
+    return None
+
+
 def _expand_slices(definition: dict) -> dict:
     """把 Cindy 的 slices 定义展开成每个切片的固定闭环。
 
@@ -304,6 +318,10 @@ def _expand_slices(definition: dict) -> dict:
             "kind": "decision",
             "title": str(decide_spec.get("title") or f"{title} · 切片决策"),
             "role": decision_role,
+            "stage": _decide_stage(
+                decision_role,
+                str(verify_spec.get("role") or verify_role).strip(),
+                str(verify2_spec.get("role") or verify_role).strip()),
             "depends_on": [verify2_id],
             "on_reject": [fix_id, verify2_id],
             "max_rework": max_rework,
@@ -551,9 +569,23 @@ def _require_loop_subagent_decisions(loop: dict) -> None:
             + ", ".join(f"loop.{phase}" for phase in invalid))
 
 
+# 存量模板（升级前发布/已落库的 workflow 定义）可能让 decide 与 verify 共用角色。
+# 这类定义只能由服务端在套用旧模板 / 重启旧 workflow 时放行；新的 loop 模板
+# 必须显式分离角色，避免同一角色自判。放行后 decide 步骤走 stage 槽。
+LEGACY_EQUAL_ROLE_MARKER = "legacy_equal_decide_verify"
+
+
+def _equal_decide_verify_allowed(definition: dict,
+                                 allow_equal_decide_verify: bool = False) -> bool:
+    return bool(allow_equal_decide_verify
+                or (isinstance(definition, dict)
+                    and definition.get(LEGACY_EQUAL_ROLE_MARKER)))
+
+
 def _validate_loop(conn: sqlite3.Connection, definition: dict,
                    raw: dict[str, dict], *, task_id: str | None = None,
-                   workflow_id: str | None = None) -> None:
+                   workflow_id: str | None = None,
+                   allow_equal_decide_verify: bool = False) -> None:
     """校验 plan_slices + loop 模板；切片由运行期角色产出，模板由 Cindy 定义。"""
     from . import roles as roles_service
 
@@ -605,6 +637,14 @@ def _validate_loop(conn: sqlite3.Connection, definition: dict,
     if decision_role in (execute_role, fix_role):
         raise ConflictError(
             "workflow loop: decide.role must differ from execute/fix roles")
+    if (decision_role == verify_role
+            and not _equal_decide_verify_allowed(definition,
+                                                 allow_equal_decide_verify)):
+        raise ConflictError(
+            "workflow loop: decide.role must differ from verify.role; "
+            "the same role must not judge work it verified. "
+            "Existing templates with equal roles keep running in a stage-keyed "
+            "context slot, but new loop templates must separate the roles.")
     scope = loop.get("scope")
     scope_role = decision_role
     if scope is not None:
@@ -968,6 +1008,7 @@ def _dynamic_slice_steps(conn: sqlite3.Connection, plan_step_id: str, loop: dict
             "kind": "decision",
             "title": f"{title} · {decide_spec.get('title') or '切片决策'}",
             "role": decision_role,
+            "stage": _decide_stage(decision_role, verify_role, verify2_role),
             "depends_on": [verify2_id or verify_id],
             "on_reject": ([fix_id, verify2_id] if verify2_id else
                           [*execute_ids, verify_id]),
@@ -1246,8 +1287,8 @@ def _insert_generated_steps(conn: sqlite3.Connection, wid: str, step_id: str,
             "INSERT INTO workflow_steps (workflow_id, step_id, title, role_slug, "
             "instructions, depends_on_json, acceptance_json, gate, reviewer, contract, "
             "kind, on_reject_json, max_rework, rework_count, source_step_id, slice_key, "
-            "evidence_required, subagent_hint, status, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "stage, evidence_required, subagent_hint, status, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (wid, raw_step["id"], raw_step.get("title") or raw_step["id"],
              raw_step.get("role") or "", raw_step.get("instructions") or "",
              jdumps(raw_step.get("depends_on") or []),
@@ -1258,6 +1299,7 @@ def _insert_generated_steps(conn: sqlite3.Connection, wid: str, step_id: str,
              jdumps(raw_step.get("on_reject") or []),
              int(raw_step.get("max_rework") or 0), 0,
              raw_step.get("source_step_id"), raw_step.get("slice_key"),
+             raw_step.get("stage"),
              1 if raw_step.get("evidence_required") else 0,
              1 if raw_step.get("subagent_hint") else 0,
              "pending", now),
@@ -1643,7 +1685,8 @@ def validate_role_coverage(conn: sqlite3.Connection, task_id: str | None,
 
 def validate_definition(conn: sqlite3.Connection, definition: dict, *,
                         require_subagent_decisions: bool = False,
-                        task_id: str | None = None) -> None:
+                        task_id: str | None = None,
+                        allow_equal_decide_verify: bool = False) -> None:
     """落板/草案提交前的结构校验。
 
     关键约束：大型多角色工作流不能是一条没有决策点的串行长链。Cindy 必须按
@@ -1661,7 +1704,8 @@ def validate_definition(conn: sqlite3.Connection, definition: dict, *,
         if isinstance(loop, dict):
             _require_loop_subagent_decisions(loop)
     raw, _plan = _plan_steps(conn, steps, task_id=task_id)
-    _validate_loop(conn, definition, raw, task_id=task_id)
+    _validate_loop(conn, definition, raw, task_id=task_id,
+                   allow_equal_decide_verify=allow_equal_decide_verify)
 
 
 def terminate_running_workflows(conn: sqlite3.Connection, task_id: str,
@@ -1760,7 +1804,8 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
                     restart_reason: str | None = None,
                     restart_note: str | None = None,
                     draft_id: str | None = None,
-                    sync_participants: bool = False) -> dict:
+                    sync_participants: bool = False,
+                    allow_equal_decide_verify: bool = False) -> dict:
     with workflow_lifecycle_lock(
             conn, task_id, required=True, wait_seconds=2.0):
         return _create_workflow_locked(
@@ -1770,7 +1815,8 @@ def create_workflow(conn: sqlite3.Connection, task_id: str, definition: dict,
             restart_reason=restart_reason,
             restart_note=restart_note,
             draft_id=draft_id,
-            sync_participants=sync_participants)
+            sync_participants=sync_participants,
+            allow_equal_decide_verify=allow_equal_decide_verify)
 
 
 def _create_workflow_locked(conn: sqlite3.Connection, task_id: str, definition: dict,
@@ -1780,7 +1826,8 @@ def _create_workflow_locked(conn: sqlite3.Connection, task_id: str, definition: 
                             restart_reason: str | None = None,
                             restart_note: str | None = None,
                             draft_id: str | None = None,
-                            sync_participants: bool = False) -> dict:
+                            sync_participants: bool = False,
+                            allow_equal_decide_verify: bool = False) -> dict:
     """落板 workflow（Cindy 草案批准后调用）：创建步骤并把任务置为进行中。
 
     decision 步骤（kind=decision）由决策角色评审后 approve/reject；reject 时把
@@ -1815,7 +1862,8 @@ def _create_workflow_locked(conn: sqlite3.Connection, task_id: str, definition: 
 
     # ---- 预校验：id/依赖/环/decision 元数据 ----
     raw, plan = _plan_steps(conn, steps, task_id=task_id)
-    _validate_loop(conn, definition, raw, task_id=task_id)
+    _validate_loop(conn, definition, raw, task_id=task_id,
+                   allow_equal_decide_verify=allow_equal_decide_verify)
     _validate_issue_board(conn, task_id, definition)
     if enforce_role_coverage:
         validate_role_coverage(conn, task_id, definition)
@@ -1880,8 +1928,8 @@ def _create_workflow_locked(conn: sqlite3.Connection, task_id: str, definition: 
             "depends_on_json, acceptance_json, gate, reviewer, contract, kind, on_reject_json, "
             "max_rework, rework_count, decision_authority, risk_level, reversible, escalate_json, "
             "decision_question, decision_options_json, evidence_required, scope_paths_json, "
-            "subagent_hint, slice_key, source_step_id, status, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "subagent_hint, slice_key, stage, source_step_id, status, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (wid, sid, str(s.get("title") or sid), role,
              str(s.get("instructions") or s.get("description") or ""),
              jdumps(s.get("depends_on") or []), jdumps(s.get("acceptance") or []),
@@ -1892,7 +1940,7 @@ def _create_workflow_locked(conn: sqlite3.Connection, task_id: str, definition: 
              jdumps(meta["decision_options"]),
              1 if (meta["evidence_required"] or (weight == "strict" and kind == "task")) else 0,
              jdumps(meta["scope_paths"]), meta["subagent_hint"], s.get("slice_key"),
-             s.get("source_step_id"), "pending", now),
+             s.get("stage"), s.get("source_step_id"), "pending", now),
         )
     from . import tasks as tasks_service
     if not tasks_service.transition_task(

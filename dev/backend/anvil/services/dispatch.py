@@ -760,11 +760,12 @@ def rearm_context_return(conn: sqlite3.Connection, run_id: str) -> bool:
 
 def _context_for_run(conn: sqlite3.Connection, run_id: str) -> str | None:
     row = conn.execute(
-        "SELECT task_id, slice_key FROM runs WHERE id=?", (run_id,)).fetchone()
+        "SELECT task_id, slice_key, stage FROM runs WHERE id=?", (run_id,)).fetchone()
     if row is None or not row["task_id"]:
         return None
     from . import daemon as daemon_service
-    return daemon_service.context_key(row["task_id"], row["slice_key"])
+    return daemon_service.context_key(
+        row["task_id"], row["slice_key"], stage=row["stage"])
 
 
 def _context_return_note(conn: sqlite3.Connection, run: dict) -> str:

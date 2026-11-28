@@ -287,6 +287,7 @@ def _normalize_step_fields(step: dict, *, field_prefix: str,
 _STEP_STRING_FIELDS = (
     "workflow_id", "step_id", "title", "instructions", "role_slug", "contract",
     "failure_reason", "last_nudge_at", "feedback", "source_step_id", "slice_key",
+    "stage",
     "plan_json", "risk_level", "decision_question", "packet_id", "submitted_at",
     "status", "run_id", "summary", "started_at", "ended_at", "updated_at",
     "lease_holder", "lease_expires_at",

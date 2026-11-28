@@ -766,8 +766,8 @@ def _insert_revision_steps(conn: sqlite3.Connection, wid: str,
             "INSERT INTO workflow_steps (workflow_id, step_id, title, role_slug, "
             "instructions, depends_on_json, acceptance_json, gate, reviewer, contract, "
             "kind, on_reject_json, max_rework, rework_count, source_step_id, slice_key, "
-            "evidence_required, subagent_hint, status, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "stage, evidence_required, subagent_hint, status, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (wid, raw_step["id"], raw_step.get("title") or raw_step["id"],
              raw_step.get("role") or "", raw_step.get("instructions") or "",
              jdumps(raw_step.get("depends_on") or []),
@@ -778,6 +778,7 @@ def _insert_revision_steps(conn: sqlite3.Connection, wid: str,
              jdumps(raw_step.get("on_reject") or []),
              int(raw_step.get("max_rework") or 0), 0,
              raw_step.get("source_step_id"), raw_step.get("slice_key"),
+             raw_step.get("stage"),
              1 if raw_step.get("evidence_required") else 0,
              hint,
              "pending", now),

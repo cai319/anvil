@@ -340,12 +340,13 @@ class _SpawnSpec:
 
 @dataclass
 class _Queued:
-    """一条待投递消息；task_id + slice_key 决定文本属于哪个上下文槽。"""
+    """一条待投递消息；task_id + slice_key + stage 决定文本属于哪个上下文槽。"""
     text: str
     run_id: str | None
     task_id: str | None
     spec: _SpawnSpec
     slice_key: str | None = None
+    stage: str | None = None
     priority: int = 100
     # 入队时 run.wake_note 的快照；写 stdin 成功后按它做 CAS 清除，
     # 避免把渲染后追加的新 note 一并清掉。

@@ -22,7 +22,7 @@ WF_TREE = {
 @pytest.fixture
 async def seeded(client):
     await client.post("/api/v1/runtimes", json=runtime_payload(), headers=auth_headers())
-    for slug in ("pm", "developer"):
+    for slug in ("pm", "developer", "lead"):
         await client.post("/api/v1/roles", json=role_payload(slug), headers=auth_headers())
 
 
@@ -179,7 +179,8 @@ DYNAMIC_TREE = {
         "verify": {"role": "pm", "subagent_hint": False},
         "fix": {"role": "developer", "subagent_hint": False},
         "verify2": {"role": "pm", "subagent_hint": False},
-        "decide": {"role": "pm", "max_rework": 2, "subagent_hint": False},
+        # v1.62：新 loop 模板要求 decide.role != verify.role。
+        "decide": {"role": "lead", "max_rework": 2, "subagent_hint": False},
     },
 }
 

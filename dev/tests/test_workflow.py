@@ -793,7 +793,9 @@ def test_dynamic_workflow_must_cover_all_bound_roles(conn):
             "from": "P1",
             "execute": {"role": "developer"},
             "verify": {"role": "pm"},
-            "decide": {"role": "pm"},
+            # decide 必须与 verify 分离（v1.62）；这里用未绑定角色，只为验证
+            # 任务绑定角色覆盖检查仍会报告 tester。
+            "decide": {"role": "lead"},
         },
     }
     with pytest.raises(ConflictError, match="missing: tester"):

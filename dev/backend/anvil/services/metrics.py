@@ -186,6 +186,44 @@ def _usage(conn: sqlite3.Connection, wid: str, task_id: str) -> dict:
     }
 
 
+def stage_slot_stats(conn: sqlite3.Connection,
+                     workflow_id: str | None = None) -> dict:
+    """统计 stage 上下文槽的触发次数，作为存量模板迁移依据。
+
+    `decide_steps`：已生成、带 stage 的步骤数（模板迁移的存量面）。
+    `runs`：实际进入 stage 槽的 run 数（真实触发次数）。
+    `workflows`：涉及 stage 槽的 workflow 数。
+    `by_role`：按角色统计的 stage run 数。
+    上下文隔离只避免同一会话自判，不代表同一模型不会犯同类错误。
+    """
+    step_where = "COALESCE(stage,'')<>''"
+    run_where = "COALESCE(stage,'')<>''"
+    step_params: list = []
+    run_params: list = []
+    if workflow_id:
+        step_where += " AND workflow_id=?"
+        run_where += " AND workflow_id=?"
+        step_params.append(workflow_id)
+        run_params.append(workflow_id)
+    step_row = conn.execute(
+        f"SELECT COUNT(*) AS n, COUNT(DISTINCT workflow_id) AS w "
+        f"FROM workflow_steps WHERE {step_where}", step_params).fetchone()
+    run_row = conn.execute(
+        f"SELECT COUNT(*) AS n FROM runs WHERE {run_where}", run_params).fetchone()
+    by_role = {
+        str(r["role_slug"]): int(r["n"])
+        for r in conn.execute(
+            f"SELECT role_slug, COUNT(*) AS n FROM runs WHERE {run_where} "
+            "GROUP BY role_slug ORDER BY role_slug", run_params).fetchall()
+    }
+    return {
+        "decide_steps": int(step_row["n"] or 0),
+        "runs": int(run_row["n"] or 0),
+        "workflows": int(step_row["w"] or 0),
+        "by_role": by_role,
+    }
+
+
 def compute(conn: sqlite3.Connection, wid: str) -> dict:
     wf = _workflow(conn, wid)
     if wf is None:
@@ -293,6 +331,7 @@ def compute(conn: sqlite3.Connection, wid: str) -> dict:
             "active_seconds": round(active_seconds, 1),
         },
         "evidence": {"packets": evidence},
+        "stage_slot": stage_slot_stats(conn, wid),
         "tokens": _usage(conn, wid, wf["task_id"]),
     }
 

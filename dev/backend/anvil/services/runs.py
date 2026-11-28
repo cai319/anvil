@@ -27,6 +27,7 @@ RUN_LOG_TAIL_BYTES = 200_000
 def create_run(conn: sqlite3.Connection, role_slug: str, task_id: str | None = None,
                prompt: str | None = None, step_id: str | None = None,
                workflow_id: str | None = None, slice_key: str | None = None,
+               stage: str | None = None,
                dispatch_id: str | None = None,
                origin: str | None = None,
                commit: bool = True) -> dict:
@@ -71,11 +72,11 @@ def create_run(conn: sqlite3.Connection, role_slug: str, task_id: str | None = N
         pass
     conn.execute(
         "INSERT INTO runs (id, role_slug, task_id, status, profile_snapshot, worktree_path, "
-        "log_path, prompt, step_id, workflow_id, slice_key, dispatch_id, origin, "
+        "log_path, prompt, step_id, workflow_id, slice_key, stage, dispatch_id, origin, "
         "role_space_version, working_set_hash, started_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (rid, role_slug, task_id, "created", digest, str(worktree), str(log_path), prompt,
-         step_id, workflow_id, slice_key, dispatch_id, origin, role_space_version,
+         step_id, workflow_id, slice_key, stage, dispatch_id, origin, role_space_version,
          working_set_hash, now_iso()),
     )
     if commit:
