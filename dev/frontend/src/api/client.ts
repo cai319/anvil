@@ -1871,6 +1871,58 @@ export interface PacketRecommendation {
   at?: string;
 }
 
+export interface PlanSliceRow {
+  id: string;
+  title: string;
+  scope_paths: string[];
+  out_of_scope: string[];
+  acceptance: string[];
+  brief_refs: string[];
+  enabling: boolean;
+  enables: string[];
+  execute_steps: number;
+}
+
+export interface PlanCoverageRow {
+  acceptance: string;
+  index: number;
+  status: "covered" | "deferred" | "uncovered";
+  slices: string[];
+  deferred_reason?: string | null;
+}
+
+export interface PlanManualEstimate {
+  total: number;
+  manual: number;
+  ratio: number;
+  threshold: number;
+  exceeds_threshold: boolean;
+}
+
+export interface PlanEnablingSlice {
+  slice_id: string;
+  title: string;
+  enables: string[];
+  scope_paths: string[];
+  checks: string[];
+}
+
+export interface PlanNonGoalConflict {
+  non_goal: string;
+  slice_id: string;
+  scope_paths: string[];
+}
+
+export interface PlanReview {
+  brief: { present: boolean; acceptance_count: number; non_goals: string[] };
+  slices: PlanSliceRow[];
+  coverage: PlanCoverageRow[];
+  manual_estimate: PlanManualEstimate;
+  enabling: PlanEnablingSlice[];
+  non_goal_conflicts: PlanNonGoalConflict[];
+  blocking: string[];
+}
+
 export interface ReviewPacket {
   id: string;
   task_id: string;
@@ -1888,6 +1940,7 @@ export interface ReviewPacket {
   upstream: ReviewUpstream[];
   risks: string[];
   recommendation: PacketRecommendation;
+  plan_review?: PlanReview | null;
   evidence_digest?: string | null;
   sla_seconds?: number | null;
   deadline_at?: string | null;

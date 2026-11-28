@@ -2447,6 +2447,22 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
   font-weight: 900;
 }
 .gate-check.is-met { background: rgba(21, 128, 61, 0.16); color: var(--green-on-paper); border-color: var(--green-on-paper); }
+.gate-plan-table { width: 100%; border-collapse: collapse; font-size: var(--fs-meta); }
+.gate-plan-table th, .gate-plan-table td {
+  border-bottom: 1px solid var(--ink-line);
+  padding: 4px 6px;
+  text-align: left;
+  vertical-align: top;
+}
+.gate-plan-table th { font-weight: 600; color: var(--muted); }
+.gate-plan-table td > span + span { margin-left: 6px; }
+.gate-plan-coverage { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.gate-plan-coverage li { display: flex; flex-wrap: wrap; gap: 7px; align-items: baseline; font-size: var(--fs-meta); }
+.gate-plan-status { flex: 0 0 auto; font-weight: 700; }
+.gate-plan-status.is-covered { color: var(--green-on-paper); }
+.gate-plan-status.is-deferred { color: var(--amber-on-paper); }
+.gate-plan-status.is-uncovered { color: var(--red-on-paper); }
+.gate-plan-blocking { color: var(--red-on-paper); font-size: var(--fs-meta); }
 .gate-upstream {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;

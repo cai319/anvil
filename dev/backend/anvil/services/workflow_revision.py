@@ -378,6 +378,11 @@ def _revision_context(conn: sqlite3.Connection, wf: dict, intent: dict) -> tuple
                         "summary": "external_deps is controlled by external_nodes; "
                                    "use an external node instead",
                         "blocked_by": [], "affected_steps": []}
+        if raw.get("enabling") or "enables" in raw:
+            return {}, {"classification": "invalid", "safe": False,
+                        "summary": "enabling slices can only be declared at plan "
+                                   "approval; runtime revision cannot add or enable them",
+                        "blocked_by": [], "affected_steps": []}
     for item in updates:
         patch = item.get("patch") or {}
         if not isinstance(patch, dict):
@@ -470,6 +475,11 @@ def _revision_context(conn: sqlite3.Connection, wf: dict, intent: dict) -> tuple
                             "summary": "external_deps is controlled by external_nodes; "
                                        "use an external node instead",
                             "blocked_by": [], "affected_steps": []}
+            if patch.get("enabling") or "enables" in patch:
+                return {}, {"classification": "invalid", "safe": False,
+                            "summary": "enabling slices can only be declared at plan "
+                                       "approval; runtime revision cannot add or enable them",
+                            "blocked_by": [], "affected_steps": []}
             for raw in tail:
                 if str(raw.get("id")) == sid:
                     raw.update(patch)
@@ -485,7 +495,8 @@ def _revision_context(conn: sqlite3.Connection, wf: dict, intent: dict) -> tuple
             generated = _dynamic_slice_steps(
                 conn, plan_step["step_id"], loop, tail, stable_ids,
                 weight=str(wf.get("weight") or "standard"),
-                previous_decide=last_stable_decide)
+                previous_decide=last_stable_decide,
+                known_slice_ids={str(raw.get("id") or "") for raw in slices})
             _validate_generated_deps(generated, stable_ids)
         except ConflictError as exc:
             return {}, {"classification": "invalid", "safe": False,
