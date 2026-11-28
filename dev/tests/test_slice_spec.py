@@ -261,3 +261,63 @@ def test_lock_violations_accepts_fully_declared_checks():
         {"acceptance": [_command_item(), _file_assert_item()]})
     assert slice_spec.lock_violations(spec) == []
     slice_spec.assert_lockable(spec)  # does not raise
+
+
+# --- replan 弱化检测（v1.62 #10）-------------------------------------------
+
+
+def _check_spec(*items) -> dict:
+    return slice_spec.parse_slice_spec({"acceptance": list(items)})
+
+
+def test_spec_hash_is_stable_and_canonical():
+    first = _valid()
+    second = _valid()
+    second["out_of_scope"] = ["web UI"]  # 同值、不同对象
+    assert slice_spec.spec_hash(first) == slice_spec.spec_hash(second)
+    assert slice_spec.spec_hash(first).startswith("sha256:")
+    changed = _valid()
+    changed["seam"] = "other seam"
+    assert slice_spec.spec_hash(first) != slice_spec.spec_hash(changed)
+
+
+def test_weakening_detects_deleted_check():
+    old = _check_spec(_command_item(), _file_assert_item())
+    new = _check_spec(_file_assert_item())
+    diff = slice_spec.weakening_diff(old, new)
+    assert diff == [{"id": "c1", "type": "check_removed"}]
+
+
+def test_weakening_detects_manual_downgrade():
+    old = _check_spec(_command_item())
+    downgraded = {"id": "c1", "kind": "manual", "criterion": "cli reports failure",
+                  "verification": {"judge": "decide", "method": "read"}}
+    diff = slice_spec.weakening_diff(old, _check_spec(downgraded))
+    assert diff == [{"id": "c1", "type": "downgraded_to_manual"}]
+
+
+def test_weakening_detects_assertion_change_without_red_evidence():
+    old = _check_spec(_command_item())
+    changed = _command_item(cmd="python -m app --check --lenient")
+    diff = slice_spec.weakening_diff(old, _check_spec(changed))
+    assert diff == [{"id": "c1",
+                     "type": "assertion_changed_without_red_evidence"}]
+
+
+def test_weakening_accepts_assertion_change_with_new_red_evidence():
+    old = _check_spec(_command_item())
+    changed = _command_item(cmd="python -m app --check --lenient")
+    diff = slice_spec.weakening_diff(
+        old, _check_spec(changed), red_evidence=["c1"])
+    assert diff == []
+    # 证据可以按检查 id 映射到具体检查，未覆盖的变更仍算弱化。
+    diff = slice_spec.weakening_diff(
+        old, _check_spec(changed), red_evidence={"other": ["job"]})
+    assert diff and diff[0]["type"] == "assertion_changed_without_red_evidence"
+
+
+def test_weakening_ignores_added_checks_and_non_assertion_fields():
+    old = _check_spec(_command_item())
+    new = _check_spec(_command_item(), _file_assert_item())
+    new = {**new, "seam": "new seam", "out_of_scope": ["more"]}
+    assert slice_spec.weakening_diff(old, new) == []

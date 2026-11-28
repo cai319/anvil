@@ -75,15 +75,38 @@ def _engine_checks(scope_step_id: str, spec: dict) -> list[dict]:
     return checks
 
 
+def _replan_epoch(conn: sqlite3.Connection, workflow_id: str,
+                  slice_key: str) -> str | None:
+    """该切片最近一次 replan 的时间；更早的绿跑证据一律作废。"""
+    row = conn.execute(
+        "SELECT slice_replan_json FROM workflow_steps "
+        "WHERE workflow_id=? AND slice_key=? AND step_id LIKE '%.scope' "
+        "ORDER BY rowid LIMIT 1", (workflow_id, slice_key)).fetchone()
+    if row is None or not row["slice_replan_json"]:
+        return None
+    try:
+        record = jloads(row["slice_replan_json"] or "{}", {})
+    except (TypeError, ValueError):
+        return None
+    value = record.get("replanned_at") if isinstance(record, dict) else None
+    return str(value) if value else None
+
+
 def _green_runs(conn: sqlite3.Connection, task_id: str, workflow_id: str,
                 slice_key: str) -> dict[str, dict]:
-    """每个检查 id 的最新绿跑作业（按创建顺序取最新）。"""
+    """每个检查 id 的最新绿跑作业（按创建顺序取最新）。
+
+    replan 之前的绿跑不能作为判定证据：必须在本片重开后重新产生。
+    """
+    epoch = _replan_epoch(conn, workflow_id, slice_key)
     rows = conn.execute(
-        "SELECT id, status, spec_json, evidence_json, finished_at "
+        "SELECT id, status, spec_json, evidence_json, finished_at, created_at "
         "FROM sandbox_jobs WHERE task_id=? AND kind='check' "
         "ORDER BY created_at DESC, rowid DESC", (str(task_id),)).fetchall()
     latest: dict[str, dict] = {}
     for row in rows:
+        if epoch and str(row["created_at"] or "") <= epoch:
+            continue
         try:
             spec = jloads(row["spec_json"] or "{}", {})
         except (TypeError, ValueError):
