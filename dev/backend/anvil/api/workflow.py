@@ -11,6 +11,7 @@ from ..schemas import (
     WorkflowOut,
 )
 from ..services.tasks import ConflictError
+from ..services import check_ledger as check_ledger_service
 from ..services import dossier as dossier_service
 from ..services import leases as lease_service
 from ..services import metrics as metrics_service
@@ -74,6 +75,26 @@ def get_metrics(wid: str, conn=Depends(get_db),
         return metrics_service.compute(conn, wid)
     except LookupError:
         raise HTTPException(status_code=404, detail="workflow not found")
+
+
+@router.get("/workflows/{wid}/check-ledger")
+def get_check_ledger(wid: str, conn=Depends(get_db),
+                     auth: Auth = Depends(get_auth)):
+    """结构化检查台账与 GLOSSARY 指标报告（N_total / 有效红 / 可机械化等）。"""
+    _assert_workflow_task(conn, wid, auth)
+    try:
+        return check_ledger_service.report(conn, wid)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="workflow not found")
+
+
+@router.get("/workflows/{wid}/check-ledger/rows")
+def get_check_ledger_rows(wid: str, record_type: str | None = None,
+                          conn=Depends(get_db),
+                          auth: Auth = Depends(get_auth)):
+    _assert_workflow_task(conn, wid, auth)
+    return check_ledger_service.rows(
+        conn, workflow_id=wid, record_type=record_type)
 
 
 @router.get("/workflows/{wid}/graph", response_model=WorkflowGraphOut)
