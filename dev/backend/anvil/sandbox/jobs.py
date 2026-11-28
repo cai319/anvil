@@ -21,6 +21,7 @@ from typing import Any, Protocol
 
 from .. import config
 from ..util import jloads, now_iso
+from . import check_kinds
 from . import pytest_adapter
 
 PHASES = ("prepare", "build", "run")
@@ -239,6 +240,25 @@ def is_safe(spec: dict) -> bool:
 CHECK_KINDS = ("test", "command", "file_assert", "manual")
 
 
+def _relative_check_path(raw: Any, field_: str) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        raise JobSpecError(f"{field_} must be a non-empty relative path")
+    path = raw.strip().replace("\\", "/")
+    if (path.startswith("/") or ".." in path.split("/")
+            or re.match(r"^[A-Za-z]:", path)):
+        raise JobSpecError(f"{field_} must be relative without ..")
+    return path
+
+
+def _red_exit_code(raw: Any) -> int:
+    """command 检查声明的断言失败退出码；未声明或非法一律拒绝。"""
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 1 <= raw <= 255:
+        raise JobSpecError(
+            "check.exit_code must be an integer between 1 and 255 "
+            "for kind=command (the assertion-failure exit code)")
+    return raw
+
+
 def _normalize_junit_paths(raw: Any, field_: str = "check.junit") -> list[str]:
     if raw is None:
         return []
@@ -314,7 +334,30 @@ def parse_check_spec(raw: Any) -> dict:
     junit = _normalize_junit_paths(check_raw.get("junit"))
     pytest_spec = None
     collect_cmd = None
-    if check_raw.get("pytest") is not None:
+    red_exit_code = None
+    file_assert: dict[str, Any] | None = None
+    run_commands: list[dict] = []
+    if check_kind == "manual":
+        raise JobSpecError(
+            "manual checks are not executed by the engine; "
+            "record them in the slice spec for the decide phase")
+    if check_kind == "file_assert":
+        if (check_raw.get("pytest") is not None
+                or check_raw.get("cmd") is not None
+                or check_raw.get("argv") is not None):
+            raise JobSpecError(
+                "check.file_assert is engine-native; it cannot carry cmd/argv/pytest")
+        path = _relative_check_path(check_raw.get("path"), "check.path")
+        contains = check_raw.get("contains")
+        if contains is not None and (not isinstance(contains, str)
+                                     or not contains.strip()):
+            raise JobSpecError("check.contains must be a non-empty string")
+        file_assert = {
+            "path": path,
+            "contains": contains.strip() if isinstance(contains, str) else None,
+        }
+        junit = []
+    elif check_raw.get("pytest") is not None:
         if check_kind != "test":
             raise JobSpecError("check.pytest is only valid for kind=test")
         if check_raw.get("cmd") is not None or check_raw.get("argv") is not None:
@@ -345,6 +388,8 @@ def parse_check_spec(raw: Any) -> dict:
         command_argv = None
         run_commands = [collect, command]
     else:
+        if check_kind == "command":
+            red_exit_code = _red_exit_code(check_raw.get("exit_code"))
         command_raw = {
             "name": check_id,
             "timeout_seconds": check_raw.get("timeout_seconds"),
@@ -364,15 +409,26 @@ def parse_check_spec(raw: Any) -> dict:
         {"path": path, "max_bytes": resources["artifact_mib"] * _MIB}
         for path in junit
     ]
-    check_spec: dict[str, Any] = {
-        "id": command["name"],
-        "kind": check_kind,
-        "cmd": command_cmd,
-        "argv": command_argv,
-        "timeout_seconds": command["timeout_seconds"],
-        "env": command["env"],
-        "junit": junit,
-    }
+    if file_assert is not None:
+        check_spec: dict[str, Any] = {
+            "id": check_id,
+            "kind": check_kind,
+            "path": file_assert["path"],
+            "contains": file_assert["contains"],
+            "junit": [],
+        }
+    else:
+        check_spec = {
+            "id": run_commands[-1]["name"],
+            "kind": check_kind,
+            "cmd": command_cmd,
+            "argv": command_argv,
+            "timeout_seconds": run_commands[-1]["timeout_seconds"],
+            "env": run_commands[-1]["env"],
+            "junit": junit,
+        }
+        if red_exit_code is not None:
+            check_spec["red_exit_code"] = red_exit_code
     if pytest_spec is not None:
         check_spec["pytest"] = pytest_spec
         check_spec["collect_cmd"] = collect_cmd
@@ -415,6 +471,9 @@ def environment_hash(spec: dict) -> str:
         "cmd": check.get("cmd"),
         "argv": check.get("argv"),
         "pytest": check.get("pytest"),
+        "red_exit_code": check.get("red_exit_code"),
+        "path": check.get("path"),
+        "contains": check.get("contains"),
         "env": check.get("env") or {},
     }
     return "sha256:" + hashlib.sha256(
@@ -833,12 +892,32 @@ def execute_job(spec: dict, job_id: str, runner: JobRunner, *,
     except OSError:
         pass
 
-    result = runner.run(spec=spec, paths=paths, job_id=job_id, log_path=log_path)
-
-    phases = parse_phases(paths.artifacts / "phases.jsonl")
-    if phases:
+    check_spec_early = spec.get("check") or {}
+    file_assert_eval: dict | None = None
+    if check and check_spec_early.get("kind") == "file_assert":
+        # file_assert 是引擎原生检查：不启动容器命令，直接在工作区快照上判定。
+        file_assert_eval = check_kinds.evaluate_file_assert(
+            paths.source, str(check_spec_early.get("path") or ""),
+            check_spec_early.get("contains"))
+        exit_code = 0 if file_assert_eval["passed"] else 1
+        phases = [{
+            "seq": 0, "phase": "run",
+            "name": str(check_spec_early.get("id") or "file_assert"),
+            "exit_code": exit_code, "signal": None, "timed_out": False,
+            "duration_ms": 0,
+            "status": "succeeded" if exit_code == 0 else "failed",
+        }]
         (paths.logs / "phases.json").write_text(
             json.dumps(phases, ensure_ascii=False, indent=2), encoding="utf-8")
+        result = RunnerResult(exit_code=exit_code, backend="engine")
+    else:
+        result = runner.run(
+            spec=spec, paths=paths, job_id=job_id, log_path=log_path)
+        phases = parse_phases(paths.artifacts / "phases.jsonl")
+        if phases:
+            (paths.logs / "phases.json").write_text(
+                json.dumps(phases, ensure_ascii=False, indent=2),
+                encoding="utf-8")
     log_text = ""
     try:
         if log_path.exists():
@@ -910,6 +989,21 @@ def execute_job(spec: dict, job_id: str, runner: JobRunner, *,
                 collected_count=collected,
                 baseline_count=baseline,
             )
+        elif check_spec.get("kind") == "command":
+            result_info = check_kinds.classify_command(
+                exit_code=(phase_exit if phase_exit is not None
+                           else result.exit_code),
+                red_exit_code=check_spec.get("red_exit_code"),
+                signal=(run_phase or {}).get("signal") or result.signal,
+                timed_out=bool(result.timed_out
+                               or (run_phase or {}).get("timed_out")),
+            )
+        elif check_spec.get("kind") == "file_assert":
+            result_info = {
+                "classification": (file_assert_eval or {}).get("classification"),
+                "cause": (file_assert_eval or {}).get("cause"),
+                "failure_types": [],
+            }
         evidence["check"] = {
             "run_id": job_id,
             "check_id": check_spec.get("id"),
@@ -929,6 +1023,11 @@ def execute_job(spec: dict, job_id: str, runner: JobRunner, *,
             "duration_ms": (run_phase or {}).get("duration_ms"),
             "status": check_status,
         }
+        if check_spec.get("red_exit_code") is not None:
+            evidence["check"]["red_exit_code"] = check_spec["red_exit_code"]
+        if check_spec.get("kind") == "file_assert":
+            evidence["check"]["path"] = check_spec.get("path")
+            evidence["check"]["contains"] = check_spec.get("contains")
     status = "succeeded" if verified else "failed"
     # 快照/scratch 不入库；日志/产物/证据留在 job 目录。
     shutil.rmtree(paths.source, ignore_errors=True)

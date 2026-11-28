@@ -232,7 +232,14 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
             "deliverables、stubs（[{path, signatures:[...]}]）。\n"
             "test 项用结构化验证方式：{\"pytest\":{\"paths\":[\"tests/...\"],"
             "\"args\":[\"-q\"],\"plugins\":[]}}；绿地切片先写抛 NotImplementedError 的 "
-            "接口 stub，再写测试。未知字段与非法 kind 会被服务端拒绝。\n")
+            "接口 stub，再写测试。"
+            "command 项用 {\"cmd\":\"python -m app --check\",\"exit_code\":1}，"
+            "必须声明断言失败退出码，否则不可锁定；"
+            "file_assert 项用 {\"path\":\"reports/out.md\",\"contains\":\"PASS\"}，"
+            "由引擎原生判定文件缺失/内容不符（红）与匹配（绿）；"
+            "manual 项用 {\"judge\":\"human|decide\",\"method\":\"...\"}，"
+            "不由引擎执行，留给 decide 阶段判定。"
+            "未知字段与非法 kind 会被服务端拒绝。\n")
     submit_cmd = (f"anvil step submit {workflow['id']} {step['step_id']} "
                   "--summary \"完成摘要\"")
     if is_scope:
@@ -583,6 +590,10 @@ def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: 
             parsed_spec = slice_spec_service.parse_slice_spec(slice_spec)
         except slice_spec_service.SliceSpecError as exc:
             raise ConflictError(f"slice_spec_invalid: {exc}") from exc
+        # 锁定前校验：command 未声明断言失败退出码的 spec 不可锁定。
+        violations = slice_spec_service.lock_violations(parsed_spec)
+        if violations:
+            raise ConflictError(f"slice_spec_unlockable: {violations[0]}")
         slice_spec_json = jdumps(parsed_spec)
     changed = [leases.normalize_path(p) for p in (changed_paths or [])]
     if changed:

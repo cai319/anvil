@@ -531,23 +531,32 @@ def _create_check_job(conn, *, spec_raw: dict, actor_role: str | None,
 def create_slice_checks(conn, *, task_id: str, step_id: str, slice_key: str,
                         spec: dict, actor_role: str | None = None,
                         actor_is_human: bool = False) -> list[dict]:
-    """为切片 spec 中可机械化的 test 类验收项创建引擎红跑作业。
+    """为切片 spec 中可机械化的验收项创建引擎红跑作业。
 
-    只处理带结构化 pytest 验证方式的 test 项；command/file_assert/manual
-    由后续票实现。作业在 base 工作区快照上执行，证据只由引擎写入。
+    test / command / file_assert 由引擎执行并写入验收证据；manual 项不创建
+    作业（判定者与判定方法随 slice spec 持久化，留给 decide 阶段）。
     """
-    from .slice_spec import test_checks
+    from .slice_spec import engine_checks
 
     created: list[dict] = []
-    for item in test_checks(spec):
+    for item in engine_checks(spec):
+        check: dict = {"id": f"{step_id}.{item['id']}", "kind": item["kind"]}
+        if item["kind"] == "test":
+            check["pytest"] = item["pytest"]
+        elif item["kind"] == "command":
+            if item.get("cmd") is not None:
+                check["cmd"] = item["cmd"]
+            else:
+                check["argv"] = item["argv"]
+            check["exit_code"] = item["exit_code"]
+        elif item["kind"] == "file_assert":
+            check["path"] = item["path"]
+            if item.get("contains") is not None:
+                check["contains"] = item["contains"]
         raw = {
             "task_id": task_id,
             "reason": f"slice {slice_key} acceptance {item['id']}",
-            "check": {
-                "id": f"{step_id}.{item['id']}",
-                "kind": "test",
-                "pytest": item["pytest"],
-            },
+            "check": check,
         }
         created.append(create_job(
             conn, spec_raw=raw, actor_role=actor_role,
