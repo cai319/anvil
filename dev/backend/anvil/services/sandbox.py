@@ -406,11 +406,21 @@ def _job_dict(row) -> dict | None:
     job = dict(row)
     job["spec"] = jloads(job.get("spec_json") or "{}", {})
     job["evidence"] = jloads(job.get("evidence_json") or "{}", {})
+    # 检查作业的运行结果直接投影出来；PoC 作业为 None。
+    job["check_result"] = (
+        job["evidence"].get("check") if job.get("kind") == "check" else None)
     return job
 
 
 def create_job(conn, *, spec_raw: dict, actor_role: str | None,
-               actor_is_human: bool, check_available: bool = True) -> dict:
+               actor_is_human: bool, check_available: bool = True,
+               kind: str = "poc") -> dict:
+    if kind == "check":
+        return _create_check_job(
+            conn, spec_raw=spec_raw, actor_role=actor_role,
+            actor_is_human=actor_is_human)
+    if kind != "poc":
+        raise ValueError("kind must be poc or check")
     spec = sandbox_jobs.parse_spec(spec_raw)
     if not actor_is_human and not spec.get("task_id") and not spec.get("finding_id"):
         raise PermissionError("agent PoC jobs must be bound to a task or finding")
@@ -465,6 +475,52 @@ def create_job(conn, *, spec_raw: dict, actor_role: str | None,
             payload={"job_id": job_id, "profile": spec["profile"],
                      "network": spec["network"],
                      "finding_id": spec.get("finding_id")})
+    except Exception:  # noqa: BLE001
+        pass
+    conn.commit()
+    return _job_dict(conn.execute(
+        "SELECT * FROM sandbox_jobs WHERE id=?", (job_id,)).fetchone())  # type: ignore[return-value]
+
+
+def _create_check_job(conn, *, spec_raw: dict, actor_role: str | None,
+                      actor_is_human: bool) -> dict:
+    """创建检查作业：绑定任务工作区、不要求 finding、默认标准档 network=none。
+
+    生产检查按 ADR-0005 使用标准档；这里不要求严格档后端可用。
+    """
+    spec = sandbox_jobs.parse_check_spec(spec_raw)
+    task_id = spec["task_id"]
+    row = conn.execute("SELECT id FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None:
+        raise LookupError("task not found")
+    _check_quota(conn, task_id=task_id, actor_role=actor_role)
+    job_id = "chk_" + uuid.uuid4().hex
+    now = now_iso()
+    status = "queued"
+    approval = "not_required"
+    if not actor_is_human and spec["profile"] != "safe":
+        status = "waiting_approval"
+        approval = "pending"
+    conn.execute(
+        "INSERT INTO sandbox_jobs "
+        "(id, kind, task_id, finding_id, created_by, created_by_type, tier, "
+        " profile, spec_json, spec_hash, status, approval_status, timeout_seconds, "
+        " created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (job_id, "check", task_id, None,
+         actor_role or "human", "human" if actor_is_human else "role",
+         "standard", spec["profile"], json.dumps(spec, ensure_ascii=False),
+         sandbox_jobs.spec_hash(spec), status, approval,
+         int(spec["resources"]["timeout_seconds"]), now, now),
+    )
+    try:
+        from . import ledger
+        ledger.emit_audit(
+            conn, role_slug=actor_role or "human", task_id=task_id,
+            action="sandbox.job.created",
+            payload={"job_id": job_id, "kind": "check",
+                     "profile": spec["profile"], "network": spec["network"],
+                     "check_id": (spec.get("check") or {}).get("id")})
     except Exception:  # noqa: BLE001
         pass
     conn.commit()
@@ -551,7 +607,7 @@ def reject_job(conn, job_id: str, *, actor_role: str = "human",
 
 def list_jobs(conn, *, task_id: str | None = None,
               finding_id: str | None = None, status: str | None = None,
-              limit: int = 100) -> list[dict]:
+              kind: str | None = None, limit: int = 100) -> list[dict]:
     clauses: list[str] = []
     params: list = []
     if task_id:
@@ -560,6 +616,8 @@ def list_jobs(conn, *, task_id: str | None = None,
         clauses.append("finding_id=?"); params.append(finding_id)
     if status:
         clauses.append("status=?"); params.append(status)
+    if kind:
+        clauses.append("kind=?"); params.append(kind)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
         f"SELECT * FROM sandbox_jobs{where} ORDER BY created_at DESC LIMIT ?",

@@ -14,6 +14,7 @@ import shlex
 import shutil
 import signal as signal_mod
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -230,6 +231,175 @@ def is_safe(spec: dict) -> bool:
         int(resources.get(key) or 0) <= DEFAULT_RESOURCES[key]
         for key in DEFAULT_RESOURCES
     )
+
+
+# ---- check spec（引擎执行的验收检查）--------------------------------------
+
+CHECK_KINDS = ("test", "command")
+
+
+def _normalize_junit_paths(raw: Any, field_: str = "check.junit") -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise JobSpecError(f"{field_} must be a list of paths")
+    out: list[str] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, str) or not item.strip():
+            raise JobSpecError(f"{field_}[{i}] must be a non-empty string")
+        path = item.replace("\\", "/")
+        if (path.startswith("/") or ".." in path.split("/")
+                or re.match(r"^[A-Za-z]:", path)):
+            raise JobSpecError(f"{field_}[{i}] must be relative without ..")
+        out.append(path)
+    return out
+
+
+def parse_check_spec(raw: Any) -> dict:
+    """校验一条检查 spec；检查作业必须绑定任务工作区，不要求 finding。"""
+    if not isinstance(raw, dict):
+        raise JobSpecError("spec must be an object")
+    task_id = str(raw.get("task_id") or "").strip()
+    if not task_id:
+        raise JobSpecError(
+            "check jobs must be bound to a task workspace (task_id)")
+    check_raw = raw.get("check")
+    if not isinstance(check_raw, dict):
+        raise JobSpecError("check must be an object")
+    check_kind = str(check_raw.get("kind") or "test").strip().lower()
+    if check_kind not in CHECK_KINDS:
+        raise JobSpecError(f"check.kind must be one of {CHECK_KINDS}")
+    network = str(raw.get("network") or "none").strip().lower()
+    if network not in ("none", "bridge"):
+        raise JobSpecError("network must be none or bridge")
+    image = raw.get("image")
+    if image is not None:
+        image = str(image).strip()
+        if not _IMAGE_RE.match(image):
+            raise JobSpecError("image must be a docker image reference")
+    resources_raw = raw.get("resources") or {}
+    if not isinstance(resources_raw, dict):
+        raise JobSpecError("resources must be an object")
+    resources = {
+        key: _int(resources_raw.get(key), default, minimum=1,
+                  maximum=HARD_MAX[key], field_=f"resources.{key}")
+        for key, default in DEFAULT_RESOURCES.items()
+    }
+    command_raw = {
+        "name": str(check_raw.get("id") or "check"),
+        "timeout_seconds": check_raw.get("timeout_seconds"),
+        "env": check_raw.get("env") or {},
+    }
+    if check_raw.get("cmd") is not None:
+        command_raw["cmd"] = check_raw["cmd"]
+    if check_raw.get("argv") is not None:
+        command_raw["argv"] = check_raw["argv"]
+    command = _normalize_command(
+        command_raw, phase="run", index=0,
+        job_timeout=resources["timeout_seconds"])
+    junit = _normalize_junit_paths(check_raw.get("junit"))
+    artifacts = [
+        {"path": path, "max_bytes": resources["artifact_mib"] * _MIB}
+        for path in junit
+    ]
+    spec: dict[str, Any] = {
+        "kind": "check",
+        "task_id": task_id,
+        "finding_id": None,
+        "source": "task_workspace",
+        # 生产检查默认标准档；bridge/自定义镜像按 ADR-0003 人工批准。
+        "tier": "standard",
+        "network": network,
+        "image": image,
+        "resources": resources,
+        "check": {
+            "id": command["name"],
+            "kind": check_kind,
+            "cmd": command["cmd"],
+            "argv": command["argv"],
+            "timeout_seconds": command["timeout_seconds"],
+            "env": command["env"],
+            "junit": junit,
+        },
+        "phases": {"prepare": [], "build": [], "run": [command]},
+        "expect": {},
+        "artifacts": artifacts,
+        "reason": str(raw.get("reason") or "")[:2000],
+    }
+    spec["profile"] = "safe" if is_safe(spec) else "relaxed"
+    requested = str(raw.get("profile") or "").strip().lower()
+    if requested:
+        if requested not in ("safe", "relaxed"):
+            raise JobSpecError("profile must be safe or relaxed")
+        if requested == "safe" and not is_safe(spec):
+            raise JobSpecError(
+                "safe profile requires network=none, default image and default limits")
+        spec["profile"] = requested
+    return spec
+
+
+def environment_hash(spec: dict) -> str:
+    """基础环境哈希：镜像、网络、tier、检查命令与环境变量。"""
+    check = spec.get("check") or {}
+    base = {
+        "tier": spec.get("tier"),
+        "image": spec.get("image") or config.SANDBOX_IMAGE,
+        "network": spec.get("network"),
+        "kind": check.get("kind"),
+        "cmd": check.get("cmd"),
+        "argv": check.get("argv"),
+        "env": check.get("env") or {},
+    }
+    return "sha256:" + hashlib.sha256(
+        canonical(base).encode("utf-8")).hexdigest()
+
+
+# ---- junit -----------------------------------------------------------------
+
+def _junit_int(node, attr: str) -> int:
+    try:
+        return int(float(node.get(attr) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+_JUNIT_MAX_BYTES = 5 * 1024 * 1024
+
+
+def parse_junit(path: Path) -> dict | None:
+    """解析单个 junit xml（testsuites 或 testsuite 根）；不可解析返回 None。"""
+    try:
+        if path.stat().st_size > _JUNIT_MAX_BYTES:
+            return None
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError):
+        return None
+    if root.tag == "testsuite":
+        suites = [root]
+    elif root.tag == "testsuites":
+        suites = [child for child in root if child.tag == "testsuite"]
+    else:
+        return None
+    summary = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
+    for suite in suites:
+        for key in summary:
+            summary[key] += _junit_int(suite, key)
+    return summary
+
+
+def junit_evidence(artifact_dir: Path,
+                   rel_paths: list[str]) -> tuple[dict | None, int | None]:
+    """汇总已声明的 junit 文件；返回 (summary, collected_count)。"""
+    total: dict[str, int] | None = None
+    for rel in rel_paths or []:
+        summary = parse_junit(Path(artifact_dir) / rel)
+        if summary is None:
+            continue
+        if total is None:
+            total = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
+        for key in total:
+            total[key] += summary[key]
+    return (total, total["tests"]) if total is not None else (None, None)
 
 
 # ---- script ----------------------------------------------------------------
@@ -525,8 +695,41 @@ def _verify(spec: dict, phases: list[dict], log_text: str,
     return ok, None if ok else "sandbox_run_failed"
 
 
+_CHECK_FAILURE = {
+    "failed": "check_failed",
+    "signal": "check_signal",
+    "timeout": "check_timeout",
+    "error": "check_error",
+}
+
+
+def _check_status(phases: list[dict], result: RunnerResult) -> str:
+    """把检查结局分为 passed/failed/signal/timeout/error，区分超时与信号。"""
+    if result.error or not phases:
+        return "error"
+    runs = [p for p in phases if p["phase"] == "run"]
+    if not runs:
+        return "error"
+    phase = runs[-1]
+    if result.timed_out or phase.get("timed_out"):
+        return "timeout"
+    if phase.get("signal"):
+        return "signal"
+    if phase.get("exit_code") == 0:
+        return "passed"
+    return "failed"
+
+
+def _command_text(check: dict) -> str:
+    if check.get("argv"):
+        return " ".join(shlex.quote(str(a)) for a in check["argv"])
+    return str(check.get("cmd") or "")
+
+
 def execute_job(spec: dict, job_id: str, runner: JobRunner, *,
-                source_dir: Path | None = None) -> JobExecution:
+                source_dir: Path | None = None,
+                check: bool = False) -> JobExecution:
+    check = bool(check or spec.get("kind") == "check")
     started = now_iso()
     paths = _prepare_paths(job_id)
     log_path = paths.logs / "container.log"
@@ -558,7 +761,12 @@ def execute_job(spec: dict, job_id: str, runner: JobRunner, *,
             log_text = log_path.read_text(encoding="utf-8", errors="replace")[-2_000_000:]
     except OSError:
         pass
-    verified, failure = _verify(spec, phases, log_text, result)
+    check_status = _check_status(phases, result) if check else None
+    if check:
+        verified = check_status == "passed"
+        failure = _CHECK_FAILURE.get(check_status or "error")
+    else:
+        verified, failure = _verify(spec, phases, log_text, result)
     # 失败作业也要保留产物（崩溃现场/最小复现输入）。
     try:
         artifacts = collect_artifacts(paths, spec)
@@ -587,6 +795,28 @@ def execute_job(spec: dict, job_id: str, runner: JobRunner, *,
         "started_at": started,
         "finished_at": now_iso(),
     }
+    if check:
+        check_spec = spec.get("check") or {}
+        summary, collected = junit_evidence(
+            paths.artifacts, list(check_spec.get("junit") or []))
+        run_phase = next(
+            (p for p in reversed(phases) if p["phase"] == "run"), None)
+        phase_exit = run_phase.get("exit_code") if run_phase else None
+        evidence["check"] = {
+            "run_id": job_id,
+            "check_id": check_spec.get("id"),
+            "kind": check_spec.get("kind"),
+            "command": _command_text(check_spec),
+            "exit_code": phase_exit if phase_exit is not None else result.exit_code,
+            "signal": (run_phase or {}).get("signal") or result.signal,
+            "timed_out": bool(result.timed_out
+                              or (run_phase or {}).get("timed_out")),
+            "junit_summary": summary,
+            "collected_count": collected,
+            "env_hash": environment_hash(spec),
+            "duration_ms": (run_phase or {}).get("duration_ms"),
+            "status": check_status,
+        }
     status = "succeeded" if verified else "failed"
     # 快照/scratch 不入库；日志/产物/证据留在 job 目录。
     shutil.rmtree(paths.source, ignore_errors=True)
@@ -604,3 +834,9 @@ def execute_job(spec: dict, job_id: str, runner: JobRunner, *,
         started_at=started,
         finished_at=now_iso(),
     )
+
+
+def execute_check_job(spec: dict, job_id: str, runner: JobRunner, *,
+                      source_dir: Path | None = None) -> JobExecution:
+    """执行一条检查；复用 PoC 的快照/脚本/产物/证据管线。"""
+    return execute_job(spec, job_id, runner, source_dir=source_dir, check=True)

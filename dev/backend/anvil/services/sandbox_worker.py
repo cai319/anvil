@@ -12,7 +12,7 @@ from .. import config
 from ..db import open_conn
 from ..sandbox.backends import strict as strict_backend
 from ..sandbox.backends.docker import kill_container
-from ..sandbox.jobs import execute_job
+from ..sandbox.jobs import execute_check_job, execute_job
 from . import sandbox as sandbox_service
 
 logger = logging.getLogger("anvil.sandbox.worker")
@@ -62,7 +62,10 @@ class SandboxJobWorker:
                 return False
             self.current_job_id = job["id"]
             try:
-                execution = execute_job(job.get("spec") or {}, job["id"], self.runner)
+                spec = job.get("spec") or {}
+                execute = (execute_check_job if job.get("kind") == "check"
+                           else execute_job)
+                execution = execute(spec, job["id"], self.runner)
                 sandbox_service.record_execution(conn, job["id"], execution)
             except Exception as exc:  # noqa: BLE001 —— 失败必须落库，不能卡 running
                 logger.exception("sandbox job %s failed", job["id"])
