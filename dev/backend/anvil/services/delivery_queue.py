@@ -373,7 +373,8 @@ class DeliveryQueueMixin:
             if old_run_id:
                 from . import runs as runs_service
                 runs_service.set_status(
-                    conn, old_run_id, "suspended", from_statuses=("running",))
+                    conn, old_run_id, "suspended", from_statuses=("running",),
+                    suspend_kind=runs_service.SUSPEND_SYSTEM_RESTART)
             # 旧槽只是释放进程，session 仍可恢复：槽状态回到 idle。
             if r.context_key:
                 self._slot_persist(r, status="idle", conn=conn)

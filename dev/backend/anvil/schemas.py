@@ -226,6 +226,8 @@ class RunOut(BaseModel):
     workflow_id: str | None = None
     timeout_seconds: int | None = None
     failure_class: str | None = None
+    failure_message: str | None = None
+    suspend_kind: str | None = None
     context_reset_count: int = 0
     context_rotation_count: int = 0
     slice_key: str | None = None
@@ -1036,6 +1038,8 @@ class DelegationOut(BaseModel):
     run_id: str | None = None
     run_status: str | None = None
     run_failure_class: str | None = None
+    run_failure_message: str | None = None
+    run_suspend_kind: str | None = None
     submitted_summary: str | None = None
     created_at: str
     updated_at: str
@@ -1116,6 +1120,8 @@ class TaskChildOut(BaseModel):
     run_id: str | None = None
     run_status: str | None = None
     run_failure_class: str | None = None
+    run_failure_message: str | None = None
+    run_suspend_kind: str | None = None
     blocking: bool = False
     dispatch_status: str | None = None
     return_pending: bool = False

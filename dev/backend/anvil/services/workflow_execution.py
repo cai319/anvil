@@ -451,6 +451,25 @@ def _advance_locked(conn: sqlite3.Connection, wid: str, starter=None) -> dict:
             (role, *RUN_ACTIVE),
         ).fetchone():
             continue
+        # 运行时环境门禁：不可用组合不派发。检查读金丝雀缓存，缓存缺失/键变化时
+        # 才真实跑一次（有模型成本）；失败保持 pending，并给出可操作原因。
+        from . import sandbox as sandbox_service
+        ready, reason = sandbox_service.runtime_dispatch_guard(
+            conn, role_slug=role, task=dict(task) if task else None)
+        if not ready:
+            if str(s.get("failure_reason") or "") != reason:
+                conn.execute(
+                    "UPDATE workflow_steps SET failure_reason=?, updated_at=? "
+                    "WHERE workflow_id=? AND step_id=? AND status='pending'",
+                    (reason, now_iso(), wid, s["step_id"]))
+                ledger.emit(
+                    conn, "dispatch.deferred", task_id=wf["task_id"],
+                    workflow_id=wid, execution_no=wf.get("execution_no"),
+                    step_id=s["step_id"], slice_key=s.get("slice_key"),
+                    actor_type="system", actor="scheduler",
+                    payload={"role": role, "reason": "runtime_unavailable",
+                             "detail": reason})
+            continue
         if task:
             from . import governance
             try:
@@ -1040,7 +1059,8 @@ def _retry_backoff_seconds(attempt: int) -> float:
 
 
 def _end_run_for_step(conn: sqlite3.Connection, wf: dict, step: dict, *,
-                      now: str, failure_class: str | None = None) -> None:
+                      now: str, failure_class: str | None = None,
+                      failure_message: str | None = None) -> None:
     """步骤失败/重排时结束其关联 run，避免残留 running 占住角色、阻断 advance 重派。"""
     run_id = step.get("run_id")
     if not run_id:
@@ -1053,8 +1073,9 @@ def _end_run_for_step(conn: sqlite3.Connection, wf: dict, step: dict, *,
     dispatch_service.clear_inbound_context_returns(conn, run_id)
     conn.execute(
         "UPDATE runs SET status='failed', ended_at=?, "
-        "failure_class=COALESCE(?, failure_class) WHERE id=?",
-        (now, failure_class, run_id))
+        "failure_class=COALESCE(?, failure_class), "
+        "failure_message=COALESCE(?, failure_message) WHERE id=?",
+        (now, failure_class, failure_message, run_id))
     ledger.emit(
         conn, "run.status_changed", task_id=wf["task_id"], workflow_id=wf["id"],
         execution_no=wf.get("execution_no"), step_id=step["step_id"], run_id=run_id,
@@ -1082,7 +1103,8 @@ def fail_step(conn: sqlite3.Connection, wid: str, step_id: str, reason: str,
     now = now_iso()
     # 先结束旧 run 再清 run_id：否则旧 run 仍是活跃态，advance 会一直跳过该角色。
     _end_run_for_step(conn, wf, step, now=now,
-                      failure_class=failure_class or category)
+                      failure_class=failure_class or category,
+                      failure_message=reason)
     recovery = int(step.get("recovery_count") or 0) + 1
     max_attempts = max(1, int(config.AUTO_RECOVER_MAX_ATTEMPTS))
     if config.AUTO_RECOVER_ENABLED and recovery <= max_attempts:

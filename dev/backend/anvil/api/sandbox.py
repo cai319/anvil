@@ -20,8 +20,13 @@ def sandbox_status(conn=Depends(get_db), auth: Auth = Depends(require_human)):
 
 
 @router.post("/sandbox/self-check")
-def sandbox_self_check(conn=Depends(get_db), auth: Auth = Depends(require_human)):
-    result = sandbox_service.self_check()
+def sandbox_self_check(body: dict | None = None, conn=Depends(get_db),
+                       auth: Auth = Depends(require_human)):
+    """真实金丝雀；``{"force": true}`` 忽略缓存重跑（修复环境后使用）。"""
+    payload = body or {}
+    result = sandbox_service.self_check(
+        conn, force=bool(payload.get("force")),
+        runtime_id=payload.get("runtime_id") or None)
     ledger_service.emit_audit(
         conn, role_slug="human", task_id=None,
         action="sandbox.self_check", payload=result)

@@ -34,6 +34,7 @@ turn_delay = float(os.environ.get("FAKE_TURN_DELAY", "0.2"))
 context_error = os.environ.get("FAKE_CONTEXT_ERROR", "")
 attachment_chars = int(os.environ.get("FAKE_ATTACHMENT_CHARS", "0"))
 result_text = os.environ.get("FAKE_RESULT_TEXT", "OK")
+tool_error = os.environ.get("FAKE_TOOL_ERROR", "")
 warn_line = os.environ.get("FAKE_WARN_LINE", "")
 exit_once_file = os.environ.get("FAKE_EXIT_ONCE_FILE", "")
 exit_after = float(os.environ.get("FAKE_EXIT_AFTER", "0"))
@@ -95,6 +96,12 @@ for line in sys.stdin:
         ]
     print(json.dumps({"type": "user", "message": {"content": [
         {"type": "tool_result", "content": tool_content}]}}), flush=True)
+    if tool_error:
+        print(json.dumps({"type": "user", "message": {"content": [
+            {"type": "tool_result", "is_error": True,
+             "content": [{"type": "text", "text": tool_error}]}]}}), flush=True)
+        time.sleep(30)
+        continue
     result = {"type": "result", "subtype": "success", "result": result_text}
     if result_usage:
         result["usage"] = json.loads(result_usage)
@@ -1258,6 +1265,26 @@ def test_exit_callback_carries_only_current_run(env):
     assert _wait(lambda: _run_status(mgr.db_path, rb["id"]) == "suspended", timeout=10)
     assert seen == [("qa-role", 0, ra["id"])]
     assert _run_status(mgr.db_path, rb["id"]) == "suspended"
+
+
+def test_tool_eperm_exit_callback_carries_runtime_env_error(env):
+    """工具级 EPERM 启动失败：reader 立即终止进程并上报 runtime_env_error。"""
+    conn, mgr, fake, log = env
+    seen: list[tuple] = []
+    mgr.on_exit = lambda role, code, run_id, failure_class=None, failure_message=None: (
+        seen.append((role, code, run_id, failure_class, failure_message)))
+    run = runs_service.create_run(conn, "qa-role", task_id=None)
+    _deliver(mgr, conn, fake, log, run["id"], "first", extra_env={
+        "FAKE_TOOL_ERROR": (
+            "EPERM: operation not permitted, mkdir '/private/tmp/claude-501/x'"),
+    })
+    assert _wait(lambda: seen, timeout=10), "EPERM 应触发 on_exit"
+    role, _code, run_id, failure_class, failure_message = seen[0]
+    assert role == "qa-role" and run_id == run["id"]
+    assert failure_class == "runtime_env_error"
+    assert "EPERM" in failure_message
+    # 进程被终止且上下文按失败处理（不 --resume 坏会话）。
+    assert _wait(lambda: not mgr.status("qa-role")["alive"], timeout=5)
 
 
 def test_terminal_queued_run_is_not_delivered(env):

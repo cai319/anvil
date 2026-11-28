@@ -215,7 +215,36 @@ export function Governance() {
                     .finally(() => setChecking(false));
                 }}
               >{checking ? "自检中…" : "重新自检"}</button>
+              <button
+                disabled={checking}
+                title="忽略金丝雀缓存，真实启动目标运行时执行一次 Bash 工具调用"
+                onClick={() => {
+                  setChecking(true);
+                  api.runSandboxSelfCheck(true)
+                    .then(setSelfCheck)
+                    .catch((e) => setError(String(e)))
+                    .finally(() => setChecking(false));
+                }}
+              >{checking ? "金丝雀中…" : "强制金丝雀"}</button>
             </div>
+            {sandbox.runtime_capabilities && (
+              <p className={
+                sandbox.runtime_capabilities.unavailable.length > 0 ? "error" : "muted"
+              }>
+                运行时金丝雀（
+                {sandbox.runtime_capabilities.os} /{" "}
+                {sandbox.runtime_capabilities.sandbox_backend}）：
+                {sandbox.runtime_capabilities.runtimes.length === 0
+                  ? "尚未注册运行时"
+                  : sandbox.runtime_capabilities.runtimes.map((rt) => {
+                    const state = rt.available ? "可用"
+                      : rt.canary && !rt.canary.ok ? "不可用" : "未检查";
+                    const detail = !rt.available && rt.canary?.detail
+                      ? `（${rt.canary.detail}）` : "";
+                    return `${rt.display_name}：${state}${detail}`;
+                  }).join(" · ")}
+              </p>
+            )}
             <p className="muted">
               严格档（PoC/动态验证）：
               {sandbox.strict.available

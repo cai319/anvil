@@ -1771,6 +1771,44 @@ def edit_clarification_brief(tid: str, body: dict, conn=Depends(get_db),
     return state
 
 
+@router.get("/{tid}/clarification/workspace-brief")
+def preview_workspace_brief(tid: str, conn=Depends(get_db),
+                            auth: Auth = Depends(require_human)):
+    """human 只读查看工作区 brief.json；不写 DB、不自动导入。"""
+    _assert_session_task(conn, auth, tid)
+    try:
+        return services.clarification.preview_workspace_brief(conn, tid)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="task not found")
+
+
+@router.post("/{tid}/clarification/import")
+def import_workspace_brief(tid: str, body: dict, conn=Depends(get_db),
+                           auth: Auth = Depends(require_human)):
+    """human 查看后导入为草稿；必须显式 reviewed=true，导入后仍需结构化确认。"""
+    _assert_session_task(conn, auth, tid)
+    body = body or {}
+    if not bool(body.get("reviewed")):
+        raise HTTPException(
+            status_code=422,
+            detail="reviewed=true is required after previewing the workspace brief")
+    brief = body.get("brief")
+    if brief is not None and not isinstance(brief, dict):
+        raise HTTPException(status_code=422, detail="brief must be a JSON object")
+    try:
+        result = services.clarification.import_workspace_brief(
+            conn, tid, brief=brief, reviewed=True, actor="human",
+            reason=body.get("reason"))
+    except LookupError:
+        raise HTTPException(status_code=404, detail="task not found")
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    events.publish("task", {"id": tid, "kind": "clarification_brief"})
+    return result
+
+
 @router.get("/{tid}/clarification/versions")
 def clarification_versions(tid: str, conn=Depends(get_db),
                            auth: Auth = Depends(get_auth)):

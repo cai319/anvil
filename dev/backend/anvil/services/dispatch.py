@@ -15,6 +15,7 @@ from .. import config
 from ..util import ConflictError, jdumps, new_id, now_iso
 from . import context_router, ledger, roles as roles_service
 from . import runs as runs_service
+from . import sandbox as sandbox_service
 from . import tasks as tasks_service
 
 
@@ -144,6 +145,13 @@ def create_dispatch(conn: sqlite3.Connection, *, source_task_id: str,
         governance.check_claim_allowed(conn, source, target_role)
     except ConflictError as exc:
         raise DispatchError(f"dispatch blocked by governance: {exc}") from exc
+
+    # 运行时环境门禁必须在创建任何 task/dispatch/run 之前完成：金丝雀缓存写入
+    # 会 commit，若放在部分写入之后失败，rollback 无法收回已提交的孤儿 task。
+    ready, unavailable = sandbox_service.runtime_dispatch_guard(
+        conn, role_slug=target_role)
+    if not ready:
+        raise DispatchError(f"target runtime unavailable: {unavailable}")
 
     source_workflow_id = None
     if source_run_id:

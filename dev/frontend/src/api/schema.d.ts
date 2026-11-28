@@ -5478,6 +5478,10 @@ export interface components {
             run_status?: string | null;
             /** Run Failure Class */
             run_failure_class?: string | null;
+            /** Run Failure Message */
+            run_failure_message?: string | null;
+            /** Run Suspend Kind */
+            run_suspend_kind?: string | null;
             /** Submitted Summary */
             submitted_summary?: string | null;
             /** Created At */
@@ -6585,6 +6589,10 @@ export interface components {
             timeout_seconds?: number | null;
             /** Failure Class */
             failure_class?: string | null;
+            /** Failure Message */
+            failure_message?: string | null;
+            /** Suspend Kind */
+            suspend_kind?: string | null;
             /**
              * Context Reset Count
              * @default 0
@@ -6842,6 +6850,10 @@ export interface components {
             run_status?: string | null;
             /** Run Failure Class */
             run_failure_class?: string | null;
+            /** Run Failure Message */
+            run_failure_message?: string | null;
+            /** Run Suspend Kind */
+            run_suspend_kind?: string | null;
             /**
              * Blocking
              * @default false

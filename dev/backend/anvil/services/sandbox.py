@@ -21,6 +21,7 @@ from typing import Any
 from .. import config
 from ..db import open_conn
 from ..util import jloads, now_iso
+from ..sandbox import canary as sandbox_canary
 from ..sandbox import capabilities as sandbox_capabilities
 from ..sandbox import env as sandbox_env
 from ..sandbox import jobs as sandbox_jobs
@@ -277,6 +278,125 @@ def get_backend_by_name(name: str | None) -> Any:
     return current
 
 
+# ---- 运行时金丝雀 / 能力矩阵 ----------------------------------------------
+
+def runtime_id_for_role(conn, role_slug: str | None) -> tuple[str, dict]:
+    """角色的运行时 id 与冻结/实时策略。
+
+    角色不存在时回退默认运行时；这样 API 直接 ``POST /runs`` 也会经过同一道门。
+    """
+    effective: dict = {}
+    if conn is not None and role_slug:
+        try:
+            from . import roles as roles_service
+            effective = roles_service.effective_config(conn, role_slug) or {}
+        except Exception:  # noqa: BLE001 —— 配置读取失败不应掩盖运行时门禁
+            effective = {}
+    projection = effective.get("projection") or {}
+    rt = projection.get("runtime") if isinstance(projection, dict) else None
+    runtime_id = rt.get("id") if isinstance(rt, dict) else rt
+    return str(runtime_id or config.DEFAULT_RUNTIME), effective
+
+
+def runtime_policy(conn, role_slug: str | None, task: dict | None = None):
+    from ..sandbox import policy as sandbox_policy
+    _runtime_id, effective = runtime_id_for_role(conn, role_slug)
+    return sandbox_policy.resolve_for_run(effective, task)
+
+
+def runtime_dispatch_guard(conn, *, role_slug: str | None = None,
+                           runtime_id: str | None = None,
+                           task: dict | None = None,
+                           policy=None) -> tuple[bool, str]:
+    """派发前检查：该 runtime+policy+OS+backend 组合是否可用。
+
+    - host-unsafe / sandbox disabled：开发/测试旁路，不跑金丝雀（绝不能作为修复手段）。
+    - 其余情况读缓存；缺缓存或键变化时真实跑一次金丝雀。
+    - 失败返回可直接展示给 human 的原因，调用方应拒绝本次派发。
+    """
+    if not config.SANDBOX_ENABLED or config.SANDBOX_MODE == "host-unsafe":
+        return True, ""
+    if runtime_id is None:
+        runtime_id, _effective = runtime_id_for_role(conn, role_slug)
+    policy_obj = policy or runtime_policy(conn, role_slug, task)
+    try:
+        result = sandbox_canary.run_canary(
+            conn, runtime_id, policy=policy_obj, backend=get_backend())
+    except Exception as exc:  # noqa: BLE001 —— 检查本身失败也要拒绝派发
+        return False, (
+            f"运行时 {runtime_id} 环境检查失败：{exc}。"
+            "修复后运行 `anvil sandbox self-check --force` 刷新能力矩阵。")
+    if result.get("ok"):
+        return True, ""
+    detail = str(result.get("detail") or "金丝雀失败").strip()
+    return False, (
+        f"运行时 {runtime_id} 在当前环境（{result.get('key_parts', {}).get('os', '-')}"
+        f" / {result.get('key_parts', {}).get('sandbox_backend', '-')}）不可用：{detail}。"
+        "本次不会派发/启动 run。修复后运行 `anvil sandbox self-check --force` "
+        "刷新能力矩阵；environment 类失败可在修复后自动恢复。")
+
+
+def capability_matrix(conn=None) -> dict:
+    """运行时 × 沙箱后端/OS 的实际可用性（缓存视图，不触发模型调用）。"""
+    backend = get_backend()
+    policy_obj = runtime_policy(conn, None)
+    parts = sandbox_canary.key_parts(
+        "*", "*", policy_obj.policy_digest, getattr(backend, "name", "host"))
+    runtimes: list[dict] = []
+    try:
+        from . import runtime as runtime_service
+        records = runtime_service.list_all(conn) if conn is not None else []
+        if not records:
+            records = [
+                {"id": rid, "display_name": d.get("display_name") or rid,
+                 "executable_path": d.get("executable"), "detected_version": None,
+                 "status": None}
+                for rid, d in runtime_service.load_definitions().items()
+            ]
+        for rt in records:
+            rid = str(rt.get("id") or "")
+            if not rt.get("executable_path"):
+                info = sandbox_canary.runtime_info(conn, rid)
+                rt = {**rt, "executable_path": info.get("executable")}
+            canary = sandbox_canary.load_latest(conn, rid)
+            key_matches = bool(
+                canary
+                and canary.get("policy_digest") == policy_obj.policy_digest
+                and canary.get("sandbox_backend") == getattr(backend, "name", "host")
+                and canary.get("os") == sandbox_canary.os_tag())
+            runtimes.append({
+                "runtime_id": rid,
+                "display_name": rt.get("display_name") or rid,
+                "executable_path": rt.get("executable_path"),
+                "detected_version": rt.get("detected_version"),
+                "status": rt.get("status"),
+                "canary": canary,
+                "key_matches": key_matches,
+                "available": bool(canary and canary.get("ok") and key_matches),
+            })
+    except Exception as exc:  # noqa: BLE001 —— 状态接口不能因探测失败而 500
+        return {"os": sandbox_canary.os_tag(), "sandbox_backend": getattr(backend, "name", "host"),
+                "policy_digest": policy_obj.policy_digest, "runtimes": [],
+                "error": str(exc)}
+    unavailable = [
+        r["runtime_id"] for r in runtimes
+        if r.get("canary") and not r.get("canary", {}).get("ok")
+        and r.get("key_matches")]
+    unchecked = [
+        r["runtime_id"] for r in runtimes
+        if not r.get("canary") or not r.get("key_matches")
+    ]
+    return {
+        "os": sandbox_canary.os_tag(),
+        "sandbox_backend": getattr(backend, "name", "host"),
+        "policy_digest": policy_obj.policy_digest,
+        "runtimes": runtimes,
+        "unavailable": unavailable,
+        "unchecked": unchecked,
+        "key_template": parts,
+    }
+
+
 # ---- 状态 / 自检 -----------------------------------------------------------
 
 def status(conn=None) -> dict:
@@ -296,6 +416,9 @@ def status(conn=None) -> dict:
     strict_runner, strict_ok, strict_detail = strict_backend.select_runner()
     if not strict_ok:
         warnings.append("strict_unavailable")
+    matrix = capability_matrix(conn)
+    for rid in matrix.get("unavailable") or []:
+        warnings.append(f"runtime_unavailable:{rid}")
     counts: dict = {}
     if conn is not None:
         try:
@@ -322,11 +445,18 @@ def status(conn=None) -> dict:
         },
         "substrates": substrates,
         "warnings": warnings,
+        "runtime_capabilities": matrix,
         "counts": counts,
     }
 
 
-def self_check() -> dict:
+def self_check(conn=None, *, force: bool = False,
+               runtime_id: str | None = None) -> dict:
+    """轻量自检 + 目标运行时的真实金丝雀。
+
+    金丝雀会消耗少量模型调用；默认读缓存，``force=True`` 或版本/策略/OS/后端
+    变化时重跑。没有 conn 时退化为旧行为（只做轻量检查，不落库）。
+    """
     backend = get_backend()
     try:
         caps = backend.capabilities().as_dict()
@@ -348,7 +478,16 @@ def self_check() -> dict:
     # 但仍要显式提示，避免把“从 agent shell 启动”当成正常部署方式。
     markers = sandbox_env.host_session_env(os.environ)
     checks["host_session_env"] = markers
-    warnings = list(status().get("warnings") or [])
+    if conn is not None:
+        rid = runtime_id or config.DEFAULT_RUNTIME
+        canary = sandbox_canary.run_canary(
+            conn, rid, policy=runtime_policy(conn, None), force=force,
+            backend=backend)
+        checks["runtime_canary"] = canary
+        checks["capability_matrix"] = capability_matrix(conn)
+        if not canary.get("ok"):
+            ok = False
+    warnings = list(status(conn).get("warnings") or [])
     if markers:
         warnings.append(
             "backend started from an agent shell; host session env will be "

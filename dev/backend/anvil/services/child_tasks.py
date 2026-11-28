@@ -18,7 +18,8 @@ DISPATCH_TASK_TYPES = ("dispatch", "dispatched")
 
 def _latest_run(conn: sqlite3.Connection, task_id: str):
     return conn.execute(
-        "SELECT id, status, failure_class FROM runs WHERE task_id=? "
+        "SELECT id, status, failure_class, failure_message, suspend_kind "
+        "FROM runs WHERE task_id=? "
         "ORDER BY started_at DESC, rowid DESC LIMIT 1", (task_id,)).fetchone()
 
 
@@ -69,6 +70,12 @@ def _base(*, relation_type: str, relation_id, task_id: str, title, status, type_
         "run_id": run["id"] if run is not None else None,
         "run_status": run["status"] if run is not None else None,
         "run_failure_class": run["failure_class"] if run is not None else None,
+        "run_failure_message": (run["failure_message"]
+                                if run is not None and "failure_message" in run.keys()
+                                else None),
+        "run_suspend_kind": (run["suspend_kind"]
+                             if run is not None and "suspend_kind" in run.keys()
+                             else None),
         "blocking": blocking,
         "dispatch_status": dispatch_status,
         "return_pending": return_pending,
@@ -85,7 +92,9 @@ def _delegation_child(d: dict) -> dict:
     run = None
     if d.get("run_id"):
         run = {"id": d["run_id"], "status": d.get("run_status"),
-               "failure_class": d.get("run_failure_class")}
+               "failure_class": d.get("run_failure_class"),
+               "failure_message": d.get("run_failure_message"),
+               "suspend_kind": d.get("run_suspend_kind")}
     return _base(
         relation_type=RELATION_DELEGATION,
         relation_id=None,

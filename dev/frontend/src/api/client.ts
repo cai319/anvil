@@ -619,6 +619,24 @@ export const api = {
   saveClarificationDraft: (taskId: string, brief: IntentBrief): Promise<ClarificationState> =>
     req("PUT", `/tasks/${taskId}/clarification/draft`, { brief })
       .then((r) => json<ClarificationState>(r)),
+  /** human 只读查看工作区 brief.json；不会自动导入。 */
+  previewWorkspaceBrief: (taskId: string): Promise<{
+    exists: boolean;
+    path: string | null;
+    relative_path: string | null;
+    brief: IntentBrief | null;
+    error: string | null;
+  }> => authFetch(`${BASE}/tasks/${taskId}/clarification/workspace-brief`)
+    .then((r) => json(r)),
+  /** human 查看后导入为草稿；仍需走 confirmClarification 的结构化确认。 */
+  importWorkspaceBrief: (taskId: string, brief: IntentBrief): Promise<{
+    imported: boolean;
+    requires_confirmation: boolean;
+    source: string | null;
+    clarification: ClarificationState;
+  }> => req("POST", `/tasks/${taskId}/clarification/import`, {
+    reviewed: true, brief,
+  }).then((r) => json(r)),
   confirmClarification: (taskId: string, body: {
     brief?: IntentBrief;
     weight?: WorkflowWeight;
@@ -824,8 +842,8 @@ export const api = {
     authFetch(`${BASE}/runs/${id}/sandbox`).then((r) => json<RunSandbox>(r)),
   getSandboxStatus: (): Promise<SandboxStatus> =>
     authFetch(`${BASE}/sandbox/status`).then((r) => json<SandboxStatus>(r)),
-  runSandboxSelfCheck: (): Promise<SandboxSelfCheck> =>
-    req("POST", "/sandbox/self-check").then((r) => json<SandboxSelfCheck>(r)),
+  runSandboxSelfCheck: (force = false): Promise<SandboxSelfCheck> =>
+    req("POST", "/sandbox/self-check", { force }).then((r) => json<SandboxSelfCheck>(r)),
   provisionSandbox: (consent = true): Promise<{
     ok: boolean; distro?: string; returncode?: number; log?: string;
   }> =>
@@ -1708,6 +1726,27 @@ export interface SandboxStatus {
   };
   substrates: Record<string, boolean | string>;
   warnings: string[];
+  runtime_capabilities?: {
+    os: string;
+    sandbox_backend: string;
+    policy_digest: string;
+    unavailable: string[];
+    unchecked: string[];
+    runtimes: {
+      runtime_id: string;
+      display_name: string;
+      detected_version: string | null;
+      key_matches: boolean;
+      available: boolean;
+      canary: {
+        ok: boolean;
+        skipped: boolean;
+        detail: string | null;
+        cli_version: string;
+        checked_at: string;
+      } | null;
+    }[];
+  };
   counts: Record<string, number>;
 }
 

@@ -420,6 +420,9 @@ class _Role:
     context_overflow_reason: str | None = None
     # 触发溢出的进程；旧 reader 输掉进程竞态时不能被后来者消费。
     context_overflow_proc: subprocess.Popen | None = None
+    # 工具级启动失败（EPERM/ENOENT/sandbox deny）：run 判 runtime_env_error，不 suspend。
+    runtime_env_error: str | None = None
+    runtime_env_error_run: str | None = None
     # 进程世代：每次 spawn +1，用于防止旧 reader 回写新进程状态。
     proc_generation: int = 0
     # v1.60 沙箱实例（与当前进程一对一；kill/退出后清空）。

@@ -14,7 +14,7 @@ from .. import config
 from ..db import open_conn
 from ..sandbox.ports import SpawnRequest
 from ..util import decode_child_output, jdumps, now_iso
-from . import sandbox as sandbox_service
+from . import runtime_errors, sandbox as sandbox_service
 from .daemon_common import (
     _Role, _SpawnSpec, _attachment_chars, _clean_env,
     _is_context_overflow, _is_payload_overflow, clear_session,
@@ -247,6 +247,27 @@ class RuntimeProcessMixin:
                     continue
                 if r.proc is not proc:
                     return
+                # 工具级启动失败（EPERM/ENOENT/sandbox deny）：这是环境坏了，不是
+                # “等待下一条消息”。立即终止进程并给 run 打 runtime_env_error，
+                # 让 process_exit 判失败，而不是在 55 秒后静默 suspend。
+                env_reason = runtime_errors.runtime_env_error_from_event(ev)
+                if env_reason:
+                    with r.lock:
+                        if r.proc is not proc:
+                            return
+                        r.runtime_env_error = env_reason
+                        r.runtime_env_error_run = r.current_run_id
+                    self._append_run_log(
+                        r, f"[anvil] runtime environment error: {env_reason}")
+                    self._log(
+                        r.role,
+                        "[anvil] runtime environment error; stopping role process: "
+                        + env_reason)
+                    try:
+                        proc.terminate()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    break
                 self._track_subagent(r, ev, proc)
                 self._append_run_log(r, self._format_event(ev))
                 # 图片/附件不计 token，但会计入请求体；累计到阈值时主动换新会话，
@@ -407,6 +428,8 @@ class RuntimeProcessMixin:
         overflow_run_id: str | None = None
         overflow_reason: str | None = None
         exit_run_id: str | None = None
+        env_error: str | None = None
+        env_error_run: str | None = None
         was_current = False
         suppress = False
         reset_key: str | None = None
@@ -416,8 +439,13 @@ class RuntimeProcessMixin:
                 return
             was_current = True
             suppress = bool(r.suppress_exit)
+            # 启动失败是环境错误：不复用坏上下文，下一轮走新会话（CIC）。
+            env_error = r.runtime_env_error
+            env_error_run = r.runtime_env_error_run or r.current_run_id
+            r.runtime_env_error = None
+            r.runtime_env_error_run = None
             auto_reset = (
-                code not in (None, 0)
+                (code not in (None, 0) or bool(env_error))
                 and not suppress
                 and not self._shutting_down
                 and config.RESET_SESSION_ON_FAILURE
@@ -450,6 +478,8 @@ class RuntimeProcessMixin:
         conn = open_conn(self.db_path)
         try:
             note = f"auto reset after exit code {code}" if auto_reset else None
+            if env_error:
+                note = f"runtime_env_error: {env_error}"
             if overflow_run_id:
                 note = f"context overflow ({overflow_reason}) run={overflow_run_id}"
             self._db_upsert(conn, r, status="dead", pid=None, error=note)
@@ -481,6 +511,16 @@ class RuntimeProcessMixin:
         elif self.on_exit and not self._shutting_down and not suppress:
             try:
                 # 只把实际执行的 run 交给编排器；排队 run 由 queue recovery 处理。
+                # 环境错误即使 CLI 退出码为 0 也必须作为失败泵入。
+                target_run = env_error_run or exit_run_id
+                if env_error:
+                    self.on_exit(r.role, 0 if code is None else code, target_run,
+                                 failure_class="runtime_env_error",
+                                 failure_message=env_error)
+                else:
+                    self.on_exit(r.role, 0 if code is None else code, target_run)
+            except TypeError:
+                # 兼容测试/旧注入回调的三参签名。
                 self.on_exit(r.role, 0 if code is None else code, exit_run_id)
             except Exception:  # noqa: BLE001
                 pass

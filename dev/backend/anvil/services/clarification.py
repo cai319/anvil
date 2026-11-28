@@ -526,6 +526,100 @@ def update_brief(conn: sqlite3.Connection, task_id: str, brief: dict, *,
     return get_state(conn, task_id)
 
 
+# ---- 工作区简报：只读预览 + 人工确认后导入 --------------------------------
+
+WORKSPACE_BRIEF_CANDIDATES = ("brief.json", ".anvil/intent-brief.json")
+WORKSPACE_BRIEF_MAX_BYTES = 256_000
+
+
+def preview_workspace_brief(conn: sqlite3.Connection, task_id: str) -> dict:
+    """只读预览工作区里的 ``brief.json`` / ``.anvil/intent-brief.json``。
+
+    绝不写入 DB。Cindy 在运行时环境失败时可能把草稿写在工作区（v1.62.1 事故现场），
+    但它只能作为 human 查看后手动导入的候选，不能自动成为真相源。
+    """
+    _require_task(conn, task_id)
+    workspace = task_workspace.path_for(task_id)
+    for rel in WORKSPACE_BRIEF_CANDIDATES:
+        path = workspace / rel
+        if not path.is_file():
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        if size > WORKSPACE_BRIEF_MAX_BYTES:
+            return {
+                "exists": True, "path": str(path), "relative_path": rel,
+                "brief": None, "error": (
+                    f"工作区简报过大（{size} 字节）；请人工检查后手工粘贴导入。"),
+            }
+        try:
+            brief = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            return {
+                "exists": True, "path": str(path), "relative_path": rel,
+                "brief": None, "error": f"无法解析工作区简报：{exc}",
+            }
+        if not isinstance(brief, dict):
+            return {
+                "exists": True, "path": str(path), "relative_path": rel,
+                "brief": None, "error": "工作区简报必须是 JSON 对象",
+            }
+        return {
+            "exists": True, "path": str(path), "relative_path": rel,
+            "brief": brief, "error": None,
+        }
+    return {"exists": False, "path": None, "relative_path": None,
+            "brief": None, "error": None}
+
+
+def import_workspace_brief(conn: sqlite3.Connection, task_id: str, *,
+                           brief: dict | None = None,
+                           reviewed: bool = False,
+                           actor: str = "human",
+                           reason: str | None = None) -> dict:
+    """human 查看后导入为**草稿**；导入不等于确认。
+
+    - 只有 human 能调用；
+    - 必须 ``reviewed=True``（两步：先 preview，再带 reviewed 导入）；
+    - 只用显式传入或 preview 得到的结构，不自动读取/落库；
+    - 导入后仍走既有结构化确认（POST /clarification/confirm）。
+    """
+    _require_human(actor)
+    if not reviewed:
+        raise ValueError(
+            "workspace brief import requires reviewed=true after preview")
+    task = _require_task(conn, task_id)
+    status = str(task.get("clarification_status") or "none")
+    if status != "in_progress":
+        raise ConflictError(
+            f"task {task_id} clarification is {status}; start clarification before "
+            "importing a workspace brief")
+    preview = preview_workspace_brief(conn, task_id)
+    chosen = brief if isinstance(brief, dict) else preview.get("brief")
+    if not isinstance(chosen, dict):
+        raise ValueError(
+            preview.get("error") or "no workspace brief found to import")
+    # 先校验结构，避免把坏草稿写进版本历史。
+    _normalize_brief(chosen, strict=False)
+    state = save_draft(
+        conn, task_id, chosen, actor="human",
+        reason=reason or f"imported workspace {preview.get('relative_path') or 'brief'}")
+    ledger.emit(
+        conn, "clarification.workspace_brief_imported", task_id=task_id,
+        actor_type="human", actor="human",
+        payload={"path": preview.get("relative_path"),
+                 "requires_confirmation": True})
+    conn.commit()
+    return {
+        "imported": True,
+        "requires_confirmation": True,
+        "source": preview.get("relative_path"),
+        "clarification": state,
+    }
+
+
 def mark_stale(conn: sqlite3.Connection, task_id: str, *,
                reason: str | None = None, actor: str = "system") -> dict | None:
     """任务定义材料性变更后标记 stale；只在无 workflow 的任务上生效。"""

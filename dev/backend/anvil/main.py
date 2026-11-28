@@ -65,7 +65,8 @@ def _graph_db_path(db_path: str) -> str:
 
 
 def _pump_role_exit(db_path: str, orchestrator, role: str, code: int,
-                    run_id: str | None) -> None:
+                    run_id: str | None, failure_class: str | None = None,
+                    failure_message: str | None = None) -> None:
     """常驻进程退出：只把实际执行的 run 泵进 process_exit。
 
     排队中的 run 仍是 running，但并未被这个进程执行；它们由 daemon 的队列恢复
@@ -85,10 +86,15 @@ def _pump_role_exit(db_path: str, orchestrator, role: str, code: int,
     if row is None:
         return
     try:
-        orchestrator.pump(db_path, row["id"], "process_exit", {
+        payload = {
             "exit_code": code,
             "observed_started_at": row["started_at"],
-        })
+        }
+        if failure_class:
+            payload["failure_class"] = failure_class
+        if failure_message:
+            payload["failure_message"] = failure_message
+        orchestrator.pump(db_path, row["id"], "process_exit", payload)
     except Exception:  # noqa: BLE001
         pass
 
@@ -274,8 +280,12 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         config.PERSISTENT_RUNTIME == "auto" and scheduler_enabled)
     role_daemon = daemon_service.init_manager(path, persistent_enabled)
     if persistent_enabled:
-        def _on_role_exit(role: str, code: int, run_id: str | None = None) -> None:
-            _pump_role_exit(path, orchestrator, role, code, run_id)
+        def _on_role_exit(role: str, code: int, run_id: str | None = None,
+                          failure_class: str | None = None,
+                          failure_message: str | None = None) -> None:
+            _pump_role_exit(path, orchestrator, role, code, run_id,
+                            failure_class=failure_class,
+                            failure_message=failure_message)
         role_daemon.on_exit = _on_role_exit
 
         def _on_role_context_overflow(role: str, run_id: str, reason: str) -> None:

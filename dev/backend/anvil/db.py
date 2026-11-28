@@ -1372,6 +1372,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_decision_verdicts_v1(conn)
     _migrate_stage_slot_v1(conn)
     _migrate_check_ledger_v1(conn)
+    _migrate_runtime_canary_v162(conn)
     conn.commit()
 
 
@@ -3340,4 +3341,39 @@ def _migrate_check_ledger_v1(conn: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_check_ledger_verdict "
         "ON check_ledger(decision_id, check_id) WHERE record_type='verdict'")
     _set_setting(conn, "schema.check_ledger_v1", "1")
+    conn.commit()
+
+
+def _migrate_runtime_canary_v162(conn: sqlite3.Connection) -> None:
+    """v1.62.2 运行时环境金丝雀与 suspend 分类（幂等）。
+
+    - runtime_canaries：按 (runtime, cli_version, policy_digest, os, sandbox_backend)
+      缓存金丝雀结果；任一键变化得到新行，同键覆盖为最新结果。
+    - runs.failure_message：失败原因（例如 runtime_env_error 的 EPERM 现场），
+      供运行/任务卡直接展示，不再只给一个分类枚举。
+    - runs.suspend_kind：区分 waiting_human（不走自动恢复）与 environment/system_restart
+      （修复后可恢复）。
+    """
+    _add_column(conn, "runs", "failure_message TEXT")
+    _add_column(conn, "runs", "suspend_kind TEXT")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS runtime_canaries (
+            id               TEXT PRIMARY KEY,
+            runtime_id       TEXT NOT NULL,
+            cli_version      TEXT NOT NULL,
+            policy_digest    TEXT NOT NULL,
+            os               TEXT NOT NULL,
+            sandbox_backend  TEXT NOT NULL,
+            ok               INTEGER NOT NULL,
+            skipped          INTEGER NOT NULL DEFAULT 0,
+            detail           TEXT,
+            output_tail      TEXT,
+            duration_ms      INTEGER,
+            checked_at       TEXT NOT NULL,
+            UNIQUE (runtime_id, cli_version, policy_digest, os, sandbox_backend)
+        )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runtime_canaries_runtime "
+        "ON runtime_canaries(runtime_id, checked_at DESC)")
+    _set_setting(conn, "schema.runtime_canary_v162", "1")
     conn.commit()
