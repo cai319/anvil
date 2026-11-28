@@ -30,6 +30,12 @@ const CHECK_STATUS_LABEL: Record<string, string> = {
   error: "运行错误",
 };
 
+const CHECK_CLASSIFICATION_LABEL: Record<string, string> = {
+  passed: "通过",
+  valid_red: "合法红",
+  harness_error: "harness 错误",
+};
+
 export function CheckJobsPanel({ taskId }: { taskId: string }) {
   const [jobs, setJobs] = useState<PocJob[]>([]);
   const [open, setOpen] = useState(false);
@@ -152,6 +158,12 @@ export function CheckJobsPanel({ taskId }: { taskId: string }) {
                     {CHECK_STATUS_LABEL[result.status || ""] || result.status}
                   </span>
                 )}
+                {result?.classification && (
+                  <span className={`poc-status check-${result.classification}`}>
+                    {CHECK_CLASSIFICATION_LABEL[result.classification]
+                      || result.classification}
+                  </span>
+                )}
                 <span className="muted">
                   {job.spec?.check?.kind || "check"} · 网络 {job.spec?.network || "none"} · {job.tier || "standard"}
                 </span>
@@ -165,6 +177,10 @@ export function CheckJobsPanel({ taskId }: { taskId: string }) {
                 {result?.collected_count != null && (
                   <span>收集 {result.collected_count} 项</span>
                 )}
+                {result?.collected_baseline != null && (
+                  <span>基线 {result.collected_baseline} 项</span>
+                )}
+                {result?.cause && <span className="error">{result.cause}</span>}
                 {junit && (
                   <span>
                     junit {junit.tests}/{junit.failures}F/{junit.errors}E/{junit.skipped}S

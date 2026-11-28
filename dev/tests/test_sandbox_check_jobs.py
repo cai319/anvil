@@ -68,6 +68,35 @@ def test_parse_check_spec_rejects_junit_traversal():
             check={"kind": "test", "cmd": "true", "junit": ["/abs.xml"]}))
 
 
+def test_parse_check_spec_pytest_adapter_builds_collect_and_run():
+    spec = jobs.parse_check_spec(_check_spec(
+        check={"id": "c1", "kind": "test",
+               "pytest": {"paths": ["tests/test_a.py"],
+                          "args": ["-q"], "plugins": ["pytest_timeout"]}}))
+    assert spec["check"]["pytest"]["paths"] == ["tests/test_a.py"]
+    assert spec["check"]["junit"] == ["junit.xml"]
+    assert spec["check"]["env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+    assert len(spec["phases"]["run"]) == 2
+    collect, run = spec["phases"]["run"]
+    assert "--collect-only" in collect["cmd"]
+    assert "/out/collect.txt" in collect["cmd"]
+    assert "--junit-xml=/out/junit.xml" in run["argv"]
+    assert jobs.environment_hash(spec).startswith("sha256:")
+
+
+def test_parse_check_spec_pytest_validation():
+    with pytest.raises(jobs.JobSpecError):
+        jobs.parse_check_spec(_check_spec(
+            check={"kind": "command", "pytest": {"paths": ["tests"]}}))
+    with pytest.raises(jobs.JobSpecError):
+        jobs.parse_check_spec(_check_spec(
+            check={"kind": "test", "cmd": "pytest",
+                   "pytest": {"paths": ["tests"]}}))
+    with pytest.raises(jobs.JobSpecError):
+        jobs.parse_check_spec(_check_spec(
+            check={"kind": "test", "pytest": {"paths": ["tests"], "x": 1}}))
+
+
 def test_parse_check_spec_bridge_is_relaxed():
     spec = jobs.parse_check_spec(_check_spec(network="bridge"))
     assert spec["profile"] == "relaxed"

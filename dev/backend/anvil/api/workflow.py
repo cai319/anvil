@@ -360,7 +360,8 @@ def submit_step(wid: str, sid: str, body: dict, conn=Depends(get_db),
     try:
         wf = services.workflow.submit_step(
             conn, wid, sid, auth.role or "", body.get("summary"), auth.run_id,
-            body.get("evidence"), body.get("changed_paths"))
+            body.get("evidence"), body.get("changed_paths"),
+            body.get("slice_spec"))
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ConflictError as exc:
