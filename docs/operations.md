@@ -2,6 +2,41 @@
 
 > 本文承接 README 的运维细节：升级、打包、备份/迁移/重置、卸载与清理。
 
+## 升级到 v1.62.0（验收检查与运行上限）
+
+1. 停止后端并备份 `data/`；
+2. 更新代码/安装包，重新执行 `pip install -r backend/requirements.txt` 与
+   `pip install -e agentcli`；
+3. 重启后端。`init_schema` 幂等补齐检查作业、切片 spec/锁定、逐项判定与检查台账
+   所需字段/表，无需手工迁移；
+4. 重新构建前端：`cd frontend && npm run rebuild`；
+5. 验证 `anvil --version` 为 `1.62.0`，并运行 `anvil check template` 与
+   `anvil workflow ledger <wf> --json` 确认新命令可用。
+
+**检查作业与沙箱**：`anvil check` 作业在 standard 档执行，默认 `network=none`。
+需要联网、放宽资源或非默认镜像时按 ADR-0003 由 human 批准；严格档准备与清理见下节。
+Agent 只能对自己绑定的任务创建/读取检查作业，任务队列配额满时返回 HTTP 429。
+
+**检查台账**：`anvil workflow ledger <wf> [--json]` 只读汇总 `N_total`、
+`N_qualified`、有效红、harness 错误红、可机械化占比、假通过输入、人工返工、
+human authority 片占比与 replan/弱化计数。台账只由引擎写入，不接受 agent 覆盖。
+
+**运行上限（环境变量，重启生效）**：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `ANVIL_DIFF_CAP_LINES` | `400` | 每片 diff 行数上限；`0`=不限。超限升级人工，不硬失败 |
+| `ANVIL_TASK_DURATION_CAP_SECONDS` | `0` | 每任务总时长上限（秒）；`0`=只记录、不升级 |
+| `ANVIL_RUN_CAP_ENFORCE` | `1` | `1`=超限升级人工；`0`=只记录不执行（试点阶段一） |
+
+diff 上限初始为 400 行占位，试点阶段一按 P90 重算；时长上限在阶段二基线运行后定值。
+超限只会进入人工收件箱，不会直接判失败。
+
+**依赖与环境**：生产依赖允许变化但会记录 delta，verify 前在 base 代码 + 新依赖集上
+重跑反事实检验：变成通过判检查失效，变成 harness 错误升级人工；测试依赖闭包变化
+与基础环境哈希不一致同样升级人工。升级后首次绿跑若报环境不一致，先确认红跑与绿跑
+使用同一镜像/runner/环境变量，再重新跑红。
+
 ## 升级到 v1.60.0（执行沙箱）
 
 1. 停止后端并备份 `data/`；

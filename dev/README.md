@@ -57,7 +57,7 @@ pip install pytest pytest-asyncio
 pytest tests/ -q
 ```
 
-当前基线：**1346 passed / 64 skipped**。`dev/.venv` 必须安装 `langgraph`，否则
+当前基线：**1550 passed / 64 skipped**。`dev/.venv` 必须安装 `langgraph`，否则
 `conftest` 的 `importorskip` 会静默跳过全部用例；CLI 契约测试需要 `ANVIL_BIN`，
 模型评测需要 `ANVIL_COLLAB_EVAL_CMD`。
 
@@ -74,6 +74,13 @@ anvil task clarify $ANVIL_TASK_ID --file brief.json   # 仅更新简报草稿；
 anvil rsi show --role <slug>
 anvil runtime proposals
 anvil role export <slug> --version <n>
+
+# v1.62：引擎执行验收检查 / 切片 spec / 检查台账
+anvil step submit <wf> <scope-step> --summary "切片 spec" --slice-spec-file spec.json
+anvil step decide <wf> <decision-step> --approve --verdicts-file verdicts.json
+anvil step replan <wf> <slice-step> --reason "..."
+anvil check template|run|list|show|result|logs|artifacts|cancel
+anvil workflow ledger <wf> [--json]
 ```
 
 角色思考强度通过「角色 → 运行时」或 `PUT /roles/{slug}/runtime` 配置（`effort` 字段），
@@ -106,5 +113,5 @@ Windows 安装、运行时发现和 `claude.exe` 注意事项见根 README 的�
 - CLI：[docs/cli-reference.md](../docs/cli-reference.md)
 - 问题板：[docs/issue-board.md](../docs/issue-board.md)
 - 术语：[GLOSSARY.md](../GLOSSARY.md)
-- 变更记录：`docs/v*-release.md`；最新 [v1.60.2](../docs/v1.60.2-release.md)
+- 变更记录：`docs/v*-release.md`；最新 [v1.62.0](../docs/v1.62.0-release.md)
 - 测试说明：[tests/README.md](tests/README.md)

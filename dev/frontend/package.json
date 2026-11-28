@@ -1,7 +1,7 @@
 {
   "name": "anvil-frontend",
   "private": true,
-  "version": "1.60.2",
+  "version": "1.62.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

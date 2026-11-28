@@ -688,3 +688,90 @@ Select-String -Path .\log\anvil.log -Pattern 'tracker|http id=|ERROR|Traceback'
   `~/.claude`、宿主绝对路径写权限或网络的 MCP server 需要显式配置或在
   `host-unsafe` 下排查。
 - 探针失败不会影响角色主流程；检查 `data/sandbox/probes` 是否有残留（正常应被清理）。
+
+---
+
+## 验收检查与判定（v1.62）
+
+v1.62 的验收证据只由引擎产生：scope 提交结构化切片 spec 后，引擎在 base 上跑红、
+verify 上跑绿，decide 逐项记录 `met / unmet / n.a.`。常见 409/失败与处理：
+
+### `slice_spec_required`
+
+- 原因：slice scope 步骤没有提交 `--slice-spec-file`，或 replan 后尚未重新提交 spec。
+- 处理：用 `anvil step submit <wf> <scope-step> --slice-spec-file spec.json` 重新提交。
+  spec 顶层字段：`acceptance`、`seam`、`out_of_scope`、`contract`、`deliverables`、
+  `stubs`；每个验收项需要稳定的 `id`、`kind`、`criterion` 与结构化 `verification`。
+
+### `slice_spec_unlockable`
+
+- 原因：spec 结构可解析但无法锁定。最常见是 `command` 验收项没有声明断言失败
+  `exit_code`（或既无 `cmd` 也无 `argv`）。
+- 处理：按错误指出的 `acceptance[i]` 补 `verification.exit_code` 与 `cmd`/`argv`；
+  test 项需提供 `verification.pytest.paths`；file_assert 需提供 `verification.path`。
+  `manual` 项不需要引擎执行，但必须能被 decide 判定。
+
+### `lock_violation` / `lock_scope_conflict`
+
+- 原因：execute 改动了锁定集合（测试文件、运行器配置段、独立 runner 配置、测试依赖组、
+  stub 签名），或在检查目录新增文件；`lock_scope_conflict` 表示该片 `scope_paths`
+  与锁定集合相交。
+- 处理：execute 只填实现，不改签名、测试与配置。范围/验收确需调整时走
+  `anvil step replan`，不要直接改文件绕过锁定。stub 签名变化按 AST 哈希检测；
+  只改函数体不改签名是允许的。
+
+### `verdict_unknown` / `acceptance_unmet`
+
+- 原因：decide 通过时仍有验收项状态为 `unknown` 或 `unmet`。`unknown` 通常是引擎
+  test/command/file_assert 项没有拿到绿跑结果（检查未跑、harness 错误或环境不一致）；
+  `unmet` 是引擎明确判定未满足，或 manual 项被判 `unmet`。
+- 处理：先看 `anvil check result <JOB>` 与 `anvil workflow ledger <wf> --json`，
+  区分“检查没跑起来”和“真的没过”。manual 项补 `--verdicts-file`；
+  引擎项不能手工覆盖，需要先让绿跑成功。确需改验收口径走 `step replan`。
+
+### `plan_gate_blocked`
+
+- 原因：`plan_slices` 人工门开启时，评审包缺 `slices` 列表，或 Brief 覆盖矩阵校验
+  未通过（有 Brief acceptance 既未被切片覆盖也未被显式 deferred，或 non-goals 与
+  out-of-scope/scope_paths 冲突）。
+- 处理：补齐 `plan_json` 的切片与 `deferred` 理由，重新提交 plan；human 批准前不会
+  展开任何可执行步骤。
+
+### `replan_weakening_requires_human` / `replan_limit_escalated`
+
+- `replan_weakening_requires_human`：这次 replan 删除了检查、把检查降为 `manual`，
+  或修改断言但没有新的红证据。必须由 human 批准（`--approve` 或 human 身份）。
+- `replan_limit_escalated`：同一片已经 replan 过一次；第二次必须人工批准。
+- 处理：提供新的 `--red-evidence <job-id>` 证明断言仍成立，或由 human 确认弱化。
+  replan 后 scope 与下游回到 `pending`，必须重新提交 spec 并重跑红校验。
+
+### 检查作业失败 `failure_reason`
+
+| `failure_reason` | 含义 | 处理 |
+|---|---|---|
+| `check_failed` | 断言失败（exit 非 0 且不是 harness 错误） | 目标行为未满足；正常红/失败 |
+| `check_signal` | 被信号终止 | 看 `anvil check logs <JOB>`；崩溃/OOM/外部 kill |
+| `check_timeout` | 超时 | 调大 spec 超时或缩小检查范围；超时不算合法红 |
+| `check_error` | harness/执行错误（导入、收集、用法、环境） | 修检查或环境，不消耗 fix 预算 |
+
+### `collected_count_regressed`
+
+- 原因：绿跑收集到的测试数少于红跑基线，或新增了 skip（pytest 退出码 0 也判失败）。
+  常见于删测试、`importorskip` 静默跳过、改 pytest 配置或插件未加载。
+- 处理：恢复测试或显式声明所需插件（spec 中 `verification.pytest.plugins`）；
+  不要通过减少测试数让检查“变绿”。
+
+### 环境/依赖不匹配
+
+- 绿跑前引擎要求基础环境哈希（镜像 digest、runner 命令、环境变量）与红跑一致；
+  不一致时拒绝绿跑、该检查保持 `unknown`。先确认两次运行使用同一镜像/runner/环境变量。
+- 生产依赖变化会记录 delta 并在 base 代码 + 新依赖集上重跑反事实检验：
+  变成通过 → 检查失效；变成 harness 错误 → 升级人工。
+- 测试依赖闭包变化（`dependency_test_closure_changed`）与 `pytest11` entry point
+  变化会升级人工；不要当作普通通过。
+
+### HTTP 429（检查作业队列配额）
+
+- 原因：该任务的检查作业排队/运行数达到配额上限。
+- 处理：等现有作业结束，或 `anvil check cancel <JOB>` 取消不再需要的作业；
+  不要并发刷单。429 是临时状态，不是检查失败。

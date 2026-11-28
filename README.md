@@ -6,7 +6,7 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **前端**：React + TypeScript + Vite
 - **Agent CLI**：`anvil`，Agent 在自己的工具循环里调用它上报状态
 - **地址**：`http://127.0.0.1:7317`（仅回环）
-- **当前版本**：v1.60.2（执行沙箱、受控 PoC、Windows WSL2 严格档、MCP/RSI 沙箱化；修复下拉居中、澄清问题送达提示与轮次口径）
+- **当前版本**：v1.62.0（引擎执行验收检查与切片契约锁定：红/绿校验、锁定集合、plan 人工门、逐项判定、显式 replan、检查台账与运行上限）
 
 > 内部架构、设计、ADR 与实现状态文档仅本地保留，不随仓库发布。
 
@@ -31,6 +31,7 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **规划前澄清**：Cindy 首次规划前分轮提问（每轮 1–3 问，Cindy 主动提问最多 10 轮，第 10 轮后收束；human 的追问与修正不消耗轮次），产出可确认的任务简报；未确认或过期时服务端拒绝 workflow / workflow_revision 草案。已有 workflow、已执行、非 `todo` 任务不进入澄清。
 - **任务与工作流**：任务板、认领/租约、多角色协作；Cindy 规划 workflow，人类批准后按依赖执行。角色建议必须先于 workflow 审批解决：pending 建议阻塞审批，`authorize` 建议批准后由 planner 创建/绑定角色，完成前审批保持锁定。
 - **切片闭环**：`plan_slices + loop`。Cindy 定义 loop 的角色/阶段；运行期切片只决定粒度与轮数，不能覆盖角色。
+- **引擎执行验收检查（v1.62）**：切片 scope 用结构化 spec 声明验收项（test / command / file_assert / manual），引擎在 base 上跑红、在 verify 上跑绿；只有断言失败算合法红，导入/收集、超时、信号等 harness 错误不消耗 fix 预算。锁定集合固定测试文件、运行器配置、测试依赖组与 stub 签名，execute 不能改考题；decide 逐项记录 `met / unmet / n.a.`，存在 `unknown` 不允许通过；manual 占比超过 30% 时该片判权归 human。
 - **记忆与知识**：`PRINCIPLES.md`（耐久准则）+ 角色经验卡 + FTS5 + 分层知识作用域
   （频道 / 主题知识库 / 任务级知识库 / 角色 / 共享）；知识卡模板、审批、版本、过期/复核/冲突检测；
   角色知识必须经过“成功实践 + 提炼”门控。任务起始上下文以角色画像与能力为主，历史知识按
@@ -192,6 +193,31 @@ anvil init
 
   Cindy 重新提交草案；新草案待审期间，旧 loop 下的 `step plan` 会被拒绝。
 
+**v1.62 切片验收链**（`plan_slices + loop`，按依赖顺序）：
+
+1. **plan 门（可选）**：`plan_slices` 可设为人工门。提交后只保存 `plan_json` 并生成评审包，
+   展示切片表、Brief 覆盖矩阵（每条 Brief acceptance 被切片覆盖或被显式 deferred）、
+   manual 预估与 enabling 标记；human 批准后才展开切片，未批准不产生可执行步骤。
+2. **scope 锁定**：scope 步骤用 `--slice-spec-file` 提交结构化切片 spec（验收项、seam、
+   out-of-scope、contract、交付物、stub 签名）。引擎锁定测试文件、运行器配置段、
+   测试依赖组与 stub 签名 AST 哈希；execute 的 `scope_paths` 必须与锁定集合不相交。
+   绿地切片写统一抛 `NotImplementedError` 的接口 stub。
+3. **引擎红校验**：引擎在 base 提交上执行 test / command / file_assert 检查并记录证据
+   （命令、退出码、信号、超时、junit 摘要、收集数、环境哈希）。只有
+   `AssertionError` / `NotImplementedError` 算合法红；其他失败是 harness 错误。
+4. **execute**：只填实现，不改锁定文件与签名；生产依赖可变化但会被记录，测试依赖闭包
+   变化及反事实检验异常会升级人工。
+5. **verify 绿跑**：引擎在 verify 阶段重跑同一检查，测试数少于基线或新增 skip 直接判失败；
+   verify 只整理证据，不做通过判定。
+6. **decide 逐项判定**：decision 步骤用 `--verdicts-file` 记录每项 `met / unmet / n.a.`
+   与证据引用；存在 `unknown` 或 `unmet` 时阻止通过。manual 项由 decide 判定。
+7. **显式 replan**：验收口径需要调整时用 `anvil step replan`，必须写原因；删除检查、
+   把检查降为 manual、修改断言但无新红证据属于弱化，需 human 批准。每片最多 1 次，
+   重开后必须重新提交 spec 并重跑红校验。
+
+新 loop 模板要求 `decide.role ≠ verify.role`；存量 decide=verify 模板使用按阶段隔离的
+上下文槽（role, task, slice, stage），避免同一会话自写自判。
+
 ### 3.4 收件箱与人工确认
 
 收件箱聚合：`in_review` 任务、`@human` 提及、待审 workflow/角色建议、gate 步骤、lesson/提案、操作卡片。
@@ -297,8 +323,13 @@ anvil task mention $ANVIL_TASK_ID --to <role> "请确认接口"  # 也可用 --m
 anvil task clarify $ANVIL_TASK_ID --file brief.json  # Cindy：更新规划前简报草稿
 anvil task submit $ANVIL_TASK_ID "完成摘要"
 anvil step submit <workflow-id> <step-id> --summary "步骤完成"
+anvil step submit <workflow-id> <scope-step> --summary "切片 spec" --slice-spec-file spec.json
 anvil step plan <workflow-id> <plan-step-id> --file slices.json
 anvil step decide <workflow-id> <decision-step-id> --approve|--reject --feedback "结论"
+anvil step decide <workflow-id> <decision-step-id> --approve --verdicts-file verdicts.json
+anvil step replan <workflow-id> <slice-step> --reason "..." [--slice-spec-file spec-v2.json] [--approve]
+anvil workflow ledger <workflow-id> [--json]
+anvil check template|run|list|show|result|logs|artifacts|cancel
 anvil board draft --task $ANVIL_TASK_ID --goal "..." --tree-file wf.json --kind workflow
 anvil self reset-context --task $ANVIL_TASK_ID --reason "..."
 anvil role list [--json]
@@ -489,6 +520,9 @@ anvil runtime export <RTP-id>
 | `ANVIL_SANDBOX` | `enforce` | 执行沙箱模式；`host-unsafe` 显式关闭（审计 + 常驻警示） |
 | `ANVIL_SANDBOX_IMAGE` | `anvil-toolchain:1.60.0` | 严格档工具链镜像（Docker/Podman） |
 | `ANVIL_WSL_DISTRO` / `ANVIL_WSL_USER` | 默认发行版 / `anvil-sbx` | Windows WSL2 严格档 |
+| `ANVIL_DIFF_CAP_LINES` | `400` | 每片 diff 行数上限（0=不限）；超限升级人工，不硬失败 |
+| `ANVIL_TASK_DURATION_CAP_SECONDS` | `0` | 每任务总时长上限（秒；0=只记录、不升级） |
+| `ANVIL_RUN_CAP_ENFORCE` | `1` | `1`=超限升级人工；`0`=只记录不执行（试点阶段一） |
 | `ANVIL_IDLE_RELEASE_MINUTES` | `15` | 空闲释放时间 |
 | `ANVIL_RESET_SESSION_ON_FAILURE` | `1` | 非零退出后丢弃旧 session |
 | `ANVIL_CIC_THRESHOLD_TOKENS` | `0` | 冷唤醒阈值；`0`=按模型窗口自动，`>0`=绝对覆盖 |
@@ -587,10 +621,12 @@ cd dev
 pytest tests/ -q
 ```
 
-当前基线：**1346 passed + 64 skipped**（CLI 契约需要 `ANVIL_BIN`，模型评测需要
-`ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。v1.60.2 修复下拉居中、澄清问题送达
-提示与轮次口径；v1.60.1 修复角色下拉与 PoC 实时日志；
-v1.60.0 覆盖执行沙箱与受控 PoC；v1.51.1 覆盖新增的澄清、角色思考强度、
+当前基线：**1550 passed + 64 skipped**（CLI 契约需要 `ANVIL_BIN`，模型评测需要
+`ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。v1.62.0 覆盖引擎执行验收检查与
+切片契约锁定（红/绿校验、合法红与 harness 分类、锁定集合、plan 门禁与覆盖矩阵、
+逐项判定与 manual 比例、replan 弱化检测、检查台账、diff/时长运行上限）；
+v1.60.2 修复下拉居中、澄清问题送达提示与轮次口径；v1.60.1 修复角色下拉与 PoC
+实时日志；v1.60.0 覆盖执行沙箱与受控 PoC；v1.51.1 覆盖新增的澄清、角色思考强度、
 角色建议门禁、收件箱提醒生命周期、功能开关默认恢复、工具治理与大厅性能。
 
 CLI 契约测试需要安装 `anvil` 并指定可执行文件：
@@ -759,7 +795,8 @@ anvil init
 - **执行沙箱（v1.60）**：角色执行默认进入 OS 沙箱。standard 档限制工作区写范围、
   资源上限与进程树，并在能力允许时拒绝读取 human token、数据库、备份、其他任务/
   角色数据；strict 档（PoC/动态验证）一次性运行、默认断网、只读源码快照。
-  standard 档网络不限制，不可信代码必须进 strict。Windows standard 的写范围/读拒绝
+  standard 档网络不限制，不可信代码必须进 strict。检查作业（`anvil check`）走
+  standard 档且默认 `network=none`，需要联网时按 ADR-0003 人工批准。Windows standard 的写范围/读拒绝
   依赖 AppContainer/受限令牌，不可用时界面显示能力缺口；`ANVIL_SANDBOX=host-unsafe`
   显式关闭沙箱并常驻警示（见 [v1.60.0 发布说明](docs/v1.60.0-release.md)）。
 - Web/API 响应带 `X-Frame-Options: DENY` 与 `Content-Security-Policy: frame-ancestors 'none'`。
@@ -781,6 +818,7 @@ anvil init
 - [docs/cli-reference.md](docs/cli-reference.md)：CLI 命令、参数、规则、错误处理与示例
 - [GLOSSARY.md](GLOSSARY.md)：领域术语（任务简报、澄清、角色建议门禁、思考强度等）
 - [dev/README.md](dev/README.md)：开发者入口（源码结构、本地开发与测试）
+- [docs/v1.62.0-release.md](docs/v1.62.0-release.md)：v1.62.0 引擎执行验收检查、切片契约锁定、plan 门禁、逐项判定、replan 与运行上限
 - [docs/v1.60.2-release.md](docs/v1.60.2-release.md)：v1.60.2 修复下拉菜单居中、澄清问题送达提示与澄清轮次口径
 - [docs/v1.60.1-release.md](docs/v1.60.1-release.md)：v1.60.1 修复任务角色下拉与 PoC 实时日志
 - [docs/v1.60.0-release.md](docs/v1.60.0-release.md)：v1.60.0 执行沙箱、受控 PoC、Windows WSL2 严格档、MCP/RSI 沙箱化

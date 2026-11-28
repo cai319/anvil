@@ -79,7 +79,9 @@ pip install --force-reinstall <anvil-cli-wheel-or-sdist>
 |---|---|
 | `anvil --version` | 查看 CLI 版本 |
 | `anvil task ...` | 任务：列表/创建/澄清/委派工单/验收/认领/评论/提交/归档/任务知识 |
-| `anvil step ...` | 工作流步骤：show/plan/submit/decide/escalate/packet |
+| `anvil step ...` | 工作流步骤：show/plan/submit/decide/escalate/replan/packet |
+| `anvil workflow ledger` | 工作流检查台账与指标报告（N_total、有效红、harness 比例等） |
+| `anvil check ...` | 引擎执行的验收检查：template/run/list/show/result/logs/artifacts/cancel |
 | `anvil finding ...` | 问题板：安全 finding 的填写/提交/完成（reviewer） |
 | `anvil knowledge ...` | 角色知识：检索/索引/补全/仓库/知识卡 |
 | `anvil note write` | 写入角色笔记（实践门控） |
@@ -207,12 +209,16 @@ anvil task knowledge-delete <id> --id <knowledge-id>   # human
 anvil step show <workflow-id> [--json]
 anvil step plan <wf> <plan-step> --file plan.json
 anvil step submit <wf> <step> --summary "..." \
-  [--evidence-file evidence.json] [--changed-paths src/a,src/b]
-anvil step decide <wf> <decision-step> --approve --feedback "通过"
+  [--evidence-file evidence.json] [--changed-paths src/a,src/b] \
+  [--slice-spec-file spec.json]
+anvil step decide <wf> <decision-step> --approve --feedback "通过" \
+  [--verdicts-file verdicts.json]
 anvil step decide <wf> <decision-step> --reject --feedback "..." \
-  [--rework-targets S3,S4] [--reason ...]
+  [--rework-targets S3,S4] [--reason ...] [--verdicts-file verdicts.json]
 anvil step escalate <wf> <decision-step> --reason "..." \
   [--triggers risk,compliance] [--proposed-decision approve|reject]
+anvil step replan <wf> <slice-step> --reason "..." \
+  [--slice-spec-file spec-v2.json] [--red-evidence JOB,...] [--approve]
 anvil step packet <wf> <step> [--json]
 ```
 
@@ -221,6 +227,24 @@ anvil step packet <wf> <step> [--json]
 
 `step packet` 是只读查询；没有 packet 时用 Web「刷新证据」创建/刷新。
 人工通过时若证据已过期，必须显式确认 `acknowledge_stale`（Web 勾选；API 同名字段）。
+
+**v1.62 切片验收**：
+
+- `step submit --slice-spec-file` 只用于 slice scope 步骤，提交结构化切片 spec；
+  引擎随后在 base 上跑红校验。spec 顶层字段：`acceptance`、`seam`、`out_of_scope`、
+  `contract`、`deliverables`、`stubs`。每个验收项含 `id`、`kind`
+  （`test|command|file_assert|manual`）、`criterion`、`verification`、`evidence`；
+  `command` 必须在 `verification` 中声明断言失败 `exit_code`，否则无法锁定。
+- `step decide --verdicts-file` 提交逐项判定 JSON 数组：
+  `[{"id":"a1","status":"met|unmet|n.a.","evidence_refs":["check:c1"]}]`。
+  `test/command/file_assert` 项由引擎证据给出状态，agent 不能覆盖；`manual` 项由
+  decide 判定。存在 `unknown` 或 `unmet` 时通过会被拒绝。
+- `step replan` 显式重开切片 scope 并记录原因与新旧 spec 哈希；复用驳回重开机制，
+  scope 与下游回到 `pending`，之后必须重新提交 spec 以重跑红校验。删除检查、
+  把检查降为 `manual`、修改断言但没有新的红证据属于弱化，需 human 批准
+  （`--approve` 或 human 身份）。每片最多 1 次，第二次升级人工。
+- 新 loop 模板要求 `decide.role ≠ verify.role`；存量 equal-role 模板使用按阶段隔离的
+  上下文槽（role, task, slice, stage）。
 
 `plan.json` 最小结构：
 
@@ -545,6 +569,59 @@ anvil poc cancel <JOB>
   bubblewrap/工具链并创建 `anvil-sbx` 用户，记审计。
 - `host-unsafe` 下严格档默认仍不执行；仅显式允许时才回退宿主直跑（审计+警示）。
 
+## 9.4 引擎验收检查：`anvil check`
+
+```bash
+anvil check template [--kind test|command|file_assert] [--json]
+anvil check run --file check.json [--task <id>] [--wait] [--json]
+anvil check list [--task <id>] [--status ...] [--json]
+anvil check show <JOB> [--json]
+anvil check result <JOB> [--json]
+anvil check logs <JOB> [--json]
+anvil check artifacts <JOB> [--json]
+anvil check cancel <JOB> [--json]
+```
+
+检查 spec（`anvil check template` 输出）：
+
+```json
+{
+  "task_id": "T-...",
+  "network": "none",
+  "check": {
+    "id": "c1",
+    "kind": "test",
+    "cmd": "pytest -q --junit-xml=/out/junit.xml",
+    "junit": ["junit.xml"]
+  }
+}
+```
+
+规则：
+
+- 检查种类：`test`、`command`、`file_assert`；`manual` 不执行，随切片 spec 交给
+  decide 判定。`command` 必须声明断言失败 `exit_code`；`file_assert` 由引擎原生实现
+  （`path` + `contains`）。
+- 作业在 standard 档沙箱执行，默认 `network=none`；联网或非默认环境需要人工批准。
+- 结果记录退出码、信号、超时、junit 摘要、收集到的测试数、环境哈希与运行 id。
+  只有 `AssertionError` / `NotImplementedError` 算合法红；导入/收集错误、用法错误、
+  超时、信号是 harness 错误。
+- 失败作业的 `failure_reason`：`check_failed`（断言失败）、`check_signal`（信号终止）、
+  `check_timeout`（超时）、`check_error`（harness/执行错误）。
+- 绿跑必须守住红跑记录的基础环境哈希与测试数基线；收集数少于基线或新增 skip 判失败。
+- Agent 只能对绑定任务创建/读取检查作业；任务队列配额已满时返回 HTTP 429。
+
+## 9.5 检查台账：`anvil workflow ledger`
+
+```bash
+anvil workflow ledger <workflow-id> [--json]
+```
+
+只读输出该工作流的检查台账与指标：`N_total`、`N_qualified`、有效红占比、
+harness 错误红占比、可机械化占比（按 test / command / file_assert / manual 分列）、
+假通过输入、人工返工、human authority 片占比、replan 次数与弱化次数。
+指标定义与阈值见 `GLOSSARY.md` 与本地 ADR；`--json` 输出原始报告。
+
 ## 10. 其他命令
 
 ```bash
@@ -617,6 +694,14 @@ anvil action list
 | `stale_run` | 旧 run 的 token 已失效 | 等新 run 唤醒；不要用旧上下文重试 |
 | `lease_expired` / `lease_fenced` | 步骤租约失效 | 等待自动恢复；先 `step show` 确认 |
 | `step ... already expanded` | 切片计划已应用 | 查看现有切片，不要重复 plan |
+| `slice_spec_required` | slice scope 步骤未提交结构化 spec（或 replan 后未重交） | 用 `--slice-spec-file` 重新提交；字段见 `anvil step submit -h` |
+| `slice_spec_unlockable` | spec 无法锁定（如 command 未声明断言失败退出码） | 按错误指出的验收项补 `verification.exit_code`/`cmd` |
+| `lock_scope_conflict` / `lock_violation` | execute 的 `scope_paths` 与锁定集合相交，或改动了锁定文件/签名 | 执行只填实现；范围调整走 `step replan` |
+| `verdict_unknown` / `acceptance_unmet` | decide 通过时仍有 `unknown` 或 `unmet` 验收项 | 补证据或判定；确需改口径走 `step replan` |
+| `plan_gate_blocked` | plan 评审包缺切片列表或 Brief 覆盖/ non-goals 校验未过 | 修正 `plan_json` 后重新提交 plan |
+| `replan_weakening_requires_human` | replan 删除/降级检查或改断言但无新红证据 | 由 human 批准（`--approve` 或 human 身份） |
+| `replan_limit_escalated` | 同一片已 replan 过一次 | 第二次必须由 human 批准 |
+| `429` 检查作业 | 任务检查作业队列配额已满 | 等现有作业结束/取消，或减少并发 |
 | `409 clarification ... not confirmed` | 任务简报未确认或已过期 | 在任务简报卡确认/跳过，或重新澄清 |
 | `409 workflow approval blocked by role suggestions` | 存在未解决的 `role_suggestion` | 先批准/驳回角色建议；`authorize` 还需 planner 完成创建/绑定 |
 | `409` 其他 | 状态冲突 | 先 show/查询当前状态，再决定是否重试 |
@@ -625,11 +710,13 @@ anvil action list
 ## 12. 最小自检
 
 ```bash
-anvil --version             # 预期 anvil 1.51.1
+anvil --version             # 预期 anvil 1.62.0
 anvil -h                    # 命令总览与规则
 anvil task -h               # 任务动作与示例
 anvil task clarify -h       # 规划前简报草稿
-anvil step -h               # 工作流步骤顺序
+anvil step -h               # 工作流步骤顺序（含 replan）
+anvil check -h              # 引擎验收检查
+anvil workflow ledger -h    # 检查台账
 anvil knowledge -h          # 知识动作
 anvil role list             # 系统现有角色
 anvil whoami                # 当前身份/任务/会话
