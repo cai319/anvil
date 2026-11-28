@@ -448,6 +448,13 @@ def parse_check_spec(raw: Any) -> dict:
         "artifacts": artifacts,
         "reason": str(raw.get("reason") or "")[:2000],
     }
+    # 引擎红跑作业回填锁定集合的测试数基线；由服务端写入，不参与环境哈希。
+    lock_ref = raw.get("lock_ref")
+    if isinstance(lock_ref, dict):
+        ref = {key: str(lock_ref[key]) for key in ("workflow_id", "step_id")
+               if lock_ref.get(key)}
+        if ref:
+            spec["lock_ref"] = ref
     spec["profile"] = "safe" if is_safe(spec) else "relaxed"
     requested = str(raw.get("profile") or "").strip().lower()
     if requested:
