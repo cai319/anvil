@@ -22,6 +22,7 @@ from .. import config
 from ..db import open_conn
 from ..util import jloads, now_iso
 from ..sandbox import capabilities as sandbox_capabilities
+from ..sandbox import env as sandbox_env
 from ..sandbox import jobs as sandbox_jobs
 from ..sandbox import monitor as sandbox_monitor
 from ..sandbox.backends import make_backend
@@ -343,7 +344,16 @@ def self_check() -> dict:
     if config.SANDBOX_MODE == "host-unsafe":
         ok = False
         checks["host_unsafe"] = True
-    return {"ok": ok, "checks": checks, "warnings": status().get("warnings", [])}
+    # 后端从 agent shell 启动时会把宿主会话变量带进角色；角色环境会清洗，
+    # 但仍要显式提示，避免把“从 agent shell 启动”当成正常部署方式。
+    markers = sandbox_env.host_session_env(os.environ)
+    checks["host_session_env"] = markers
+    warnings = list(status().get("warnings") or [])
+    if markers:
+        warnings.append(
+            "backend started from an agent shell; host session env will be "
+            "stripped from role processes: " + ", ".join(markers))
+    return {"ok": ok, "checks": checks, "warnings": warnings}
 
 
 def run_view(conn, run: dict) -> dict:

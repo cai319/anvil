@@ -6,7 +6,7 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **前端**：React + TypeScript + Vite
 - **Agent CLI**：`anvil`，Agent 在自己的工具循环里调用它上报状态
 - **地址**：`http://127.0.0.1:7317`（仅回环）
-- **当前版本**：v1.62.0（引擎执行验收检查与切片契约锁定：红/绿校验、锁定集合、plan 人工门、逐项判定、显式 replan、检查台账与运行上限）
+- **当前版本**：v1.62.1（v1.62 引擎执行验收检查与切片契约锁定；v1.62.1 修复从 agent shell 启动时角色运行时临时目录被沙箱拒绝的问题）
 
 > 内部架构、设计、ADR 与实现状态文档仅本地保留，不随仓库发布。
 
@@ -622,7 +622,8 @@ pytest tests/ -q
 ```
 
 当前基线：**1550 passed + 64 skipped**（CLI 契约需要 `ANVIL_BIN`，模型评测需要
-`ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。v1.62.0 覆盖引擎执行验收检查与
+`ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。v1.62.1 修复角色运行时临时目录与
+宿主会话环境；v1.62.0 覆盖引擎执行验收检查与
 切片契约锁定（红/绿校验、合法红与 harness 分类、锁定集合、plan 门禁与覆盖矩阵、
 逐项判定与 manual 比例、replan 弱化检测、检查台账、diff/时长运行上限）；
 v1.60.2 修复下拉居中、澄清问题送达提示与轮次口径；v1.60.1 修复角色下拉与 PoC
@@ -818,6 +819,7 @@ anvil init
 - [docs/cli-reference.md](docs/cli-reference.md)：CLI 命令、参数、规则、错误处理与示例
 - [GLOSSARY.md](GLOSSARY.md)：领域术语（任务简报、澄清、角色建议门禁、思考强度等）
 - [dev/README.md](dev/README.md)：开发者入口（源码结构、本地开发与测试）
+- [docs/v1.62.1-release.md](docs/v1.62.1-release.md)：v1.62.1 修复角色运行时临时目录与宿主会话环境（Claude Code EPERM）
 - [docs/v1.62.0-release.md](docs/v1.62.0-release.md)：v1.62.0 引擎执行验收检查、切片契约锁定、plan 门禁、逐项判定、replan 与运行上限
 - [docs/v1.60.2-release.md](docs/v1.60.2-release.md)：v1.60.2 修复下拉菜单居中、澄清问题送达提示与澄清轮次口径
 - [docs/v1.60.1-release.md](docs/v1.60.1-release.md)：v1.60.1 修复任务角色下拉与 PoC 实时日志

@@ -2,6 +2,15 @@
 
 > 本文承接 README 的运维细节：升级、打包、备份/迁移/重置、卸载与清理。
 
+## 升级到 v1.62.1（角色运行时临时目录修复）
+
+1. 停止后端并备份 `data/`；
+2. 更新代码/安装包并重启后端；本版无数据库迁移；
+3. 执行 `anvil sandbox self-check`：`host_session_env` 非空表示后端从 agent shell 启动；
+   角色环境会自动清洗，建议用独立终端启动后端；
+4. 角色 Bash 临时目录现在由 `CLAUDE_CODE_TMPDIR` 指向沙箱实例 tmp；standard/strict 均可。
+   `CLAUDE_CODE_TMPDIR` 未在 Claude Code 官方文档中，按 CLI 版本绑定；升级 CLI 后重跑金丝雀。
+
 ## 升级到 v1.62.0（验收检查与运行上限）
 
 1. 停止后端并备份 `data/`；

@@ -113,5 +113,5 @@ Windows 安装、运行时发现和 `claude.exe` 注意事项见根 README 的�
 - CLI：[docs/cli-reference.md](../docs/cli-reference.md)
 - 问题板：[docs/issue-board.md](../docs/issue-board.md)
 - 术语：[GLOSSARY.md](../GLOSSARY.md)
-- 变更记录：`docs/v*-release.md`；最新 [v1.62.0](../docs/v1.62.0-release.md)
+- 变更记录：`docs/v*-release.md`；最新 [v1.62.1](../docs/v1.62.1-release.md)
 - 测试说明：[tests/README.md](tests/README.md)

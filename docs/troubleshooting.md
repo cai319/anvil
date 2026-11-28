@@ -639,6 +639,14 @@ Select-String -Path .\log\anvil.log -Pattern 'tracker|http id=|ERROR|Traceback'
 
 ## 执行沙箱与 PoC
 
+### 角色 Bash 工具报 `EPERM: operation not permitted, mkdir '/private/tmp/claude-501/...'`
+
+- v1.62.1 起角色环境设置 `CLAUDE_CODE_TMPDIR` 指向沙箱实例 tmp，并剥掉宿主会话变量；
+  正常不会再出现。
+- 仍出现时：确认版本 ≥ 1.62.1；重启后端；执行 `anvil sandbox self-check` 查看
+  `host_session_env` 与 `profile_preflight`；不要用 `host-unsafe` 绕过。
+- 若升级了 Claude Code CLI 后复现，说明临时目录契约变化，需要重跑金丝雀并更新兼容性矩阵。
+
 ### 严格档 PoC 返回 409 `strict_sandbox_unavailable`
 
 - macOS/Linux：安装并启动 Docker Desktop/OrbStack/Podman，`docker info` 可用后重试；
