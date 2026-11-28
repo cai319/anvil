@@ -118,6 +118,9 @@ SANDBOX_STANDARD_DISK_MIB = int(_env("ANVIL_SANDBOX_STANDARD_DISK_MIB", "20480")
 # 沙箱内 HOME/CLI 配置放在 cwd 下的这个目录；必须从 diff/提交中排除。
 SANDBOX_HOME_DIRNAME = ".anvil/home"
 SANDBOX_INSTANCES_DIR = DATA_DIR / "sandbox" / "instances"
+SANDBOX_JOBS_DIR = DATA_DIR / "sandbox" / "jobs"
+SANDBOX_IMAGE = _env("ANVIL_SANDBOX_IMAGE", "anvil-toolchain:1.60.0")
+SANDBOX_JOB_POLL_SECONDS = float(_env("ANVIL_SANDBOX_JOB_POLL_SECONDS", "2"))
 
 # 角色未显式配置 permission_mode 时的默认值。本地单用户环境用 bypassPermissions；
 # --print 模式下没有交互授权通道，default 会让 agent 停在「等待授权」。
@@ -395,7 +398,7 @@ def ensure_dirs() -> None:
     for d in (DATA_DIR, USER_RUNTIMES_DIR, AGENTS_DIR, REPOS_DIR,
               TASK_WORKSPACES_DIR, KNOWLEDGE_REPOS_DIR, CHANNELS_DIR,
               ROLE_EVAL_DIR, RUNTIME_PROPOSALS_DIR, ROLE_IMPORTS_DIR,
-              SANDBOX_INSTANCES_DIR, SQLITE_PATH.parent):
+              SANDBOX_INSTANCES_DIR, SANDBOX_JOBS_DIR, SQLITE_PATH.parent):
         d.mkdir(parents=True, exist_ok=True)
     # 日志目录不可写时由 setup_logging 回退到 DATA_DIR/log，不能阻断服务启动。
     try:

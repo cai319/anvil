@@ -66,6 +66,9 @@ def test_migration_is_idempotent_and_adds_columns(tmp_path):
         tables = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         assert "sandbox_instances" in tables
+        assert "sandbox_jobs" in tables
+        assert "sandbox_job_phases" in tables
+        assert "sandbox_job_artifacts" in tables
         run_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
         assert "sandbox_instance_id" in run_cols
         rs_cols = {r[1] for r in conn.execute("PRAGMA table_info(role_sessions)")}

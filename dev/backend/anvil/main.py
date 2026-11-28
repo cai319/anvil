@@ -24,7 +24,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import config
 from .api import (
-    actions, agent_inbox, board, event_log, events, feature_flags, findings, governance, inbox, knowledge_repos, memory, reminders, roles, runs, runtimes, rsi, runtime_proposals, sandbox, tasks, templates, tooling, workflow, workspaces,
+    actions, agent_inbox, board, event_log, events, feature_flags, findings, governance, inbox, knowledge_repos, memory, poc_jobs, reminders, roles, runs, runtimes, rsi, runtime_proposals, sandbox, tasks, templates, tooling, workflow, workspaces,
 )
 from .db import connect, open_conn
 from .deps import token_is_valid
@@ -36,6 +36,7 @@ from .services import ledger as ledger_service
 from .services import roles as roles_service
 from .services import runs as runs_service
 from .services import sandbox as sandbox_service
+from .services import sandbox_worker as sandbox_worker_service
 from .graph import build_graph, get_checkpointer
 from .graph.orchestrator import Orchestrator
 from .logging_setup import AccessLogMiddleware, setup_logging
@@ -263,6 +264,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         eval_runner_service.EvalWorker(path)
         if config.ROLE_RSI_ENABLED and config.ROLE_RSI_EVALUATION else None
     )
+    sandbox_job_worker = (
+        sandbox_worker_service.SandboxJobWorker(path) if scheduler_enabled else None
+    )
 
     # 常驻角色运行时（owner 2026-10-19）：生产入口（scheduler_enabled）默认启用；
     # 测试/纯 API 模式默认关闭（保持 one-shot 假进程可测），可用 ANVIL_PERSISTENT_RUNTIME 覆盖。
@@ -312,11 +316,20 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         if scheduler:
             scheduler.start()
             sandbox_service.start_supervisor()
+            _conn = open_conn(path)
+            try:
+                sandbox_service.reconcile_jobs_startup(_conn)
+            finally:
+                _conn.close()
+            if sandbox_job_worker:
+                sandbox_job_worker.start()
         if eval_worker:
             eval_worker.start()
         yield
         if eval_worker:
             eval_worker.stop()
+        if sandbox_job_worker:
+            sandbox_job_worker.stop()
         if scheduler:
             sandbox_service.stop_supervisor()
             scheduler.stop()
@@ -340,6 +353,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     app.state.scheduler = scheduler
     app.state.scheduler_enabled = scheduler_enabled
     app.state.eval_worker = eval_worker
+    app.state.sandbox_job_worker = sandbox_job_worker
 
     app.add_middleware(_LocalTokenMiddleware)
     app.add_middleware(_SecurityHeadersMiddleware)
@@ -364,6 +378,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     app.include_router(feature_flags.router, prefix="/api/v1/features", tags=["features"])
     app.include_router(runs.router, prefix="/api/v1", tags=["runs"])
     app.include_router(sandbox.router, prefix="/api/v1", tags=["sandbox"])
+    app.include_router(poc_jobs.router, prefix="/api/v1", tags=["poc-jobs"])
     app.include_router(rsi.router, prefix="/api/v1", tags=["rsi"])
     app.include_router(runtime_proposals.router, prefix="/api/v1", tags=["runtime-proposals"])
     app.include_router(board.router, prefix="/api/v1", tags=["board"])

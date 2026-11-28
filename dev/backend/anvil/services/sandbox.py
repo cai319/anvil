@@ -14,14 +14,18 @@ import subprocess
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 from .. import config
 from ..db import open_conn
-from ..util import now_iso
+from ..util import jloads, now_iso
 from ..sandbox import capabilities as sandbox_capabilities
+from ..sandbox import jobs as sandbox_jobs
 from ..sandbox import monitor as sandbox_monitor
 from ..sandbox.backends import make_backend
+from ..sandbox.backends import docker as docker_backend
+from ..sandbox.errors import SandboxUnavailable
 
 logger = logging.getLogger("anvil.sandbox")
 _backend: Any = None
@@ -235,7 +239,8 @@ def status(conn=None) -> dict:
         warnings.append("host_unsafe")
     if config.SANDBOX_MODE == "enforce" and backend.name == "host":
         warnings.append("standard_degraded")
-    if not substrates.get("docker") and not substrates.get("wsl"):
+    strict_ok, strict_detail = strict_available()
+    if not strict_ok:
         warnings.append("strict_unavailable")
     counts: dict = {}
     if conn is not None:
@@ -256,9 +261,9 @@ def status(conn=None) -> dict:
             "capabilities": caps,
         },
         "strict": {
-            "available": False,
-            "backend": None,
-            "detail": "strict tier is not implemented in v1.60 M1",
+            "available": bool(strict_ok),
+            "backend": "docker" if strict_ok else None,
+            "detail": strict_detail,
         },
         "substrates": substrates,
         "warnings": warnings,
@@ -308,6 +313,279 @@ def run_view(conn, run: dict) -> dict:
         "peak": json.loads(inst.get("peak_json") or "{}") if inst else {},
         "exit_reason": inst.get("exit_reason") if inst else None,
     }
+
+
+# ---- 严格档作业（M2a） -----------------------------------------------------
+
+def strict_available() -> tuple[bool, str]:
+    return docker_backend.available()
+
+
+def _job_dict(row) -> dict | None:
+    if row is None:
+        return None
+    job = dict(row)
+    job["spec"] = jloads(job.get("spec_json") or "{}", {})
+    job["evidence"] = jloads(job.get("evidence_json") or "{}", {})
+    return job
+
+
+def create_job(conn, *, spec_raw: dict, actor_role: str | None,
+               actor_is_human: bool, check_available: bool = True) -> dict:
+    spec = sandbox_jobs.parse_spec(spec_raw)
+    if not actor_is_human and spec["profile"] != "safe":
+        raise PermissionError("relaxed PoC jobs require human approval")
+    if check_available:
+        ok, detail = strict_available()
+        if not ok:
+            raise SandboxUnavailable(detail)
+    if spec.get("task_id"):
+        row = conn.execute(
+            "SELECT id FROM tasks WHERE id=?", (spec["task_id"],)).fetchone()
+        if row is None:
+            raise LookupError("task not found")
+    if spec.get("finding_id"):
+        try:
+            row = conn.execute(
+                "SELECT id FROM task_findings WHERE id=?",
+                (spec["finding_id"],)).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        if row is None:
+            raise LookupError("finding not found")
+    job_id = "poc_" + uuid.uuid4().hex
+    now = now_iso()
+    status = "queued"
+    approval = "not_required"
+    if not actor_is_human and spec["profile"] != "safe":
+        status = "waiting_approval"
+        approval = "pending"
+    conn.execute(
+        "INSERT INTO sandbox_jobs "
+        "(id, kind, task_id, finding_id, created_by, created_by_type, tier, "
+        " profile, spec_json, spec_hash, status, approval_status, timeout_seconds, "
+        " created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (job_id, "poc", spec.get("task_id"), spec.get("finding_id"),
+         actor_role or "human", "human" if actor_is_human else "role",
+         "strict", spec["profile"], json.dumps(spec, ensure_ascii=False),
+         sandbox_jobs.spec_hash(spec), status, approval,
+         int(spec["resources"]["timeout_seconds"]), now, now),
+    )
+    try:
+        from . import ledger
+        ledger.emit_audit(
+            conn, role_slug=actor_role or "human", task_id=spec.get("task_id"),
+            action="sandbox.job.created",
+            payload={"job_id": job_id, "profile": spec["profile"],
+                     "network": spec["network"],
+                     "finding_id": spec.get("finding_id")})
+    except Exception:  # noqa: BLE001
+        pass
+    conn.commit()
+    return _job_dict(conn.execute(
+        "SELECT * FROM sandbox_jobs WHERE id=?", (job_id,)).fetchone())  # type: ignore[return-value]
+
+
+def list_jobs(conn, *, task_id: str | None = None,
+              finding_id: str | None = None, status: str | None = None,
+              limit: int = 100) -> list[dict]:
+    clauses: list[str] = []
+    params: list = []
+    if task_id:
+        clauses.append("task_id=?"); params.append(task_id)
+    if finding_id:
+        clauses.append("finding_id=?"); params.append(finding_id)
+    if status:
+        clauses.append("status=?"); params.append(status)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = conn.execute(
+        f"SELECT * FROM sandbox_jobs{where} ORDER BY created_at DESC LIMIT ?",
+        (*params, max(1, min(int(limit or 100), 500)))).fetchall()
+    return [_job_dict(r) for r in rows if r is not None]  # type: ignore[misc]
+
+
+def get_job(conn, job_id: str) -> dict | None:
+    return _job_dict(conn.execute(
+        "SELECT * FROM sandbox_jobs WHERE id=?", (job_id,)).fetchone())
+
+
+def claim_next_job(conn) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM sandbox_jobs WHERE status='queued' "
+        "ORDER BY created_at, id LIMIT 1").fetchone()
+    if row is None:
+        return None
+    native = sandbox_jobs.container_name(row["id"])
+    now = now_iso()
+    cur = conn.execute(
+        "UPDATE sandbox_jobs SET status='running', started_at=?, updated_at=?, "
+        "native_job_id=? WHERE id=? AND status='queued'",
+        (now, now, native, row["id"]))
+    conn.commit()
+    if not cur.rowcount:
+        return None
+    return get_job(conn, row["id"])
+
+
+def record_execution(conn, job_id: str, execution) -> bool:
+    row = conn.execute(
+        "SELECT status FROM sandbox_jobs WHERE id=?", (job_id,)).fetchone()
+    if row is None or row["status"] != "running":
+        return False  # 已取消/被接管；不得覆盖
+    now = now_iso()
+    conn.execute("DELETE FROM sandbox_job_phases WHERE job_id=?", (job_id,))
+    for phase in execution.phases:
+        conn.execute(
+            "INSERT INTO sandbox_job_phases "
+            "(job_id, seq, phase, name, cmd, status, exit_code, signal, "
+            " timed_out, duration_ms, started_at, finished_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (job_id, phase["seq"], phase["phase"], phase["name"],
+             phase["name"], phase["status"], phase.get("exit_code"),
+             phase.get("signal"), 1 if phase.get("timed_out") else 0,
+             phase.get("duration_ms"), execution.started_at, execution.finished_at))
+    conn.execute("DELETE FROM sandbox_job_artifacts WHERE job_id=?", (job_id,))
+    for artifact in execution.artifacts:
+        conn.execute(
+            "INSERT INTO sandbox_job_artifacts "
+            "(job_id, rel_path, size_bytes, sha256, created_at) "
+            "VALUES (?,?,?,?,?)",
+            (job_id, artifact["rel_path"], artifact["size_bytes"],
+             artifact["sha256"], now))
+    conn.execute(
+        "UPDATE sandbox_jobs SET status=?, finished_at=?, exit_code=?, signal=?, "
+        "failure_reason=?, evidence_json=?, log_dir=?, artifact_dir=?, updated_at=? "
+        "WHERE id=? AND status='running'",
+        (execution.status, execution.finished_at, execution.exit_code,
+         execution.signal, execution.failure_reason,
+         json.dumps(execution.evidence, ensure_ascii=False),
+         execution.log_dir, execution.artifact_dir, now, job_id))
+    try:
+        from . import ledger
+        ledger.emit_audit(
+            conn, role_slug=None, task_id=None,
+            action=("sandbox.job.succeeded" if execution.status == "succeeded"
+                    else "sandbox.job.failed"),
+            payload={"job_id": job_id, "status": execution.status,
+                     "failure_reason": execution.failure_reason,
+                     "exit_code": execution.exit_code,
+                     "signal": execution.signal})
+    except Exception:  # noqa: BLE001
+        pass
+    conn.commit()
+    return True
+
+
+def fail_job(conn, job_id: str, reason: str) -> None:
+    now = now_iso()
+    conn.execute(
+        "UPDATE sandbox_jobs SET status='failed', failure_reason=?, "
+        "finished_at=?, updated_at=? WHERE id=? AND status IN ('queued','running')",
+        (reason[:500], now, now, job_id))
+    try:
+        from . import ledger
+        ledger.emit_audit(
+            conn, role_slug=None, task_id=None, action="sandbox.job.failed",
+            payload={"job_id": job_id, "failure_reason": reason[:500]})
+    except Exception:  # noqa: BLE001
+        pass
+    conn.commit()
+
+
+def cancel_job(conn, job_id: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM sandbox_jobs WHERE id=?", (job_id,)).fetchone()
+    if row is None:
+        raise LookupError("job not found")
+    if row["status"] in ("queued", "waiting_approval"):
+        now = now_iso()
+        conn.execute(
+            "UPDATE sandbox_jobs SET status='canceled', finished_at=?, updated_at=? "
+            "WHERE id=? AND status IN ('queued','waiting_approval')",
+            (now, now, job_id))
+        conn.commit()
+    elif row["status"] == "running":
+        docker_backend.kill_container(row["native_job_id"])
+        now = now_iso()
+        conn.execute(
+            "UPDATE sandbox_jobs SET status='canceled', finished_at=?, "
+            "failure_reason='canceled', updated_at=? WHERE id=? AND status='running'",
+            (now, now, job_id))
+        conn.commit()
+    try:
+        from . import ledger
+        ledger.emit_audit(
+            conn, role_slug=None, task_id=None, action="sandbox.job.canceled",
+            payload={"job_id": job_id})
+    except Exception:  # noqa: BLE001
+        pass
+    return get_job(conn, job_id)
+
+
+def reconcile_jobs_startup(conn) -> None:
+    now = now_iso()
+    try:
+        conn.execute(
+            "UPDATE sandbox_jobs SET status='failed', "
+            "failure_reason='controller_restart', finished_at=?, updated_at=? "
+            "WHERE status='running'", (now, now))
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+
+def job_view(conn, job_id: str) -> dict | None:
+    job = get_job(conn, job_id)
+    if job is None:
+        return None
+    job["phases"] = [dict(r) for r in conn.execute(
+        "SELECT * FROM sandbox_job_phases WHERE job_id=? ORDER BY seq",
+        (job_id,)).fetchall()]
+    job["artifacts"] = [dict(r) for r in conn.execute(
+        "SELECT * FROM sandbox_job_artifacts WHERE job_id=? ORDER BY rel_path",
+        (job_id,)).fetchall()]
+    return job
+
+
+def job_log(conn, job_id: str, *, tail_bytes: int = 200_000) -> dict:
+    job = get_job(conn, job_id)
+    if job is None:
+        raise LookupError("job not found")
+    log_dir = job.get("log_dir")
+    path = Path(log_dir) / "container.log" if log_dir else None
+    if path is None or not path.exists():
+        return {"job_id": job_id, "exists": False, "content": ""}
+    with open(path, "rb") as fh:
+        fh.seek(0, 2)
+        size = fh.tell()
+        fh.seek(max(0, size - max(1, tail_bytes)))
+        data = fh.read()
+    return {"job_id": job_id, "exists": True,
+            "truncated": size > len(data),
+            "content": data.decode("utf-8", errors="replace")}
+
+
+def job_artifacts(conn, job_id: str) -> list[dict]:
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM sandbox_job_artifacts WHERE job_id=? ORDER BY rel_path",
+        (job_id,)).fetchall()]
+
+
+def artifact_file(conn, job_id: str, rel_path: str) -> Path:
+    row = conn.execute(
+        "SELECT * FROM sandbox_job_artifacts WHERE job_id=? AND rel_path=?",
+        (job_id, rel_path)).fetchone()
+    job = get_job(conn, job_id)
+    if row is None or job is None or not job.get("artifact_dir"):
+        raise LookupError("artifact not found")
+    base = Path(job["artifact_dir"]).resolve()
+    target = (base / rel_path).resolve()
+    if base != target and base not in target.parents:
+        raise LookupError("artifact not found")
+    if target.is_symlink() or not target.is_file():
+        raise LookupError("artifact not found")
+    return target
 
 
 # ---- 资源 supervisor -------------------------------------------------------

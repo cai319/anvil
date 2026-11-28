@@ -1958,6 +1958,115 @@ def role_expand(
         typer.echo(f"新 agent 已创建：{out['display_name']}（{out['slug']}）")
 
 
+# ---- poc（受控 PoC / 动态验证作业）----------------------------------------
+
+
+POC_TEMPLATE = {
+    "task_id": "T-...",
+    "finding_id": "F-...",
+    "profile": "safe",
+    "network": "none",
+    "resources": {
+        "timeout_seconds": 3600,
+        "rss_mib": 8192,
+        "pids": 512,
+        "scratch_mib": 10240,
+        "artifact_mib": 200,
+    },
+    "phases": {
+        "prepare": [],
+        "build": [{"name": "build", "cmd": "make"}],
+        "run": [{"name": "poc", "cmd": "./poc input.bin"}],
+    },
+    "expect": {"phase": "run", "signal": "SIGSEGV"},
+    "artifacts": [{"path": "out/**"}],
+    "reason": "验证崩溃",
+}
+
+poc_app = typer.Typer(
+    help="受控 PoC/动态验证作业：严格档沙箱、只读快照、默认断网、产物取证。",
+    context_settings=HELP_CTX)
+app.add_typer(poc_app, name="poc")
+
+
+@poc_app.command("template")
+def poc_template(json_out: bool = typer.Option(False, "--json")):
+    """打印作业 spec 模板（JSON）。"""
+    _emit(POC_TEMPLATE, True)
+
+
+@poc_app.command("run")
+def poc_run(
+    file: str = typer.Option(..., "--file", help="作业 spec JSON 文件"),
+    task: str = typer.Option(None, "--task", help="覆盖 spec.task_id"),
+    finding: str = typer.Option(None, "--finding", help="覆盖 spec.finding_id"),
+    wait: bool = typer.Option(False, "--wait", help="等待作业结束"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """创建并排队一个 PoC 作业（human；safe 档可直接跑）。"""
+    try:
+        spec = json.loads(Path(file).read_text(encoding="utf-8"))
+    except OSError as exc:
+        _usage_error(f"无法读取 spec：{exc}")
+    except json.JSONDecodeError as exc:
+        _usage_error(f"spec 不是合法 JSON：{exc}")
+    if not isinstance(spec, dict):
+        _usage_error("spec 必须是 JSON 对象")
+    if task:
+        spec["task_id"] = task
+    if finding:
+        spec["finding_id"] = finding
+    job = _call("POST", "/api/v1/poc-jobs", spec)
+    if wait:
+        import time as _time
+        while job.get("status") in ("queued", "running", "waiting_approval"):
+            _time.sleep(2)
+            job = _call("GET", f"/api/v1/poc-jobs/{job['id']}")
+    _emit(job, json_out)
+
+
+@poc_app.command("list")
+def poc_list(
+    task: str = typer.Option(None, "--task"),
+    finding: str = typer.Option(None, "--finding"),
+    status: str = typer.Option(None, "--status"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """列出 PoC 作业。"""
+    params = {k: v for k, v in
+              {"task_id": task, "finding_id": finding, "status": status}.items()
+              if v}
+    _emit(_call("GET", "/api/v1/poc-jobs", params=params), json_out)
+
+
+@poc_app.command("show")
+def poc_show(job: str = typer.Argument(...), json_out: bool = typer.Option(False, "--json")):
+    """查看作业详情（含 phases/artifacts/evidence）。"""
+    _emit(_call("GET", f"/api/v1/poc-jobs/{job}"), json_out)
+
+
+@poc_app.command("logs")
+def poc_logs(job: str = typer.Argument(...), json_out: bool = typer.Option(False, "--json")):
+    """查看作业容器日志。"""
+    data = _call("GET", f"/api/v1/poc-jobs/{job}/log")
+    if json_out:
+        _emit(data, True)
+    else:
+        typer.echo(data.get("content") or "")
+
+
+@poc_app.command("artifacts")
+def poc_artifacts(job: str = typer.Argument(...), json_out: bool = typer.Option(False, "--json")):
+    """列出作业产物（相对路径 / 大小 / sha256）。"""
+    _emit(_call("GET", f"/api/v1/poc-jobs/{job}/artifacts"), json_out)
+
+
+@poc_app.command("cancel")
+def poc_cancel(job: str = typer.Argument(...), json_out: bool = typer.Option(False, "--json")):
+    """取消排队或运行中的作业。"""
+    _emit(_call("POST", f"/api/v1/poc-jobs/{job}/cancel", {}), json_out)
+
+
 # ---- action（Action Cards：Agent 准备，人类执行）---------------------------
 
 

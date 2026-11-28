@@ -1351,6 +1351,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_clarification_v1(conn)
     _migrate_lobby_indexes_v1(conn)
     _migrate_sandbox_v160(conn)
+    _migrate_sandbox_jobs_v160(conn)
     conn.commit()
 
 
@@ -3061,4 +3062,79 @@ def _migrate_sandbox_v160(conn: sqlite3.Connection) -> None:
     _add_column(conn, "role_sessions", "sandbox_instance_id TEXT")
     _add_column(conn, "role_task_sessions", "sandbox_instance_id TEXT")
     _add_column(conn, "tasks", "sandbox_json TEXT NOT NULL DEFAULT '{}'")
+    conn.commit()
+
+
+def _migrate_sandbox_jobs_v160(conn: sqlite3.Connection) -> None:
+    """v1.60 严格档作业表（M2）：job / phase / artifact。幂等。"""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sandbox_jobs (
+            id                 TEXT PRIMARY KEY,
+            kind               TEXT NOT NULL DEFAULT 'poc',
+            task_id            TEXT,
+            finding_id         TEXT,
+            role_slug          TEXT,
+            created_by         TEXT NOT NULL,
+            created_by_type    TEXT NOT NULL DEFAULT 'human',
+            tier               TEXT NOT NULL DEFAULT 'strict',
+            profile            TEXT NOT NULL DEFAULT 'safe',
+            spec_json          TEXT NOT NULL,
+            spec_hash          TEXT NOT NULL,
+            status             TEXT NOT NULL DEFAULT 'queued',
+            approval_status    TEXT NOT NULL DEFAULT 'not_required',
+            approved_by        TEXT,
+            approved_at        TEXT,
+            approval_note      TEXT,
+            backend            TEXT,
+            sandbox_instance_id TEXT,
+            native_job_id      TEXT,
+            timeout_seconds    INTEGER,
+            started_at         TEXT,
+            finished_at        TEXT,
+            exit_code          INTEGER,
+            signal             TEXT,
+            failure_reason     TEXT,
+            evidence_json      TEXT,
+            log_dir            TEXT,
+            artifact_dir       TEXT,
+            created_at         TEXT NOT NULL,
+            updated_at         TEXT NOT NULL
+        )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sandbox_jobs_task "
+        "ON sandbox_jobs(task_id, created_at DESC)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sandbox_jobs_finding "
+        "ON sandbox_jobs(finding_id, created_at DESC)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sandbox_jobs_status "
+        "ON sandbox_jobs(status, created_at)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sandbox_job_phases (
+            job_id       TEXT NOT NULL,
+            seq          INTEGER NOT NULL,
+            phase        TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            cmd          TEXT NOT NULL,
+            status       TEXT NOT NULL,
+            exit_code    INTEGER,
+            signal       TEXT,
+            timed_out    INTEGER NOT NULL DEFAULT 0,
+            duration_ms  INTEGER,
+            stdout_path  TEXT,
+            stderr_path  TEXT,
+            started_at   TEXT,
+            finished_at  TEXT,
+            PRIMARY KEY (job_id, seq)
+        )""")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sandbox_job_artifacts (
+            job_id     TEXT NOT NULL,
+            rel_path   TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            sha256     TEXT NOT NULL,
+            removed_at TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (job_id, rel_path)
+        )""")
     conn.commit()
