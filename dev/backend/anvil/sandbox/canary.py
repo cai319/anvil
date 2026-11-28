@@ -82,8 +82,10 @@ class ClaudeCodeCanaryAdapter:
             "Do not create the file by any other means and do not use other tools. "
             "After it succeeds, reply DONE."
         )
+        # SpawnRequest.executable 已经承载 CLI 路径；args 只放参数，避免
+        # 生成 `claude claude -p ...` 把路径当成 prompt。
+        _ = executable
         return [
-            executable,
             "-p", prompt,
             "--allowedTools", "Bash",
             "--permission-mode", config.DEFAULT_PERMISSION_MODE,

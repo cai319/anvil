@@ -161,7 +161,8 @@ def test_canary_env_matches_role_contract_and_strips_agent_shell(conn):
 def test_real_adapter_command_forces_bash_tool():
     adapter = canary.ClaudeCodeCanaryAdapter()
     args = adapter.command("/opt/claude", nonce="abc123")
-    assert args[0] == "/opt/claude"
+    assert args[0] == "-p"
+    assert "/opt/claude" not in args
     assert "-p" in args
     assert "--allowedTools" in args
     assert args[args.index("--allowedTools") + 1] == "Bash"
