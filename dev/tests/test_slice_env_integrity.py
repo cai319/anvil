@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import zipfile
 
 import pytest
 
@@ -61,6 +62,16 @@ def test_install_requirements_are_sorted_and_deduplicated():
     b = _install_spec(["requests", "rich", "requests"])
     assert jobs.dependency_digest(a) == jobs.dependency_digest(b)
     assert a["check"]["install"]["requirements"] == ["requests", "rich"]
+
+
+def test_pytest11_signals_requires_explicit_task_entry_points():
+    """缺省不扫描 Anvil 服务器自身；必须由调用方提供任务环境元数据。"""
+    assert env_integrity.pytest11_signals(["rich"]) == []
+    assert env_integrity.pytest11_signals(
+        ["rich"],
+        entry_points=[{"package": "rich", "group": "pytest11",
+                       "plugin": "rich.pytest"}]) == [
+        {"package": "rich", "plugin": "rich.pytest"}]
 
 
 # ---- workflow helpers ------------------------------------------------------
@@ -289,12 +300,38 @@ def test_production_change_creates_network_gated_counterfactual(tmp_path):
         tmp_path, ["requests>=2", "rich"])
     assert len(counterfactuals) == 1
     job = counterfactuals[0]
-    # 安装新生产依赖需要网络：角色发起时必须等待人工审批。
+    # 安装新生产依赖需要网络：角色发起时必须等待人工审批，批准后也必须真的有网。
     assert job["status"] == "waiting_approval"
+    assert job["spec"]["network"] == "bridge"
     assert job["spec"]["check"]["install"]["requirements"] == [
         "requests>=2", "rich"]
     snapshot = job["spec"]["base_snapshot"]
     assert str(ws / ".anvil" / "slice-base") in snapshot
+
+
+def _fake_wheel(directory, name: str, version: str, entry_name: str,
+                entry_value: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(directory / f"{name}-{version}-py3-none-any.whl", "w") as zf:
+        zf.writestr(f"{name}-{version}.dist-info/entry_points.txt",
+                    f"[pytest11]\n{entry_name} = {entry_value}\n")
+
+
+def test_pytest11_scans_task_wheel_metadata_not_server_distributions(tmp_path):
+    conn, _db, wid, ws = _env(tmp_path)
+    _submit_scope(conn, wid)
+    _run_checks(conn, _db, FakePytestRunner())
+    _to_execute(conn, wid)
+    _fake_wheel(ws / ".anvil" / "wheelhouse", "rich", "13.0.0",
+                "pytest_rich", "rich.pytest")
+    _prod_change(ws, ["requests>=2", "rich"])
+    wf_service.submit_step(
+        conn, wid, "P1.auth.impl", "auditor", "added production dependency",
+        changed_paths=["pyproject.toml"])
+
+    integrity = _step(conn, wid, "P1.auth.scope")["slice_lock"]["dependency_integrity"]
+    assert integrity["pytest11"] == [{"package": "rich", "plugin": "pytest_rich"}]
+    assert "dependency_pytest11_plugin" in integrity["signals"]
 
 
 def _approved_counterfactual(conn, counterfactual):
@@ -427,6 +464,20 @@ def test_base_environment_mismatch_blocks_green_run(tmp_path):
     })
     with pytest.raises(env_integrity.EnvironmentMismatch):
         env_integrity.guard_green_environment(lock, check_id, mismatched)
+
+
+def test_missing_red_env_hash_fails_closed_instead_of_skipping_guard():
+    """红跑没记录 env_hash 时不能放行绿跑；应视为不一致，留 unknown。"""
+    check_id = "P1.auth.scope.a1"
+    green_spec = jobs.parse_check_spec({
+        "task_id": "T1",
+        "check": {"id": check_id, "kind": "test",
+                  "pytest": {"paths": [TEST_FILE], "args": ["-q"]}},
+    })
+    for lock in ({"checks": [{"id": check_id}]},  # 有检查但缺 env_hash
+                 {"checks": []}):                # 锁定里根本没有该检查
+        with pytest.raises(env_integrity.EnvironmentMismatch):
+            env_integrity.guard_green_environment(lock, check_id, green_spec)
 
 
 def test_ai_decide_escalates_on_test_closure_change(tmp_path):

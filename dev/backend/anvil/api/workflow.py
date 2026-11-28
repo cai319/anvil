@@ -10,6 +10,7 @@ from ..schemas import (
     TaskLeasesOut, WorkflowGraphOut, WorkflowHistoryOut, WorkflowMetricsOut,
     WorkflowOut,
 )
+from ..sandbox.errors import QuotaExceeded
 from ..services.tasks import ConflictError
 from ..services import check_ledger as check_ledger_service
 from ..services import dossier as dossier_service
@@ -388,6 +389,8 @@ def submit_step(wid: str, sid: str, body: dict, conn=Depends(get_db),
             body.get("slice_spec"))
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except QuotaExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc))
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except review_service.EvidenceError as exc:
@@ -450,7 +453,8 @@ def replan_step(wid: str, sid: str, body: dict, conn=Depends(get_db),
             conn, wid, sid, auth.role, str(body.get("reason") or ""),
             new_spec=body.get("slice_spec"),
             red_evidence=body.get("red_evidence"),
-            actor_is_human=auth.role == "human")
+            actor_is_human=auth.role == "human",
+            approve=bool(body.get("approve")))
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except PermissionError as exc:

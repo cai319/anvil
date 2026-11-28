@@ -302,6 +302,39 @@ def test_assertion_change_with_new_engine_red_evidence_is_not_weakening(
     assert replan["red_evidence_checks"] == ["a1"]
 
 
+def test_role_cannot_self_approve_a_weakening_replan(replan_env):
+    """approve 只有 human 身份能用；角色传 approve 不能绕过弱化守卫。"""
+    conn, _db_path, wid, _ws = replan_env
+    _scope(conn, wid, _slice_spec())
+    _run_checks(conn, _db_path)
+    new_raw = copy.deepcopy(_slice_spec())
+    new_raw["acceptance"] = []
+
+    with pytest.raises(PermissionError) as excinfo:
+        wf_service.replan_slice(
+            conn, wid, "P1.auth.scope", "lead", "self approve",
+            new_spec=new_raw, approve=True)
+    assert "human" in str(excinfo.value)
+    scope = _step(conn, wid, "P1.auth.scope")
+    assert scope["status"] == "approved"
+    assert scope["slice_replan"] is None
+
+
+def test_human_approve_flag_is_honored(replan_env):
+    conn, _db_path, wid, _ws = replan_env
+    _scope(conn, wid, _slice_spec())
+    _run_checks(conn, _db_path)
+    new_raw = copy.deepcopy(_slice_spec())
+    new_raw["acceptance"] = []
+
+    wf_service.replan_slice(
+        conn, wid, "P1.auth.scope", "human", "approved weakening",
+        new_spec=new_raw, approve=True)
+    scope = _step(conn, wid, "P1.auth.scope")
+    assert scope["status"] == "pending"
+    assert scope["slice_replan"]["approved_by"] == "human"
+
+
 def test_human_can_approve_a_weakening_replan(replan_env):
     conn, _db_path, wid, _ws = replan_env
     _scope(conn, wid, _slice_spec())

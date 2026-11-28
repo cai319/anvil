@@ -465,6 +465,13 @@ def parse_check_spec(raw: Any) -> dict:
         }
         if red_exit_code is not None:
             check_spec["red_exit_code"] = red_exit_code
+    min_collected = check_raw.get("min_collected")
+    if min_collected is not None:
+        if (isinstance(min_collected, bool)
+                or not isinstance(min_collected, int) or min_collected < 0):
+            raise JobSpecError(
+                "check.min_collected must be a non-negative integer")
+        check_spec["min_collected"] = min_collected
     if pytest_spec is not None:
         check_spec["pytest"] = pytest_spec
         check_spec["collect_cmd"] = collect_cmd
@@ -1075,6 +1082,10 @@ def execute_job(spec: dict, job_id: str, runner: JobRunner, *,
                     collect_path.read_text(encoding="utf-8", errors="replace"))
             except OSError:
                 baseline = None
+        # 绿跑对照红跑锁定的测试数基线；没有锁定值时退回本次 collect 结果。
+        locked_baseline = check_spec.get("min_collected")
+        compare_baseline = (locked_baseline
+                            if locked_baseline is not None else baseline)
         result_info = {
             "classification": None, "cause": None, "failure_types": [],
         }
@@ -1087,7 +1098,7 @@ def execute_job(spec: dict, job_id: str, runner: JobRunner, *,
                                or (run_phase or {}).get("timed_out")),
                 junit=detail,
                 collected_count=collected,
-                baseline_count=baseline,
+                baseline_count=compare_baseline,
             )
         elif check_spec.get("kind") == "command":
             result_info = check_kinds.classify_command(
@@ -1116,6 +1127,7 @@ def execute_job(spec: dict, job_id: str, runner: JobRunner, *,
             "junit_summary": summary,
             "collected_count": collected,
             "collected_baseline": baseline,
+            "min_collected": locked_baseline,
             "classification": result_info["classification"],
             "cause": result_info["cause"],
             "failure_types": result_info["failure_types"],

@@ -632,7 +632,8 @@ def replan_slice(conn: sqlite3.Connection, wid: str, step_id: str,
                  role: str | None, reason: str, *,
                  new_spec: dict | None = None,
                  red_evidence=None,
-                 actor_is_human: bool | None = None) -> dict:
+                 actor_is_human: bool | None = None,
+                 approve: bool = False) -> dict:
     """显式 replan：重开切片 scope 与下游，记录原因与新旧 spec 哈希。
 
     - 复用 reject-to-ancestor 重置，不新增 workflow 状态族；
@@ -646,7 +647,7 @@ def replan_slice(conn: sqlite3.Connection, wid: str, step_id: str,
             conn, task_id, required=True, wait_seconds=2.0):
         return _replan_slice_locked(
             conn, wid, step_id, role, reason, new_spec=new_spec,
-            red_evidence=red_evidence,
+            red_evidence=red_evidence, approve=approve,
             actor_is_human=(role == "human" if actor_is_human is None
                             else actor_is_human))
 
@@ -655,9 +656,15 @@ def _replan_slice_locked(conn: sqlite3.Connection, wid: str, step_id: str,
                          role: str | None, reason: str, *,
                          new_spec: dict | None,
                          red_evidence,
-                         actor_is_human: bool) -> dict:
+                         actor_is_human: bool,
+                         approve: bool = False) -> dict:
     from . import slice_spec as slice_spec_service
 
+    # approve 只能由 human 身份使用：角色不能通过请求体自批弱化或第二次 replan。
+    if approve and not actor_is_human:
+        raise PermissionError(
+            "replan approve requires human identity; roles cannot self-approve "
+            "a weakening or repeated replan")
     reason = (reason or "").strip()
     if not reason:
         raise ConflictError("replan_reason_required: a replan must record a reason")

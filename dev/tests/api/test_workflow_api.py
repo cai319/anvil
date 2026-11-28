@@ -95,6 +95,54 @@ async def test_step_submit_gate_and_review(client, seeded, app):
     assert all(i["kind"] != "gate" for i in inbox["items"])
 
 
+async def test_step_submit_quota_maps_to_429(client, seeded, monkeypatch):
+    """检查作业配额耗尽时提交端点返回 429，而不是 500。"""
+    import anvil.api.workflow as workflow_api
+    from anvil.sandbox.errors import QuotaExceeded
+
+    did = await _draft(client)
+    await client.post("/api/v1/board/drafts/approve", headers=human_headers(),
+                      json={"draft_ids": [did]})
+    wid = (await client.get("/api/v1/tasks/T-WF/workflow",
+                            headers=auth_headers())).json()["id"]
+
+    def quota_exceeded(*args, **kwargs):
+        raise QuotaExceeded("task has 20 queued check jobs (limit 20)")
+
+    monkeypatch.setattr(
+        workflow_api.services.workflow, "submit_step", quota_exceeded)
+    r = await client.post(
+        f"/api/v1/workflows/{wid}/steps/S1/submit",
+        headers=auth_headers("pm"), json={"summary": "done"})
+    assert r.status_code == 429, r.text
+
+
+async def test_replan_api_forwards_human_approve_flag(client, seeded, monkeypatch):
+    """CLI --approve 必须真正传到服务层，而不是被端点丢弃。"""
+    import anvil.api.workflow as workflow_api
+
+    did = await _draft(client)
+    await client.post("/api/v1/board/drafts/approve", headers=human_headers(),
+                      json={"draft_ids": [did]})
+    wid = (await client.get("/api/v1/tasks/T-WF/workflow",
+                            headers=auth_headers())).json()["id"]
+    captured: dict = {}
+
+    def fake_replan(conn, wid_, sid, role, reason, **kwargs):
+        captured.update({"wid": wid_, "sid": sid, "role": role,
+                         "reason": reason, **kwargs})
+        return {"id": wid_, "task_id": "T-WF", "steps": []}
+
+    monkeypatch.setattr(
+        workflow_api.services.workflow, "replan_slice", fake_replan)
+    r = await client.post(
+        f"/api/v1/workflows/{wid}/steps/S1/replan", headers=human_headers(),
+        json={"reason": "口径调整", "approve": True})
+    assert r.status_code == 200, r.text
+    assert captured["approve"] is True
+    assert captured["actor_is_human"] is True
+
+
 async def test_mention_on_workflow_creates_reply_run(client, seeded):
     did = await _draft(client)
     await client.post("/api/v1/board/drafts/approve", headers=human_headers(),

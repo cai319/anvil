@@ -7,7 +7,7 @@ import pytest
 
 from anvil.db import open_conn
 from anvil.services import sandbox
-from tests.conftest import human_headers
+from tests.conftest import API, human_headers, task_payload
 
 
 def _pm_headers(app) -> dict:
@@ -84,6 +84,46 @@ async def test_invalid_spec_returns_400(client, monkeypatch):
         "/api/v1/poc-jobs", headers=human_headers(),
         json={"network": "host", "phases": {"run": [{"cmd": "true"}]}})
     assert r.status_code == 400
+
+
+CHECK_SPEC = {
+    "task_id": "T-POC-CHK",
+    "network": "none",
+    "check": {
+        "id": "c1",
+        "kind": "test",
+        "cmd": "pytest -q --junit-xml=/out/junit.xml",
+        "junit": ["junit.xml"],
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_poc_endpoints_do_not_leak_check_jobs(client, monkeypatch):
+    """PoC 列表/详情/日志/产物只服务于 kind=poc；检查作业必须走 /check-jobs。"""
+    monkeypatch.setattr(sandbox, "strict_available", lambda: (True, "ready"))
+    created = await client.post(
+        f"{API}/tasks",
+        json=task_payload("T-POC-CHK", assignees=[]), headers=human_headers())
+    assert created.status_code == 201, created.text
+    poc = (await client.post(
+        "/api/v1/poc-jobs", headers=human_headers(),
+        json={**SPEC, "task_id": "T-POC-CHK"})).json()
+    check = await client.post(
+        f"{API}/check-jobs", headers=human_headers(), json=CHECK_SPEC)
+    assert check.status_code == 201, check.text
+    check_id = check.json()["id"]
+
+    listing = await client.get(
+        "/api/v1/poc-jobs?task_id=T-POC-CHK", headers=human_headers())
+    assert listing.status_code == 200
+    assert [job["id"] for job in listing.json()] == [poc["id"]]
+    assert all(job["kind"] == "poc" for job in listing.json())
+
+    for suffix in ("", "/log", "/artifacts", "/evidence"):
+        r = await client.get(
+            f"/api/v1/poc-jobs/{check_id}{suffix}", headers=human_headers())
+        assert r.status_code == 404, (suffix, r.text)
 
 
 @pytest.mark.asyncio

@@ -50,11 +50,31 @@ def test_parse_accepts_full_spec_and_normalizes_ids():
     assert spec["stubs"][0]["path"] == "src/feature.py"
 
 
-def test_parse_accepts_all_four_kinds():
-    for kind in ("test", "command", "file_assert", "manual"):
+def test_parse_accepts_all_four_kinds_with_structured_verification():
+    structured = {
+        "test": {"pytest": {"paths": ["tests/test_x.py"]}},
+        "command": {"cmd": "true", "exit_code": 1},
+        "file_assert": {"path": "reports/out.md"},
+        "manual": {"judge": "decide", "method": "read it"},
+    }
+    for kind, verification in structured.items():
         spec = slice_spec.parse_slice_spec({"acceptance": [{
-            "kind": kind, "criterion": "x", "verification": "check it"}]})
+            "kind": kind, "criterion": "x", "verification": verification}]})
         assert spec["acceptance"][0]["kind"] == kind
+
+
+@pytest.mark.parametrize("kind", ["test", "command", "file_assert"])
+def test_parse_rejects_prose_verification_for_non_manual_kinds(kind):
+    """散文验收只对 manual 合法；否则会被静默漏判却计入 N_total。"""
+    with pytest.raises(slice_spec.SliceSpecError):
+        slice_spec.parse_slice_spec({"acceptance": [{
+            "kind": kind, "criterion": "x", "verification": "check it"}]})
+
+
+def test_parse_manual_accepts_prose_verification():
+    spec = slice_spec.parse_slice_spec({"acceptance": [{
+        "kind": "manual", "criterion": "x", "verification": "read the diff"}]})
+    assert spec["acceptance"][0]["method"] == "read the diff"
 
 
 def test_parse_accepts_deliverable_and_stub_aliases():
@@ -127,12 +147,19 @@ def test_test_checks_exposes_runnable_pytest_items_only():
 
 
 def test_test_checks_skips_items_without_structured_pytest():
+    # 结构化校验已保证 test 项带 pytest 对象；解耦后仅 command 项存在时无 test。
     spec = slice_spec.parse_slice_spec({"acceptance": [
-        {"kind": "test", "criterion": "x", "verification": "manual prose"},
         {"kind": "command", "criterion": "y",
          "verification": {"cmd": "true", "exit_code": 1}},
     ]})
     assert slice_spec.test_checks(spec) == []
+
+
+def test_parse_rejects_test_item_with_non_object_pytest():
+    with pytest.raises(slice_spec.SliceSpecError):
+        slice_spec.parse_slice_spec({"acceptance": [{
+            "kind": "test", "criterion": "x",
+            "verification": {"pytest": "tests/test_x.py"}}]})
 
 
 # --- command / file_assert / manual（v1.62 #5）------------------------------

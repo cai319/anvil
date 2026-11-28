@@ -126,6 +126,12 @@ def _verification(raw, kind: str, index: int) -> str | dict:
     if isinstance(raw, str):
         if not raw.strip():
             raise SliceSpecError(f"{field_} must not be empty")
+        # 散文验收只有 manual 合法；test/command/file_assert 必须结构化，
+        # 否则既不会进入引擎检查也不会进入 manual 判定，却被计入 N_total。
+        if kind != "manual":
+            raise SliceSpecError(
+                f"{field_} must be an object for kind {kind}; "
+                "prose is only valid for manual items")
         return raw.strip()
     if not isinstance(raw, dict):
         raise SliceSpecError(f"{field_} must be a string or an object")
@@ -134,9 +140,10 @@ def _verification(raw, kind: str, index: int) -> str | dict:
         raise SliceSpecError(f"{field_} has unknown field(s) for kind {kind}: "
                              f"{sorted(unknown)}")
     if kind == "test":
-        if isinstance(raw.get("pytest"), dict):
-            return {"pytest": _pytest_spec(raw["pytest"], field_)}
-        return dict(raw)
+        if not isinstance(raw.get("pytest"), dict):
+            raise SliceSpecError(
+                f"{field_}.pytest must be an object with paths/args/plugins")
+        return {"pytest": _pytest_spec(raw["pytest"], field_)}
     if kind == "command":
         return _command_verification(raw, field_)
     if kind == "file_assert":

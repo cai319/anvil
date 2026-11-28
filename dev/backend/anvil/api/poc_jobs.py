@@ -35,10 +35,13 @@ def _finding_task(conn, finding_id: str | None) -> str | None:
     return str(row["task_id"]) if row else None
 
 
+KIND = "poc"
+
+
 def _checked_job(conn, job_id: str, auth: Auth) -> dict:
     job = sandbox_service.get_job(conn, job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="job not found")
+    if job is None or job.get("kind") != KIND:
+        raise HTTPException(status_code=404, detail="poc job not found")
     if access.is_agent(auth):
         if not job.get("task_id"):
             raise HTTPException(
@@ -100,7 +103,7 @@ def list_poc_jobs(task_id: str | None = None, finding_id: str | None = None,
                 status_code=403, detail="agent must pass task_id or finding_id")
     return sandbox_service.list_jobs(
         conn, task_id=task_id, finding_id=finding_id,
-        status=status, limit=limit)
+        status=status, kind=KIND, limit=limit)
 
 
 @router.get("/poc-jobs/{job_id}")
