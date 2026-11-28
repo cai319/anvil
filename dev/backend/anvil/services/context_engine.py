@@ -13,7 +13,7 @@ from . import ledger
 from .daemon_common import (
     _ALL_SLOTS, _MODEL_VARIANT_SUFFIX, _Role, _hard_limit_for, clear_session,
     clear_slice_sessions, context_key, context_parts, logger, slice_key_of,
-    task_id_of,
+    stage_of, task_id_of,
 )
 
 
@@ -237,7 +237,7 @@ class ContextEngineMixin:
             if active:
                 conn.execute(
                     "UPDATE role_sessions SET session_id='', last_context_tokens=NULL, "
-                    "current_context_key=NULL, current_slice_key=NULL, "
+                    "current_context_key=NULL, current_slice_key=NULL, current_stage=NULL, "
                     "last_error=?, updated_at=? WHERE role_slug=?",
                     (note, now_iso(), role))
             conn.commit()
@@ -269,15 +269,17 @@ class ContextEngineMixin:
             datetime.fromtimestamp(r.last_active, tz=timezone.utc).isoformat()
             if r.last_active else now)
         task_id, slice_key = context_parts(key)
+        stage = stage_of(key)
         conn.execute(
             """INSERT INTO role_task_sessions
-                   (role_slug, task_key, task_id, slice_key, session_id, runtime_id,
+                   (role_slug, task_key, task_id, slice_key, stage, session_id, runtime_id,
                     cwd, workspace_path, model_id, status, context_tokens,
                     last_seen_activity_id, last_active_at, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(role_slug, task_key) DO UPDATE SET
                    task_id=excluded.task_id,
                    slice_key=excluded.slice_key,
+                   stage=excluded.stage,
                    session_id=excluded.session_id,
                    runtime_id=COALESCE(excluded.runtime_id, role_task_sessions.runtime_id),
                    cwd=COALESCE(excluded.cwd, role_task_sessions.cwd),
@@ -292,7 +294,7 @@ class ContextEngineMixin:
                        ELSE role_task_sessions.last_seen_activity_id END,
                    last_active_at=excluded.last_active_at,
                    updated_at=excluded.updated_at""",
-            (r.role, key, task_id, slice_key, r.session_id or "",
+            (r.role, key, task_id, slice_key, stage, r.session_id or "",
              spec.runtime_id if spec else None,
              spec.cwd if spec else None, spec.workspace_path if spec else None,
              r.model_id, slot_status, int(r.context_tokens or 0),
@@ -309,11 +311,12 @@ class ContextEngineMixin:
             "UPDATE role_sessions SET session_id=?, model_id=COALESCE(?, model_id), "
             "last_context_tokens=?, current_task_id=?, current_run_id=?, "
             "current_step_id=?, current_context_key=?, current_slice_key=?, "
-            "updated_at=? WHERE role_slug=?",
+            "current_stage=?, updated_at=? WHERE role_slug=?",
             (r.session_id or "", r.model_id, int(r.context_tokens or 0),
              current_task, current_run, current_step,
              r.context_key if current_task else None,
-             slice_key if current_task else None, now, r.role),
+             slice_key if current_task else None,
+             stage if current_task else None, now, r.role),
         )
 
     def _slot_load(self, conn, role: str, key: str):

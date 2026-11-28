@@ -11,7 +11,7 @@ from .. import config
 from ..db import open_conn
 from ..util import now_iso
 from .daemon_common import (  # noqa: F401
-    CONTEXT_SEP, GLOBAL_TASK_KEY, _ALL_SLOTS, _CONTEXT_OVERFLOW_MARKERS, _DeliveryError, _MODEL_VARIANT_SUFFIX, _PAYLOAD_OVERFLOW_MARKERS, _Queued, _Role, _SESSION_ENV_KEYS, _SpawnSpec, _USAGE_CAMEL, _aggregate_model_usage, _attachment_chars, _clean_env, _hard_limit_for, _is_context_overflow, _is_payload_overflow, clear_session, clear_slice_sessions, context_key, context_parts, extract_turn_usage, extract_usage, frame_user_message, logger, slice_key_of, task_id_of, task_key,
+    CONTEXT_SEP, CONTEXT_STAGE_SEP, GLOBAL_TASK_KEY, _ALL_SLOTS, _CONTEXT_OVERFLOW_MARKERS, _DeliveryError, _MODEL_VARIANT_SUFFIX, _PAYLOAD_OVERFLOW_MARKERS, _Queued, _Role, _SESSION_ENV_KEYS, _SpawnSpec, _USAGE_CAMEL, _aggregate_model_usage, _attachment_chars, _clean_env, _hard_limit_for, _is_context_overflow, _is_payload_overflow, clear_session, clear_slice_sessions, context_key, context_parts, context_parts_full, extract_turn_usage, extract_usage, frame_user_message, logger, slice_key_of, stage_of, task_id_of, task_key,
 )
 from .context_engine import ContextEngineMixin
 from .delivery_queue import DeliveryQueueMixin
@@ -127,7 +127,7 @@ class DaemonManager(DeliveryQueueMixin, ContextEngineMixin,
             conn.execute(
                 "UPDATE role_sessions SET status='dead', pid=NULL, busy_since=NULL, "
                 "current_task_id=NULL, current_run_id=NULL, current_step_id=NULL, "
-                "current_context_key=NULL, current_slice_key=NULL, "
+                "current_context_key=NULL, current_slice_key=NULL, current_stage=NULL, "
                 "updated_at=? WHERE status IN ('starting','idle','busy')", (now_iso(),))
             conn.execute("UPDATE role_task_sessions SET status='dead', updated_at=? "
                          "WHERE status IN ('idle','busy')", (now_iso(),))

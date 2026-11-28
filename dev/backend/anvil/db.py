@@ -1328,6 +1328,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_task_workspace_v1(conn)
     _migrate_slice_context_v1(conn)
     _migrate_slice_context_v2(conn)
+    _migrate_context_stage_v1(conn)
     _migrate_run_recovery_v1(conn)
     _migrate_dispatch_child_v1(conn)
     _migrate_delegation_scope_v1(conn)
@@ -1838,6 +1839,45 @@ def _migrate_slice_context_v2(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
     _set_setting(conn, "schema.slice_context_v2", "1")
+    conn.commit()
+
+
+def _migrate_context_stage_v1(conn: sqlite3.Connection) -> None:
+    """上下文键可选 stage 维度：显式列 + 从已写入的 key 回填。幂等。
+
+    `role_task_sessions.task_key` 仍是唯一槽 key（opaque），stage 后缀随 key
+    持久化；显式列让清理/观测不必解析 key。旧键没有 stage，列保持 NULL。
+    """
+    if _setting(conn, "schema.context_stage_v1"):
+        return
+    _add_column(conn, "role_task_sessions", "stage TEXT")
+    _add_column(conn, "role_sessions", "current_stage TEXT")
+
+    def _parse_stage_key(key: str) -> tuple[str | None, str | None, str | None]:
+        text = str(key or "")
+        if text == "__global__":
+            return None, None, None
+        stage = None
+        if "::stage::" in text:
+            text, stage = text.split("::stage::", 1)
+            stage = stage or None
+        if "::slice::" in text:
+            task_id, slice_key = text.split("::slice::", 1)
+            return task_id or None, slice_key or None, stage
+        return text or None, None, stage
+
+    for row in conn.execute(
+            "SELECT role_slug, task_key FROM role_task_sessions "
+            "WHERE stage IS NULL").fetchall():
+        task_id, slice_key, stage = _parse_stage_key(row["task_key"])
+        if stage is None:
+            continue
+        conn.execute(
+            "UPDATE role_task_sessions SET task_id=COALESCE(task_id, ?), "
+            "slice_key=COALESCE(slice_key, ?), stage=? "
+            "WHERE role_slug=? AND task_key=?",
+            (task_id, slice_key, stage, row["role_slug"], row["task_key"]))
+    _set_setting(conn, "schema.context_stage_v1", "1")
     conn.commit()
 
 
