@@ -2439,8 +2439,11 @@ app.add_typer(step_app, name="step")
 示例:
   anvil step submit WF-1 S2 --summary "接口完成" --evidence-file evidence.json
   anvil step submit WF-1 S2 --summary "修复完成" --changed-paths src/auth.ts,src/api.ts
+  anvil step submit WF-1 S1.auth.scope --summary "切片 spec" --slice-spec-file spec.json
 
 规则: 只对 running 步骤提交；不要用 task submit。409 时先 `anvil step show WF-1`。
+slice scope 步骤用 --slice-spec-file 提交结构化切片的执行契约；test 类验收项由引擎在
+base 上跑红校验。
 摘要要让非技术读者看懂：先写结论与需要人类做什么，给选项/推荐/下一步。
 涉及具体交付件时，--summary 必须逐项列出性质、内容简介与绝对路径；无交付件时写「本次提交无具体交付件」。
 """)
@@ -2454,6 +2457,9 @@ def step_submit(
         "", "--evidence-file", help="证据 JSON 文件（数组）"),
     changed_paths: str = typer.Option(
         "", "--changed-paths", help="本步骤改动的路径，逗号分隔"),
+    slice_spec_file: str = typer.Option(
+        "", "--slice-spec-file",
+        help="切片 spec JSON 文件（仅 slice scope 步骤；提交后引擎在 base 上跑红校验）"),
     json_out: bool = typer.Option(False, "--json"),
 ):
     """提交当前工作流步骤（完成后必须调用；不要用 task submit）。"""
@@ -2468,6 +2474,15 @@ def step_submit(
         if not isinstance(body["evidence"], list):
             _usage_error("--evidence-file 顶层必须是 JSON 数组",
                          "例如 [{\"kind\":\"file\",\"ref\":\"src/auth.ts\"}]。")
+    if slice_spec_file:
+        try:
+            body["slice_spec"] = json.loads(_read_text_file(slice_spec_file))
+        except (OSError, json.JSONDecodeError) as exc:
+            _usage_error(f"无法读取 --slice-spec-file: {exc}",
+                         "传 JSON 对象文件；字段见 `anvil step submit -h`。")
+        if not isinstance(body["slice_spec"], dict):
+            _usage_error("--slice-spec-file 顶层必须是 JSON 对象",
+                         "字段：acceptance/seam/out_of_scope/contract/deliverables/stubs。")
     out = _call("POST", f"/api/v1/workflows/{workflow_id}/steps/{step_id}/submit", body)
     if json_out:
         _emit(out, True)

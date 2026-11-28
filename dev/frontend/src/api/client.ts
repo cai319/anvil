@@ -92,6 +92,10 @@ export interface CheckResult {
   timed_out?: boolean;
   junit_summary?: JunitSummary | null;
   collected_count?: number | null;
+  collected_baseline?: number | null;
+  classification?: "passed" | "valid_red" | "harness_error" | null;
+  cause?: string | null;
+  failure_types?: string[];
   env_hash?: string | null;
   duration_ms?: number | null;
   status?: string | null;

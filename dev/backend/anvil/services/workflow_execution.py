@@ -221,8 +221,23 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
             "不要调用 `anvil step submit` / `anvil task submit` / `anvil task claim`。\n"
         )
 
+    is_scope = bool(step.get("slice_key")) and step["step_id"].endswith(".scope")
+    slice_spec_block = ""
+    if is_scope:
+        slice_spec_block = (
+            "\n## 切片 spec（scope 提交必填）\n"
+            "scope 阶段用结构化 spec 固化本切片的执行契约，供引擎在 base 上跑红校验。\n"
+            "JSON 字段：acceptance（数组，每项 {id?, kind, criterion, verification|evidence}，"
+            "kind 只能是 test/command/file_assert/manual）、seam、out_of_scope、contract、"
+            "deliverables、stubs（[{path, signatures:[...]}]）。\n"
+            "test 项用结构化验证方式：{\"pytest\":{\"paths\":[\"tests/...\"],"
+            "\"args\":[\"-q\"],\"plugins\":[]}}；绿地切片先写抛 NotImplementedError 的 "
+            "接口 stub，再写测试。未知字段与非法 kind 会被服务端拒绝。\n")
     submit_cmd = (f"anvil step submit {workflow['id']} {step['step_id']} "
                   "--summary \"完成摘要\"")
+    if is_scope:
+        submit_cmd = (f"anvil step submit {workflow['id']} {step['step_id']} "
+                      "--summary \"完成摘要\" --slice-spec-file slice-spec.json")
     if step.get("evidence_required"):
         submit_cmd += " --evidence-file evidence.json"
     submit_cmd += ' --changed-paths "src/a.py,src/b.py"'
@@ -231,6 +246,7 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
         + loop_block
         + evidence_block
         + dep_results_block
+        + slice_spec_block
         + feedback_block
         + recovery_block
         + f"\n完成后必须执行：`{submit_cmd}`。\n"
@@ -506,7 +522,8 @@ def renew_step_lease_for_run(conn: sqlite3.Connection, run_id: str | None,
 def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
                 summary: str | None, run_id: str | None = None,
                 evidence: list | None = None,
-                changed_paths: list | None = None) -> dict:
+                changed_paths: list | None = None,
+                slice_spec: dict | None = None) -> dict:
     """角色提交当前步骤（anvil step submit）。gate 步骤进入人工审核。"""
     wf = get_workflow(conn, wid)
     task_id = wf["task_id"] if wf else None
@@ -515,13 +532,15 @@ def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
     with workflow_lifecycle_lock(
             conn, task_id, required=True, wait_seconds=2.0):
         return _submit_step_locked(
-            conn, wid, step_id, role, summary, run_id, evidence, changed_paths)
+            conn, wid, step_id, role, summary, run_id, evidence, changed_paths,
+            slice_spec)
 
 
 def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
                         summary: str | None, run_id: str | None = None,
                         evidence: list | None = None,
-                        changed_paths: list | None = None) -> dict:
+                        changed_paths: list | None = None,
+                        slice_spec: dict | None = None) -> dict:
     from . import runs as runs_service
 
     wf = get_workflow(conn, wid)
@@ -553,6 +572,18 @@ def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: 
     if step.get("evidence_required") and not normalized:
         raise ConflictError(
             f"evidence_required: step {step_id} requires at least one evidence item")
+    parsed_spec = None
+    slice_spec_json = None
+    if slice_spec is not None:
+        if not str(step.get("slice_key") or "").strip() or not step_id.endswith(".scope"):
+            raise ConflictError(
+                "slice_spec is only accepted when submitting a slice scope step")
+        from . import slice_spec as slice_spec_service
+        try:
+            parsed_spec = slice_spec_service.parse_slice_spec(slice_spec)
+        except slice_spec_service.SliceSpecError as exc:
+            raise ConflictError(f"slice_spec_invalid: {exc}") from exc
+        slice_spec_json = jdumps(parsed_spec)
     changed = [leases.normalize_path(p) for p in (changed_paths or [])]
     if changed:
         conflicts = leases.check_paths(conn, wf["task_id"], changed, holder=role)
@@ -568,8 +599,10 @@ def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: 
     # 把已结束步骤写回 submitted（形成 orphan run / 重复 packet）。
     cur = conn.execute(
         "UPDATE workflow_steps SET status='submitted', summary=?, evidence_json=?, "
-        "updated_at=? WHERE workflow_id=? AND step_id=? AND status='running'",
-        (summary, jdumps(normalized or step.get("evidence") or []), now, wid, step_id),
+        "slice_spec_json=COALESCE(?, slice_spec_json), updated_at=? "
+        "WHERE workflow_id=? AND step_id=? AND status='running'",
+        (summary, jdumps(normalized or step.get("evidence") or []),
+         slice_spec_json, now, wid, step_id),
     )
     if cur.rowcount != 1:
         raise ConflictError(
@@ -593,6 +626,13 @@ def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: 
         _step_activity(conn, wf["task_id"], role, step, "approved", summary)
     leases.release(conn, step.get("lease_id"), commit=False)
     conn.commit()
+    if parsed_spec is not None:
+        # 引擎在 base 上按切片 spec 的 test 项创建红跑作业；证据只由引擎写入。
+        from . import sandbox as sandbox_service
+        sandbox_service.create_slice_checks(
+            conn, task_id=wf["task_id"], step_id=step_id,
+            slice_key=str(step.get("slice_key") or ""), spec=parsed_spec,
+            actor_role=role, actor_is_human=False)
     _finalize_if_done(conn, wid)
     return get_workflow(conn, wid)  # type: ignore[return-value]
 

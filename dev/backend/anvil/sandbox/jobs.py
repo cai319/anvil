@@ -21,6 +21,7 @@ from typing import Any, Protocol
 
 from .. import config
 from ..util import jloads, now_iso
+from . import pytest_adapter
 
 PHASES = ("prepare", "build", "run")
 DEFAULT_RESOURCES = {
@@ -235,7 +236,7 @@ def is_safe(spec: dict) -> bool:
 
 # ---- check spec（引擎执行的验收检查）--------------------------------------
 
-CHECK_KINDS = ("test", "command")
+CHECK_KINDS = ("test", "command", "file_assert", "manual")
 
 
 def _normalize_junit_paths(raw: Any, field_: str = "check.junit") -> list[str]:
@@ -253,6 +254,30 @@ def _normalize_junit_paths(raw: Any, field_: str = "check.junit") -> list[str]:
             raise JobSpecError(f"{field_}[{i}] must be relative without ..")
         out.append(path)
     return out
+
+
+def _normalize_pytest_config(raw: Any) -> dict:
+    """校验 pytest 检查的运行配置：源码相对路径 + 透传参数 + 显式插件。"""
+    if not isinstance(raw, dict):
+        raise JobSpecError("check.pytest must be an object")
+    unknown = set(raw) - {"paths", "args", "plugins"}
+    if unknown:
+        raise JobSpecError(f"check.pytest has unknown key(s): {sorted(unknown)}")
+    paths = _normalize_junit_paths(raw.get("paths"), "check.pytest.paths")
+    if not paths:
+        raise JobSpecError("check.pytest.paths must not be empty")
+
+    def _strings(value: Any, field_: str) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list) or any(
+                not isinstance(item, str) or not item.strip() for item in value):
+            raise JobSpecError(f"{field_} must be a list of non-empty strings")
+        return [item.strip() for item in value]
+
+    return {"paths": paths,
+            "args": _strings(raw.get("args"), "check.pytest.args"),
+            "plugins": _strings(raw.get("plugins"), "check.pytest.plugins")}
 
 
 def parse_check_spec(raw: Any) -> dict:
@@ -285,23 +310,72 @@ def parse_check_spec(raw: Any) -> dict:
                   maximum=HARD_MAX[key], field_=f"resources.{key}")
         for key, default in DEFAULT_RESOURCES.items()
     }
-    command_raw = {
-        "name": str(check_raw.get("id") or "check"),
-        "timeout_seconds": check_raw.get("timeout_seconds"),
-        "env": check_raw.get("env") or {},
-    }
-    if check_raw.get("cmd") is not None:
-        command_raw["cmd"] = check_raw["cmd"]
-    if check_raw.get("argv") is not None:
-        command_raw["argv"] = check_raw["argv"]
-    command = _normalize_command(
-        command_raw, phase="run", index=0,
-        job_timeout=resources["timeout_seconds"])
+    check_id = str(check_raw.get("id") or "check")
     junit = _normalize_junit_paths(check_raw.get("junit"))
+    pytest_spec = None
+    collect_cmd = None
+    if check_raw.get("pytest") is not None:
+        if check_kind != "test":
+            raise JobSpecError("check.pytest is only valid for kind=test")
+        if check_raw.get("cmd") is not None or check_raw.get("argv") is not None:
+            raise JobSpecError(
+                "check.pytest cannot be combined with check.cmd/check.argv")
+        pytest_spec = _normalize_pytest_config(check_raw["pytest"])
+        if not junit:
+            junit = ["junit.xml"]
+        env = {**dict(check_raw.get("env") or {}),
+               **pytest_adapter.pytest_env()}
+        collect_text = " ".join(shlex.quote(a) for a in pytest_adapter.collect_argv(
+            pytest_spec["paths"], pytest_spec["args"], pytest_spec["plugins"]))
+        if len(collect_text) > 32768:
+            raise JobSpecError("check.pytest collect command is too long")
+        collect_cmd = collect_text + " > /out/collect.txt 2>&1"
+        collect = _normalize_command(
+            {"name": f"{check_id}.collect", "cmd": collect_cmd,
+             "timeout_seconds": check_raw.get("timeout_seconds"), "env": env},
+            phase="run", index=0, job_timeout=resources["timeout_seconds"])
+        run_argv = pytest_adapter.run_argv(
+            pytest_spec["paths"], pytest_spec["args"], pytest_spec["plugins"],
+            junit[0])
+        command = _normalize_command(
+            {"name": check_id, "argv": run_argv,
+             "timeout_seconds": check_raw.get("timeout_seconds"), "env": env},
+            phase="run", index=1, job_timeout=resources["timeout_seconds"])
+        command_cmd = " ".join(shlex.quote(a) for a in run_argv)
+        command_argv = None
+        run_commands = [collect, command]
+    else:
+        command_raw = {
+            "name": check_id,
+            "timeout_seconds": check_raw.get("timeout_seconds"),
+            "env": check_raw.get("env") or {},
+        }
+        if check_raw.get("cmd") is not None:
+            command_raw["cmd"] = check_raw["cmd"]
+        if check_raw.get("argv") is not None:
+            command_raw["argv"] = check_raw["argv"]
+        command = _normalize_command(
+            command_raw, phase="run", index=0,
+            job_timeout=resources["timeout_seconds"])
+        command_cmd = command["cmd"]
+        command_argv = command["argv"]
+        run_commands = [command]
     artifacts = [
         {"path": path, "max_bytes": resources["artifact_mib"] * _MIB}
         for path in junit
     ]
+    check_spec: dict[str, Any] = {
+        "id": command["name"],
+        "kind": check_kind,
+        "cmd": command_cmd,
+        "argv": command_argv,
+        "timeout_seconds": command["timeout_seconds"],
+        "env": command["env"],
+        "junit": junit,
+    }
+    if pytest_spec is not None:
+        check_spec["pytest"] = pytest_spec
+        check_spec["collect_cmd"] = collect_cmd
     spec: dict[str, Any] = {
         "kind": "check",
         "task_id": task_id,
@@ -312,16 +386,8 @@ def parse_check_spec(raw: Any) -> dict:
         "network": network,
         "image": image,
         "resources": resources,
-        "check": {
-            "id": command["name"],
-            "kind": check_kind,
-            "cmd": command["cmd"],
-            "argv": command["argv"],
-            "timeout_seconds": command["timeout_seconds"],
-            "env": command["env"],
-            "junit": junit,
-        },
-        "phases": {"prepare": [], "build": [], "run": [command]},
+        "check": check_spec,
+        "phases": {"prepare": [], "build": [], "run": run_commands},
         "expect": {},
         "artifacts": artifacts,
         "reason": str(raw.get("reason") or "")[:2000],
@@ -348,6 +414,7 @@ def environment_hash(spec: dict) -> str:
         "kind": check.get("kind"),
         "cmd": check.get("cmd"),
         "argv": check.get("argv"),
+        "pytest": check.get("pytest"),
         "env": check.get("env") or {},
     }
     return "sha256:" + hashlib.sha256(
@@ -400,6 +467,23 @@ def junit_evidence(artifact_dir: Path,
         for key in total:
             total[key] += summary[key]
     return (total, total["tests"]) if total is not None else (None, None)
+
+
+def junit_detail_evidence(artifact_dir: Path,
+                          rel_paths: list[str]) -> dict | None:
+    """汇总 junit 明细（含失败测试的异常类型），用于红/harness 分类。"""
+    total: dict | None = None
+    for rel in rel_paths or []:
+        detail = pytest_adapter.parse_junit_path(Path(artifact_dir) / rel)
+        if detail is None:
+            continue
+        if total is None:
+            total = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0,
+                     "failure_types": []}
+        for key in ("tests", "failures", "errors", "skipped"):
+            total[key] += int(detail.get(key) or 0)
+        total["failure_types"].extend(detail.get("failure_types") or [])
+    return total
 
 
 # ---- script ----------------------------------------------------------------
@@ -802,6 +886,30 @@ def execute_job(spec: dict, job_id: str, runner: JobRunner, *,
         run_phase = next(
             (p for p in reversed(phases) if p["phase"] == "run"), None)
         phase_exit = run_phase.get("exit_code") if run_phase else None
+        detail = junit_detail_evidence(
+            paths.artifacts, list(check_spec.get("junit") or []))
+        baseline = None
+        collect_path = paths.artifacts / "collect.txt"
+        if check_spec.get("pytest") is not None and collect_path.exists():
+            try:
+                baseline = pytest_adapter.parse_collected_count(
+                    collect_path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                baseline = None
+        result_info = {
+            "classification": None, "cause": None, "failure_types": [],
+        }
+        if check_spec.get("kind") == "test":
+            result_info = pytest_adapter.classify(
+                exit_code=(phase_exit if phase_exit is not None
+                           else result.exit_code),
+                signal=(run_phase or {}).get("signal") or result.signal,
+                timed_out=bool(result.timed_out
+                               or (run_phase or {}).get("timed_out")),
+                junit=detail,
+                collected_count=collected,
+                baseline_count=baseline,
+            )
         evidence["check"] = {
             "run_id": job_id,
             "check_id": check_spec.get("id"),
@@ -813,6 +921,10 @@ def execute_job(spec: dict, job_id: str, runner: JobRunner, *,
                               or (run_phase or {}).get("timed_out")),
             "junit_summary": summary,
             "collected_count": collected,
+            "collected_baseline": baseline,
+            "classification": result_info["classification"],
+            "cause": result_info["cause"],
+            "failure_types": result_info["failure_types"],
             "env_hash": environment_hash(spec),
             "duration_ms": (run_phase or {}).get("duration_ms"),
             "status": check_status,

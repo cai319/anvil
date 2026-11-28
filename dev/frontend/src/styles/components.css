@@ -2706,6 +2706,8 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
 .poc-status.check-passed { background: #dcf0e2; color: #166534; }
 .poc-status.check-failed, .poc-status.check-error { background: #f6dcdc; color: #b03030; }
 .poc-status.check-timeout, .poc-status.check-signal { background: #fbeccf; color: #92400e; }
+.poc-status.check-valid_red { background: #dcf0e2; color: #166534; }
+.poc-status.check-harness_error { background: #fbeccf; color: #92400e; }
 .finding-verification {
   display: inline-flex;
   padding: 0 6px;
