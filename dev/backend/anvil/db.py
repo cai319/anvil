@@ -1370,6 +1370,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_slice_lock_v1(conn)
     _migrate_slice_replan_v1(conn)
     _migrate_decision_verdicts_v1(conn)
+    _migrate_stage_slot_v1(conn)
     _migrate_check_ledger_v1(conn)
     conn.commit()
 
@@ -3245,6 +3246,47 @@ def _migrate_decision_verdicts_v1(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
     _set_setting(conn, "schema.decision_verdicts_v1", "1")
+    conn.commit()
+
+
+def _migrate_stage_slot_v1(conn: sqlite3.Connection) -> None:
+    """v1.62：存量 decide==verify 模板的 stage 上下文槽。幂等。
+
+    stage 随步骤与 run 持久化，按 (role, task, slice, stage) 隔离会话槽；
+    上下文隔离不等于模型错误隔离。
+    """
+    if _setting(conn, "schema.stage_slot_v1"):
+        return
+    _add_column(conn, "workflow_steps", "stage TEXT")
+    _add_column(conn, "runs", "stage TEXT")
+    # 已展开的存量 workflow：loop 中 decide 与验证角色相同时，把尚未执行的
+    # decide 步骤补标 stage，升级后不再复用验证会话自判。只影响 decide 步骤。
+    try:
+        rows = conn.execute("SELECT id, definition_json FROM workflows").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    for row in rows:
+        try:
+            definition = json.loads(row["definition_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        loop = definition.get("loop") if isinstance(definition, dict) else None
+        if not isinstance(loop, dict):
+            continue
+
+        def _phase_role(phase: str) -> str:
+            spec = loop.get(phase)
+            return str(spec.get("role") or "").strip() if isinstance(spec, dict) else ""
+
+        decide = _phase_role("decide")
+        verify = _phase_role("verify")
+        verify2 = _phase_role("verify2") or verify
+        if decide and decide in {verify, verify2}:
+            conn.execute(
+                "UPDATE workflow_steps SET stage='decide' WHERE workflow_id=? "
+                "AND kind='decision' AND step_id LIKE '%.decide' "
+                "AND COALESCE(stage,'')=''", (row["id"],))
+    _set_setting(conn, "schema.stage_slot_v1", "1")
     conn.commit()
 
 

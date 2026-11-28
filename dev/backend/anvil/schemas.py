@@ -323,6 +323,7 @@ class WorkflowStepOut(BaseModel):
     feedback: str | None = None
     source_step_id: str | None = None
     slice_key: str | None = None
+    stage: str | None = None
     plan_json: str | None = None
     decision_authority: Literal["ai", "human", "joint", ""] | None = None
     risk_level: str | None = None
@@ -438,6 +439,13 @@ class WorkflowMetricsTokensOut(BaseModel):
     task_records: int = 0
 
 
+class WorkflowMetricsStageSlotOut(BaseModel):
+    decide_steps: int = 0
+    runs: int = 0
+    workflows: int = 0
+    by_role: dict[str, int] = Field(default_factory=dict)
+
+
 class WorkflowMetricsOut(BaseModel):
     workflow_id: str
     task_id: str
@@ -457,6 +465,8 @@ class WorkflowMetricsOut(BaseModel):
         default_factory=WorkflowMetricsWaitingOut)
     evidence: WorkflowMetricsEvidenceOut = Field(
         default_factory=WorkflowMetricsEvidenceOut)
+    stage_slot: WorkflowMetricsStageSlotOut = Field(
+        default_factory=WorkflowMetricsStageSlotOut)
     tokens: WorkflowMetricsTokensOut = Field(default_factory=WorkflowMetricsTokensOut)
 
 

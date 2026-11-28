@@ -18,6 +18,7 @@ class DeliveryQueueMixin:
                            prompt: str, run_id: str | None = None,
                            task_id: str | None = None,
                            slice_key: str | None = None,
+                           stage: str | None = None,
                            priority: int = 100,
                            model_pool: list[str] | None = None,
                            context_window_floor: int | None = None,
@@ -46,7 +47,7 @@ class DeliveryQueueMixin:
         with r.lock:
             self._deliver_locked(conn, r, _Queued(
                 text=prompt, run_id=run_id, task_id=task_id, spec=spec,
-                slice_key=slice_key, priority=priority,
+                slice_key=slice_key, stage=stage, priority=priority,
                 wake_note=self._run_wake_note(conn, run_id)))
             queued = any(item.run_id == run_id for item in r.queue) if run_id else bool(r.queue)
             run_status = None
@@ -73,7 +74,7 @@ class DeliveryQueueMixin:
 
     def deliver(self, conn, role: str, prompt: str, run_id: str | None = None,
                 task_id: str | None = None, slice_key: str | None = None,
-                priority: int = 100) -> bool:
+                stage: str | None = None, priority: int = 100) -> bool:
         """向已存在的常驻进程投递消息（无进程返回 False，由调用方走 spawn 路径）。"""
         r = self._roles.get(role)
         if r is None or r.proc is None or r.proc.poll() is not None:
@@ -83,7 +84,7 @@ class DeliveryQueueMixin:
                 executable="", args_new=[], args_resume=[], ctx={}, cwd="", env={})
             self._deliver_locked(conn, r, _Queued(
                 text=prompt, run_id=run_id, task_id=task_id, spec=spec,
-                slice_key=slice_key, priority=priority,
+                slice_key=slice_key, stage=stage, priority=priority,
                 wake_note=self._run_wake_note(conn, run_id)))
             return True
 
@@ -223,6 +224,7 @@ class DeliveryQueueMixin:
                     queued.text = item.text
                     queued.spec = item.spec
                     queued.slice_key = item.slice_key
+                    queued.stage = item.stage
                     queued.task_id = item.task_id
                     queued.wake_note = item.wake_note
                     queued.priority = min(int(queued.priority), int(item.priority))
@@ -303,7 +305,7 @@ class DeliveryQueueMixin:
             if not self._run_dispatchable(conn, item.run_id):
                 self._queue_drop(conn, r, item, "run is terminal or not dispatchable")
                 continue
-            target_key = context_key(item.task_id, item.slice_key)
+            target_key = context_key(item.task_id, item.slice_key, stage=item.stage)
             same_context = (
                 r.proc is not None
                 and r.proc.poll() is None
@@ -346,7 +348,7 @@ class DeliveryQueueMixin:
 
     def _switch_context_locked(self, conn, r: _Role, item: _Queued) -> bool:
         """在 turn 边界切换任务上下文：保存当前槽 → 重开进程 → 恢复目标槽。"""
-        target_key = context_key(item.task_id, item.slice_key)
+        target_key = context_key(item.task_id, item.slice_key, stage=item.stage)
         # 1) 保存当前上下文
         if r.context_key:
             self._slot_persist(r, status="idle", conn=conn)

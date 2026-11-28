@@ -244,6 +244,9 @@ def restart_workflow(tid: str, body: dict, conn=Depends(get_db),
         new_wf = services.workflow.create_workflow(
             conn, tid, definition, created_by="human",
             enforce_role_coverage=False, restart_running=True,
+            # 重新执行的是已有定义：存量 decide==verify 模板必须继续可用，
+            # decide 走 stage 槽；新定义仍在校验阶段拒绝相等角色。
+            allow_equal_decide_verify=True,
             restart_reason=body.get("reason") or "人工调整流程强度后重新执行",
             restart_note=body.get("note"))
     except ConflictError as exc:

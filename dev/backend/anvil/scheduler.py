@@ -336,7 +336,8 @@ class Scheduler:
                 return runs_service.create_run(
                     conn, role, task_id, prompt=prompt,
                     step_id=step["step_id"], workflow_id=_wid,
-                    slice_key=step.get("slice_key"), origin="step")
+                    slice_key=step.get("slice_key"), stage=step.get("stage"),
+                    origin="step")
 
             try:
                 workflow_service.advance(conn, wid, starter=starter)
@@ -932,7 +933,8 @@ class Scheduler:
                 "请先检查失败原因/现场，再继续未完成的工作；不要重复提交已完成内容。")
             new = runs_service.create_run(
                 conn, role, task_id, prompt=run.get("prompt"),
-                slice_key=slice_key, origin=run.get("origin") or "recovery")
+                slice_key=slice_key, stage=run.get("stage"),
+                origin=run.get("origin") or "recovery")
             conn.execute(
                 "UPDATE runs SET recovery_count=?, recovery_of_run_id=?, "
                 "wake_note=? WHERE id=?",

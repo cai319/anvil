@@ -947,7 +947,7 @@ def spawn_node(state: dict, config) -> dict:
                     conn, run["role_slug"], executable=exe, args_new=args_new,
                     args_resume=args_resume, ctx=pctx, cwd=cwd, env=env, prompt=prompt,
                     run_id=run_id, task_id=run.get("task_id"),
-                    slice_key=run.get("slice_key"),
+                    slice_key=run.get("slice_key"), stage=run.get("stage"),
                     priority=_delivery_priority(conn, run),
                     model_pool=model_pool, context_window_floor=window_floor,
                     runtime_id=runtime_id, workspace_path=ws_path,

@@ -363,6 +363,10 @@ def validate_template(conn: sqlite3.Connection, definition: dict,
     if any(i["severity"] == "error" for i in issues):
         return issues
     compiled = compile_definition(definition, _synthetic_mapping(definition))
+    # 新模板必须分离 decide/verify：忽略仅用于存量套用的放行标记，防止
+    # 模板定义自带标记绕过“新模板”规则。
+    from .workflow_definition import LEGACY_EQUAL_ROLE_MARKER
+    compiled.pop(LEGACY_EQUAL_ROLE_MARKER, None)
     try:
         workflow_service.validate_definition(conn, compiled)
     except ConflictError as exc:
@@ -779,9 +783,32 @@ def _fill_bound_role_defaults(conn: sqlite3.Connection, definition: dict,
     return out
 
 
+def _mark_legacy_equal_loop(definition: dict) -> dict:
+    """存量模板编译后如果 decide==verify，打上仅服务端使用的放行标记。
+
+    新模板在发布校验时已强制 decide≠verify；升级前发布、或以相同实际角色
+    映射的存量模板继续可用，decide 步骤改走 stage 槽。标记只影响校验放行，
+    不改变运行行为。
+    """
+    loop = definition.get("loop")
+    if not isinstance(loop, dict):
+        return definition
+
+    def role(phase: str) -> str:
+        spec = loop.get(phase)
+        return str(spec.get("role") or "").strip() if isinstance(spec, dict) else ""
+
+    decide, verify = role("decide"), role("verify")
+    if decide and decide == verify:
+        from .workflow_definition import LEGACY_EQUAL_ROLE_MARKER
+        definition[LEGACY_EQUAL_ROLE_MARKER] = True
+    return definition
+
+
 def validate_mapping(conn: sqlite3.Connection, definition: dict,
                      role_mapping: dict[str, str],
-                     task: dict | None = None) -> list[dict]:
+                     task: dict | None = None,
+                     *, allow_equal_decide_verify: bool = False) -> list[dict]:
     issues: list[dict] = []
     slots = _slots(definition)
     used = used_slot_keys(definition)
@@ -804,7 +831,9 @@ def validate_mapping(conn: sqlite3.Connection, definition: dict,
                                  f"onboarding 助理不能用于工作流: {role}", slot_key=key))
     try:
         compiled = compile_definition(definition, role_mapping)
-        workflow_service.validate_definition(conn, compiled)
+        _mark_legacy_equal_loop(compiled)
+        workflow_service.validate_definition(
+            conn, compiled, allow_equal_decide_verify=allow_equal_decide_verify)
     except ConflictError as exc:
         issues.append(_issue("error", "workflow_invalid", str(exc)))
     if task is not None and not any(i["severity"] == "error" for i in issues):
@@ -852,6 +881,7 @@ def preview_apply(conn: sqlite3.Connection, task_id: str, tid: str,
     issues = validate_mapping(conn, ver["definition"], role_mapping, task)
     try:
         resolved = compile_definition(ver["definition"], role_mapping)
+        _mark_legacy_equal_loop(resolved)
     except ConflictError as exc:
         resolved = None
         issues.append(_issue("error", "compile_failed", str(exc)))
@@ -926,6 +956,7 @@ def apply_to_task(conn: sqlite3.Connection, task_id: str, tid: str,
         tasks_service.add_assignees(conn, task_id, mapped_roles)
         task = tasks_service.get(conn, task_id) or task
     resolved = compile_definition(ver["definition"], role_mapping)
+    _mark_legacy_equal_loop(resolved)
     resolved["template"] = {
         "id": template["id"], "version": ver["version"], "name": template["name"],
         "role_mapping": role_mapping, "applied_by": actor, "applied_at": now_iso(),
@@ -1034,6 +1065,9 @@ def import_definition(conn: sqlite3.Connection, definition: dict, *,
                       name: str, created_by: str = "human") -> dict:
     """把已落/草案 workflow definition 转成 role-slot 模板草稿。"""
     normalized = workflow_service.normalize_definition(conn, deepcopy(definition))
+    # 导入会生成新模板：即使来源是存量相等模板，也必须先分离 decide/verify。
+    from .workflow_definition import LEGACY_EQUAL_ROLE_MARKER
+    normalized.pop(LEGACY_EQUAL_ROLE_MARKER, None)
     workflow_service.validate_definition(conn, normalized)
     steps = [deepcopy(s) for s in (normalized.get("steps") or normalized.get("children") or [])
              if isinstance(s, dict)]
