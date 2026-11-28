@@ -2644,3 +2644,72 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
   font-size: 11px;
 }
 .sandbox-status-panel .toolbar { flex-wrap: wrap; }
+
+/* v1.60 受控 PoC 运行（finding 抽屉） */
+.poc-section { border-top: 1px solid var(--border-subtle, #e2dccd); padding-top: 12px; }
+.poc-editor textarea {
+  width: 100%;
+  min-height: 220px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle, #d8d2c4);
+  padding: 8px;
+  background: var(--paper, #fdfbf5);
+}
+.poc-list { display: grid; gap: 8px; margin-top: 8px; }
+.poc-card {
+  border: 1px solid var(--border-subtle, #e2dccd);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--paper-raised, #faf7f0);
+  display: grid;
+  gap: 5px;
+}
+.poc-card-head, .poc-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  font-size: 11px;
+}
+.poc-status {
+  display: inline-flex;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  background: #eee7d7;
+  color: #5b4a2f;
+}
+.poc-status.is-succeeded { background: #dcf0e2; color: #166534; }
+.poc-status.is-failed, .poc-status.is-rejected { background: #f6dcdc; color: #b03030; }
+.poc-status.is-running, .poc-status.is-queued { background: #dce8f6; color: #1d4ed8; }
+.poc-status.is-waiting_approval { background: #fbeccf; color: #92400e; }
+.poc-pre {
+  max-height: 240px;
+  overflow: auto;
+  font-size: 10px;
+  line-height: 1.45;
+  background: #1f1c17;
+  color: #f4efe2;
+  border-radius: 6px;
+  padding: 8px;
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.poc-artifacts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.finding-verification {
+  display: inline-flex;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  background: #e7e2d3;
+  color: #5b4a2f;
+}
+.finding-verification.is-verified { background: #dcf0e2; color: #166534; }
+.finding-verification.is-pending { background: #dce8f6; color: #1d4ed8; }
+.finding-verification.is-failed { background: #f6dcdc; color: #b03030; }

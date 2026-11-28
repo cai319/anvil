@@ -603,6 +603,7 @@ class FindingOut(BaseModel):
     trigger_point: str
     poc_status: str
     poc: str
+    verification: dict | None = None
     fix_priority: str
     fix_suggestion: str
     confidence: int = 0

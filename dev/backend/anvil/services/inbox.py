@@ -28,6 +28,7 @@ def collect(conn: sqlite3.Connection) -> dict:
     items.extend(_finding_boards(conn))
     items.extend(_rsi_candidates(conn))
     items.extend(_runtime_proposals(conn))
+    items.extend(_poc_approvals(conn))
     items.sort(key=lambda i: i["created_at"] or "", reverse=True)
     return {"count": len(items), "items": items}
 
@@ -458,6 +459,35 @@ def _finding_boards(conn: sqlite3.Connection) -> list[dict]:
             },
         })
     return out
+
+
+def _poc_approvals(conn: sqlite3.Connection) -> list[dict]:
+    """等待人工批准的 relaxed PoC 作业。"""
+    try:
+        rows = conn.execute(
+            "SELECT j.id, j.task_id, j.finding_id, j.profile, "
+            "       json_extract(j.spec_json, '$.network') AS network, "
+            "       j.created_by, j.created_at, t.title "
+            "FROM sandbox_jobs j LEFT JOIN tasks t ON t.id=j.task_id "
+            "WHERE j.status='waiting_approval' ORDER BY j.created_at"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [{
+        "id": f"poc_job:{r['id']}",
+        "kind": "poc_job",
+        "title": f"PoC 作业待批准 — {r['title'] or r['finding_id'] or r['id']}",
+        "detail": f"profile {r['profile']} · network {r['network']} · by {r['created_by']}",
+        "task_id": r["task_id"],
+        "created_at": r["created_at"] or "",
+        "meta": {
+            "job_id": r["id"],
+            "finding_id": r["finding_id"],
+            "profile": r["profile"],
+            "network": r["network"],
+            "created_by": r["created_by"],
+        },
+    } for r in rows]
 
 
 def _rsi_candidates(conn: sqlite3.Connection) -> list[dict]:

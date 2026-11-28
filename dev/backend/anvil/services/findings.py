@@ -111,6 +111,45 @@ def _row(row) -> dict | None:
     return dict(row) if row is not None else None
 
 
+def verification_for(conn: sqlite3.Connection,
+                     finding_ids: list[str]) -> dict[str, dict]:
+    """由成功的 PoC 作业派生 finding 验证状态；不改手工 poc_status。"""
+    ids = [str(f) for f in finding_ids if f]
+    if not ids:
+        return {}
+    marks = ",".join("?" for _ in ids)
+    try:
+        rows = conn.execute(
+            "SELECT finding_id, id, status, created_at, finished_at "
+            f"FROM sandbox_jobs WHERE finding_id IN ({marks}) "
+            "ORDER BY created_at DESC, id DESC", ids).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    grouped: dict[str, list] = {}
+    for row in rows:
+        grouped.setdefault(str(row["finding_id"]), []).append(row)
+    out: dict[str, dict] = {}
+    for fid, jobs in grouped.items():
+        statuses = {job["status"] for job in jobs}
+        if "succeeded" in statuses:
+            status = "verified"
+        elif statuses & {"queued", "waiting_approval", "running"}:
+            status = "pending"
+        elif "blocked" in statuses:
+            status = "blocked"
+        elif statuses & {"failed", "canceled", "rejected"}:
+            status = "failed"
+        else:
+            status = "none"
+        latest = jobs[0]
+        out[fid] = {
+            "status": status,
+            "job_id": latest["id"],
+            "updated_at": latest["finished_at"] or latest["created_at"],
+        }
+    return out
+
+
 def _task(conn: sqlite3.Connection, task_id: str):
     return conn.execute(
         "SELECT id, title, status, issue_board_enabled, assignee, planner "
@@ -276,7 +315,11 @@ def get_finding(conn: sqlite3.Connection, finding_id: str,
         return None
     if task_id is not None and row["task_id"] != task_id:
         return None
-    return _row(row)
+    item = _row(row)
+    if item is not None:
+        item["verification"] = verification_for(
+            conn, [finding_id]).get(finding_id, {"status": "none"})
+    return item
 
 
 def list_findings(conn: sqlite3.Connection, task_id: str, *,
@@ -305,7 +348,13 @@ def list_findings(conn: sqlite3.Connection, task_id: str, *,
         f"SELECT * FROM task_findings WHERE {' AND '.join(clauses)} "
         "ORDER BY updated_at DESC, id DESC LIMIT ?", params
     ).fetchall()
-    return [_row(r) for r in rows]
+    items = [_row(r) for r in rows]
+    marks = verification_for(conn, [str(i["id"]) for i in items if i])
+    for item in items:
+        if item is not None:
+            item["verification"] = marks.get(
+                str(item["id"]), {"status": "none"})
+    return items
 
 
 def _infer_run_context(conn: sqlite3.Connection, task_id: str,

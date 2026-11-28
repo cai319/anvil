@@ -34,6 +34,7 @@ const KIND_LABEL: Record<InboxItem["kind"], string> = {
   finding: "问题板",
   rsi_candidate: "角色演化",
   runtime_proposal: "运行时提案",
+  poc_job: "PoC 审批",
 };
 
 const KIND_COLOR: Record<InboxItem["kind"], string> = {
@@ -49,6 +50,7 @@ const KIND_COLOR: Record<InboxItem["kind"], string> = {
   finding: "#a16207",
   rsi_candidate: "#0369a1",
   runtime_proposal: "#7c3aed",
+  poc_job: "#be185d",
 };
 
 type Tab = "all" | InboxItem["kind"];
@@ -67,6 +69,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "finding", label: "问题板" },
   { key: "rsi_candidate", label: "角色演化" },
   { key: "runtime_proposal", label: "运行时提案" },
+  { key: "poc_job", label: "PoC 审批" },
 ];
 
 function roleBlockerText(blockers: InboxDraftMeta["role_suggestion_blockers"]): string {
@@ -417,6 +420,24 @@ export function Inbox() {
             <button className="small danger" disabled={disabled}
               onClick={() => act(it.id, () => api.rejectActionCard(actionId))}>拒绝</button>
             {it.task_id && <a className="small" href={`/tasks/${it.task_id}`}>看任务</a>}
+          </>
+        );
+      }
+      case "poc_job": {
+        const jobId = it.meta?.job_id;
+        return (
+          <>
+            <button className="primary small" disabled={disabled || !jobId}
+              onClick={() => { if (jobId) void act(it.id, () => api.approvePocJob(jobId)); }}>
+              批准
+            </button>
+            <button className="small danger" disabled={disabled || !jobId}
+              onClick={() => { if (jobId) void act(it.id, () => api.rejectPocJob(jobId)); }}>
+              驳回
+            </button>
+            {it.task_id && (
+              <a className="small" href={`/tasks/${it.task_id}?tab=findings`}>看 finding</a>
+            )}
           </>
         );
       }

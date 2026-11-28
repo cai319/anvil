@@ -25,7 +25,7 @@ from ..sandbox import jobs as sandbox_jobs
 from ..sandbox import monitor as sandbox_monitor
 from ..sandbox.backends import make_backend
 from ..sandbox.backends import docker as docker_backend
-from ..sandbox.errors import SandboxUnavailable
+from ..sandbox.errors import QuotaExceeded, SandboxUnavailable
 
 logger = logging.getLogger("anvil.sandbox")
 _backend: Any = None
@@ -333,26 +333,32 @@ def _job_dict(row) -> dict | None:
 def create_job(conn, *, spec_raw: dict, actor_role: str | None,
                actor_is_human: bool, check_available: bool = True) -> dict:
     spec = sandbox_jobs.parse_spec(spec_raw)
-    if not actor_is_human and spec["profile"] != "safe":
-        raise PermissionError("relaxed PoC jobs require human approval")
-    if check_available:
-        ok, detail = strict_available()
-        if not ok:
-            raise SandboxUnavailable(detail)
-    if spec.get("task_id"):
-        row = conn.execute(
-            "SELECT id FROM tasks WHERE id=?", (spec["task_id"],)).fetchone()
-        if row is None:
-            raise LookupError("task not found")
+    if not actor_is_human and not spec.get("task_id") and not spec.get("finding_id"):
+        raise PermissionError("agent PoC jobs must be bound to a task or finding")
+    task_id = spec.get("task_id")
     if spec.get("finding_id"):
         try:
             row = conn.execute(
-                "SELECT id FROM task_findings WHERE id=?",
+                "SELECT id, task_id FROM task_findings WHERE id=?",
                 (spec["finding_id"],)).fetchone()
         except sqlite3.OperationalError:
             row = None
         if row is None:
             raise LookupError("finding not found")
+        if task_id and task_id != row["task_id"]:
+            raise LookupError("finding does not belong to the task")
+        task_id = task_id or row["task_id"]
+        spec["task_id"] = task_id
+    if task_id:
+        row = conn.execute(
+            "SELECT id FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is None:
+            raise LookupError("task not found")
+    if check_available:
+        ok, detail = strict_available()
+        if not ok:
+            raise SandboxUnavailable(detail)
+    _check_quota(conn, task_id=task_id, actor_role=actor_role)
     job_id = "poc_" + uuid.uuid4().hex
     now = now_iso()
     status = "queued"
@@ -366,7 +372,7 @@ def create_job(conn, *, spec_raw: dict, actor_role: str | None,
         " profile, spec_json, spec_hash, status, approval_status, timeout_seconds, "
         " created_at, updated_at) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (job_id, "poc", spec.get("task_id"), spec.get("finding_id"),
+        (job_id, "poc", task_id, spec.get("finding_id"),
          actor_role or "human", "human" if actor_is_human else "role",
          "strict", spec["profile"], json.dumps(spec, ensure_ascii=False),
          sandbox_jobs.spec_hash(spec), status, approval,
@@ -385,6 +391,83 @@ def create_job(conn, *, spec_raw: dict, actor_role: str | None,
     conn.commit()
     return _job_dict(conn.execute(
         "SELECT * FROM sandbox_jobs WHERE id=?", (job_id,)).fetchone())  # type: ignore[return-value]
+
+
+def _check_quota(conn, *, task_id: str | None, actor_role: str | None) -> None:
+    running_limit, queued_limit = 2, 20
+
+    def _count(clause: str, value) -> tuple[int, int]:
+        row = conn.execute(
+            "SELECT "
+            "SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) AS running, "
+            "SUM(CASE WHEN status IN ('queued','waiting_approval') THEN 1 ELSE 0 END) AS queued "
+            f"FROM sandbox_jobs WHERE {clause}", (value,)).fetchone()
+        return int(row["running"] or 0), int(row["queued"] or 0)
+
+    checks = []
+    if task_id:
+        checks.append(("task", *_count("task_id=?", task_id)))
+    if actor_role and actor_role != "human":
+        checks.append(("role", *_count("created_by=?", actor_role)))
+    for scope, running, queued in checks:
+        if running >= running_limit:
+            raise QuotaExceeded(f"{scope} has {running} running PoC jobs (limit {running_limit})")
+        if queued >= queued_limit:
+            raise QuotaExceeded(f"{scope} has {queued} queued PoC jobs (limit {queued_limit})")
+
+
+def approve_job(conn, job_id: str, *, actor_role: str = "human",
+                note: str | None = None) -> dict:
+    row = conn.execute(
+        "SELECT status FROM sandbox_jobs WHERE id=?", (job_id,)).fetchone()
+    if row is None:
+        raise LookupError("job not found")
+    if row["status"] != "waiting_approval":
+        raise ValueError("job is not waiting for approval")
+    now = now_iso()
+    cur = conn.execute(
+        "UPDATE sandbox_jobs SET status='queued', approval_status='approved', "
+        "approved_by=?, approved_at=?, approval_note=?, updated_at=? "
+        "WHERE id=? AND status='waiting_approval'",
+        (actor_role, now, note, now, job_id))
+    if not cur.rowcount:
+        raise ValueError("job is not waiting for approval")
+    try:
+        from . import ledger
+        ledger.emit_audit(
+            conn, role_slug=actor_role, task_id=None,
+            action="sandbox.job.approved",
+            payload={"job_id": job_id, "note": note})
+    except Exception:  # noqa: BLE001
+        pass
+    conn.commit()
+    return get_job(conn, job_id)  # type: ignore[return-value]
+
+
+def reject_job(conn, job_id: str, *, actor_role: str = "human",
+               note: str | None = None) -> dict:
+    row = conn.execute(
+        "SELECT status FROM sandbox_jobs WHERE id=?", (job_id,)).fetchone()
+    if row is None:
+        raise LookupError("job not found")
+    if row["status"] != "waiting_approval":
+        raise ValueError("job is not waiting for approval")
+    now = now_iso()
+    conn.execute(
+        "UPDATE sandbox_jobs SET status='rejected', approval_status='rejected', "
+        "approved_by=?, approved_at=?, approval_note=?, finished_at=?, updated_at=? "
+        "WHERE id=? AND status='waiting_approval'",
+        (actor_role, now, note, now, now, job_id))
+    try:
+        from . import ledger
+        ledger.emit_audit(
+            conn, role_slug=actor_role, task_id=None,
+            action="sandbox.job.rejected",
+            payload={"job_id": job_id, "note": note})
+    except Exception:  # noqa: BLE001
+        pass
+    conn.commit()
+    return get_job(conn, job_id)  # type: ignore[return-value]
 
 
 def list_jobs(conn, *, task_id: str | None = None,
@@ -430,7 +513,8 @@ def claim_next_job(conn) -> dict | None:
 
 def record_execution(conn, job_id: str, execution) -> bool:
     row = conn.execute(
-        "SELECT status FROM sandbox_jobs WHERE id=?", (job_id,)).fetchone()
+        "SELECT status, task_id, created_by FROM sandbox_jobs WHERE id=?",
+        (job_id,)).fetchone()
     if row is None or row["status"] != "running":
         return False  # 已取消/被接管；不得覆盖
     now = now_iso()
@@ -464,7 +548,7 @@ def record_execution(conn, job_id: str, execution) -> bool:
     try:
         from . import ledger
         ledger.emit_audit(
-            conn, role_slug=None, task_id=None,
+            conn, role_slug=row["created_by"], task_id=row["task_id"],
             action=("sandbox.job.succeeded" if execution.status == "succeeded"
                     else "sandbox.job.failed"),
             payload={"job_id": job_id, "status": execution.status,
@@ -479,6 +563,9 @@ def record_execution(conn, job_id: str, execution) -> bool:
 
 def fail_job(conn, job_id: str, reason: str) -> None:
     now = now_iso()
+    row = conn.execute(
+        "SELECT task_id, created_by FROM sandbox_jobs WHERE id=?",
+        (job_id,)).fetchone()
     conn.execute(
         "UPDATE sandbox_jobs SET status='failed', failure_reason=?, "
         "finished_at=?, updated_at=? WHERE id=? AND status IN ('queued','running')",
@@ -486,7 +573,9 @@ def fail_job(conn, job_id: str, reason: str) -> None:
     try:
         from . import ledger
         ledger.emit_audit(
-            conn, role_slug=None, task_id=None, action="sandbox.job.failed",
+            conn, role_slug=row["created_by"] if row else None,
+            task_id=row["task_id"] if row else None,
+            action="sandbox.job.failed",
             payload={"job_id": job_id, "failure_reason": reason[:500]})
     except Exception:  # noqa: BLE001
         pass

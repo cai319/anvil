@@ -347,6 +347,14 @@ export function TaskFindingBoard({ taskId, onChanged, initialFindingId }: {
                     </span>
                     <span className="finding-tag">{riskLabel(schema, f.risk_type)}</span>
                     <span className="finding-tag">置信度 {f.confidence}%</span>
+                    {f.verification && f.verification.status !== "none" && (
+                      <span className={`finding-verification is-${f.verification.status}`}>
+                        {f.verification.status === "verified" ? "已验证"
+                          : f.verification.status === "pending" ? "PoC 运行中"
+                          : f.verification.status === "failed" ? "PoC 失败"
+                          : "PoC 阻塞"}
+                      </span>
+                    )}
                     {f.external_id && (
                       <span className="finding-tag finding-external-badge">外部 #{f.external_id}</span>
                     )}

@@ -1,10 +1,29 @@
-"""PoC 作业 API（M2a：human-only）。"""
+"""PoC 作业 API（M2a/M2b：human 与任务范围内的 agent）。"""
 from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from anvil.db import open_conn
 from anvil.services import sandbox
-from tests.conftest import auth_headers, human_headers
+from tests.conftest import human_headers
+
+
+def _pm_headers(app) -> dict:
+    now = datetime.now(timezone.utc)
+    conn = open_conn(app.state.db_path)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions "
+            "(token, role_slug, run_id, task_id, created_at, expires_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("pm-token", "pm", None, None, now.isoformat(),
+             (now + timedelta(days=1)).isoformat()))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"X-Anvil-Session": "pm-token", "X-Anvil-Role": "pm"}
 
 SPEC = {
     "network": "none",
@@ -38,13 +57,14 @@ async def test_human_create_list_cancel(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_agent_cannot_create_or_read(client, monkeypatch):
+async def test_agent_unbound_job_denied(client, app, monkeypatch):
+    """Agent 只能创建/读取绑定到参与任务的作业。"""
     monkeypatch.setattr(sandbox, "strict_available", lambda: (True, "ready"))
+    headers = _pm_headers(app)
     denied = await client.post(
-        "/api/v1/poc-jobs", headers=auth_headers("pm"), json=SPEC)
+        "/api/v1/poc-jobs", headers=headers, json=SPEC)
     assert denied.status_code == 403
-    listing = await client.get(
-        "/api/v1/poc-jobs", headers=auth_headers("pm"))
+    listing = await client.get("/api/v1/poc-jobs", headers=headers)
     assert listing.status_code == 403
 
 

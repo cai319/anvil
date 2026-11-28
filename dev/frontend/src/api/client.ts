@@ -45,7 +45,63 @@ export interface TaskChildren {
 
 export type FindingStatus = Schemas["FindingOut"]["status"];
 
-export type Finding = Required<Schemas["FindingOut"]>;
+export interface FindingVerification {
+  status: "verified" | "pending" | "failed" | "blocked" | "none";
+  job_id?: string;
+  updated_at?: string;
+}
+
+export type Finding = Required<Schemas["FindingOut"]> & {
+  verification?: FindingVerification;
+};
+
+export interface PocPhase {
+  seq: number;
+  phase: string;
+  name: string;
+  status: string;
+  exit_code?: number | null;
+  signal?: string | null;
+  timed_out?: number | boolean;
+  duration_ms?: number | null;
+}
+
+export interface PocArtifact {
+  job_id: string;
+  rel_path: string;
+  size_bytes: number;
+  sha256: string;
+  removed_at?: string | null;
+  created_at?: string | null;
+}
+
+export interface PocJob {
+  id: string;
+  status: string;
+  profile: string;
+  task_id?: string | null;
+  finding_id?: string | null;
+  created_by: string;
+  created_by_type?: string;
+  approval_status?: string;
+  approved_by?: string | null;
+  approval_note?: string | null;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  exit_code?: number | null;
+  signal?: string | null;
+  failure_reason?: string | null;
+  native_job_id?: string | null;
+  spec?: {
+    network?: string;
+    resources?: Record<string, number>;
+    [key: string]: unknown;
+  };
+  evidence?: Record<string, unknown>;
+  phases?: PocPhase[];
+  artifacts?: PocArtifact[];
+}
 
 export type FindingInput = Partial<Omit<Finding,
   "id" | "task_id" | "author_role" | "status" | "version" |
@@ -634,6 +690,36 @@ export const api = {
     req("POST", `/tasks/${taskId}/findings/${fid}/reopen`, { note }).then((r) => json<Finding>(r)),
   deleteFinding: (taskId: string, fid: string): Promise<unknown> =>
     req("DELETE", `/tasks/${taskId}/findings/${fid}`).then((r) => json(r)),
+  listPocJobs: (params?: { task_id?: string; finding_id?: string; status?: string }): Promise<PocJob[]> => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params || {})) {
+      if (v) qs.set(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return authFetch(`${BASE}/poc-jobs${suffix}`).then((r) => json<PocJob[]>(r));
+  },
+  getPocJob: (id: string): Promise<PocJob> =>
+    authFetch(`${BASE}/poc-jobs/${id}`).then((r) => json<PocJob>(r)),
+  createPocJob: (spec: Record<string, unknown>): Promise<PocJob> =>
+    req("POST", "/poc-jobs", spec).then((r) => json<PocJob>(r)),
+  getPocJobLog: (id: string): Promise<{ exists: boolean; content: string }> =>
+    authFetch(`${BASE}/poc-jobs/${id}/log`).then((r) => json(r)),
+  getPocJobEvidence: (id: string): Promise<Record<string, unknown>> =>
+    authFetch(`${BASE}/poc-jobs/${id}/evidence`).then((r) => json(r)),
+  listPocArtifacts: (id: string): Promise<PocArtifact[]> =>
+    authFetch(`${BASE}/poc-jobs/${id}/artifacts`).then((r) => json<PocArtifact[]>(r)),
+  approvePocJob: (id: string, note?: string): Promise<PocJob> =>
+    req("POST", `/poc-jobs/${id}/approve`, { note }).then((r) => json<PocJob>(r)),
+  rejectPocJob: (id: string, note?: string): Promise<PocJob> =>
+    req("POST", `/poc-jobs/${id}/reject`, { note }).then((r) => json<PocJob>(r)),
+  cancelPocJob: (id: string): Promise<PocJob> =>
+    req("POST", `/poc-jobs/${id}/cancel`, {}).then((r) => json<PocJob>(r)),
+  downloadPocArtifact: async (jobId: string, relPath: string): Promise<Blob> => {
+    const encoded = relPath.split("/").map(encodeURIComponent).join("/");
+    const res = await authFetch(`${BASE}/poc-jobs/${jobId}/artifacts/${encoded}`);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return res.blob();
+  },
   completeFindingBoard: (taskId: string, summary: string): Promise<FindingSummary> =>
     req("POST", `/tasks/${taskId}/findings/complete`, { summary }).then((r) => json<FindingSummary>(r)),
   reopenFindingBoard: (taskId: string, note: string): Promise<FindingSummary> =>
@@ -1608,6 +1694,12 @@ export interface RoleSuggestionOutcome {
 }
 
 export interface InboxDraftMeta {
+  // PoC 审批
+  job_id?: string;
+  finding_id?: string | null;
+  profile?: string;
+  network?: string;
+  created_by?: string;
   draft_kind?: "tasks" | "workflow" | "workflow_revision" | "role_suggestion";
   workflow_revision?: {
     draft_id: string;
@@ -1660,7 +1752,7 @@ export interface InboxDraftMeta {
 
 export interface InboxItem {
   id: string;
-  kind: "review" | "delegation" | "mention" | "draft" | "lesson" | "proposal" | "gate" | "decision" | "action" | "finding" | "rsi_candidate" | "runtime_proposal";
+  kind: "review" | "delegation" | "mention" | "draft" | "lesson" | "proposal" | "gate" | "decision" | "action" | "finding" | "rsi_candidate" | "runtime_proposal" | "poc_job";
   title: string;
   detail: string;
   task_id: string | null;

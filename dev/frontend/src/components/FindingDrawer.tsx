@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { PocJobsPanel } from "./PocJobsPanel";
 import { api, type Finding, type FindingSchema } from "../api/client";
 import { canCloseOnBackdrop } from "../dialogGuard";
 import { useLiveRefresh } from "../useLiveRefresh";
@@ -471,6 +472,8 @@ export function FindingDrawer({ taskId, findingId, schema, trackerConfigured = f
                 ))}
               </dl>
             </section>
+
+            <PocJobsPanel taskId={taskId} findingId={findingId} />
           </div>
         )}
 
