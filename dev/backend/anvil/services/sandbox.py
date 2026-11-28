@@ -834,8 +834,8 @@ def claim_next_job(conn, *, backend: str | None = None) -> dict | None:
 
 def record_execution(conn, job_id: str, execution) -> bool:
     row = conn.execute(
-        "SELECT status, task_id, created_by, spec_json FROM sandbox_jobs WHERE id=?",
-        (job_id,)).fetchone()
+        "SELECT id, kind, status, task_id, created_by, spec_json "
+        "FROM sandbox_jobs WHERE id=?", (job_id,)).fetchone()
     if row is None or row["status"] != "running":
         return False  # 已取消/被接管；不得覆盖
     now = now_iso()
@@ -880,6 +880,12 @@ def record_execution(conn, job_id: str, execution) -> bool:
         pass
     _record_lock_baseline(conn, row, execution)
     _record_counterfactual(conn, row, execution)
+    if row["kind"] == "check":
+        try:
+            from . import check_ledger
+            check_ledger.record_check_run(conn, row, execution)
+        except Exception:  # noqa: BLE001 —— 台账失败不得影响取证
+            pass
     conn.commit()
     return True
 
@@ -956,12 +962,18 @@ def _record_counterfactual(conn, row, execution) -> None:
 def fail_job(conn, job_id: str, reason: str) -> None:
     now = now_iso()
     row = conn.execute(
-        "SELECT task_id, created_by FROM sandbox_jobs WHERE id=?",
+        "SELECT id, kind, task_id, created_by, spec_json FROM sandbox_jobs WHERE id=?",
         (job_id,)).fetchone()
     conn.execute(
         "UPDATE sandbox_jobs SET status='failed', failure_reason=?, "
         "finished_at=?, updated_at=? WHERE id=? AND status IN ('queued','running')",
         (reason[:500], now, now, job_id))
+    if row is not None and row["kind"] == "check":
+        try:
+            from . import check_ledger
+            check_ledger.record_failed_run(conn, row, reason)
+        except Exception:  # noqa: BLE001 —— 台账失败不得影响失败落库
+            pass
     try:
         from . import ledger
         ledger.emit_audit(
