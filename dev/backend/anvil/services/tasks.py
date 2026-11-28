@@ -130,8 +130,10 @@ def create(conn: sqlite3.Connection, *, id: str | None = None, title: str,
         tid = validate_component_id(tid, label="task id")
     except ValueError as exc:
         raise ConflictError(str(exc)) from exc
-    if str(tid).startswith("__") or "::slice::" in str(tid):
-        # `__global__` 是角色上下文槽保留 key；`::slice::` 是 context key 分隔符。
+    if str(tid).startswith("__") or any(
+            sep in str(tid) for sep in ("::slice::", "::stage::")):
+        # `__global__` 是角色上下文槽保留 key；`::slice::` / `::stage::`
+        # 是 context key 分隔符。
         raise ConflictError(f"task id {tid!r} is reserved")
     now = now_iso()
     tags = knowledge.normalize_tags(tags or [])

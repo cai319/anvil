@@ -7,6 +7,7 @@ from anvil import config
 from anvil import db as db_module
 from anvil.db import connect
 from anvil.services import daemon as daemon_service
+from anvil.services import daemon_common
 from anvil.services import tasks as tasks_service
 from anvil.services import workflow as workflow_service
 from anvil.util import jdumps, now_iso
@@ -26,12 +27,115 @@ def test_context_key_roundtrip():
     assert daemon_service.slice_key_of("T1") is None
 
 
+def test_context_key_stage_is_additive_and_roundtrips():
+    """旧键解析完全不变；stage 是新可选维度，可与 task/slice 并存。"""
+    # 旧键：逐项与 test_context_key_roundtrip 一致。
+    assert daemon_service.context_key(None) == "__global__"
+    assert daemon_service.context_key("T1") == "T1"
+    assert daemon_service.context_key("T1", "A") == "T1::slice::A"
+    assert daemon_service.context_key("T1", "A", stage=None) == "T1::slice::A"
+    assert daemon_service.context_parts("T1") == ("T1", None)
+    assert daemon_service.context_parts("T1::slice::A") == ("T1", "A")
+    assert daemon_service.context_parts("__global__") == (None, None)
+    assert daemon_service.context_parts_full("T1") == ("T1", None, None)
+    assert daemon_service.context_parts_full("T1::slice::A") == ("T1", "A", None)
+    assert daemon_service.context_parts_full("__global__") == (None, None, None)
+    assert daemon_service.stage_of("T1::slice::A") is None
+
+    # slice + stage：写入后可完整解析回来。
+    key = daemon_service.context_key("T1", "A", stage="verify")
+    assert key == "T1::slice::A::stage::verify"
+    assert daemon_service.context_parts_full(key) == ("T1", "A", "verify")
+    # 兼容的两元解析仍只返回 task/slice，stage 不污染 slice。
+    assert daemon_service.context_parts(key) == ("T1", "A")
+    assert daemon_service.task_id_of(key) == "T1"
+    assert daemon_service.slice_key_of(key) == "A"
+    assert daemon_service.stage_of(key) == "verify"
+
+    # task + stage（无 slice）。
+    task_stage = daemon_service.context_key("T1", stage="decide")
+    assert task_stage == "T1::stage::decide"
+    assert daemon_service.context_parts_full(task_stage) == ("T1", None, "decide")
+    assert daemon_service.context_parts(task_stage) == ("T1", None)
+
+
+def test_stage_context_key_persists_and_roundtrips(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
+    conn = connect(str(tmp_path / "t.db"))
+    try:
+        now = now_iso()
+        conn.execute(
+            "INSERT INTO role_sessions (role_slug,session_id,status,updated_at) "
+            "VALUES ('dev','s1','busy',?)", (now,))
+        conn.commit()
+        mgr = daemon_service.DaemonManager(str(tmp_path / "t.db"), enabled=False)
+        role = daemon_common._Role(
+            role="dev", session_id="s1", current_task_id="T1",
+            context_key="T1::slice::A::stage::verify")
+        mgr._slot_upsert_conn(conn, role, status="busy")
+        conn.commit()
+
+        row = conn.execute(
+            "SELECT task_key, task_id, slice_key, stage FROM role_task_sessions "
+            "WHERE role_slug='dev'").fetchone()
+        assert row["task_key"] == "T1::slice::A::stage::verify"
+        assert (row["task_id"], row["slice_key"], row["stage"]) == (
+            "T1", "A", "verify")
+        # 持久化的 key 能重新解析出 stage。
+        assert daemon_service.context_parts_full(row["task_key"]) == (
+            "T1", "A", "verify")
+
+        mirror = conn.execute(
+            "SELECT current_context_key, current_stage FROM role_sessions "
+            "WHERE role_slug='dev'").fetchone()
+        assert mirror["current_context_key"] == "T1::slice::A::stage::verify"
+        assert mirror["current_stage"] == "verify"
+    finally:
+        conn.close()
+
+
+def test_migration_backfills_context_stage(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
+    conn = connect(str(tmp_path / "t.db"))
+    try:
+        now = now_iso()
+        conn.execute(
+            "INSERT INTO role_task_sessions "
+            "(role_slug,task_key,session_id,status,created_at,updated_at) "
+            "VALUES ('dev','T1::slice::A::stage::verify','s1','idle',?,?)",
+            (now, now))
+        # 回到升级前状态：显式列未回填。
+        conn.execute(
+            "UPDATE role_task_sessions SET task_id=NULL, slice_key=NULL, stage=NULL")
+        conn.execute(
+            "DELETE FROM settings WHERE key='schema.context_stage_v1'")
+        conn.commit()
+
+        db_module._migrate_context_stage_v1(conn)
+
+        row = conn.execute(
+            "SELECT task_id, slice_key, stage FROM role_task_sessions "
+            "WHERE role_slug='dev'").fetchone()
+        assert (row["task_id"], row["slice_key"], row["stage"]) == (
+            "T1", "A", "verify")
+        # 幂等：重复迁移不改变结果。
+        db_module._migrate_context_stage_v1(conn)
+        row2 = conn.execute(
+            "SELECT task_id, slice_key, stage FROM role_task_sessions "
+            "WHERE role_slug='dev'").fetchone()
+        assert tuple(row2) == tuple(row)
+    finally:
+        conn.close()
+
+
 def test_task_id_cannot_collide_with_context_separator(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
     conn = connect(str(tmp_path / "t.db"))
     try:
         with pytest.raises(Exception):
             tasks_service.create(conn, id="T::slice::A", title="bad")
+        with pytest.raises(Exception):
+            tasks_service.create(conn, id="T::stage::verify", title="bad")
     finally:
         conn.close()
 

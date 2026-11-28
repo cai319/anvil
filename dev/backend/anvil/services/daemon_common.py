@@ -179,30 +179,54 @@ RSI_REFLECT_TASK_KEY = "__rsi_reflect__"
 
 
 CONTEXT_SEP = "::slice::"
+# 可选 stage 维度：追加在 task/slice 之后，例如 T1::slice::A::stage::verify。
+# 旧键没有该后缀，解析与输出保持完全一致。
+CONTEXT_STAGE_SEP = "::stage::"
 
 
 _ALL_SLOTS = object()
 
 
 def context_key(task_id: str | None, slice_key: str | None = None,
-                origin: str | None = None) -> str:
-    """上下文槽 key：task 级 / slice 级 / __global__ / RSI 反思独立槽。"""
+                origin: str | None = None, stage: str | None = None) -> str:
+    """上下文槽 key：task 级 / slice 级 / __global__ / RSI 反思独立槽。
+
+    stage 是可选维度，用于同一 (task, slice) 下按阶段隔离会话槽；不传
+    stage 时输出与旧键逐字节一致（扩展步骤，不改变现有行为）。
+    """
     if origin == "rsi_reflect":
         return RSI_REFLECT_TASK_KEY
     if not task_id:
         return GLOBAL_TASK_KEY
-    return (f"{task_id}{CONTEXT_SEP}{slice_key}" if slice_key else str(task_id))
+    key = f"{task_id}{CONTEXT_SEP}{slice_key}" if slice_key else str(task_id)
+    stage_text = str(stage or "").strip()
+    return f"{key}{CONTEXT_STAGE_SEP}{stage_text}" if stage_text else key
+
+
+def context_parts_full(
+        key: str | None) -> tuple[str | None, str | None, str | None]:
+    """Parse a context key into (task_id, slice_key, stage).
+
+    旧键没有 stage 后缀，stage 恒为 None；task/slice 结果与 ``context_parts``
+    完全一致。
+    """
+    if key in (None, GLOBAL_TASK_KEY):
+        return (None, None, None)
+    text = str(key)
+    stage = None
+    if CONTEXT_STAGE_SEP in text:
+        text, stage = text.split(CONTEXT_STAGE_SEP, 1)
+        stage = stage or None
+    if CONTEXT_SEP in text:
+        task_id, slice_key = text.split(CONTEXT_SEP, 1)
+        return (task_id or None, slice_key or None, stage)
+    return (text, None, stage)
 
 
 def context_parts(key: str | None) -> tuple[str | None, str | None]:
-    """Parse a context key into (task_id, slice_key)."""
-    if key in (None, GLOBAL_TASK_KEY):
-        return (None, None)
-    text = str(key)
-    if CONTEXT_SEP in text:
-        task_id, slice_key = text.split(CONTEXT_SEP, 1)
-        return (task_id or None, slice_key or None)
-    return (text, None)
+    """Parse a context key into (task_id, slice_key); stage 维度被忽略。"""
+    task_id, slice_key, _stage = context_parts_full(key)
+    return (task_id, slice_key)
 
 
 def task_key(task_id: str | None) -> str:
@@ -216,6 +240,11 @@ def task_id_of(key: str | None) -> str | None:
 
 def slice_key_of(key: str | None) -> str | None:
     return context_parts(key)[1]
+
+
+def stage_of(key: str | None) -> str | None:
+    """上下文 key 的 stage 维度；旧键返回 None。"""
+    return context_parts_full(key)[2]
 
 
 def clear_session(conn, role: str, note: str = "session reset",
@@ -232,7 +261,7 @@ def clear_session(conn, role: str, note: str = "session reset",
         conn.execute(
             "UPDATE role_sessions SET session_id='', status='dead', pid=NULL, "
             "last_context_tokens=NULL, current_task_id=NULL, current_run_id=NULL, "
-            "current_step_id=NULL, current_context_key=NULL, current_slice_key=NULL, "
+            "current_step_id=NULL, current_context_key=NULL, current_slice_key=NULL, current_stage=NULL, "
             "last_error=?, updated_at=? WHERE role_slug=?",
             (note, now_iso(), role),
         )
@@ -279,7 +308,7 @@ def clear_session(conn, role: str, note: str = "session reset",
             conn.execute(
                 "UPDATE role_sessions SET session_id='', last_context_tokens=NULL, "
                 "current_task_id=NULL, current_run_id=NULL, current_step_id=NULL, "
-                "current_context_key=NULL, current_slice_key=NULL, "
+                "current_context_key=NULL, current_slice_key=NULL, current_stage=NULL, "
                 "last_error=?, updated_at=? WHERE role_slug=?",
                 (note, now_iso(), role),
             )
@@ -344,7 +373,7 @@ def clear_slice_sessions(conn, role: str, task_id: str,
         conn.execute(
             "UPDATE role_sessions SET session_id='', last_context_tokens=NULL, "
             "current_task_id=NULL, current_run_id=NULL, current_step_id=NULL, "
-            "current_context_key=NULL, current_slice_key=NULL, "
+            "current_context_key=NULL, current_slice_key=NULL, current_stage=NULL, "
             "last_error=?, updated_at=? WHERE role_slug=?",
             (note, now_iso(), role))
     conn.commit()

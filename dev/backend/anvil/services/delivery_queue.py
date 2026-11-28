@@ -136,7 +136,7 @@ class DeliveryQueueMixin:
                 cur = conn.execute(
                     "UPDATE role_sessions SET status='dead', pid=NULL, busy_since=NULL, "
                     "current_task_id=NULL, current_run_id=NULL, current_step_id=NULL, "
-                    "current_context_key=NULL, current_slice_key=NULL, "
+                    "current_context_key=NULL, current_slice_key=NULL, current_stage=NULL, "
                     "updated_at=? WHERE role_slug=? AND current_run_id=?",
                     (now_iso(), role, run_id))
                 conn.commit()
@@ -180,7 +180,7 @@ class DeliveryQueueMixin:
                 cur = conn.execute(
                     "UPDATE role_sessions SET status='dead', busy_since=NULL, "
                     "current_task_id=NULL, current_run_id=NULL, current_step_id=NULL, "
-                    "current_context_key=NULL, current_slice_key=NULL, "
+                    "current_context_key=NULL, current_slice_key=NULL, current_stage=NULL, "
                     "updated_at=? WHERE role_slug=? AND current_run_id=?",
                     (now_iso(), role, run_id))
                 conn.commit()
