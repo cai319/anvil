@@ -82,6 +82,14 @@ def test_new_template_publish_rejects_equal_decide_verify(tmp_path):
         issues = templates_service.validate_template(conn, definition)
         assert any(i["severity"] == "error" and "decide.role must differ" in i["message"]
                    for i in issues)
+
+        # 模板定义自带存量放行标记也不能绕过新模板规则。
+        from anvil.services.workflow_definition import LEGACY_EQUAL_ROLE_MARKER
+        tampered = dict(definition)
+        tampered[LEGACY_EQUAL_ROLE_MARKER] = True
+        issues = templates_service.validate_template(conn, tampered)
+        assert any(i["severity"] == "error" and "decide.role must differ" in i["message"]
+                   for i in issues)
     finally:
         conn.close()
 

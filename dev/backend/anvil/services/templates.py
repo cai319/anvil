@@ -363,6 +363,10 @@ def validate_template(conn: sqlite3.Connection, definition: dict,
     if any(i["severity"] == "error" for i in issues):
         return issues
     compiled = compile_definition(definition, _synthetic_mapping(definition))
+    # 新模板必须分离 decide/verify：忽略仅用于存量套用的放行标记，防止
+    # 模板定义自带标记绕过“新模板”规则。
+    from .workflow_definition import LEGACY_EQUAL_ROLE_MARKER
+    compiled.pop(LEGACY_EQUAL_ROLE_MARKER, None)
     try:
         workflow_service.validate_definition(conn, compiled)
     except ConflictError as exc:
@@ -1061,6 +1065,9 @@ def import_definition(conn: sqlite3.Connection, definition: dict, *,
                       name: str, created_by: str = "human") -> dict:
     """把已落/草案 workflow definition 转成 role-slot 模板草稿。"""
     normalized = workflow_service.normalize_definition(conn, deepcopy(definition))
+    # 导入会生成新模板：即使来源是存量相等模板，也必须先分离 decide/verify。
+    from .workflow_definition import LEGACY_EQUAL_ROLE_MARKER
+    normalized.pop(LEGACY_EQUAL_ROLE_MARKER, None)
     workflow_service.validate_definition(conn, normalized)
     steps = [deepcopy(s) for s in (normalized.get("steps") or normalized.get("children") or [])
              if isinstance(s, dict)]
