@@ -481,6 +481,7 @@ CREATE TABLE IF NOT EXISTS gate_packets (
     upstream_json      TEXT NOT NULL DEFAULT '[]',
     risks_json         TEXT NOT NULL DEFAULT '[]',
     recommendation_json TEXT NOT NULL DEFAULT '{}',
+    plan_review_json   TEXT NOT NULL DEFAULT '{}',
     evidence_digest    TEXT,
     sla_seconds        INTEGER,
     deadline_at        TEXT,
@@ -1118,6 +1119,12 @@ def init_schema(conn: sqlite3.Connection) -> None:
         pass
     try:
         conn.execute("ALTER TABLE workflow_steps ADD COLUMN reviewer TEXT")
+    except sqlite3.OperationalError:
+        pass
+    # 迁移：plan_slices 人工门评审包附带切片表/Brief 覆盖矩阵/manual 预估/enabling。
+    try:
+        conn.execute(
+            "ALTER TABLE gate_packets ADD COLUMN plan_review_json TEXT NOT NULL DEFAULT '{}'")
     except sqlite3.OperationalError:
         pass
     try:

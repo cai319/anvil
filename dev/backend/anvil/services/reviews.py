@@ -266,8 +266,10 @@ def latest_packet(conn: sqlite3.Connection, workflow_id: str, step_id: str) -> d
         return None
     d = dict(row)
     for key in ("options_json", "acceptance_json", "evidence_json", "upstream_json",
-                "risks_json", "recommendation_json"):
-        d[key[:-5]] = jloads(d.pop(key), [] if key != "recommendation_json" else {})
+                "risks_json"):
+        d[key[:-5]] = jloads(d.pop(key), [])
+    for key in ("recommendation_json", "plan_review_json"):
+        d[key[:-5]] = jloads(d.pop(key), {})
     return d
 
 
@@ -287,7 +289,7 @@ def decisions_for_step(conn: sqlite3.Connection, workflow_id: str, step_id: str)
 
 def ensure_packet(conn: sqlite3.Connection, wf: dict, step: dict,
                   created_by: str = "system", *, commit: bool = True,
-                  force: bool = False) -> dict:
+                  force: bool = False, plan_review: dict | None = None) -> dict:
     current = latest_packet(conn, wf["id"], step["step_id"])
     if current and current["status"] in ("pending_human", "pending_ai") and not force:
         return current
@@ -314,6 +316,9 @@ def ensure_packet(conn: sqlite3.Connection, wf: dict, step: dict,
     risks = jloads(step.get("escalate_json") or "[]", [])
     if not isinstance(risks, list):
         risks = []
+    if plan_review is None:
+        # 刷新 packet 时保留已算好的切片表 / 覆盖矩阵，避免只刷新证据就丢掉。
+        plan_review = (current or {}).get("plan_review") or {}
     packet_id = new_id()
     now = now_iso()
     previous_recommendation = {}
@@ -325,15 +330,16 @@ def ensure_packet(conn: sqlite3.Connection, wf: dict, step: dict,
     conn.execute(
         "INSERT INTO gate_packets (id, task_id, workflow_id, execution_no, step_id, kind, "
         "revision, status, authority, question, options_json, acceptance_json, evidence_json, "
-        "upstream_json, risks_json, recommendation_json, evidence_digest, sla_seconds, "
-        "deadline_at, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "upstream_json, risks_json, recommendation_json, plan_review_json, evidence_digest, "
+        "sla_seconds, deadline_at, created_by, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (packet_id, wf["task_id"], wf["id"], int(wf.get("execution_no") or 1),
          step["step_id"], "gate" if step.get("gate") else "decision", revision,
          "pending_human" if authority in ("human", "joint") else "pending_ai",
          authority, _question(step), jdumps(_options(step)),
          jdumps(_acceptance(step, evidence)), jdumps(evidence), jdumps(upstream),
-         jdumps(risks), jdumps(previous_recommendation), _digest(evidence),
-         24 * 3600, _deadline(), created_by, now),
+         jdumps(risks), jdumps(previous_recommendation), jdumps(plan_review),
+         _digest(evidence), 24 * 3600, _deadline(), created_by, now),
     )
     # A forced refresh supersedes a packet that is still pending; the human has
     # been waiting since the original submission, not since the refresh click.
@@ -494,5 +500,6 @@ def human_decision_items(conn: sqlite3.Connection) -> list[dict]:
         d["upstream"] = jloads(d.pop("upstream_json", "[]"), [])
         d["risks"] = jloads(d.pop("risks_json", "[]"), [])
         d["recommendation"] = jloads(d.pop("recommendation_json", "{}"), {})
+        d["plan_review"] = jloads(d.pop("plan_review_json", "{}"), {})
         out.append(d)
     return out
