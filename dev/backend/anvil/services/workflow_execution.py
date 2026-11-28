@@ -205,6 +205,13 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
             "你是本切片的决策角色。只审阅依赖步骤的产出、证据与验收标准，"
             "不要亲自实现具体工作。决策前逐条核对验收标准；通过时写明放行依据与剩余风险，"
             "打回时逐条列出必须修改的问题、验收口径与复验要求。\n"
+            "\n## 逐项验收判定\n"
+            "引擎已在 verify 阶段重跑锁定检查并写入绿跑证据（验收证据只由引擎产生）。"
+            "验收项 verdict 为 met / unmet / n.a.；引擎检查失败的项是 unmet，"
+            "无法判定（harness 错误、未跑完）的项是 unknown。存在 unmet 或 unknown 时不能通过。"
+            "manual 项必须由你判定，用 --verdicts-file 提交："
+            "[{\"id\":\"m1\",\"status\":\"met|unmet|n.a.\",\"evidence_refs\":[\"...\"]}]；"
+            "漏交 manual 项会保持 unknown 并阻止通过；引擎 verdict 不可覆盖。\n"
             f"重做次数：{step.get('rework_count', 0)} / {step.get('max_rework', 0)}\n"
             f"可打回的目标步骤（on_reject）：\n{target_block}\n"
             f"决策权限：{reviews.authority_of(step)}"
@@ -213,7 +220,7 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
             + recovery_block
             + "\n完成后执行：\n"
             f"- 通过：`anvil step decide {workflow['id']} {step['step_id']} "
-            "--approve --feedback \"结论\"`\n"
+            "--approve --feedback \"结论\" --verdicts-file verdicts.json`\n"
             f"- 打回：`anvil step decide {workflow['id']} {step['step_id']} "
             "--reject --feedback \"具体问题与修改要求\"`\n"
             f"- 证据不足/风险超限：`anvil step escalate {workflow['id']} {step['step_id']} "
@@ -248,12 +255,20 @@ def step_prompt(workflow: dict, step: dict, task: dict | None) -> str:
     if step.get("evidence_required"):
         submit_cmd += " --evidence-file evidence.json"
     submit_cmd += ' --changed-paths "src/a.py,src/b.py"'
+    verify_block = ""
+    if (str(step.get("slice_key") or "").strip()
+            and step["step_id"].endswith((".verify", ".verify2"))):
+        verify_block = (
+            "\n## 验证职责\n"
+            "你只整理与复核验收证据，不要提交“通过/已通过”结论；引擎会在本步骤提交后"
+            "重跑锁定检查，逐项判定由 decide 记录。报告独立复核的证据、问题与无法复现项即可。\n")
     return (
         base
         + loop_block
         + evidence_block
         + dep_results_block
         + slice_spec_block
+        + verify_block
         + feedback_block
         + recovery_block
         + f"\n完成后必须执行：`{submit_cmd}`。\n"
@@ -568,6 +583,50 @@ def _slice_lock_for_step(conn: sqlite3.Connection, wid: str,
     return jloads(row["slice_lock_json"], {}) or None
 
 
+def _slice_final_verify(conn: sqlite3.Connection, wid: str, step: dict) -> bool:
+    """本步骤是否是切片 decide 之前的最终验证门（verify / verify2）。
+
+    绿跑必须覆盖 decide 将要判定的代码状态；fix 之后的 verify2 才是最终门，
+    light 强度没有 fix/verify2 时 decide 直接依赖 verify。
+    """
+    slice_key = str(step.get("slice_key") or "").strip()
+    if not slice_key or step.get("kind") == "decision":
+        return False
+    row = conn.execute(
+        "SELECT depends_on_json FROM workflow_steps WHERE workflow_id=? "
+        "AND slice_key=? AND kind='decision' ORDER BY rowid LIMIT 1",
+        (wid, slice_key)).fetchone()
+    if row is None:
+        return False
+    return step["step_id"] in set(jloads(row["depends_on_json"], []))
+
+
+def _maybe_create_green_checks(conn: sqlite3.Connection, wf: dict,
+                               step: dict, role: str | None) -> None:
+    """切片最终验证门提交后，由引擎在 final 代码上重跑锁定检查。"""
+    if not _slice_final_verify(conn, wf["id"], step):
+        return
+    from . import lock_set
+    from . import sandbox as sandbox_service
+    slice_key = str(step.get("slice_key") or "").strip()
+    found = lock_set.for_slice(conn, wf["id"], slice_key)
+    if found is None:
+        return
+    lock, scope_step_id = found
+    row = conn.execute(
+        "SELECT slice_spec_json FROM workflow_steps WHERE workflow_id=? AND step_id=?",
+        (wf["id"], scope_step_id)).fetchone()
+    if row is None or not row["slice_spec_json"]:
+        return
+    spec = jloads(row["slice_spec_json"], {})
+    if not isinstance(spec, dict) or not spec:
+        return
+    sandbox_service.create_slice_green_checks(
+        conn, task_id=str(wf["task_id"]), workflow_id=wf["id"],
+        slice_key=slice_key, scope_step_id=scope_step_id, spec=spec,
+        lock=lock, actor_role=role)
+
+
 def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
                 summary: str | None, run_id: str | None = None,
                 evidence: list | None = None,
@@ -651,6 +710,15 @@ def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: 
                 base_snapshot=base_snapshot)
         except lock_set_service.LockConflict as exc:
             raise ConflictError(f"lock_scope_conflict: {exc}") from exc
+        # manual 占比在 scope 锁定重算；超过 30% 时该片 decide authority 切 human。
+        from . import slice_verdicts
+        manual = slice_verdicts.manual_ratio(parsed_spec)
+        lock["manual"] = manual
+        if manual["authority"] == "human":
+            conn.execute(
+                "UPDATE workflow_steps SET decision_authority='human', updated_at=? "
+                "WHERE workflow_id=? AND slice_key=? AND kind='decision'",
+                (now_iso(), wid, str(step.get("slice_key") or "")))
         slice_lock_json = jdumps(lock)
     changed = [leases.normalize_path(p) for p in (changed_paths or [])]
     if changed:
@@ -720,6 +788,8 @@ def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: 
         sandbox_service.evaluate_dependencies(
             conn, task_id=wf["task_id"], workflow_id=wid,
             slice_key=str(step.get("slice_key") or ""), actor_role=role)
+    # 最终验证门提交：引擎在 final 代码上重跑锁定检查（绿跑）。
+    _maybe_create_green_checks(conn, wf, step, role)
     _finalize_if_done(conn, wid)
     return get_workflow(conn, wid)  # type: ignore[return-value]
 

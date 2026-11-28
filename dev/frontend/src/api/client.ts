@@ -588,6 +588,7 @@ export const api = {
     approve: boolean; feedback?: string; packet_id?: string;
     rework_targets?: string[]; reasons?: string[]; override_reason?: string;
     acknowledge_stale?: boolean;
+    verdicts?: { id: string; status: string; evidence_refs?: string[] }[];
   }): Promise<Workflow> =>
     req("POST", `/workflows/${wid}/steps/${sid}/decide`, body).then((r) => json<Workflow>(r)),
   escalateWorkflowStep: (wid: string, sid: string, body: {
@@ -1849,8 +1850,11 @@ export interface ReviewEvidence {
 }
 
 export interface ReviewAcceptance {
+  id?: string;
+  kind?: string;
   criterion: string;
   status: string;
+  source?: "engine" | "manual" | string;
   evidence_refs: string[];
 }
 

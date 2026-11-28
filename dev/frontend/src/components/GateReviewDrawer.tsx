@@ -41,6 +41,20 @@ const EVIDENCE_KIND_LABEL: Record<string, string> = {
   summary: "摘要",
 };
 
+const VERDICT_LABEL: Record<string, string> = {
+  met: "通过",
+  unmet: "未通过",
+  "n.a.": "不适用",
+  unknown: "未判定",
+};
+
+const VERDICT_MARK: Record<string, string> = {
+  met: "✓",
+  unmet: "✗",
+  "n.a.": "—",
+  unknown: "?",
+};
+
 export function GateReviewDrawer({
   wid,
   sid,
@@ -57,6 +71,9 @@ export function GateReviewDrawer({
   const [overrideReason, setOverrideReason] = useState("");
   const [acknowledgeStale, setAcknowledgeStale] = useState(false);
   const [reworkTargets, setReworkTargets] = useState<string[]>([]);
+  const [manualVerdicts, setManualVerdicts] = useState<
+    Record<string, { status: string; evidence_refs: string }>
+  >({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -77,6 +94,10 @@ export function GateReviewDrawer({
   const authority = packet?.authority ?? step?.decision_authority ?? (step?.gate ? "human" : "ai");
   const stale = Boolean(data?.can_decide.stale_evidence);
   const isDecision = step?.kind === "decision";
+  const manualItems = useMemo(
+    () => (packet?.acceptance ?? []).filter(
+      (a) => a.source === "manual" && a.id),
+    [packet]);
   const planReview = packet?.plan_review && (packet.plan_review.slices?.length ?? 0) > 0
     ? packet.plan_review
     : null;
@@ -84,6 +105,17 @@ export function GateReviewDrawer({
     if (!step || isDecision) return step?.on_reject ?? [];
     return [...new Set([step.step_id, ...(step.depends_on ?? [])])];
   }, [step, isDecision]);
+
+  useEffect(() => {
+    const next: Record<string, { status: string; evidence_refs: string }> = {};
+    for (const item of manualItems) {
+      next[item.id!] = {
+        status: item.status === "unknown" ? "" : item.status,
+        evidence_refs: (item.evidence_refs ?? []).join(", "),
+      };
+    }
+    setManualVerdicts(next);
+  }, [manualItems]);
 
   useEffect(() => {
     // Rejecting always resets the current step; decision steps default to the
@@ -107,9 +139,26 @@ export function GateReviewDrawer({
       setError("证据已过期，请先确认接受过期证据或刷新证据");
       return;
     }
+    if (isDecision && manualItems.some((item) => !manualVerdicts[item.id!]?.status)) {
+      setError("manual 验收项必须逐项判定后才能通过（met / unmet / n.a.）");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
+      const verdicts = isDecision
+        ? manualItems
+          .filter((item) => manualVerdicts[item.id!]?.status)
+          .map((item) => {
+            const value = manualVerdicts[item.id!];
+            return {
+              id: item.id!,
+              status: value.status,
+              evidence_refs: value.evidence_refs
+                .split(",").map((ref) => ref.trim()).filter(Boolean),
+            };
+          })
+        : undefined;
       const body = {
         approve,
         feedback: feedback.trim() || undefined,
@@ -117,6 +166,7 @@ export function GateReviewDrawer({
         rework_targets: approve ? undefined : reworkTargets,
         override_reason: overrideReason.trim() || undefined,
         acknowledge_stale: acknowledgeStale,
+        verdicts,
       };
       const wf = isDecision
         ? await api.decideWorkflowStep(wid, sid, body)
@@ -235,15 +285,49 @@ export function GateReviewDrawer({
               </section>
 
               <section className="gate-section">
-                <h4>验收清单</h4>
+                <h4>逐项验收判定</h4>
                 {packet.acceptance.length === 0 && <p className="muted">未定义验收标准。</p>}
                 <ul className="gate-acceptance">
                   {packet.acceptance.map((a, i) => (
-                    <li key={`${a.criterion}-${i}`}>
-                      <span className={`gate-check is-${a.status}`}>{a.status === "met" ? "✓" : "?"}</span>
+                    <li key={`${a.id ?? a.criterion}-${i}`}>
+                      <span className={`gate-check is-${a.status}`}>
+                        {VERDICT_MARK[a.status] ?? "?"}
+                      </span>
                       <span>{a.criterion}</span>
+                      <span className="muted">
+                        {VERDICT_LABEL[a.status] ?? a.status}
+                        {a.source ? ` · ${a.source === "manual" ? "manual" : "engine"}` : ""}
+                      </span>
                       {a.evidence_refs.length > 0 && (
                         <span className="muted">证据 {a.evidence_refs.join("、")}</span>
+                      )}
+                      {isDecision && a.source === "manual" && a.id && (
+                        <span className="gate-manual-verdict">
+                          <select
+                            value={manualVerdicts[a.id]?.status ?? ""}
+                            onChange={(e) => setManualVerdicts((prev) => ({
+                              ...prev,
+                              [a.id!]: {
+                                status: e.target.value,
+                                evidence_refs: prev[a.id!]?.evidence_refs ?? "",
+                              },
+                            }))}>
+                            <option value="">请选择</option>
+                            <option value="met">通过</option>
+                            <option value="unmet">未通过</option>
+                            <option value="n.a.">不适用</option>
+                          </select>
+                          <input
+                            placeholder="证据引用（逗号分隔）"
+                            value={manualVerdicts[a.id]?.evidence_refs ?? ""}
+                            onChange={(e) => setManualVerdicts((prev) => ({
+                              ...prev,
+                              [a.id!]: {
+                                status: prev[a.id!]?.status ?? "",
+                                evidence_refs: e.target.value,
+                              },
+                            }))} />
+                        </span>
                       )}
                     </li>
                   ))}

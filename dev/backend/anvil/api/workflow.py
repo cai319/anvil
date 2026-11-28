@@ -382,7 +382,7 @@ def decide_step(wid: str, sid: str, body: dict, conn=Depends(get_db),
             conn, wid, sid, auth.role, bool(body.get("approve")), body.get("feedback"),
             auth.run_id, body.get("packet_id"), body.get("rework_targets"),
             body.get("reasons"), body.get("override_reason"),
-            bool(body.get("acknowledge_stale")))
+            bool(body.get("acknowledge_stale")), body.get("verdicts"))
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except PermissionError as exc:

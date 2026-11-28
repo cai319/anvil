@@ -220,7 +220,14 @@ def _options(step: dict) -> list[dict]:
     ]
 
 
-def _acceptance(step: dict, evidence: list[dict]) -> list[dict]:
+def _acceptance(conn: sqlite3.Connection, wf: dict, step: dict,
+                evidence: list[dict]) -> list[dict]:
+    # 切片决策：按引擎绿跑证据与 decide 的 manual 判定逐项给 verdict。
+    from . import slice_verdicts
+
+    verdicts = slice_verdicts.build_verdicts(conn, wf, step)
+    if verdicts is not None:
+        return verdicts
     refs = [str(e.get("id")) for e in evidence if e.get("id")]
     out = []
     for item in jloads(step.get("acceptance_json") or "[]", []):
@@ -314,6 +321,7 @@ def decisions_for_step(conn: sqlite3.Connection, workflow_id: str, step_id: str)
         d = dict(row)
         d["reasons"] = jloads(d.pop("reasons_json"), [])
         d["rework_targets"] = jloads(d.pop("rework_targets_json"), [])
+        d["verdicts"] = jloads(d.pop("verdicts_json", "[]"), [])
         out.append(d)
     return out
 
@@ -357,6 +365,12 @@ def ensure_packet(conn: sqlite3.Connection, wf: dict, step: dict,
             risks.append("dependency_pytest11_plugin")
         evidence.append(_dependency_evidence(integrity))
         evidence = evidence[:MAX_EVIDENCE_ITEMS]
+    # 引擎绿跑证据与 manual 占比随评审包展示，供逐项 verdict 引用。
+    from . import slice_verdicts
+    for item in slice_verdicts.engine_evidence(conn, wf, step):
+        if item not in evidence:
+            evidence.append(item)
+    evidence = evidence[:MAX_EVIDENCE_ITEMS]
     if plan_review is None:
         # 刷新 packet 时保留已算好的切片表 / 覆盖矩阵，避免只刷新证据就丢掉。
         plan_review = (current or {}).get("plan_review") or {}
@@ -378,7 +392,7 @@ def ensure_packet(conn: sqlite3.Connection, wf: dict, step: dict,
          step["step_id"], "gate" if step.get("gate") else "decision", revision,
          "pending_human" if authority in ("human", "joint") else "pending_ai",
          authority, _question(step), jdumps(_options(step)),
-         jdumps(_acceptance(step, evidence)), jdumps(evidence), jdumps(upstream),
+         jdumps(_acceptance(conn, wf, step, evidence)), jdumps(evidence), jdumps(upstream),
          jdumps(risks), jdumps(previous_recommendation), jdumps(plan_review),
          _digest(evidence), 24 * 3600, _deadline(), created_by, now),
     )
@@ -412,6 +426,7 @@ def record_decision(conn: sqlite3.Connection, wf: dict, step: dict, *,
                     rework_targets: list[str] | None = None,
                     override_reason: str | None = None,
                     packet_id: str | None = None,
+                    verdicts: list[dict] | None = None,
                     closes_packet: bool = True,
                     commit: bool = True) -> dict:
     packet = latest_packet(conn, wf["id"], step["step_id"])
@@ -428,16 +443,25 @@ def record_decision(conn: sqlite3.Connection, wf: dict, step: dict, *,
     except (TypeError, ValueError):
         pass
     decision_id = new_id()
+    verdicts_json = None
+    if verdicts is not None:
+        verdicts_json = jdumps(verdicts)
+        # 逐项 verdict 与证据引用回写到 packet，评审包/UI 与档案同步可见。
+        conn.execute(
+            "UPDATE gate_packets SET acceptance_json=? WHERE id=?",
+            (verdicts_json, packet["id"]))
     conn.execute(
         "INSERT INTO decisions (id, packet_id, task_id, workflow_id, execution_no, step_id, "
         "authority, decider_type, decider, decision, feedback, reasons_json, "
-        "rework_targets_json, evidence_digest, override_reason, latency_seconds, created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "rework_targets_json, evidence_digest, override_reason, latency_seconds, "
+        "verdicts_json, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (decision_id, packet["id"], wf["task_id"], wf["id"],
          int(wf.get("execution_no") or 1), step["step_id"], packet["authority"],
          actor_type, actor, decision, feedback, jdumps(reasons or []),
          jdumps(rework_targets or []), packet.get("evidence_digest"),
-         override_reason, latency, now),
+         override_reason, latency,
+         verdicts_json if verdicts_json is not None else "[]", now),
     )
     if closes_packet:
         conn.execute(

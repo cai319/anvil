@@ -531,6 +531,24 @@ def _create_check_job(conn, *, spec_raw: dict, actor_role: str | None,
         "SELECT * FROM sandbox_jobs WHERE id=?", (job_id,)).fetchone())  # type: ignore[return-value]
 
 
+def _engine_check(item: dict, check_id: str) -> dict:
+    """把切片 spec 的引擎验收项转换成检查作业的 check 声明。"""
+    check: dict = {"id": check_id, "kind": item["kind"]}
+    if item["kind"] == "test":
+        check["pytest"] = item["pytest"]
+    elif item["kind"] == "command":
+        if item.get("cmd") is not None:
+            check["cmd"] = item["cmd"]
+        else:
+            check["argv"] = item["argv"]
+        check["exit_code"] = item["exit_code"]
+    elif item["kind"] == "file_assert":
+        check["path"] = item["path"]
+        if item.get("contains") is not None:
+            check["contains"] = item["contains"]
+    return check
+
+
 def create_slice_checks(conn, *, task_id: str, step_id: str, slice_key: str,
                         spec: dict, workflow_id: str | None = None,
                         actor_role: str | None = None,
@@ -544,29 +562,54 @@ def create_slice_checks(conn, *, task_id: str, step_id: str, slice_key: str,
 
     created: list[dict] = []
     for item in engine_checks(spec):
-        check: dict = {"id": f"{step_id}.{item['id']}", "kind": item["kind"]}
-        if item["kind"] == "test":
-            check["pytest"] = item["pytest"]
-        elif item["kind"] == "command":
-            if item.get("cmd") is not None:
-                check["cmd"] = item["cmd"]
-            else:
-                check["argv"] = item["argv"]
-            check["exit_code"] = item["exit_code"]
-        elif item["kind"] == "file_assert":
-            check["path"] = item["path"]
-            if item.get("contains") is not None:
-                check["contains"] = item["contains"]
         raw = {
             "task_id": task_id,
             "reason": f"slice {slice_key} acceptance {item['id']}",
-            "check": check,
+            "check": _engine_check(item, f"{step_id}.{item['id']}"),
         }
         if workflow_id:
             raw["lock_ref"] = {"workflow_id": workflow_id, "step_id": step_id}
         created.append(create_job(
             conn, spec_raw=raw, actor_role=actor_role,
             actor_is_human=actor_is_human, kind="check"))
+    return created
+
+
+def create_slice_green_checks(conn, *, task_id: str, workflow_id: str,
+                              slice_key: str, scope_step_id: str,
+                              spec: dict, lock: dict,
+                              actor_role: str | None = None) -> list[dict]:
+    """verify 阶段由引擎重跑锁定检查（绿跑）。
+
+    绿跑前用红跑记录的锁定集合校验基础环境哈希；不一致时跳过该检查，不产生
+    绿跑证据（decide 将看到 ``unknown``，不能据此通过）。manual 项不由引擎执行。
+    """
+    from . import env_integrity
+    from .slice_spec import engine_checks
+
+    created: list[dict] = []
+    for item in engine_checks(spec):
+        check_id = f"{scope_step_id}.{item['id']}"
+        raw = {
+            "task_id": task_id,
+            "reason": f"slice {slice_key} green run {item['id']}",
+            "check": _engine_check(item, check_id),
+            "green_ref": {
+                "workflow_id": workflow_id,
+                "slice_key": slice_key,
+                "scope_step_id": scope_step_id,
+                "check_id": check_id,
+            },
+        }
+        parsed = sandbox_jobs.parse_check_spec(raw)
+        try:
+            env_integrity.guard_green_environment(lock, check_id, parsed)
+        except env_integrity.EnvironmentMismatch:
+            # 基础环境与红跑不一致：不执行绿跑，留待人工处理。
+            continue
+        created.append(create_job(
+            conn, spec_raw=raw, actor_role=actor_role,
+            actor_is_human=False, kind="check"))
     return created
 
 

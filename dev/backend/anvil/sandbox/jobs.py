@@ -508,6 +508,14 @@ def parse_check_spec(raw: Any) -> dict:
         if not base_snapshot.strip() or not Path(base_snapshot).is_absolute():
             raise JobSpecError("base_snapshot must be an absolute path")
         spec["base_snapshot"] = base_snapshot
+    # 绿跑：verify 阶段由引擎重跑锁定检查，绑定回切片以便汇总逐项判定。
+    green_ref = raw.get("green_ref")
+    if isinstance(green_ref, dict):
+        ref = {key: str(green_ref[key])
+               for key in ("workflow_id", "slice_key", "scope_step_id", "check_id")
+               if green_ref.get(key)}
+        if ref:
+            spec["green_ref"] = ref
     counterfactual = raw.get("counterfactual")
     if counterfactual is not None:
         if not isinstance(counterfactual, dict):
