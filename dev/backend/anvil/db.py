@@ -1367,6 +1367,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_slice_lock_v1(conn)
     _migrate_decision_verdicts_v1(conn)
     _migrate_stage_slot_v1(conn)
+    _migrate_check_ledger_v1(conn)
     conn.commit()
 
 
@@ -3269,4 +3270,57 @@ def _migrate_stage_slot_v1(conn: sqlite3.Connection) -> None:
                 "AND kind='decision' AND step_id LIKE '%.decide' "
                 "AND COALESCE(stage,'')=''", (row["id"],))
     _set_setting(conn, "schema.stage_slot_v1", "1")
+    conn.commit()
+
+
+def _migrate_check_ledger_v1(conn: sqlite3.Connection) -> None:
+    """v1.62：引擎检查运行与 decide verdict 的结构化台账（append-only）。幂等。"""
+    if _setting(conn, "schema.check_ledger_v1"):
+        return
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS check_ledger (
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            record_type          TEXT NOT NULL,          -- run | verdict | audit
+            task_id              TEXT,
+            workflow_id          TEXT,
+            execution_no         INTEGER,
+            slice_key            TEXT,
+            step_id              TEXT,
+            scope_step_id        TEXT,
+            check_id             TEXT,
+            kind                 TEXT,
+            source               TEXT,                   -- red|green|counterfactual|standalone|engine|manual
+            command              TEXT,
+            exit_code            INTEGER,
+            signal               TEXT,
+            timed_out            INTEGER NOT NULL DEFAULT 0,
+            red_exit_code        INTEGER,
+            collected_count      INTEGER,
+            collected_baseline   INTEGER,
+            junit_summary_json   TEXT NOT NULL DEFAULT '{}',
+            failure_types_json   TEXT NOT NULL DEFAULT '[]',
+            classification       TEXT,                   -- passed|valid_red|trivial_red|harness_error
+            cause                TEXT,
+            env_hash             TEXT,
+            dependency_digest    TEXT,
+            run_id               TEXT,
+            verdict_status       TEXT,                   -- met|unmet|n.a.|unknown
+            evidence_refs_json   TEXT NOT NULL DEFAULT '[]',
+            decision_id          TEXT,
+            detail_json          TEXT NOT NULL DEFAULT '{}',
+            created_at           TEXT NOT NULL
+        )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_check_ledger_workflow "
+        "ON check_ledger(workflow_id, record_type, id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_check_ledger_task "
+        "ON check_ledger(task_id, created_at)")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_check_ledger_run "
+        "ON check_ledger(run_id) WHERE record_type='run'")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_check_ledger_verdict "
+        "ON check_ledger(decision_id, check_id) WHERE record_type='verdict'")
+    _set_setting(conn, "schema.check_ledger_v1", "1")
     conn.commit()
