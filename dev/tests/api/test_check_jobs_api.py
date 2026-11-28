@@ -108,3 +108,48 @@ async def test_invalid_check_spec_returns_400(client, task):
                                            "junit": ["../x"]}},
         headers=human_headers())
     assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_command_check_requires_declared_exit_code(client, task):
+    missing = await client.post(
+        f"{API}/check-jobs",
+        json={"task_id": "T-CHK",
+              "check": {"kind": "command", "cmd": "python -m app --check"}},
+        headers=human_headers())
+    assert missing.status_code == 400
+
+    ok = await client.post(
+        f"{API}/check-jobs",
+        json={"task_id": "T-CHK",
+              "check": {"kind": "command", "cmd": "python -m app --check",
+                        "exit_code": 1}},
+        headers=human_headers())
+    assert ok.status_code == 201
+    assert ok.json()["spec"]["check"]["red_exit_code"] == 1
+
+
+@pytest.mark.asyncio
+async def test_file_assert_check_is_accepted_native(client, task):
+    r = await client.post(
+        f"{API}/check-jobs",
+        json={"task_id": "T-CHK",
+              "check": {"kind": "file_assert", "path": "reports/out.md",
+                        "contains": "PASS"}},
+        headers=human_headers())
+    assert r.status_code == 201
+    check = r.json()["spec"]["check"]
+    assert check["kind"] == "file_assert"
+    assert check["path"] == "reports/out.md"
+    assert r.json()["spec"]["phases"]["run"] == []
+
+
+@pytest.mark.asyncio
+async def test_manual_check_is_rejected_as_not_executed(client, task):
+    r = await client.post(
+        f"{API}/check-jobs",
+        json={"task_id": "T-CHK",
+              "check": {"kind": "manual", "judge": "human",
+                        "method": "read the diff"}},
+        headers=human_headers())
+    assert r.status_code == 400

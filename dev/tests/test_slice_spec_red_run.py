@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 
 import pytest
 
@@ -200,3 +201,158 @@ def test_timeout_is_harness_error(scope_env):
     result = sandbox.job_view(conn, job["id"])["check_result"]
     assert result["classification"] == "harness_error"
     assert result["cause"] == "timeout"
+
+
+# --- command / file_assert / manual（v1.62 #5）------------------------------
+
+class FakeRunner:
+    """通用 fake：collect 阶段退出 0，最后一个 run 阶段用给定退出码。"""
+
+    name = "fake"
+
+    def __init__(self, *, exit_code=1, timed_out=False):
+        self.exit_code = exit_code
+        self.timed_out = timed_out
+
+    def available(self):
+        return True, ""
+
+    def run(self, *, spec, paths, job_id, log_path):
+        run_phases = spec["phases"]["run"]
+        lines = []
+        for index, phase in enumerate(run_phases):
+            last = index == len(run_phases) - 1
+            lines.append(json.dumps({
+                "phase": "run", "name": phase["name"],
+                "exit_code": self.exit_code if last else 0,
+                "duration_ms": 5,
+            }))
+        (paths.artifacts / "phases.jsonl").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8")
+        log_path.write_text("check log", encoding="utf-8")
+        return jobs.RunnerResult(
+            exit_code=self.exit_code, timed_out=self.timed_out,
+            signal=jobs._signal_name(self.exit_code), backend="fake")
+
+
+def _kinds_spec(**overrides) -> dict:
+    spec = {
+        "acceptance": [
+            {"id": "c1", "kind": "command", "criterion": "cli reports failure",
+             "verification": {"cmd": "python -m app --check", "exit_code": 1}},
+            {"id": "f1", "kind": "file_assert", "criterion": "report produced",
+             "verification": {"path": "reports/out.md", "contains": "PASS"}},
+            {"id": "m1", "kind": "manual", "criterion": "API shape is sensible",
+             "verification": {"judge": "human", "method": "read the diff"}},
+        ],
+    }
+    spec.update(overrides)
+    return spec
+
+
+def _jobs_by_kind(conn) -> dict:
+    return {j["spec"]["check"]["kind"]: j
+            for j in sandbox.list_jobs(conn, task_id="T1", kind="check")}
+
+
+def test_scope_submit_creates_command_and_file_assert_jobs_records_manual(scope_env):
+    conn, _db_path, wid = scope_env
+    wf_service.submit_step(
+        conn, wid, "P1.auth.scope", "lead", "spec ready",
+        slice_spec=_kinds_spec())
+
+    jobs = _jobs_by_kind(conn)
+    assert sorted(jobs) == ["command", "file_assert"]
+    assert jobs["command"]["spec"]["check"]["red_exit_code"] == 1
+    assert jobs["file_assert"]["spec"]["check"]["path"] == "reports/out.md"
+
+    step = _scope_step(conn, wid)
+    manual = next(a for a in step["slice_spec"]["acceptance"]
+                  if a["kind"] == "manual")
+    assert manual["judge"] == "human"
+    assert manual["method"] == "read the diff"
+    # manual 项不产生任何引擎作业。
+    assert all(j["spec"]["check"].get("kind") != "manual"
+               for j in jobs.values())
+
+
+def test_scope_submit_rejects_command_without_exit_code(scope_env):
+    conn, _db_path, wid = scope_env
+    bad = _kinds_spec()
+    bad["acceptance"][0]["verification"].pop("exit_code")
+    with pytest.raises(ConflictError):
+        wf_service.submit_step(
+            conn, wid, "P1.auth.scope", "lead", "bad", slice_spec=bad)
+    step = _scope_step(conn, wid)
+    assert step["status"] == "running"
+    assert not step.get("slice_spec")
+    assert sandbox.list_jobs(conn, task_id="T1", kind="check") == []
+
+
+def test_command_check_declared_red_exit_classifies_valid_red(scope_env):
+    conn, db_path, wid = scope_env
+    wf_service.submit_step(
+        conn, wid, "P1.auth.scope", "lead", "spec ready",
+        slice_spec=_kinds_spec())
+    _run_checks(conn, db_path, FakeRunner(exit_code=1))
+    result = sandbox.job_view(
+        conn, _jobs_by_kind(conn)["command"]["id"])["check_result"]
+    assert result["classification"] == "valid_red"
+    assert result["exit_code"] == 1
+    assert result["red_exit_code"] == 1
+
+
+def test_command_check_other_exit_is_harness_error(scope_env):
+    conn, db_path, wid = scope_env
+    wf_service.submit_step(
+        conn, wid, "P1.auth.scope", "lead", "spec ready",
+        slice_spec=_kinds_spec())
+    _run_checks(conn, db_path, FakeRunner(exit_code=2))
+    result = sandbox.job_view(
+        conn, _jobs_by_kind(conn)["command"]["id"])["check_result"]
+    assert result["classification"] == "harness_error"
+    assert result["cause"] == "unexpected_exit_code"
+
+
+def test_file_assert_missing_report_is_trivial_red(scope_env):
+    conn, db_path, wid = scope_env
+    shutil.rmtree(config.TASK_WORKSPACES_DIR / "T1" / "reports",
+                  ignore_errors=True)
+    wf_service.submit_step(
+        conn, wid, "P1.auth.scope", "lead", "spec ready",
+        slice_spec=_kinds_spec())
+    _run_checks(conn, db_path, FakeRunner())
+    result = sandbox.job_view(
+        conn, _jobs_by_kind(conn)["file_assert"]["id"])["check_result"]
+    assert result["classification"] == "trivial_red"
+    assert result["cause"] == "file_missing"
+
+
+def test_file_assert_matching_report_is_green(scope_env):
+    conn, db_path, wid = scope_env
+    wf_service.submit_step(
+        conn, wid, "P1.auth.scope", "lead", "spec ready",
+        slice_spec=_kinds_spec())
+    report = config.TASK_WORKSPACES_DIR / "T1" / "reports" / "out.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("status: PASS\n", encoding="utf-8")
+    _run_checks(conn, db_path, FakeRunner())
+    job = _jobs_by_kind(conn)["file_assert"]
+    view = sandbox.job_view(conn, job["id"])
+    assert view["status"] == "succeeded"
+    assert view["check_result"]["classification"] == "passed"
+
+
+def test_file_assert_content_mismatch_is_valid_red(scope_env):
+    conn, db_path, wid = scope_env
+    wf_service.submit_step(
+        conn, wid, "P1.auth.scope", "lead", "spec ready",
+        slice_spec=_kinds_spec())
+    report = config.TASK_WORKSPACES_DIR / "T1" / "reports" / "out.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("status: FAIL\n", encoding="utf-8")
+    _run_checks(conn, db_path, FakeRunner())
+    result = sandbox.job_view(
+        conn, _jobs_by_kind(conn)["file_assert"]["id"])["check_result"]
+    assert result["classification"] == "valid_red"
+    assert result["cause"] == "content_mismatch"

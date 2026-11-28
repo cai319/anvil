@@ -93,12 +93,15 @@ export interface CheckResult {
   junit_summary?: JunitSummary | null;
   collected_count?: number | null;
   collected_baseline?: number | null;
-  classification?: "passed" | "valid_red" | "harness_error" | null;
+  classification?: "passed" | "valid_red" | "trivial_red" | "harness_error" | null;
   cause?: string | null;
   failure_types?: string[];
   env_hash?: string | null;
   duration_ms?: number | null;
   status?: string | null;
+  red_exit_code?: number | null;
+  path?: string | null;
+  contains?: string | null;
 }
 
 export interface PocJob {
@@ -130,6 +133,10 @@ export interface PocJob {
       cmd?: string | null;
       argv?: string[] | null;
       junit?: string[];
+      exit_code?: number;
+      red_exit_code?: number;
+      path?: string | null;
+      contains?: string | null;
     };
     [key: string]: unknown;
   };

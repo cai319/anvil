@@ -223,7 +223,7 @@ def test_execute_check_timeout_is_distinct(tmp_path, monkeypatch):
 
 def test_execute_check_without_junit_still_records_core_fields(tmp_path, monkeypatch):
     spec = jobs.parse_check_spec(_check_spec(
-        check={"kind": "command", "cmd": "true"}))
+        check={"kind": "command", "cmd": "true", "exit_code": 1}))
     execution = _run(tmp_path, monkeypatch, FakeCheckRunner(), spec=spec)
     result = execution.evidence["check"]
     assert result["status"] == "passed"
@@ -231,3 +231,128 @@ def test_execute_check_without_junit_still_records_core_fields(tmp_path, monkeyp
     assert result["collected_count"] is None
     assert result["exit_code"] == 0
     assert result["env_hash"].startswith("sha256:")
+
+
+# --- command / file_assert / manual（v1.62 #5）------------------------------
+
+
+def test_parse_command_requires_declared_red_exit_code():
+    with pytest.raises(jobs.JobSpecError):
+        jobs.parse_check_spec(_check_spec(
+            check={"kind": "command", "cmd": "python -m app --check"}))
+    for bad in (0, 256, -1, "1", True):
+        with pytest.raises(jobs.JobSpecError):
+            jobs.parse_check_spec(_check_spec(
+                check={"kind": "command", "cmd": "false", "exit_code": bad}))
+
+
+def test_parse_command_records_red_exit_code_and_environment_hash():
+    spec = jobs.parse_check_spec(_check_spec(
+        check={"kind": "command", "cmd": "false", "exit_code": 2}))
+    assert spec["check"]["kind"] == "command"
+    assert spec["check"]["red_exit_code"] == 2
+    assert spec["check"]["cmd"] == "false"
+    other = jobs.parse_check_spec(_check_spec(
+        check={"kind": "command", "cmd": "false", "exit_code": 3}))
+    assert jobs.environment_hash(spec) != jobs.environment_hash(other)
+
+
+def test_parse_file_assert_is_native_without_run_command():
+    spec = jobs.parse_check_spec(_check_spec(
+        check={"kind": "file_assert", "path": "reports/out.md",
+               "contains": "PASS"}))
+    assert spec["check"]["kind"] == "file_assert"
+    assert spec["check"]["path"] == "reports/out.md"
+    assert spec["check"]["contains"] == "PASS"
+    assert spec["phases"]["run"] == []
+    assert spec["artifacts"] == []
+
+
+def test_parse_file_assert_rejects_command_fields_and_bad_paths():
+    with pytest.raises(jobs.JobSpecError):
+        jobs.parse_check_spec(_check_spec(
+            check={"kind": "file_assert", "path": "reports/out.md",
+                   "cmd": "true"}))
+    for bad in ("/abs.md", "../escape.md"):
+        with pytest.raises(jobs.JobSpecError):
+            jobs.parse_check_spec(_check_spec(
+                check={"kind": "file_assert", "path": bad}))
+
+
+def test_parse_manual_check_is_rejected_as_not_engine_executed():
+    with pytest.raises(jobs.JobSpecError):
+        jobs.parse_check_spec(_check_spec(
+            check={"kind": "manual", "judge": "human",
+                   "method": "read the diff"}))
+
+
+def _write_workspace(tmp_path, rel_path: str, content: str) -> None:
+    target = tmp_path / "task-workspaces" / "T1" / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+
+
+def test_execute_command_declared_red_exit_is_valid_red(tmp_path, monkeypatch):
+    spec = jobs.parse_check_spec(_check_spec(
+        check={"kind": "command", "cmd": "false", "exit_code": 1}))
+    execution = _run(tmp_path, monkeypatch,
+                     FakeCheckRunner(exit_code=1), spec=spec)
+    result = execution.evidence["check"]
+    assert execution.status == "failed"
+    assert result["classification"] == "valid_red"
+    assert result["cause"] is None
+    assert result["red_exit_code"] == 1
+
+
+def test_execute_command_undeclared_exit_is_harness_error(tmp_path, monkeypatch):
+    spec = jobs.parse_check_spec(_check_spec(
+        check={"kind": "command", "cmd": "false", "exit_code": 1}))
+    execution = _run(tmp_path, monkeypatch,
+                     FakeCheckRunner(exit_code=2), spec=spec)
+    result = execution.evidence["check"]
+    assert result["classification"] == "harness_error"
+    assert result["cause"] == "unexpected_exit_code"
+
+
+def test_execute_command_zero_exit_is_passed(tmp_path, monkeypatch):
+    spec = jobs.parse_check_spec(_check_spec(
+        check={"kind": "command", "cmd": "true", "exit_code": 1}))
+    execution = _run(tmp_path, monkeypatch, FakeCheckRunner(), spec=spec)
+    result = execution.evidence["check"]
+    assert execution.status == "succeeded"
+    assert result["classification"] == "passed"
+
+
+def _file_assert_spec(**overrides):
+    check = {"kind": "file_assert", "path": "reports/out.md", "contains": "PASS"}
+    check.update(overrides)
+    return jobs.parse_check_spec(_check_spec(check=check))
+
+
+def test_execute_file_assert_missing_file_is_trivial_red(tmp_path, monkeypatch):
+    execution = _run(tmp_path, monkeypatch, FakeCheckRunner(),
+                     spec=_file_assert_spec())
+    result = execution.evidence["check"]
+    assert execution.status == "failed"
+    assert result["classification"] == "trivial_red"
+    assert result["cause"] == "file_missing"
+
+
+def test_execute_file_assert_content_mismatch_is_valid_red(tmp_path, monkeypatch):
+    _write_workspace(tmp_path, "reports/out.md", "FAIL")
+    execution = _run(tmp_path, monkeypatch, FakeCheckRunner(),
+                     spec=_file_assert_spec())
+    result = execution.evidence["check"]
+    assert execution.status == "failed"
+    assert result["classification"] == "valid_red"
+    assert result["cause"] == "content_mismatch"
+
+
+def test_execute_file_assert_matching_content_is_passed(tmp_path, monkeypatch):
+    _write_workspace(tmp_path, "reports/out.md", "status: PASS\n")
+    execution = _run(tmp_path, monkeypatch, FakeCheckRunner(),
+                     spec=_file_assert_spec())
+    result = execution.evidence["check"]
+    assert execution.status == "succeeded"
+    assert result["classification"] == "passed"
+    assert result["kind"] == "file_assert"
