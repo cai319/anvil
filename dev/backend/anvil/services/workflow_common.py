@@ -177,6 +177,7 @@ def _steps(conn: sqlite3.Connection, wid: str) -> list[dict]:
         d["slice_spec"] = jloads(d.get("slice_spec_json") or "{}", {}) or None
         d["slice_lock"] = jloads(d.get("slice_lock_json") or "{}", {}) or None
         d["slice_replan"] = jloads(d.get("slice_replan_json") or "{}", {}) or None
+        d["diff_stats"] = jloads(d.get("diff_stats_json") or "{}", {}) or {}
         out.append(d)
     return out
 

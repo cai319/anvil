@@ -269,6 +269,7 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     slice_spec_json  TEXT,                           -- scope：结构化切片 spec（验收项/seam/stub）
     slice_lock_json  TEXT,                           -- scope：锁定集合（路径/配置/签名/基线）
     slice_replan_json TEXT,                          -- scope：replan 次数/原因/新旧 spec 哈希
+    diff_stats_json  TEXT NOT NULL DEFAULT '{}',     -- 提交时 git numstat 增删行数（v1.62 #13）
     decision_authority TEXT NOT NULL DEFAULT '',     -- 空=派生；ai|human|joint
     risk_level       TEXT NOT NULL DEFAULT 'normal', -- normal|high|critical
     reversible       INTEGER NOT NULL DEFAULT 1,
@@ -1196,6 +1197,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
         "packet_id TEXT",
         "submitted_at TEXT",
         "scope_paths_json TEXT NOT NULL DEFAULT '[]'",
+        "diff_stats_json TEXT NOT NULL DEFAULT '{}'",
         "lease_id TEXT",
         "fence_token INTEGER NOT NULL DEFAULT 0",
     ):

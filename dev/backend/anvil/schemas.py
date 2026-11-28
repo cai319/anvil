@@ -338,6 +338,7 @@ class WorkflowStepOut(BaseModel):
     scope_paths: list[str] = Field(default_factory=list)
     slice_lock: dict | None = None
     slice_replan: dict | None = None
+    diff_stats: dict = Field(default_factory=dict)
     lease_id: str | None = None
     fence_token: int = 0
     status: str

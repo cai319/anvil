@@ -911,6 +911,11 @@ def _submit_locked(conn: sqlite3.Connection, tid: str, *, summary: str | None = 
         raise ConflictError(f"role {role} has no write access to repo {t['repo']}")
     # 硬防线（§4.3）：不只信 Agent 自报的 changed_paths，尽量从 worktree/分支真实计算。
     changed = _collect_changed_paths(conn, t, role, changed_paths)
+    # v1.62 #13：提交时记录 numstat 增删行数，供运行上限与审计使用。
+    from . import run_caps
+    diff_stats = run_caps.collect_numstat(
+        conn, tid, role, changed, base_branch=t.get("base_branch"))
+    diff_record = {key: diff_stats[key] for key in ("added", "deleted", "total", "source")}
     patterns = _ignore_patterns(t)
     if changed:
         for p in changed:
@@ -943,7 +948,8 @@ def _submit_locked(conn: sqlite3.Connection, tid: str, *, summary: str | None = 
         _complete_runs(conn, tid, role)
         _audit(conn, role, tid, "submit", {
             "summary": summary, "branch": branch, "changed_paths": changed,
-            "reported_paths": changed_paths, "final": True, "dispatch": True,
+            "reported_paths": changed_paths, "diff_stats": diff_record,
+            "final": True, "dispatch": True,
         })
         conn.commit()
         try:
@@ -984,6 +990,7 @@ def _submit_locked(conn: sqlite3.Connection, tid: str, *, summary: str | None = 
             _audit(conn, role, tid, "submit", {"summary": summary, "branch": branch,
                                                "changed_paths": changed,
                                                "reported_paths": changed_paths,
+                                               "diff_stats": diff_record,
                                                "partial": True})
             conn.commit()
             return get(conn, tid)  # type: ignore[return-value]
@@ -1011,6 +1018,7 @@ def _submit_locked(conn: sqlite3.Connection, tid: str, *, summary: str | None = 
         _audit(conn, role, tid, "submit", {"summary": summary, "branch": branch,
                                            "changed_paths": changed,
                                            "reported_paths": changed_paths,
+                                           "diff_stats": diff_record,
                                            "final": True})
         conn.commit()
         return get(conn, tid)  # type: ignore[return-value]
@@ -1029,7 +1037,9 @@ def _submit_locked(conn: sqlite3.Connection, tid: str, *, summary: str | None = 
     )
     _notify_delegator(conn, t, role)
     _audit(conn, role, tid, "submit", {"summary": summary, "branch": branch,
-                                       "changed_paths": changed, "reported_paths": changed_paths})
+                                       "changed_paths": changed,
+                                       "reported_paths": changed_paths,
+                                       "diff_stats": diff_record})
     conn.commit()
     return get(conn, tid)  # type: ignore[return-value]
 

@@ -759,16 +759,23 @@ def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: 
                     lock_set_service.enforce_changes(lock, workspace, changed)
                 except lock_set_service.LockConflict as exc:
                     raise ConflictError(f"lock_violation: {exc}") from exc
+    # v1.62 #13：提交时记录本次改动的 git numstat（不信任自报数量）。
+    from . import run_caps
+    task_row = conn.execute(
+        "SELECT base_branch FROM tasks WHERE id=?", (wf["task_id"],)).fetchone()
+    diff_stats = run_caps.collect_numstat(
+        conn, wf["task_id"], role, changed, run_id=step.get("run_id"),
+        base_branch=(task_row["base_branch"] if task_row else None))
     now = now_iso()
     # CAS：只有仍处于 running 的步骤才能提交，避免与 fail/terminate/rework 竞态
     # 把已结束步骤写回 submitted（形成 orphan run / 重复 packet）。
     cur = conn.execute(
         "UPDATE workflow_steps SET status='submitted', summary=?, evidence_json=?, "
         "slice_spec_json=COALESCE(?, slice_spec_json), "
-        "slice_lock_json=COALESCE(?, slice_lock_json), updated_at=? "
+        "slice_lock_json=COALESCE(?, slice_lock_json), diff_stats_json=?, updated_at=? "
         "WHERE workflow_id=? AND step_id=? AND status='running'",
         (summary, jdumps(normalized or step.get("evidence") or []),
-         slice_spec_json, slice_lock_json, now, wid, step_id),
+         slice_spec_json, slice_lock_json, jdumps(diff_stats), now, wid, step_id),
     )
     if cur.rowcount != 1:
         raise ConflictError(
@@ -784,12 +791,16 @@ def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: 
         # 运行期可能已生成过空包；提交时必须用最终证据强制刷新。
         reviews.ensure_packet(conn, wf, {
             **step, "summary": summary, "evidence": normalized or step.get("evidence") or [],
-            "status": "submitted"}, created_by=role, force=True)
+            "diff_stats": diff_stats, "status": "submitted"},
+            created_by=role, force=True)
     else:
         conn.execute(
             "UPDATE workflow_steps SET status='approved', ended_at=?, updated_at=? "
             "WHERE workflow_id=? AND step_id=?", (now, now, wid, step_id))
         _step_activity(conn, wf["task_id"], role, step, "approved", summary)
+    # 运行上限超限：升级人工（收件箱 + 评审包 risk），不硬失败、不阻塞推进。
+    cap_report = run_caps.evaluate(conn, wf, {**step, "diff_stats": diff_stats})
+    run_caps.escalate(conn, wf, {**step, "diff_stats": diff_stats}, cap_report)
     leases.release(conn, step.get("lease_id"), commit=False)
     conn.commit()
     if parsed_spec is not None:
