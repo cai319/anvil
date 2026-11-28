@@ -860,6 +860,15 @@ def _retry_step_locked(conn: sqlite3.Connection, wid: str, step_id: str) -> dict
                 "WHERE workflow_id=? AND step_id=?", (wid, step_id))
         if step:
             leases.release(conn, step.get("lease_id"), commit=False)
+            # 人工重试计入「人工返工」指标；与 reject / reopen 同源可审计。
+            ledger.emit(
+                conn, "step.retried", task_id=wf["task_id"], workflow_id=wid,
+                execution_no=wf.get("execution_no"), step_id=step_id,
+                slice_key=step.get("slice_key"), actor_type="human",
+                actor="human",
+                payload={"prev_status": step.get("status"),
+                         "failure_reason": step.get("failure_reason")},
+            )
         conn.commit()
     except BaseException:
         conn.rollback()
