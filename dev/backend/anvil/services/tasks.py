@@ -1383,6 +1383,11 @@ def archive(conn: sqlite3.Connection, tid: str, role: str | None = None) -> dict
     if cur.rowcount != 1:
         raise ConflictError(f"task {tid} state changed; refresh before archiving")
     _audit(conn, role, tid, "archive")
+    try:
+        from . import sandbox as sandbox_service
+        sandbox_service.cleanup_task_jobs(conn, tid)
+    except Exception:  # noqa: BLE001 —— 清理失败不阻断归档
+        pass
     conn.commit()
     return get(conn, tid)  # type: ignore[return-value]
 
@@ -1420,6 +1425,11 @@ def archive_completed(conn: sqlite3.Connection, workspace_id: str | None = None,
             (now, now, tid),
         )
         _audit(conn, role, tid, "archive")
+        try:
+            from . import sandbox as sandbox_service
+            sandbox_service.cleanup_task_jobs(conn, tid)
+        except Exception:  # noqa: BLE001
+            pass
     conn.commit()
     return [get(conn, tid) for tid in ids]  # type: ignore[list-item]
 
@@ -1479,6 +1489,12 @@ def delete(conn: sqlite3.Connection, tid: str, *, force: bool = False,
     t = get(conn, tid)
     if t is None:
         return False
+
+    try:
+        from . import sandbox as sandbox_service
+        sandbox_service.cleanup_task_jobs(conn, tid)
+    except Exception:  # noqa: BLE001 —— 作业清理失败不阻断任务删除
+        pass
 
     runs = conn.execute(
         "SELECT id, role_slug, native_session_id, status, started_at "

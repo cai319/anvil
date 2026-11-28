@@ -94,6 +94,9 @@ class SandboxBackend(Protocol):
     def spawn_persistent(self, req: SpawnRequest) -> SandboxProcess:
         ...
 
+    def spawn_stdio(self, req: SpawnRequest) -> SandboxProcess:
+        ...
+
     def kill(self, proc: Any, *, graceful: bool = True) -> None:
         ...
 

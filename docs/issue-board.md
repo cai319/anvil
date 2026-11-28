@@ -54,6 +54,16 @@
 `GET /tasks/{id}/findings/schema` 读取；CLI `anvil finding template` 提供同一份字段清单
 和枚举，提交时仍由后端权威校验。
 
+### 2.1 受控 PoC 与「已验证」
+
+- `poc_status` 仍是**手工字段**（provided / not_verified / not_applicable），后端不自动
+  改写。
+- finding 额外返回派生字段 `verification`：`verified | pending | failed | blocked | none`，
+  由绑定该 finding 的 `sandbox_jobs` 推导（任一 succeeded → verified；运行中 → pending；
+  全部结束无成功 → failed）。没有作业时为 `none`。
+- finding 抽屉可新建 PoC 作业并查看日志/证据/产物；safe 作业自动执行，relaxed 需 human
+  在收件箱批准。成功作业在问题板显示「已验证」chip，供 reviewer 判断是否确认。
+
 ## 3. 状态机
 
 Finding：

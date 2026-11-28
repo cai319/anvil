@@ -57,6 +57,10 @@ class WindowsJobBackend:
             popen=proc, backend=self.name,
             instance_id=req.instance_id, native_handle=job_name)
 
+    def spawn_stdio(self, req: SpawnRequest) -> SandboxProcess:
+        """launcher 继承三根管道；子进程自动继承 Job。"""
+        return self.spawn_persistent(req)
+
     def kill(self, proc: Any, *, graceful: bool = True) -> None:
         if proc is None:
             return

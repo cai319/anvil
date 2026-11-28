@@ -169,6 +169,59 @@ def test_verification_for_finding(tmp_path):
         conn.close()
 
 
+def test_cleanup_task_jobs_removes_dirs_and_keeps_metadata(tmp_path, monkeypatch):
+    from anvil import config
+
+    monkeypatch.setattr(config, "SANDBOX_JOBS_DIR", tmp_path / "jobs")
+    conn = _conn(tmp_path)
+    try:
+        tasks_service.create(conn, id="T1", title="t")
+        job = sandbox.create_job(
+            conn, spec_raw=_raw(task_id="T1"),
+            actor_role="human", actor_is_human=True, check_available=False)
+        job_dir = tmp_path / "jobs" / job["id"]
+        (job_dir / "out").mkdir(parents=True)
+        (job_dir / "out" / "a.txt").write_text("x", encoding="utf-8")
+        conn.execute(
+            "INSERT INTO sandbox_job_artifacts (job_id, rel_path, size_bytes, "
+            "sha256, created_at) VALUES (?,?,?,?,?)",
+            (job["id"], "a.txt", 1, "h", "2026-01-01T00:00:00Z"))
+        conn.commit()
+        assert sandbox.cleanup_task_jobs(conn, "T1") == 1
+        assert not job_dir.exists()
+        art = conn.execute(
+            "SELECT removed_at FROM sandbox_job_artifacts WHERE job_id=?",
+            (job["id"],)).fetchone()
+        assert art["removed_at"]
+        row = sandbox.get_job(conn, job["id"])
+        assert row["status"] == "canceled"
+    finally:
+        conn.close()
+
+
+def test_cleanup_orphans_removes_expired_job_dir(tmp_path, monkeypatch):
+    from anvil import config
+
+    monkeypatch.setattr(config, "SANDBOX_JOBS_DIR", tmp_path / "jobs")
+    monkeypatch.setattr(config, "SANDBOX_JOB_RETENTION_DAYS", 0)
+    conn = _conn(tmp_path)
+    try:
+        conn.execute(
+            "INSERT INTO sandbox_jobs (id, kind, created_by, spec_json, spec_hash, "
+            "status, created_at, finished_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("old", "poc", "human", "{}", "h", "succeeded",
+             "2020-01-01T00:00:00Z", "2020-01-01T00:00:00Z",
+             "2020-01-01T00:00:00Z"))
+        conn.commit()
+        job_dir = tmp_path / "jobs" / "old"
+        job_dir.mkdir(parents=True)
+        result = sandbox.cleanup_orphans(conn)
+        assert result["jobs"] == 1
+        assert not job_dir.exists()
+    finally:
+        conn.close()
+
+
 def test_inbox_lists_poc_approval(tmp_path):
     conn = _conn(tmp_path)
     try:

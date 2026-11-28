@@ -45,6 +45,8 @@ def _isolate_data_dirs(tmp_path, monkeypatch):
     monkeypatch.setattr(app_config, "RUNTIME_PROPOSALS_DIR", data / "runtime-proposals")
     monkeypatch.setattr(app_config, "ROLE_IMPORTS_DIR", data / "imports")
     monkeypatch.setattr(app_config, "SANDBOX_INSTANCES_DIR", data / "sandbox" / "instances")
+    monkeypatch.setattr(app_config, "SANDBOX_JOBS_DIR", data / "sandbox" / "jobs")
+    monkeypatch.setattr(app_config, "SANDBOX_PROBES_DIR", data / "sandbox" / "probes")
     monkeypatch.setattr(app_config, "SQLITE_PATH", data / "anvil.db")
     return data
 

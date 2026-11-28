@@ -39,6 +39,9 @@ pip install --force-reinstall <anvil-cli-wheel-or-sdist>
 | `ANVIL_AGENT_SLUG` | 角色 slug；缺失时 CLI 以 human 身份调用 |
 | `ANVIL_TASK_ID` | 当前任务 id；多数任务/步骤命令的默认 target |
 | `ANVIL_RUN_ID` | 当前 run id（由运行时注入，用于 stale-run 围栏） |
+| `ANVIL_SANDBOX` | 执行沙箱模式：`enforce`（默认）/ `host-unsafe`（显式关闭，审计+警示） |
+| `ANVIL_SANDBOX_IMAGE` | 严格档工具链镜像，默认 `anvil-toolchain:1.60.0` |
+| `ANVIL_WSL_DISTRO` / `ANVIL_WSL_USER` | Windows 严格档发行版 / 专用用户（默认 `anvil-sbx`） |
 
 规则：
 
@@ -83,6 +86,8 @@ pip install --force-reinstall <anvil-cli-wheel-or-sdist>
 | `anvil role ...` | 角色：list/propose/expand/export/import；思考强度走 Web/API |
 | `anvil rsi ...` | 角色 RSI：show/observations/trigger/retro/candidates/eval |
 | `anvil runtime ...` | 运行时改进提案：propose/evidence/proposals/show/export |
+| `anvil poc ...` | 受控 PoC/动态验证：template/run/list/show/logs/artifacts/cancel |
+| `anvil sandbox ...` | 执行沙箱：status/self-check/provision（Windows WSL2） |
 | `anvil workspace ...` | 频道与频道知识卡 |
 | `anvil lesson propose/fill` | 提议共享经验 / 收割角色补全字段（human 审批） |
 | `anvil reminder ...` | 定时提醒（含任务完成知识收割提醒） |
@@ -513,6 +518,32 @@ anvil runtime export <RTP-id>            # human
 - 提案 md 生成在 `data/runtime-proposals/<id>/proposal.md`；`export` 复制为 human 可执行文档，
   不会自动改运行时。
 - 自动检测器 `runtime_proposal_detector` 默认关闭；开启后只创建 draft/追加证据。
+
+## 9.3 执行沙箱与受控 PoC：`anvil sandbox` / `anvil poc`
+
+```bash
+anvil sandbox status [--json]
+anvil sandbox self-check [--json]
+anvil sandbox provision --consent          # Windows：一次性准备 WSL2 严格档（root）
+
+anvil poc template
+anvil poc run --file job.json [--task T] [--finding F] [--wait] [--json]
+anvil poc list [--task T] [--finding F] [--status ...]
+anvil poc show <JOB>
+anvil poc logs <JOB>
+anvil poc artifacts <JOB>
+anvil poc cancel <JOB>
+```
+
+规则：
+
+- safe 作业（`network=none`、默认镜像/限额）可由绑定任务的 Agent 直接发起；放宽网络、
+  资源、时长或使用非默认镜像会进入 `waiting_approval`，由 human 在收件箱批准/驳回。
+- 作业在严格档沙箱执行：只读工作区快照、独立 scratch、默认断网、资源/时限；失败
+  不自动重试。产物只导出 spec `artifacts` 匹配的文件，并计算 sha256。
+- `anvil sandbox provision` 只能在 Windows + WSL2 使用，必须显式 `--consent`；会安装
+  bubblewrap/工具链并创建 `anvil-sbx` 用户，记审计。
+- `host-unsafe` 下严格档默认仍不执行；仅显式允许时才回退宿主直跑（审计+警示）。
 
 ## 10. 其他命令
 

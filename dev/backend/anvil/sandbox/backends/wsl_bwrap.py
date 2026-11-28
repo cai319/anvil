@@ -279,6 +279,21 @@ class WSLBwrapRunner:
     def provision(self) -> dict:
         return provision()
 
+    def kill(self, job_id: str | None) -> None:
+        d = distro()
+        if not d or not job_id:
+            return
+        try:
+            _run_wsl(["pkill", "-9", "-u", SBX_USER],
+                     user="root", distro=d, timeout=20)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _run_wsl(["rm", "-rf", f"{WSL_ROOT}/jobs/{container_name(job_id)}"],
+                     user=SBX_USER, distro=d, timeout=30)
+        except Exception:  # noqa: BLE001
+            pass
+
     def run(self, *, spec: dict, paths: JobPaths, job_id: str,
             log_path: Path) -> RunnerResult:
         ok, detail = available()

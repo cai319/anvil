@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -204,6 +205,57 @@ def reconcile_startup(conn) -> None:
 
 def terminate_process(proc, *, graceful: bool = True) -> None:
     get_backend().kill(proc, graceful=graceful)
+
+
+def spawn_stdio(conn, *, executable: str, args: list[str], cwd: str,
+                env: dict[str, str], role_slug: str | None = None,
+                scope_id: str | None = None, policy=None):
+    """按标准档启动一个 stdio 子进程（MCP 探针）；返回 SandboxProcess。"""
+    from ..sandbox import env as sandbox_env
+    from ..sandbox import instances as sandbox_instances
+    from ..sandbox.ports import SpawnRequest
+
+    backend = get_backend()
+    iid = new_instance_id()
+    root_dir = ""
+    if config.SANDBOX_ENABLED and config.SANDBOX_MODE != "host-unsafe":
+        try:
+            root_dir = str(sandbox_instances.prepare(role_slug or "probes", iid))
+            home, tmp = sandbox_env.prepare_home(cwd, cwd, root_dir)
+            env = sandbox_env.apply_standard_env(env, home=home, tmp=tmp)
+        except Exception:  # noqa: BLE001 —— 环境重定向失败不阻断探针
+            pass
+    try:
+        caps = backend.capabilities().as_dict()
+    except Exception:  # noqa: BLE001
+        caps = {}
+    instance_id = create_instance(
+        conn, role_slug=role_slug, scope_kind="mcp_probe",
+        scope_id=scope_id or executable, backend=getattr(backend, "name", "host"),
+        capabilities=caps, root_dir=root_dir or None,
+        rss_limit_mib=512, pids_limit=64, workspace_path=cwd, instance_id=iid)
+    req = SpawnRequest(
+        executable=executable, args=args, cwd=cwd, env=env,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        instance_id=instance_id or None, instance_dir=root_dir or None,
+        workspace_path=cwd, role_slug=role_slug, policy=policy)
+    try:
+        sp = backend.spawn_stdio(req)
+    except Exception:
+        if instance_id:
+            try:
+                finish_instance(conn, instance_id, exit_reason="spawn_error")
+            except Exception:  # noqa: BLE001
+                pass
+        raise
+    if instance_id:
+        try:
+            bind_instance(conn, instance_id, pid=sp.popen.pid,
+                          native_handle=sp.native_handle,
+                          root_dir=root_dir or None)
+        except Exception:  # noqa: BLE001
+            pass
+    return sp
 
 
 def _safe_capabilities() -> dict:
@@ -609,6 +661,14 @@ def fail_job(conn, job_id: str, reason: str) -> None:
     conn.commit()
 
 
+def _kill_job_runner(job: dict) -> None:
+    runner = strict_backend.select_runner()[0]
+    if getattr(runner, "name", None) == "docker":
+        docker_backend.kill_container(job.get("native_job_id"))
+    elif hasattr(runner, "kill"):
+        runner.kill(job.get("id"))
+
+
 def cancel_job(conn, job_id: str) -> dict | None:
     row = conn.execute(
         "SELECT * FROM sandbox_jobs WHERE id=?", (job_id,)).fetchone()
@@ -622,7 +682,10 @@ def cancel_job(conn, job_id: str) -> dict | None:
             (now, now, job_id))
         conn.commit()
     elif row["status"] == "running":
-        docker_backend.kill_container(row["native_job_id"])
+        try:
+            _kill_job_runner(dict(row))
+        except Exception:  # noqa: BLE001 —— 取消失败仍要落状态
+            pass
         now = now_iso()
         conn.execute(
             "UPDATE sandbox_jobs SET status='canceled', finished_at=?, "
@@ -686,6 +749,83 @@ def job_artifacts(conn, job_id: str) -> list[dict]:
     return [dict(r) for r in conn.execute(
         "SELECT * FROM sandbox_job_artifacts WHERE job_id=? ORDER BY rel_path",
         (job_id,)).fetchall()]
+
+
+def cleanup_task_jobs(conn, task_id: str) -> int:
+    """任务归档/删除：取消活跃作业并删除产物/日志目录（保留元数据与 evidence）。"""
+    try:
+        rows = conn.execute(
+            "SELECT id, status FROM sandbox_jobs WHERE task_id=?", (task_id,)
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return 0
+    removed = 0
+    for row in rows:
+        if row["status"] in ("queued", "waiting_approval", "running"):
+            try:
+                cancel_job(conn, row["id"])
+            except Exception:  # noqa: BLE001
+                pass
+        shutil.rmtree(config.SANDBOX_JOBS_DIR / row["id"], ignore_errors=True)
+        conn.execute(
+            "UPDATE sandbox_job_artifacts SET removed_at=? "
+            "WHERE job_id=? AND removed_at IS NULL",
+            (now_iso(), row["id"]))
+        removed += 1
+    conn.commit()
+    return removed
+
+
+def cleanup_orphans(conn) -> dict:
+    """每日清理：过期作业目录、过期实例目录；保留 DB 元数据。"""
+    now = now_iso()
+    jobs = 0
+    try:
+        rows = conn.execute(
+            "SELECT id, finished_at FROM sandbox_jobs "
+            "WHERE status IN ('succeeded','failed','canceled','rejected') "
+            "AND finished_at IS NOT NULL").fetchall()
+        for row in rows:
+            finished = str(row["finished_at"] or "")
+            if _older_than_days(finished, config.SANDBOX_JOB_RETENTION_DAYS):
+                shutil.rmtree(config.SANDBOX_JOBS_DIR / row["id"], ignore_errors=True)
+                conn.execute(
+                    "UPDATE sandbox_job_artifacts SET removed_at=? "
+                    "WHERE job_id=? AND removed_at IS NULL", (now, row["id"]))
+                jobs += 1
+    except sqlite3.OperationalError:
+        pass
+    instances = 0
+    try:
+        rows = conn.execute(
+            "SELECT id, role_slug, root_dir, ended_at FROM sandbox_instances "
+            "WHERE status IN ('exited','killed','stale') AND ended_at IS NOT NULL"
+        ).fetchall()
+        for row in rows:
+            if not _older_than_days(str(row["ended_at"] or ""),
+                                    config.SANDBOX_INSTANCE_RETENTION_DAYS):
+                continue
+            root = row["root_dir"]
+            if root:
+                shutil.rmtree(root, ignore_errors=True)
+            instances += 1
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+    return {"jobs": jobs, "instances": instances}
+
+
+def _older_than_days(stamp: str, days: int) -> bool:
+    if not stamp:
+        return False
+    try:
+        from datetime import datetime, timedelta, timezone
+        parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed < datetime.now(timezone.utc) - timedelta(days=max(0, days))
+    except ValueError:
+        return False
 
 
 def artifact_file(conn, job_id: str, rel_path: str) -> Path:

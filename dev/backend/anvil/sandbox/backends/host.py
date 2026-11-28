@@ -47,6 +47,10 @@ class HostBackend:
             popen=proc, backend=self.name,
             instance_id=req.instance_id, native_handle=handle)
 
+    def spawn_stdio(self, req: SpawnRequest) -> SandboxProcess:
+        """stdio 探针复用持久 spawn 的管道/进程组语义。"""
+        return self.spawn_persistent(req)
+
     def kill(self, proc: Any, *, graceful: bool = True) -> None:
         if proc is None:
             return

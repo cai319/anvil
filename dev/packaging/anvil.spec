@@ -55,6 +55,7 @@ server = Analysis(
     binaries=[],
     datas=[
         (str(ROOT / "backend" / "anvil" / "runtimes"), "anvil/runtimes"),
+        (str(ROOT / "backend" / "anvil" / "sandbox" / "images"), "anvil/sandbox/images"),
         (str(ROOT / "backend" / "anvil" / "tools.yaml"), "anvil"),
         (str(ROOT / "frontend" / "dist"), "frontend"),
     ],

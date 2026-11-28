@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import uuid
 import shutil
 import subprocess
 import tempfile
@@ -21,6 +22,8 @@ from pathlib import Path
 
 from .. import config
 from ..db import open_conn
+from ..sandbox import jobs as sandbox_jobs
+from ..sandbox.backends import strict as strict_backend
 from ..util import now_iso
 from . import role_eval, role_space, roles as roles_service, runtime as runtime_service
 
@@ -367,10 +370,8 @@ class ReplayRunner:
                    for rel in touched for pattern in patterns)
 
     @staticmethod
-    def _verify(item: dict, workspace: Path) -> tuple[float, bool, list[str]]:
-        verifier = item.get("verifier") or {}
-        checks = verifier.get("checks") or []
-        timeout = float(verifier.get("timeout_seconds") or 600)
+    def _host_verify(checks: list[dict], workspace: Path,
+                     timeout: float) -> tuple[float, bool, list[str]]:
         total = 0.0
         passed = 0.0
         hard_failure = False
@@ -394,6 +395,58 @@ class ReplayRunner:
                 failures.append(str(check.get("id") or "check"))
                 if check.get("hard"):
                     hard_failure = True
+        return (passed / total if total else 0.0), hard_failure, failures
+
+    @classmethod
+    def _verify(cls, item: dict, workspace: Path) -> tuple[float, bool, list[str]]:
+        verifier = item.get("verifier") or {}
+        checks = verifier.get("checks") or []
+        timeout = float(verifier.get("timeout_seconds") or 600)
+        if not checks:
+            return 0.0, False, []
+        if not config.SANDBOX_ENABLED or config.SANDBOX_MODE == "host-unsafe":
+            return cls._host_verify(checks, workspace, timeout)
+        runner, ok, detail = strict_backend.select_runner()
+        if not ok:
+            return 0.0, True, [f"strict sandbox unavailable: {detail}"]
+        try:
+            spec = sandbox_jobs.parse_spec({
+                "network": "none",
+                "resources": {"timeout_seconds": max(1, int(timeout))},
+                "phases": {"run": [
+                    {
+                        "name": f"check-{i}",
+                        "cmd": str(check.get("cmd") or "false"),
+                        "timeout_seconds": max(1, int(timeout)),
+                    }
+                    for i, check in enumerate(checks)
+                ]},
+            })
+            execution = sandbox_jobs.execute_job(
+                spec, "rsi_" + uuid.uuid4().hex, runner,
+                source_dir=workspace)
+        except Exception as exc:  # noqa: BLE001 —— 基础设施失败不误评分
+            return 0.0, True, [f"strict verifier failed: {exc}"]
+        phases = {phase["name"]: phase for phase in execution.phases}
+        total = 0.0
+        passed = 0.0
+        hard_failure = False
+        failures: list[str] = []
+        for i, check in enumerate(checks):
+            weight = float(check.get("weight") or 1)
+            total += weight
+            phase = phases.get(f"check-{i}")
+            expected = int(check.get("expect_exit") or 0)
+            ok = phase is not None and phase.get("exit_code") == expected
+            if ok:
+                passed += weight
+            else:
+                failures.append(str(check.get("id") or "check"))
+                if check.get("hard"):
+                    hard_failure = True
+        if execution.failure_reason == "sandbox_timeout":
+            hard_failure = True
+            failures.append("strict verifier timed out")
         return (passed / total if total else 0.0), hard_failure, failures
 
 

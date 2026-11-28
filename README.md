@@ -6,7 +6,7 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **前端**：React + TypeScript + Vite
 - **Agent CLI**：`anvil`，Agent 在自己的工具循环里调用它上报状态
 - **地址**：`http://127.0.0.1:7317`（仅回环）
-- **当前版本**：v1.51.1（Cindy 规划前澄清、角色建议门禁、收件箱与工具治理改进）
+- **当前版本**：v1.60.0（执行沙箱、受控 PoC 运行、Windows WSL2 严格档、MCP/RSI 沙箱化）
 
 > 内部架构、设计、ADR 与实现状态文档仅本地保留，不随仓库发布。
 
@@ -486,6 +486,9 @@ anvil runtime export <RTP-id>
 | `ANVIL_DEFAULT_RUNTIME` | `claude-code` | 默认运行时 |
 | `ANVIL_DEFAULT_PERMISSION_MODE` | `bypassPermissions` | 角色默认权限模式 |
 | `ANVIL_PERSISTENT_RUNTIME` | `auto` | `auto`/`1`/`0`：常驻会话开关 |
+| `ANVIL_SANDBOX` | `enforce` | 执行沙箱模式；`host-unsafe` 显式关闭（审计 + 常驻警示） |
+| `ANVIL_SANDBOX_IMAGE` | `anvil-toolchain:1.60.0` | 严格档工具链镜像（Docker/Podman） |
+| `ANVIL_WSL_DISTRO` / `ANVIL_WSL_USER` | 默认发行版 / `anvil-sbx` | Windows WSL2 严格档 |
 | `ANVIL_IDLE_RELEASE_MINUTES` | `15` | 空闲释放时间 |
 | `ANVIL_RESET_SESSION_ON_FAILURE` | `1` | 非零退出后丢弃旧 session |
 | `ANVIL_CIC_THRESHOLD_TOKENS` | `0` | 冷唤醒阈值；`0`=按模型窗口自动，`>0`=绝对覆盖 |
@@ -584,8 +587,9 @@ cd dev
 pytest tests/ -q
 ```
 
-当前基线：**1266 passed + 63 skipped**（CLI 契约需要 `ANVIL_BIN`，模型评测需要
-`ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。v1.51.1 覆盖新增的澄清、角色思考强度、
+当前基线：**1343 passed + 64 skipped**（CLI 契约需要 `ANVIL_BIN`，模型评测需要
+`ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。v1.60.0 覆盖执行沙箱与受控 PoC；
+v1.51.1 覆盖新增的澄清、角色思考强度、
 角色建议门禁、收件箱提醒生命周期、功能开关默认恢复、工具治理与大厅性能。
 
 CLI 契约测试需要安装 `anvil` 并指定可执行文件：
@@ -750,8 +754,13 @@ anvil init
   `VITE_ANVIL_TOKEN`，或写入 localStorage `anvil-session`）；CLI 从 `ANVIL_TOKEN`、
   `ANVIL_TOKEN_FILE` 或 `data/auth-token` 自动读取。
 - 人类 secret 不会注入 Agent 子进程环境；Agent 只持有绑定角色/任务的运行级 session
-  token，不能调用审批、删除、运行时/MCP 配置等 HITL 端点。若 Agent 与 Anvil 使用同一
-  OS 用户且能读取 `data/auth-token`，仍需独立用户/容器形成强隔离。
+  token，不能调用审批、删除、运行时/MCP 配置等 HITL 端点。
+- **执行沙箱（v1.60）**：角色执行默认进入 OS 沙箱。standard 档限制工作区写范围、
+  资源上限与进程树，并在能力允许时拒绝读取 human token、数据库、备份、其他任务/
+  角色数据；strict 档（PoC/动态验证）一次性运行、默认断网、只读源码快照。
+  standard 档网络不限制，不可信代码必须进 strict。Windows standard 的写范围/读拒绝
+  依赖 AppContainer/受限令牌，不可用时界面显示能力缺口；`ANVIL_SANDBOX=host-unsafe`
+  显式关闭沙箱并常驻警示（见 [v1.60.0 发布说明](docs/v1.60.0-release.md)）。
 - Web/API 响应带 `X-Frame-Options: DENY` 与 `Content-Security-Policy: frame-ancestors 'none'`。
 - 运行时/MCP 的注册、探测与 health，以及角色创建、workspace 合并等操作只接受自然人身份。
 - 数据库每天自动备份到 `data/backups/anvil-YYYYMMDD.db`，默认保留 7 天。
@@ -771,6 +780,7 @@ anvil init
 - [docs/cli-reference.md](docs/cli-reference.md)：CLI 命令、参数、规则、错误处理与示例
 - [GLOSSARY.md](GLOSSARY.md)：领域术语（任务简报、澄清、角色建议门禁、思考强度等）
 - [dev/README.md](dev/README.md)：开发者入口（源码结构、本地开发与测试）
+- [docs/v1.60.0-release.md](docs/v1.60.0-release.md)：v1.60.0 执行沙箱、受控 PoC、Windows WSL2 严格档、MCP/RSI 沙箱化
 - [docs/v1.51.1-release.md](docs/v1.51.1-release.md)：v1.51.1 Cindy 规划前澄清、角色思考强度、角色建议门禁、收件箱与工具治理
 - [docs/v1.50.1-release.md](docs/v1.50.1-release.md)：v1.50.1 任务会话默认「对话」、面向自然人的沟通规范
 - [docs/v1.50.0-release.md](docs/v1.50.0-release.md)：v1.50.0 角色 RSI、隐藏回放评估与运行时改进提案

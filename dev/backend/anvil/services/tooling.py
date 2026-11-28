@@ -8,10 +8,12 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import sqlite3
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import yaml  # type: ignore
@@ -190,7 +192,7 @@ def delete_mcp_server(conn: sqlite3.Connection, mid: str) -> bool:
     return True
 
 
-def _read_line(q: queue.Queue, deadline: float) -> str | None:
+def _read_line(q: queue.Queue, deadline: float) -> bytes | str | None:
     remaining = max(0.0, deadline - time.monotonic())
     try:
         return q.get(timeout=remaining)
@@ -218,19 +220,21 @@ def probe_mcp_server(conn: sqlite3.Connection, mid: str, timeout: float = 8.0) -
         {str(k): str(v) for k, v in (server["env"] or {}).items()},
         allow_run_token=False))
     merged_env = force_utf8_stdio(merged_env)
+    from . import sandbox as sandbox_service
+    probe_dir = Path(config.SANDBOX_PROBES_DIR) / uuid.uuid4().hex
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    instance_id: str | None = None
     try:
-        proc = subprocess.Popen(
-            [server["command"], *[str(a) for a in server["args"]]],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", bufsize=1, env=merged_env,
-        )
+        sp = sandbox_service.spawn_stdio(
+            conn, executable=server["command"],
+            args=[str(a) for a in server["args"]],
+            cwd=str(probe_dir), env=merged_env,
+            role_slug=f"mcp:{server['id']}", scope_id=server["id"])
+        proc = sp.popen
+        instance_id = sp.instance_id
     except Exception as exc:  # noqa: BLE001
+        shutil.rmtree(probe_dir, ignore_errors=True)
         return {"id": server["id"], "ok": False, "detail": str(exc), "tools": []}
-    try:
-        if proc.stdin:
-            proc.stdin.reconfigure(newline="\n")
-    except Exception:  # noqa: BLE001
-        pass
 
     q: queue.Queue = queue.Queue()
 
@@ -245,7 +249,7 @@ def probe_mcp_server(conn: sqlite3.Connection, mid: str, timeout: float = 8.0) -
 
     def send(msg: dict) -> None:
         assert proc.stdin is not None
-        proc.stdin.write(json.dumps(msg) + "\n")
+        proc.stdin.write((json.dumps(msg) + "\n").encode("utf-8"))
         proc.stdin.flush()
 
     def await_id(msg_id: int, deadline: float) -> dict | None:
@@ -297,13 +301,19 @@ def probe_mcp_server(conn: sqlite3.Connection, mid: str, timeout: float = 8.0) -
         return {"id": server["id"], "ok": False, "detail": str(exc), "tools": []}
     finally:
         try:
-            proc.terminate()
-            proc.wait(timeout=2)
+            sandbox_service.terminate_process(proc, graceful=True)
         except Exception:  # noqa: BLE001
             try:
                 proc.kill()
             except Exception:  # noqa: BLE001
                 pass
+        if instance_id:
+            try:
+                sandbox_service.finish_instance(
+                    conn, instance_id, exit_reason="probe_done")
+            except Exception:  # noqa: BLE001
+                pass
+        shutil.rmtree(probe_dir, ignore_errors=True)
 
 
 def mcp_config_for(conn: sqlite3.Connection, names: list[str],

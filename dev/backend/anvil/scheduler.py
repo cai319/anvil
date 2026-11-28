@@ -143,6 +143,7 @@ class Scheduler:
             )),
             ("reconcile", (
                 ("cleanup_workspaces", lambda: self._cleanup_workspaces(conn)),
+                ("cleanup_sandbox", lambda: self._cleanup_sandbox(conn)),
                 ("reconcile", lambda: self._reconcile(conn)),
             )),
         )
@@ -253,6 +254,25 @@ class Scheduler:
         if result.get("removed"):
             logger.info("workspace cleanup removed=%s skipped=%s",
                         len(result["removed"]), len(result["skipped"]))
+
+    def _cleanup_sandbox(self, conn: sqlite3.Connection) -> None:
+        """每天清理一次过期沙箱作业/实例目录（保留 DB 元数据与 evidence）。"""
+        today = datetime.now(timezone.utc).date().isoformat()
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key='sandbox.cleanup_date'").fetchone()
+        if row is not None and row["value"] == today:
+            return
+        from .services import sandbox as sandbox_service
+        result = sandbox_service.cleanup_orphans(conn)
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            ("sandbox.cleanup_date", today, now_iso()),
+        )
+        conn.commit()
+        if result.get("jobs") or result.get("instances"):
+            logger.info("sandbox cleanup jobs=%s instances=%s",
+                        result.get("jobs"), result.get("instances"))
 
     def _backup_daily(self) -> None:
         """每天一次 SQLite 在线备份，并清理超过保留期的备份。"""

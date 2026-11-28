@@ -699,7 +699,7 @@ def test_recover_failed_dispatch_run_before_claim(tmp_path, monkeypatch):
 
 
 def test_phase_domains_preserve_order_and_budget(tmp_path, monkeypatch):
-    """P1.14：22 个阶段收敛为 ≤12 个域入口，顺序必须逐项不变。"""
+    """P1.14：23 个阶段收敛为 ≤12 个域入口，顺序必须逐项不变。"""
     env = make_env(tmp_path, monkeypatch)
     sched = Scheduler(env["db_path"], env["orch"])
     domains = sched._phase_domains(None)  # 只构造，不执行
@@ -730,6 +730,7 @@ def test_phase_domains_preserve_order_and_budget(tmp_path, monkeypatch):
         "reap_orphaned_step_runs",
         "reap_stalled_phases",
         "cleanup_workspaces",
+        "cleanup_sandbox",
         "reconcile",
     ]
     assert len(domains) <= 12

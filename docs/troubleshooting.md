@@ -634,3 +634,57 @@ Select-String -Path .\log\anvil.log -Pattern 'tracker|http id=|ERROR|Traceback'
 - `run_subagents` 只是观测：turn 结束、进程退出、daemon 重启、上下文切换都会把仍
   running 的子代理标 `interrupted`，这是预期语义；Anvil 不负责其跨 turn 存活。
 - 需要跨 turn 的结果应写入 step summary/evidence，或改用委派工单。
+
+---
+
+## 执行沙箱与 PoC
+
+### 严格档 PoC 返回 409 `strict_sandbox_unavailable`
+
+- macOS/Linux：安装并启动 Docker Desktop/OrbStack/Podman，`docker info` 可用后重试；
+  首次作业会本地构建 `anvil-toolchain:1.60.0`（需要一次联网）。
+- Windows：确认 `wsl -l -v` 默认发行版 VERSION=2，然后在治理页点「准备 WSL 沙箱」或
+  执行 `anvil sandbox provision --consent`；完成后 `anvil sandbox status` 应显示
+  `strict.backend=wsl_bwrap`。
+- 检查 `anvil sandbox status` 的 `strict.detail` 与 `warnings`；`host-unsafe` 下严格档
+  默认仍不执行。
+
+### WSL 准备失败 / bubblewrap probe failed
+
+- Ubuntu 24.04 的 unprivileged userns 限制：准备脚本会安装 AppArmor bwrap profile；
+  若仍失败，检查 `/etc/apparmor.d/bwrap` 与 `apparmor_parser -r` 是否成功。
+- 确认专用用户存在：`wsl -d <distro> -u anvil-sbx -- id -u`；目录
+  `/var/lib/anvil/jobs` 归 `anvil-sbx` 所有。
+- `wsl --shutdown` 后重试；不要手工删除 `/etc/anvil-sandbox/provisioned.json` 之外的状态。
+
+### 角色执行被阻止 / 想临时恢复旧行为
+
+- v1.60 默认 `ANVIL_SANDBOX=enforce`。底座缺失时 standard 档会降级 Host 并显示能力
+  横幅；需要完全关闭沙箱时显式设置 `ANVIL_SANDBOX=host-unsafe`（审计 + 常驻警示，
+  仅排障用）。
+- Windows standard 若显示「写范围未强制」，说明 AppContainer/受限令牌不可用；不要
+  把不可信代码放在 standard 档执行，改用严格档 PoC。
+
+### 沙箱 HOME 重定向后 Claude/Codex 登录态丢失
+
+- 任务 run 的 `HOME` 指向 `<workspace>/.anvil/home`，宿主 `~/.claude` 不再可见。
+  使用 API key 环境变量（如 `ANTHROPIC_API_KEY`）或把凭证受控导入沙箱 HOME；
+  `host-unsafe` 可临时恢复旧行为。
+- 角色会话 transcript 迁移失败时会自动改用 CIC 新会话，不会直接失败 run；审计出现
+  `sandbox.session_unavailable` 属预期。
+
+### PoC 作业 `failed` 且 `failure_reason=sandbox_timeout/resource_*`
+
+- `sandbox_timeout`：作业超时（spec `resources.timeout_seconds` 或单命令超时）已杀树。
+- `sandbox_resource_rss/pids/disk`：supervisor 超限杀树；调大 spec 资源或缩小输入。
+- `sandbox_build_failed`：prepare/build 阶段非零退出；看 `anvil poc logs <JOB>`。
+- `sandbox_expectation_failed`：`expect` 与实际 exit/signal/stdout 不符；PoC 需要预期
+  崩溃时写 `{"phase":"run","signal":"SIGSEGV"}`。
+- 以上失败都不自动重试；修正后新建作业。
+
+### MCP 探针失败但命令在宿主可运行
+
+- v1.60 探针在 standard 沙箱内启动，`HOME/TMP` 指向临时 prober 目录；依赖宿主
+  `~/.claude`、宿主绝对路径写权限或网络的 MCP server 需要显式配置或在
+  `host-unsafe` 下排查。
+- 探针失败不会影响角色主流程；检查 `data/sandbox/probes` 是否有残留（正常应被清理）。

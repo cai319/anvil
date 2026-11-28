@@ -2,7 +2,42 @@
 
 > 本文承接 README 的运维细节：升级、打包、备份/迁移/重置、卸载与清理。
 
-## 升级到 v1.51.1
+## 升级到 v1.60.0（执行沙箱）
+
+1. 停止后端并备份 `data/`；
+2. 更新代码/安装包，重新执行 `pip install -r backend/requirements.txt` 与
+   `pip install -e agentcli`；
+3. 重启后端。`init_schema` 幂等新增 `sandbox_instances`、`sandbox_jobs`、
+   `sandbox_job_phases`、`sandbox_job_artifacts` 与 `tasks.sandbox_json`；
+4. 重新构建前端：`cd frontend && npm run rebuild`；
+5. 验证 `anvil --version` 为 `1.60.0`，并运行 `anvil sandbox status`；
+6. 按需准备严格档底座（见下节）；缺底座时普通角色仍走 standard 档，PoC 会返回
+   409 `strict_sandbox_unavailable`。
+
+> v1.60 默认启用沙箱。`ANVIL_SANDBOX=host-unsafe` 只用于排障：会关闭写范围/读拒绝，
+> 审计并常驻警示；生产不要设置。
+
+## 执行沙箱准备与清理
+
+- 目录：`data/sandbox/instances`（角色实例/探针）、`data/sandbox/jobs`（严格档作业）、
+  `data/sandbox/probes`（MCP 探针临时 home）。这些目录都不应提交到 Git。
+- **macOS/Linux 严格档**：安装 Docker Desktop/OrbStack/Podman 并启动。首次 PoC 会按
+  `backend/anvil/sandbox/images/toolchain.Dockerfile` 本地构建
+  `anvil-toolchain:1.60.0` 并缓存；删除该镜像可在下次作业时重建。
+  `docker info` 可用后 `anvil sandbox status` 会显示 `strict.backend=docker`。
+- **Windows 严格档**：启用 WSL2 并保留默认发行版（`wsl -l -v` 显示 VERSION 2）。
+  执行 `anvil sandbox provision --consent`（或治理页「准备 WSL 沙箱」）：以 root 在
+  默认发行版安装 bubblewrap/工具链、创建专用用户 `anvil-sbx`、写
+  `/etc/anvil-sandbox/provisioned.json`。该操作记审计；不要手工改脚本中的用户/目录。
+  Ubuntu 24.04 的 unprivileged userns 限制会由准备脚本安装 AppArmor bwrap profile。
+- **清理**：任务归档/删除时会取消活跃作业并删除其作业目录（保留 DB 元数据/evidence/
+  sha256）；调度器每日清理过期作业（默认 180 天）与实例目录（默认 7 天）。手工清理
+  只应删除终态作业目录；不要删除 `data/sandbox` 根或 DB 行。
+- **验证**：macOS `ANVIL_SANDBOX_IT=1 pytest tests/test_sandbox_seatbelt.py`；
+  Docker `ANVIL_SANDBOX_IT=1 pytest tests/test_sandbox_docker.py`。Windows 按
+  `docs/superpowers/specs/2026-11-28-windows-sandbox-qa.md`（本地）执行真实链路验收。
+
+## 升级到 v1.51.1（历史）
 
 源码安装（editable）：
 

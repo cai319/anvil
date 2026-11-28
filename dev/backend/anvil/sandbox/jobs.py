@@ -525,12 +525,15 @@ def _verify(spec: dict, phases: list[dict], log_text: str,
     return ok, None if ok else "sandbox_run_failed"
 
 
-def execute_job(spec: dict, job_id: str, runner: JobRunner) -> JobExecution:
+def execute_job(spec: dict, job_id: str, runner: JobRunner, *,
+                source_dir: Path | None = None) -> JobExecution:
     started = now_iso()
     paths = _prepare_paths(job_id)
     log_path = paths.logs / "container.log"
     source = None
-    if spec.get("task_id"):
+    if source_dir is not None:
+        source = Path(source_dir)
+    elif spec.get("task_id"):
         source = config.TASK_WORKSPACES_DIR / str(spec["task_id"])
     try:
         tree_hash = _snapshot(source, paths.source)
