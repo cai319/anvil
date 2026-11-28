@@ -57,7 +57,7 @@ pip install pytest pytest-asyncio
 pytest tests/ -q
 ```
 
-当前基线：**1343 passed / 64 skipped**。`dev/.venv` 必须安装 `langgraph`，否则
+当前基线：**1344 passed / 64 skipped**。`dev/.venv` 必须安装 `langgraph`，否则
 `conftest` 的 `importorskip` 会静默跳过全部用例；CLI 契约测试需要 `ANVIL_BIN`，
 模型评测需要 `ANVIL_COLLAB_EVAL_CMD`。
 

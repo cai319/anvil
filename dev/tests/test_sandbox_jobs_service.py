@@ -82,6 +82,30 @@ def test_claim_sets_native_job_and_cancel_guard(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_claim_exposes_live_log_and_artifact_paths(tmp_path, monkeypatch):
+    from anvil import config
+    from pathlib import Path
+
+    monkeypatch.setattr(config, "SANDBOX_JOBS_DIR", tmp_path / "jobs")
+    monkeypatch.setattr(sandbox, "strict_available", lambda: (True, "ready"))
+    conn = _conn(tmp_path)
+    try:
+        job = sandbox.create_job(
+            conn, spec_raw=_raw(), actor_role="human", actor_is_human=True,
+            check_available=False)
+        claimed = sandbox.claim_next_job(conn, backend="docker")
+        assert claimed["backend"] == "docker"
+        assert claimed["log_dir"] and claimed["artifact_dir"]
+        log = Path(claimed["log_dir"]) / "container.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("building image", encoding="utf-8")
+        out = sandbox.job_log(conn, job["id"])
+        assert out["exists"] is True
+        assert "building image" in out["content"]
+    finally:
+        conn.close()
+
+
 def test_agent_safe_queued_relaxed_waiting_and_approval(tmp_path, monkeypatch):
     monkeypatch.setattr(sandbox, "strict_available", lambda: (True, "ready"))
     conn = _conn(tmp_path)

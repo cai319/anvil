@@ -56,7 +56,8 @@ class SandboxJobWorker:
         own = conn is None
         conn = conn or open_conn(self.db_path)
         try:
-            job = sandbox_service.claim_next_job(conn)
+            job = sandbox_service.claim_next_job(
+                conn, backend=getattr(self.runner, "name", None))
             if job is None:
                 return False
             self.current_job_id = job["id"]

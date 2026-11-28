@@ -572,18 +572,21 @@ def get_job(conn, job_id: str) -> dict | None:
         "SELECT * FROM sandbox_jobs WHERE id=?", (job_id,)).fetchone())
 
 
-def claim_next_job(conn) -> dict | None:
+def claim_next_job(conn, *, backend: str | None = None) -> dict | None:
     row = conn.execute(
         "SELECT * FROM sandbox_jobs WHERE status='queued' "
         "ORDER BY created_at, id LIMIT 1").fetchone()
     if row is None:
         return None
     native = sandbox_jobs.container_name(row["id"])
+    paths = sandbox_jobs.job_paths(row["id"])
     now = now_iso()
     cur = conn.execute(
         "UPDATE sandbox_jobs SET status='running', started_at=?, updated_at=?, "
-        "native_job_id=? WHERE id=? AND status='queued'",
-        (now, now, native, row["id"]))
+        "native_job_id=?, log_dir=?, artifact_dir=?, backend=COALESCE(?, backend) "
+        "WHERE id=? AND status='queued'",
+        (now, now, native, str(paths.logs), str(paths.artifacts),
+         backend, row["id"]))
     conn.commit()
     if not cur.rowcount:
         return None
@@ -732,8 +735,9 @@ def job_log(conn, job_id: str, *, tail_bytes: int = 200_000) -> dict:
     if job is None:
         raise LookupError("job not found")
     log_dir = job.get("log_dir")
-    path = Path(log_dir) / "container.log" if log_dir else None
-    if path is None or not path.exists():
+    path = (Path(log_dir) if log_dir else
+            config.SANDBOX_JOBS_DIR / job_id / "logs") / "container.log"
+    if not path.exists():
         return {"job_id": job_id, "exists": False, "content": ""}
     with open(path, "rb") as fh:
         fh.seek(0, 2)

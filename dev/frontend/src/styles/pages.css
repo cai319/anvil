@@ -136,7 +136,16 @@ input, select, textarea {
 }
 select { height: 36px; padding-top: 0.3rem; padding-bottom: 0.3rem; }
 input[type="checkbox"], input[type="radio"] { min-height: 0; height: auto; }
-.session-actions select { max-width: 260px; }
+/* 任务指派角色选择器：控件文字跟随控件尺度（与相邻按钮一致），不继承正文大字号；
+   窄行内不撑出容器，超长角色名由原生 select 截断。 */
+.session-actions select {
+  max-width: min(280px, 100%);
+  font-size: var(--fs-control);
+  line-height: 1.25;
+  flex: 0 1 auto;
+  min-width: 0;
+  text-overflow: ellipsis;
+}
 .content textarea { max-width: 1200px; }
 .modal textarea { max-width: none; }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }

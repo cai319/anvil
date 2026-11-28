@@ -6,7 +6,7 @@ Anvil 是一个**单机、单用户**的多 Agent 编排服务：把你本机已
 - **前端**：React + TypeScript + Vite
 - **Agent CLI**：`anvil`，Agent 在自己的工具循环里调用它上报状态
 - **地址**：`http://127.0.0.1:7317`（仅回环）
-- **当前版本**：v1.60.0（执行沙箱、受控 PoC 运行、Windows WSL2 严格档、MCP/RSI 沙箱化）
+- **当前版本**：v1.60.1（执行沙箱、受控 PoC 运行、Windows WSL2 严格档、MCP/RSI 沙箱化；修复角色下拉与 PoC 实时日志）
 
 > 内部架构、设计、ADR 与实现状态文档仅本地保留，不随仓库发布。
 
@@ -587,9 +587,9 @@ cd dev
 pytest tests/ -q
 ```
 
-当前基线：**1343 passed + 64 skipped**（CLI 契约需要 `ANVIL_BIN`，模型评测需要
-`ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。v1.60.0 覆盖执行沙箱与受控 PoC；
-v1.51.1 覆盖新增的澄清、角色思考强度、
+当前基线：**1344 passed + 64 skipped**（CLI 契约需要 `ANVIL_BIN`，模型评测需要
+`ANVIL_COLLAB_EVAL_CMD`；未设置时相关用例跳过）。v1.60.1 修复角色下拉与 PoC 实时日志；
+v1.60.0 覆盖执行沙箱与受控 PoC；v1.51.1 覆盖新增的澄清、角色思考强度、
 角色建议门禁、收件箱提醒生命周期、功能开关默认恢复、工具治理与大厅性能。
 
 CLI 契约测试需要安装 `anvil` 并指定可执行文件：
@@ -780,6 +780,7 @@ anvil init
 - [docs/cli-reference.md](docs/cli-reference.md)：CLI 命令、参数、规则、错误处理与示例
 - [GLOSSARY.md](GLOSSARY.md)：领域术语（任务简报、澄清、角色建议门禁、思考强度等）
 - [dev/README.md](dev/README.md)：开发者入口（源码结构、本地开发与测试）
+- [docs/v1.60.1-release.md](docs/v1.60.1-release.md)：v1.60.1 修复任务角色下拉与 PoC 实时日志
 - [docs/v1.60.0-release.md](docs/v1.60.0-release.md)：v1.60.0 执行沙箱、受控 PoC、Windows WSL2 严格档、MCP/RSI 沙箱化
 - [docs/v1.51.1-release.md](docs/v1.51.1-release.md)：v1.51.1 Cindy 规划前澄清、角色思考强度、角色建议门禁、收件箱与工具治理
 - [docs/v1.50.1-release.md](docs/v1.50.1-release.md)：v1.50.1 任务会话默认「对话」、面向自然人的沟通规范
