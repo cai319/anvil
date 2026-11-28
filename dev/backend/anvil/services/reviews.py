@@ -160,9 +160,12 @@ def escalation_triggers(step: dict, packet: dict | None) -> list[str]:
         triggers.add("evidence_stale")
     if any(a.get("status") == "unmet" for a in (packet or {}).get("acceptance") or []):
         triggers.add("acceptance_unmet")
-    # 依赖完整性信号（测试闭包变化 / 反事实检查失效 / harness 错误）必须升级人工。
+    # 依赖完整性信号（测试闭包变化 / 反事实检查失效 / harness 错误）与运行上限
+    # （diff 行数 / 任务时长）必须升级人工。
+    from . import run_caps
+    escalations = env_integrity.ESCALATION_SIGNALS | run_caps.ESCALATION_SIGNALS
     for risk in (packet or {}).get("risks") or []:
-        if isinstance(risk, str) and risk in env_integrity.ESCALATION_SIGNALS:
+        if isinstance(risk, str) and risk in escalations:
             triggers.add(risk)
     return sorted(triggers)
 
@@ -364,6 +367,15 @@ def ensure_packet(conn: sqlite3.Connection, wf: dict, step: dict,
         if integrity.get("pytest11") and "dependency_pytest11_plugin" not in risks:
             risks.append("dependency_pytest11_plugin")
         evidence.append(_dependency_evidence(integrity))
+        evidence = evidence[:MAX_EVIDENCE_ITEMS]
+    # 运行上限（diff 行数 / 任务时长）超限作为评审触发项与证据展示（v1.62 #13）。
+    from . import run_caps
+    cap_report = run_caps.evaluate(conn, wf, step)
+    if cap_report.get("signals"):
+        for signal in cap_report["signals"]:
+            if signal not in risks:
+                risks.append(signal)
+        evidence.append(run_caps.evidence_entry(cap_report))
         evidence = evidence[:MAX_EVIDENCE_ITEMS]
     # 引擎绿跑证据与 manual 占比随评审包展示，供逐项 verdict 引用。
     from . import slice_verdicts

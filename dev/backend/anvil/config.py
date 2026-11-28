@@ -193,6 +193,15 @@ BACKUP_KEEP_DAYS = int(_env("ANVIL_BACKUP_KEEP_DAYS", "7"))
 CLEANER_ENABLED = _env("ANVIL_CLEANER", "1") != "0"
 CLEANER_MAX_BYTES = int(_env("ANVIL_CLEANER_MAX_BYTES", "12000"))
 
+# v1.62 #13 运行上限（运行参数，不是预注册阈值）：提交时记录 git numstat；
+# 每片 diff 行数或每任务总时长超限时升级人工，不硬失败。diff 上限初始 400 行
+# 占位，试点阶段一按 P90 重算；0 表示不设上限。时长上限由试点阶段二基线算出，
+# 算出前默认 0（只记录、不升级）。ANVIL_RUN_CAP_ENFORCE=0 时阶段一只记录不执行。
+RUN_CAP_ENFORCE = _env("ANVIL_RUN_CAP_ENFORCE", "1") != "0"
+DIFF_CAP_LINES = int(_env("ANVIL_DIFF_CAP_LINES", "400"))
+TASK_DURATION_CAP_SECONDS = float(
+    _env("ANVIL_TASK_DURATION_CAP_SECONDS", "0"))
+
 # 工作流步骤停滞看门狗：步骤 run 挂起且无活动超过阈值 → 唤醒角色续跑；超过次数后交给自动恢复。
 STEP_NUDGE_SECONDS = float(_env("ANVIL_STEP_NUDGE_SECONDS", "600"))
 STEP_MAX_NUDGES = int(_env("ANVIL_STEP_MAX_NUDGES", "3"))
