@@ -25,6 +25,7 @@ def _packets(conn: sqlite3.Connection, wid: str) -> list[dict]:
             item = dict(dec)
             item["reasons"] = jloads(item.pop("reasons_json", "[]"), [])
             item["rework_targets"] = jloads(item.pop("rework_targets_json", "[]"), [])
+            item["verdicts"] = jloads(item.pop("verdicts_json", "[]"), [])
             d["decisions"].append(item)
         out.append(d)
     return out
@@ -155,6 +156,11 @@ def render_md(dossier: dict) -> str:
             lines.append(
                 f"- 决策：{dec.get('decider')} {dec.get('decision')} "
                 f"{dec.get('feedback') or ''}".rstrip())
+            for verdict in dec.get("verdicts") or []:
+                refs = "、".join(verdict.get("evidence_refs") or [])
+                lines.append(
+                    f"  · {verdict.get('id')} {verdict.get('status')}"
+                    + (f"（证据 {refs}）" if refs else ""))
         lines.append("")
     lines += ["## 计划 vs 实际", ""]
     diff = dossier.get("diff") or {}

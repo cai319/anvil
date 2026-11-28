@@ -19,14 +19,16 @@ def decide_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str | No
                 rework_targets: list[str] | None = None,
                 reasons: list[str] | None = None,
                 override_reason: str | None = None,
-                acknowledge_stale: bool = False) -> dict:
+                acknowledge_stale: bool = False,
+                verdicts: list[dict] | None = None) -> dict:
     wf = get_workflow(conn, wid)
     task_id = wf["task_id"] if wf else None
     with workflow_lifecycle_lock(
             conn, task_id, required=True, wait_seconds=2.0):
         return _decide_step_locked(
             conn, wid, step_id, role, approve, feedback, run_id, packet_id,
-            rework_targets, reasons, override_reason, acknowledge_stale)
+            rework_targets, reasons, override_reason, acknowledge_stale,
+            verdicts)
 
 
 def _decide_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
@@ -37,7 +39,8 @@ def _decide_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
                         rework_targets: list[str] | None = None,
                         reasons: list[str] | None = None,
                         override_reason: str | None = None,
-                        acknowledge_stale: bool = False) -> dict:
+                        acknowledge_stale: bool = False,
+                        verdicts: list[dict] | None = None) -> dict:
     """决策角色 approve/reject 一个 decision 步骤。
 
     reject 时把 on_reject 闭包内的步骤重置为 pending，并把 decision 自身重置为 pending；
@@ -60,6 +63,13 @@ def _decide_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
             leases.assert_step(conn, step, run_id)
         if step.get("kind") != "decision":
             raise ConflictError(f"step {step_id} is not a decision step")
+        # 逐项判定：引擎 verdict 由绿跑证据决定；manual verdict 只能由 decide 提交。
+        from . import slice_verdicts
+        try:
+            built_verdicts = slice_verdicts.build_verdicts(
+                conn, wf, step, verdicts)
+        except slice_verdicts.VerdictError as exc:
+            raise ConflictError(f"verdict_invalid: {exc}") from exc
         is_human = role == "human"
         if role and not is_human and role != step["role_slug"]:
             raise PermissionError(f"role {role} cannot decide step {step_id}")
@@ -84,6 +94,11 @@ def _decide_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
             raise ConflictError(
                 f"escalation_required: {', '.join(approval_triggers)}; "
                 f"step {step_id} must be escalated instead of approved by AI")
+        # 逐项判定：存在 unknown / unmet 时任何决策者都不能通过。
+        blocking = slice_verdicts.blocking_verdicts(
+            built_verdicts, approve=approve)
+        if blocking:
+            raise ConflictError(blocking)
 
         if authority == "joint" and approve and not is_human:
             # AI may only recommend approval under joint authority. The run is
@@ -149,6 +164,7 @@ def _decide_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
                 override_reason=override_reason or (
                     feedback if role == "human"
                     and (authority != "human" or approval_triggers) else None),
+                verdicts=built_verdicts,
                 commit=False,
             )
             leases.release(conn, step.get("lease_id"), commit=False)
@@ -231,7 +247,7 @@ def _decide_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
             actor=role or step["role_slug"], decision="reject", feedback=note,
             rework_targets=rework_targets or [str(x) for x in (step.get("on_reject") or [])],
             reasons=reasons, packet_id=packet_id, override_reason=override_reason,
-            commit=False,
+            verdicts=built_verdicts, commit=False,
         )
         leases.release(conn, step.get("lease_id"), commit=False)
         conn.commit()

@@ -2546,6 +2546,9 @@ def step_decide(
     packet_id: str = typer.Option("", "--packet", help="决策针对的 packet ID"),
     acknowledge_stale: bool = typer.Option(
         False, "--acknowledge-stale", help="确认接受过期证据"),
+    verdicts_file: str = typer.Option(
+        "", "--verdicts-file",
+        help="逐项验收判定 JSON 文件（manual 项必需；引擎 verdict 不可覆盖）"),
     json_out: bool = typer.Option(False, "--json"),
 ):
     """决策角色通过或打回 decision 步骤（只能二选一）。"""
@@ -2562,6 +2565,18 @@ def step_decide(
         "packet_id": packet_id or None,
         "acknowledge_stale": acknowledge_stale,
     }
+    if verdicts_file:
+        try:
+            verdicts = json.loads(_read_text_file(verdicts_file))
+        except (OSError, json.JSONDecodeError) as exc:
+            _usage_error(f"无法读取 --verdicts-file: {exc}",
+                         "传 JSON 数组："
+                         "[{\"id\":\"m1\",\"status\":\"met|unmet|n.a.\","
+                         "\"evidence_refs\":[\"...\"]}]。")
+        if not isinstance(verdicts, list):
+            _usage_error("--verdicts-file 顶层必须是 JSON 数组",
+                         "每项 {id, status, evidence_refs}。")
+        body["verdicts"] = verdicts
     out = _call("POST", f"/api/v1/workflows/{workflow_id}/steps/{step_id}/decide", body)
     if json_out:
         _emit(out, True)
@@ -2624,9 +2639,15 @@ def step_packet(
     typer.echo(f"权限：{packet.get('authority')} · 状态：{packet.get('status')}")
     for e in packet.get("evidence") or []:
         mark = "新鲜" if e.get("fresh", True) else "过期"
-        typer.echo(f"- [{e.get('kind')}] {e.get('ref')} ({mark})")
+        typer.echo(f"- [{e.get('kind')}] {e.get('ref')} {e.get('label') or ''} ({mark})")
+    for a in packet.get("acceptance") or []:
+        refs = a.get("evidence_refs") or []
+        suffix = f" 证据 {', '.join(refs)}" if refs else ""
+        typer.echo(f"- [{a.get('status', 'unknown')}] {a.get('criterion')}{suffix}")
     for d in out.get("decisions") or []:
         typer.echo(f"决策：{d.get('decider')} {d.get('decision')} {d.get('feedback') or ''}")
+        for v in d.get("verdicts") or []:
+            typer.echo(f"  · {v.get('id')} {v.get('status')}")
 
 
 @step_app.command("plan", epilog="""\b
