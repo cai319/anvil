@@ -413,6 +413,31 @@ def escalate_step(wid: str, sid: str, body: dict, conn=Depends(get_db),
     return wf
 
 
+@router.post("/workflows/{wid}/steps/{sid}/replan")
+def replan_step(wid: str, sid: str, body: dict, conn=Depends(get_db),
+                auth: Auth = Depends(get_auth)):
+    """显式 replan：重开切片 scope，记录原因与新旧 spec 哈希。
+
+    弱化 diff 或第二次 replan 需要由 human 身份批准；旧红/绿证据作废。
+    """
+    _assert_workflow_task(conn, wid, auth)
+    try:
+        wf = services.workflow.replan_slice(
+            conn, wid, sid, auth.role, str(body.get("reason") or ""),
+            new_spec=body.get("slice_spec"),
+            red_evidence=body.get("red_evidence"),
+            actor_is_human=auth.role == "human")
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    events.publish("task", {"id": wf["task_id"], "kind": "step_replanned",
+                            "step": sid})
+    return wf
+
+
 @router.post("/workflows/{wid}/steps/{sid}/plan")
 def plan_step(wid: str, sid: str, body: dict, conn=Depends(get_db),
               auth: Auth = Depends(get_auth)):

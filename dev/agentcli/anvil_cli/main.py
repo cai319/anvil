@@ -239,10 +239,12 @@ STEP_EPILOG = """\b
   anvil step submit <wf> <step> --summary "完成"
   anvil step decide <wf> <decision-step> --approve --feedback "通过"
   anvil step escalate <wf> <decision-step> --reason "证据不足"
+  anvil step replan <wf> <slice-step> --reason "验收口径需要调整"
 
 规则:
   · 只对 running 步骤操作；409 时先用 step show 确认状态，不要反复重试。
   · plan_slices 用 step plan；decision 用 step decide；普通步骤用 step submit。
+  · 修改切片验收只能显式 replan；删除/降级检查或改断言需人工批准，每片最多 1 次。
   · 工作流步骤不要 task claim / task submit，也不要在切片里指定角色。
   · 评审/挑战/澄清用 `anvil task mention`；切片外、不影响本步骤完成且需新上下文的工作用
     `anvil task dispatch`；只有验收依赖另一角色独立交付物（如独立 PoC/复现）且 workflow
@@ -2461,7 +2463,7 @@ def workflow_revise(
         typer.echo("批准后原地应用，不重启当前执行。")
 
 
-step_app = typer.Typer(help="工作流步骤（show/plan/submit/decide/escalate）",
+step_app = typer.Typer(help="工作流步骤（show/plan/submit/decide/escalate/replan）",
                        context_settings=HELP_CTX, epilog=STEP_EPILOG)
 app.add_typer(step_app, name="step")
 
@@ -2523,6 +2525,52 @@ def step_submit(
 
 def _csv(value: str) -> list[str]:
     return [x.strip() for x in value.split(",") if x.strip()]
+
+
+@step_app.command("replan", epilog="""\b
+示例:
+  anvil step replan WF-1 S1.auth.scope --reason "验收口径需要调整" \\
+      --slice-spec-file spec-v2.json
+  anvil step replan WF-1 S1.auth.scope --reason "需要人工批准弱化" --approve
+
+规则: 只能对已锁定 spec 的切片触发；复用驳回重开 scope 与下游。
+删除检查、降为 manual、改断言但无新红证据 → 必须由 human 批准（--approve 或人物身份）。
+每片最多 1 次，第二次需要人工批准；重开后必须重新提交 spec 以重跑红校验。
+""")
+def step_replan(
+    workflow_id: str = typer.Argument(..., help="工作流 ID"),
+    step_id: str = typer.Argument(..., help="切片步骤 ID（任一切片步骤或 scope）"),
+    reason: str = typer.Option(..., "--reason", help="replan 原因（必填）"),
+    slice_spec_file: str = typer.Option(
+        "", "--slice-spec-file", help="新的切片 spec JSON 文件（可选）"),
+    red_evidence: str = typer.Option(
+        "", "--red-evidence", help="新的引擎红跑作业 id，逗号分隔"),
+    approve: bool = typer.Option(
+        False, "--approve", help="人工批准弱化/第二次 replan（需 human 身份）"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """显式 replan：重开切片 scope，记录原因与新旧 spec 哈希。"""
+    body: dict = {"reason": reason, "red_evidence": _csv(red_evidence)}
+    if slice_spec_file:
+        try:
+            body["slice_spec"] = json.loads(_read_text_file(slice_spec_file))
+        except (OSError, json.JSONDecodeError) as exc:
+            _usage_error(f"无法读取 --slice-spec-file: {exc}",
+                         "传 JSON 对象文件；字段见 `anvil step submit -h`。")
+        if not isinstance(body["slice_spec"], dict):
+            _usage_error("--slice-spec-file 顶层必须是 JSON 对象",
+                         "字段：acceptance/seam/out_of_scope/contract/deliverables/stubs。")
+    if approve:
+        body["approve"] = True
+    out = _call("POST", f"/api/v1/workflows/{workflow_id}/steps/{step_id}/replan", body)
+    if json_out:
+        _emit(out, True)
+    else:
+        scope = next((s for s in out.get("steps", [])
+                      if s.get("step_id") == step_id), {})
+        count = (scope.get("slice_replan") or {}).get("count")
+        typer.echo(f"步骤 {step_id} 已 replan（第 {count or 1} 次）；"
+                   "scope 与下游已回到 pending，需重新提交 spec 以重跑红校验。")
 
 
 @step_app.command("decide", epilog="""\b

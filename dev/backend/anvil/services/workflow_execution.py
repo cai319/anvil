@@ -682,6 +682,7 @@ def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: 
             f"evidence_required: step {step_id} requires at least one evidence item")
     parsed_spec = None
     slice_spec_json = None
+    replan = step.get("slice_replan") or {}
     if slice_spec is not None:
         if not str(step.get("slice_key") or "").strip() or not step_id.endswith(".scope"):
             raise ConflictError(
@@ -695,7 +696,24 @@ def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: 
         violations = slice_spec_service.lock_violations(parsed_spec)
         if violations:
             raise ConflictError(f"slice_spec_unlockable: {violations[0]}")
+        # replan 后重新提交的 spec 不得偷偷弱化：对比上次批准的基线 spec，
+        # 任何新增弱化仍需人工批准或附新的引擎红证据。
+        baseline = replan.get("baseline_spec") if isinstance(replan, dict) else None
+        if isinstance(baseline, dict) and baseline:
+            changes = slice_spec_service.weakening_diff(
+                baseline, parsed_spec,
+                red_evidence=replan.get("red_evidence_checks") or [])
+            if changes:
+                detail = ", ".join(
+                    f"{c['id']}:{c['type']}" for c in changes)
+                raise ConflictError(
+                    "replan_weakening_requires_human: " + detail)
         slice_spec_json = jdumps(parsed_spec)
+    elif replan:
+        # replan 必须重跑红校验：scope 重新提交时必须带新的切片 spec。
+        raise ConflictError(
+            "slice_spec_required: resubmit the slice spec after a replan "
+            "so red checks are re-run")
     # scope 锁定时固定锁定集合并校验与 execute scope_paths 不相交；冲突不落库。
     slice_lock_json = None
     if parsed_spec is not None:

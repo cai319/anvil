@@ -330,6 +330,50 @@ def _escalate_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
     return get_workflow(conn, wid)  # type: ignore[return-value]
 
 
+def _reset_rework_steps(conn: sqlite3.Connection, wf: dict, by_id: dict,
+                        targets: list[str] | set[str], feedback: str | None,
+                        now: str) -> set[str]:
+    """复用 reject-to-ancestor 重置：目标与其下游闭包回到 pending。
+
+    replan 与人工驳回共用这套语义，避免出现第二套状态族。
+    """
+    reset_ids = set(targets) | _transitive_downstream(wf["steps"], set(targets))
+    for sid in reset_ids:
+        target_step = by_id.get(sid) or {}
+        status = target_step.get("status") or "unknown"
+        if status == "running" or (
+                status == "pending" and (
+                    target_step.get("run_id") or target_step.get("lease_id"))):
+            raise ConflictError(
+                f"rework target {sid} is running or being dispatched; "
+                "wait for it to finish")
+        if status not in ("pending", "submitted", "approved", "failed",
+                          "rejected"):
+            continue
+        if status == "pending":
+            continue
+        conn.execute(
+            "UPDATE workflow_steps SET status='pending', run_id=NULL, "
+            "started_at=NULL, ended_at=NULL, summary=NULL, "
+            "failure_reason=NULL, recovery_count=0, next_retry_at=NULL, "
+            "nudge_count=0, last_nudge_at=NULL, lease_id=NULL, "
+            "fence_token=0, feedback=COALESCE(?, feedback), updated_at=? "
+            "WHERE workflow_id=? AND step_id=?",
+            (feedback, now, wf["id"], sid))
+        conn.execute(
+            "UPDATE gate_packets SET status='superseded' "
+            "WHERE workflow_id=? AND step_id=? "
+            "AND status IN ('pending_human','pending_ai')",
+            (wf["id"], sid))
+        if target_step.get("kind") == "plan_slices":
+            # 计划被驳回：清空 plan_json 与 packet 指针，角色可重新提交。
+            conn.execute(
+                "UPDATE workflow_steps SET plan_json=NULL, packet_id=NULL, "
+                "submitted_at=NULL WHERE workflow_id=? AND step_id=?",
+                (wf["id"], sid))
+    return reset_ids
+
+
 def review_step(conn: sqlite3.Connection, wid: str, step_id: str, approve: bool,
                 feedback: str | None = None,
                 reasons: list[str] | None = None,
@@ -437,41 +481,8 @@ def _review_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
             _step_activity(conn, wf["task_id"], "human", step, "approved",
                            feedback or step.get("summary"))
         else:
-            reset_ids = set(targets) | _transitive_downstream(
-                wf["steps"], set(targets))
-            for sid in reset_ids:
-                target_step = by_id.get(sid) or {}
-                status = target_step.get("status") or "unknown"
-                if status == "running" or (
-                        status == "pending" and (
-                            target_step.get("run_id") or target_step.get("lease_id"))):
-                    raise ConflictError(
-                        f"rework target {sid} is running or being dispatched; "
-                        "wait for it to finish")
-                if status not in ("pending", "submitted", "approved",
-                                  "failed", "rejected"):
-                    continue
-                if status == "pending":
-                    continue
-                conn.execute(
-                    "UPDATE workflow_steps SET status='pending', run_id=NULL, "
-                    "started_at=NULL, ended_at=NULL, summary=NULL, "
-                    "failure_reason=NULL, recovery_count=0, next_retry_at=NULL, "
-                    "nudge_count=0, last_nudge_at=NULL, lease_id=NULL, "
-                    "fence_token=0, feedback=COALESCE(?, feedback), updated_at=? "
-                    "WHERE workflow_id=? AND step_id=?",
-                    (feedback, now, wid, sid))
-                conn.execute(
-                    "UPDATE gate_packets SET status='superseded' "
-                    "WHERE workflow_id=? AND step_id=? "
-                    "AND status IN ('pending_human','pending_ai')",
-                    (wid, sid))
-                if target_step.get("kind") == "plan_slices":
-                    # 计划被驳回：清空 plan_json 与 packet 指针，角色可重新提交。
-                    conn.execute(
-                        "UPDATE workflow_steps SET plan_json=NULL, packet_id=NULL, "
-                        "submitted_at=NULL WHERE workflow_id=? AND step_id=?",
-                        (wid, sid))
+            reset_ids = _reset_rework_steps(
+                conn, wf, by_id, targets, feedback, now)
             _step_activity(conn, wf["task_id"], "human", step, "rejected",
                            feedback or "请按评审意见修改后重新提交")
         reviews.record_decision(
@@ -514,6 +525,271 @@ def _review_step_locked(conn: sqlite3.Connection, wid: str, step_id: str,
             pass
     _finalize_if_done(conn, wid)
     return get_workflow(conn, wid)  # type: ignore[return-value]
+
+
+# ---- 显式 replan 与弱化检测（v1.62 #10）------------------------------------
+
+def _slice_scope_step(wf: dict, step: dict) -> dict:
+    """把任意切片步骤解析为该切片的 scope 步骤。"""
+    slice_key = str(step.get("slice_key") or "").strip()
+    if not slice_key:
+        raise ConflictError("replan requires a slice step")
+    scope = next(
+        (s for s in wf["steps"]
+         if s.get("slice_key") == slice_key
+         and str(s.get("step_id") or "").endswith(".scope")), None)
+    if scope is None:
+        raise ConflictError(f"slice {slice_key} has no scope step")
+    return scope
+
+
+def _replan_record(scope: dict) -> dict:
+    record = scope.get("slice_replan")
+    return record if isinstance(record, dict) else {}
+
+
+def _red_evidence_ids(conn: sqlite3.Connection, wf: dict, slice_key: str,
+                      red_evidence) -> tuple[list[str], list[str]]:
+    """校验新红证据只来自引擎检查作业；返回 (覆盖的检查 id, 作业 id)。"""
+    if not red_evidence:
+        return [], []
+    from . import sandbox as job_service
+    if isinstance(red_evidence, str):
+        raw_items = [red_evidence]
+    elif isinstance(red_evidence, list):
+        raw_items = red_evidence
+    elif isinstance(red_evidence, dict):
+        raw_items = [x for value in red_evidence.values()
+                     for x in (value if isinstance(value, list) else [value])
+                     if x]
+    else:
+        raise ConflictError("red_evidence must be a list of check-run ids")
+    covered: set[str] = set()
+    job_ids: list[str] = []
+    for raw in raw_items:
+        job_id = str(raw or "").strip()
+        if not job_id:
+            continue
+        job = job_service.get_job(conn, job_id)
+        if job is None or job.get("kind") != "check":
+            raise ConflictError(
+                f"red_evidence_invalid: {job_id} is not an engine check run")
+        spec = job.get("spec") or {}
+        ref = spec.get("lock_ref") if isinstance(spec, dict) else None
+        if not isinstance(ref, dict):
+            ref = spec.get("green_ref") if isinstance(spec, dict) else None
+        if not isinstance(ref, dict) or str(ref.get("workflow_id")) != str(wf["id"]):
+            raise ConflictError(
+                f"red_evidence_invalid: {job_id} belongs to another workflow")
+        if str(ref.get("slice_key") or slice_key) != str(slice_key):
+            raise ConflictError(
+                f"red_evidence_invalid: {job_id} belongs to another slice")
+        result = job.get("check_result") or {}
+        if (str(job.get("status")) in ("queued", "running", "waiting_approval")
+                or result.get("classification") not in
+                ("valid_red", "trivial_red")):
+            raise ConflictError(
+                f"red_evidence_invalid: {job_id} is not a valid red run")
+        check_id = str(result.get("check_id") or "")
+        step_id = str(ref.get("step_id") or ref.get("scope_step_id") or "")
+        if step_id and check_id.startswith(step_id + "."):
+            covered.add(check_id[len(step_id) + 1:])
+        job_ids.append(job_id)
+    return sorted(covered), job_ids
+
+
+def _cancel_slice_check_jobs(conn: sqlite3.Connection, wid: str,
+                             scope_step_id: str, slice_key: str,
+                             now: str) -> None:
+    """作废未完成的红/绿跑，避免 replan 后旧证据被 worker 继续写回。"""
+    rows = conn.execute(
+        "SELECT id, spec_json, status FROM sandbox_jobs "
+        "WHERE kind='check' AND status IN "
+        "('queued','running','waiting_approval')").fetchall()
+    for row in rows:
+        try:
+            spec = jloads(row["spec_json"] or "{}", {})
+        except (TypeError, ValueError):
+            continue
+        ref = spec.get("lock_ref") if isinstance(spec, dict) else None
+        if not isinstance(ref, dict):
+            ref = spec.get("green_ref") if isinstance(spec, dict) else None
+        if not isinstance(ref, dict):
+            continue
+        if str(ref.get("workflow_id") or "") != str(wid):
+            continue
+        if (str(ref.get("step_id") or ref.get("scope_step_id") or "")
+                != str(scope_step_id)
+                and str(ref.get("slice_key") or "") != str(slice_key)):
+            continue
+        conn.execute(
+            "UPDATE sandbox_jobs SET status='cancelled', "
+            "failure_reason='replanned', updated_at=? WHERE id=? AND status IN "
+            "('queued','running','waiting_approval')", (now, row["id"]))
+
+
+def replan_slice(conn: sqlite3.Connection, wid: str, step_id: str,
+                 role: str | None, reason: str, *,
+                 new_spec: dict | None = None,
+                 red_evidence=None,
+                 actor_is_human: bool | None = None) -> dict:
+    """显式 replan：重开切片 scope 与下游，记录原因与新旧 spec 哈希。
+
+    - 复用 reject-to-ancestor 重置，不新增 workflow 状态族；
+    - 每片最多 1 次，第二次必须由 human 执行；
+    - 删除检查 / 降为 manual / 修改断言但没有新红证据 → 必须由 human 执行；
+    - scope 重新提交后引擎会重建锁定集合并重跑红校验。
+    """
+    wf = get_workflow(conn, wid)
+    task_id = wf["task_id"] if wf else None
+    with workflow_lifecycle_lock(
+            conn, task_id, required=True, wait_seconds=2.0):
+        return _replan_slice_locked(
+            conn, wid, step_id, role, reason, new_spec=new_spec,
+            red_evidence=red_evidence,
+            actor_is_human=(role == "human" if actor_is_human is None
+                            else actor_is_human))
+
+
+def _replan_slice_locked(conn: sqlite3.Connection, wid: str, step_id: str,
+                         role: str | None, reason: str, *,
+                         new_spec: dict | None,
+                         red_evidence,
+                         actor_is_human: bool) -> dict:
+    from . import slice_spec as slice_spec_service
+
+    reason = (reason or "").strip()
+    if not reason:
+        raise ConflictError("replan_reason_required: a replan must record a reason")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        wf = get_workflow(conn, wid)
+        if wf is None:
+            raise LookupError(wid)
+        if wf.get("status") != "running":
+            raise ConflictError(
+                f"workflow {wid} is {wf.get('status')}; cannot replan")
+        step = next((s for s in wf["steps"] if s["step_id"] == step_id), None)
+        if step is None:
+            raise LookupError(step_id)
+        participant_roles = {str(s.get("role_slug") or "") for s in wf["steps"]}
+        if role and role != "human" and role not in participant_roles:
+            raise PermissionError(
+                f"role {role} is not a participant of workflow {wid}")
+        scope = _slice_scope_step(wf, step)
+        old_spec = scope.get("slice_spec") or {}
+        if not isinstance(old_spec, dict) or not old_spec:
+            raise ConflictError(
+                "replan_no_slice_spec: the slice has no locked spec to replan")
+        old_hash = slice_spec_service.spec_hash(old_spec)
+
+        parsed_new = None
+        if new_spec is not None:
+            try:
+                parsed_new = slice_spec_service.parse_slice_spec(new_spec)
+            except slice_spec_service.SliceSpecError as exc:
+                raise ConflictError(f"slice_spec_invalid: {exc}") from exc
+            violations = slice_spec_service.lock_violations(parsed_new)
+            if violations:
+                raise ConflictError(
+                    f"slice_spec_unlockable: {violations[0]}")
+        baseline_spec = parsed_new if parsed_new is not None else old_spec
+        new_hash = slice_spec_service.spec_hash(baseline_spec)
+
+        covered, job_ids = _red_evidence_ids(
+            conn, wf, str(scope.get("slice_key") or ""), red_evidence)
+        weakening = (slice_spec_service.weakening_diff(
+            old_spec, baseline_spec, red_evidence=covered)
+            if parsed_new is not None else [])
+
+        record = _replan_record(scope)
+        count = int(record.get("count") or 0)
+        now = now_iso()
+        if not actor_is_human and (weakening or count >= 1):
+            code = ("replan_weakening_requires_human" if weakening
+                    else "replan_limit_escalated")
+            detail = ("; ".join(f"{w['id']}:{w['type']}" for w in weakening)
+                      if weakening else f"slice already replanned {count} time(s)")
+            # 事件名刻意不含 replan：检查台账只把真正应用的 replan 计入指标，
+            # 升级人工的尝试单独审计，不虚增 replan 次数。
+            ledger.emit(
+                conn, "slice.human_approval_required",
+                task_id=wf["task_id"], workflow_id=wid,
+                execution_no=wf.get("execution_no"),
+                step_id=scope["step_id"], slice_key=scope.get("slice_key"),
+                actor_type="role", actor=role or "unknown",
+                payload={"action": "replan", "reason": reason,
+                         "old_spec_hash": old_hash,
+                         "new_spec_hash": new_hash, "weakening": weakening,
+                         "count": count, "code": code},
+                mirror_audit=True, audit_action="slice.human_approval_required")
+            conn.commit()
+            _mention(
+                conn, wf["task_id"], "human",
+                f"切片「{scope.get('slice_key')}」请求 replan 但需要人工批准"
+                f"（{code}）：{reason}。原因：{detail}。")
+            raise ConflictError(
+                f"{code}: {detail}; a human must approve this replan")
+
+        by_id = {s["step_id"]: s for s in wf["steps"]}
+        reset_ids = _reset_rework_steps(
+            conn, wf, by_id, {scope["step_id"]}, reason, now)
+        # 旧锁定集合与未完成检查作业全部作废；重新提交 scope 时重建并重跑红校验。
+        conn.execute(
+            "UPDATE workflow_steps SET slice_lock_json=NULL "
+            "WHERE workflow_id=? AND step_id=?",
+            (wid, scope["step_id"]))
+        _cancel_slice_check_jobs(
+            conn, wid, scope["step_id"], str(scope.get("slice_key") or ""), now)
+
+        updated = {
+            "count": count + 1,
+            "reason": reason,
+            "old_spec_hash": old_hash,
+            "new_spec_hash": new_hash,
+            "weakening": weakening,
+            "approved_by": "human" if actor_is_human else (role or "system"),
+            "human_approved": bool(actor_is_human),
+            "red_evidence": job_ids,
+            "red_evidence_checks": covered,
+            "baseline_spec": baseline_spec,
+            "reset_steps": sorted(reset_ids),
+            "replanned_at": now,
+        }
+        conn.execute(
+            "UPDATE workflow_steps SET slice_replan_json=?, feedback=?, "
+            "updated_at=? WHERE workflow_id=? AND step_id=?",
+            (jdumps(updated), reason, now, wid, scope["step_id"]))
+        _step_activity(
+            conn, wf["task_id"], role or scope.get("role_slug"), scope,
+            "replanned", reason,
+            extra={"old_spec_hash": old_hash, "new_spec_hash": new_hash,
+                   "weakening": weakening, "replan_count": count + 1})
+        ledger.emit(
+            conn, "slice.replanned",
+            task_id=wf["task_id"], workflow_id=wid,
+            execution_no=wf.get("execution_no"),
+            step_id=scope["step_id"], slice_key=scope.get("slice_key"),
+            actor_type="human" if actor_is_human else "role",
+            actor=role or "system",
+            payload={"reason": reason, "old_spec_hash": old_hash,
+                     "new_spec_hash": new_hash, "weakening": weakening,
+                     "count": count + 1, "approved_by": updated["approved_by"],
+                     "human_approved": bool(actor_is_human),
+                     "red_evidence": job_ids},
+            mirror_audit=True, audit_action="slice.replanned")
+        conn.commit()
+    except BaseException:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        raise
+    return get_workflow(conn, wid)  # type: ignore[return-value]
+
+
+# 兼容命名：step 维度的 replan 入口。
+replan_step = replan_slice
 
 
 def gates(conn: sqlite3.Connection) -> list[dict]:
