@@ -1,14 +1,36 @@
 import { useEffect, useState } from "react";
 import { api, type PocArtifact, type PocJob } from "../api/client";
 
-const TEMPLATE = {
-  task_id: "T-...",
-  network: "none",
-  check: {
-    id: "c1",
-    kind: "test",
-    cmd: "pytest -q --junit-xml=/out/junit.xml",
-    junit: ["junit.xml"],
+const KIND_TEMPLATES: Record<string, Record<string, unknown>> = {
+  test: {
+    task_id: "T-...",
+    network: "none",
+    check: {
+      id: "c1",
+      kind: "test",
+      cmd: "pytest -q --junit-xml=/out/junit.xml",
+      junit: ["junit.xml"],
+    },
+  },
+  command: {
+    task_id: "T-...",
+    network: "none",
+    check: {
+      id: "c1",
+      kind: "command",
+      cmd: "python -m app --check",
+      exit_code: 1,
+    },
+  },
+  file_assert: {
+    task_id: "T-...",
+    network: "none",
+    check: {
+      id: "c1",
+      kind: "file_assert",
+      path: "reports/out.md",
+      contains: "PASS",
+    },
   },
 };
 
@@ -33,14 +55,16 @@ const CHECK_STATUS_LABEL: Record<string, string> = {
 const CHECK_CLASSIFICATION_LABEL: Record<string, string> = {
   passed: "通过",
   valid_red: "合法红",
+  trivial_red: "平凡红",
   harness_error: "harness 错误",
 };
 
 export function CheckJobsPanel({ taskId }: { taskId: string }) {
   const [jobs, setJobs] = useState<PocJob[]>([]);
   const [open, setOpen] = useState(false);
+  const [kind, setKind] = useState("test");
   const [spec, setSpec] = useState(() => JSON.stringify(
-    { ...TEMPLATE, task_id: taskId }, null, 2));
+    { ...KIND_TEMPLATES.test, task_id: taskId }, null, 2));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -64,6 +88,13 @@ export function CheckJobsPanel({ taskId }: { taskId: string }) {
     const timer = setInterval(() => { void refresh(); }, 5000);
     return () => clearInterval(timer);
   }, [jobs]);
+
+  const applyKind = (next: string) => {
+    setKind(next);
+    setSpec(JSON.stringify(
+      { ...(KIND_TEMPLATES[next] || KIND_TEMPLATES.test), task_id: taskId },
+      null, 2));
+  };
 
   const create = async () => {
     setBusy(true);
@@ -132,11 +163,20 @@ export function CheckJobsPanel({ taskId }: { taskId: string }) {
           <textarea value={spec} spellCheck={false} rows={12}
             onChange={(e) => setSpec(e.target.value)} />
           <div className="toolbar">
+            <label className="muted">
+              类型{" "}
+              <select value={kind} onChange={(e) => applyKind(e.target.value)}>
+                <option value="test">test</option>
+                <option value="command">command</option>
+                <option value="file_assert">file_assert</option>
+              </select>
+            </label>
             <button type="button" className="primary" disabled={busy} onClick={create}>
               {busy ? "提交中…" : "提交检查"}
             </button>
             <span className="muted">
               标准档、默认断网；放宽网络或自定义镜像需人工批准。
+              command 需声明断言失败退出码；manual 项随切片 spec 交给 decide。
             </span>
           </div>
         </div>
@@ -171,7 +211,11 @@ export function CheckJobsPanel({ taskId }: { taskId: string }) {
               </div>
               <div className="poc-card-meta">
                 {result?.check_id && <span className="mono">{result.check_id}</span>}
+                {result?.path && <span className="mono">{result.path}</span>}
                 {result?.exit_code != null && <span>exit {result.exit_code}</span>}
+                {result?.red_exit_code != null && (
+                  <span>红退出码 {result.red_exit_code}</span>
+                )}
                 {result?.signal && <span>{result.signal}</span>}
                 {result?.timed_out && <span className="error">超时</span>}
                 {result?.collected_count != null && (

@@ -2070,27 +2070,58 @@ def poc_cancel(job: str = typer.Argument(...), json_out: bool = typer.Option(Fal
 # ---- check（引擎执行的验收检查作业）----------------------------------------
 
 
-CHECK_TEMPLATE = {
-    "task_id": "T-...",
-    "network": "none",
-    "check": {
-        "id": "c1",
-        "kind": "test",
-        "cmd": "pytest -q --junit-xml=/out/junit.xml",
-        "junit": ["junit.xml"],
+CHECK_TEMPLATES = {
+    "test": {
+        "task_id": "T-...",
+        "network": "none",
+        "check": {
+            "id": "c1",
+            "kind": "test",
+            "cmd": "pytest -q --junit-xml=/out/junit.xml",
+            "junit": ["junit.xml"],
+        },
+    },
+    "command": {
+        "task_id": "T-...",
+        "network": "none",
+        "check": {
+            "id": "c1",
+            "kind": "command",
+            "cmd": "python -m app --check",
+            "exit_code": 1,
+        },
+    },
+    "file_assert": {
+        "task_id": "T-...",
+        "network": "none",
+        "check": {
+            "id": "c1",
+            "kind": "file_assert",
+            "path": "reports/out.md",
+            "contains": "PASS",
+        },
     },
 }
+CHECK_TEMPLATE = CHECK_TEMPLATES["test"]
 
 check_app = typer.Typer(
-    help="引擎执行的验收检查：标准档、默认断网、复用沙箱取证管线。",
+    help="引擎执行的验收检查：test/command/file_assert；标准档、默认断网。"
+         "manual 验收项不执行，随切片 spec 交给 decide 阶段判定。",
     context_settings=HELP_CTX)
 app.add_typer(check_app, name="check")
 
 
 @check_app.command("template")
-def check_template(json_out: bool = typer.Option(False, "--json")):
+def check_template(
+    kind: str = typer.Option(
+        "test", "--kind", help="test | command | file_assert"),
+    json_out: bool = typer.Option(False, "--json"),
+):
     """打印检查作业 spec 模板（JSON）。"""
-    _emit(CHECK_TEMPLATE, True)
+    template = CHECK_TEMPLATES.get(kind)
+    if template is None:
+        _usage_error(f"kind 只能是 {', '.join(CHECK_TEMPLATES)}")
+    _emit(template, True)
 
 
 @check_app.command("run")
