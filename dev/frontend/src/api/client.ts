@@ -75,8 +75,32 @@ export interface PocArtifact {
   created_at?: string | null;
 }
 
+export interface JunitSummary {
+  tests: number;
+  failures: number;
+  errors: number;
+  skipped: number;
+}
+
+export interface CheckResult {
+  run_id: string;
+  check_id?: string | null;
+  kind?: string | null;
+  command?: string | null;
+  exit_code?: number | null;
+  signal?: string | null;
+  timed_out?: boolean;
+  junit_summary?: JunitSummary | null;
+  collected_count?: number | null;
+  env_hash?: string | null;
+  duration_ms?: number | null;
+  status?: string | null;
+}
+
 export interface PocJob {
   id: string;
+  kind?: string;
+  tier?: string | null;
   status: string;
   profile: string;
   task_id?: string | null;
@@ -96,9 +120,17 @@ export interface PocJob {
   spec?: {
     network?: string;
     resources?: Record<string, number>;
+    check?: {
+      id?: string;
+      kind?: string;
+      cmd?: string | null;
+      argv?: string[] | null;
+      junit?: string[];
+    };
     [key: string]: unknown;
   };
   evidence?: Record<string, unknown>;
+  check_result?: CheckResult | null;
   phases?: PocPhase[];
   artifacts?: PocArtifact[];
 }
@@ -720,6 +752,30 @@ export const api = {
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     return res.blob();
   },
+  listCheckJobs: (params?: { task_id?: string; status?: string }): Promise<PocJob[]> => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params || {})) {
+      if (v) qs.set(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return authFetch(`${BASE}/check-jobs${suffix}`).then((r) => json<PocJob[]>(r));
+  },
+  getCheckJob: (id: string): Promise<PocJob> =>
+    authFetch(`${BASE}/check-jobs/${id}`).then((r) => json<PocJob>(r)),
+  createCheckJob: (spec: Record<string, unknown>): Promise<PocJob> =>
+    req("POST", "/check-jobs", spec).then((r) => json<PocJob>(r)),
+  getCheckJobResult: (id: string): Promise<CheckResult> =>
+    authFetch(`${BASE}/check-jobs/${id}/result`).then((r) => json<CheckResult>(r)),
+  getCheckJobLog: (id: string): Promise<{ exists: boolean; content: string }> =>
+    authFetch(`${BASE}/check-jobs/${id}/log`).then((r) => json(r)),
+  listCheckArtifacts: (id: string): Promise<PocArtifact[]> =>
+    authFetch(`${BASE}/check-jobs/${id}/artifacts`).then((r) => json<PocArtifact[]>(r)),
+  approveCheckJob: (id: string, note?: string): Promise<PocJob> =>
+    req("POST", `/check-jobs/${id}/approve`, { note }).then((r) => json<PocJob>(r)),
+  rejectCheckJob: (id: string, note?: string): Promise<PocJob> =>
+    req("POST", `/check-jobs/${id}/reject`, { note }).then((r) => json<PocJob>(r)),
+  cancelCheckJob: (id: string): Promise<PocJob> =>
+    req("POST", `/check-jobs/${id}/cancel`, {}).then((r) => json<PocJob>(r)),
   completeFindingBoard: (taskId: string, summary: string): Promise<FindingSummary> =>
     req("POST", `/tasks/${taskId}/findings/complete`, { summary }).then((r) => json<FindingSummary>(r)),
   reopenFindingBoard: (taskId: string, note: string): Promise<FindingSummary> =>

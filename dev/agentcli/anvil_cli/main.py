@@ -2067,6 +2067,104 @@ def poc_cancel(job: str = typer.Argument(...), json_out: bool = typer.Option(Fal
     _emit(_call("POST", f"/api/v1/poc-jobs/{job}/cancel", {}), json_out)
 
 
+# ---- check（引擎执行的验收检查作业）----------------------------------------
+
+
+CHECK_TEMPLATE = {
+    "task_id": "T-...",
+    "network": "none",
+    "check": {
+        "id": "c1",
+        "kind": "test",
+        "cmd": "pytest -q --junit-xml=/out/junit.xml",
+        "junit": ["junit.xml"],
+    },
+}
+
+check_app = typer.Typer(
+    help="引擎执行的验收检查：标准档、默认断网、复用沙箱取证管线。",
+    context_settings=HELP_CTX)
+app.add_typer(check_app, name="check")
+
+
+@check_app.command("template")
+def check_template(json_out: bool = typer.Option(False, "--json")):
+    """打印检查作业 spec 模板（JSON）。"""
+    _emit(CHECK_TEMPLATE, True)
+
+
+@check_app.command("run")
+def check_run(
+    file: str = typer.Option(..., "--file", help="检查 spec JSON 文件"),
+    task: str = typer.Option(None, "--task", help="覆盖 spec.task_id"),
+    wait: bool = typer.Option(False, "--wait", help="等待作业结束"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """对任务工作区执行一条声明的检查。"""
+    try:
+        spec = json.loads(Path(file).read_text(encoding="utf-8"))
+    except OSError as exc:
+        _usage_error(f"无法读取 spec：{exc}")
+    except json.JSONDecodeError as exc:
+        _usage_error(f"spec 不是合法 JSON：{exc}")
+    if not isinstance(spec, dict):
+        _usage_error("spec 必须是 JSON 对象")
+    if task:
+        spec["task_id"] = task
+    job = _call("POST", "/api/v1/check-jobs", spec)
+    if wait:
+        import time as _time
+        while job.get("status") in ("queued", "running", "waiting_approval"):
+            _time.sleep(2)
+            job = _call("GET", f"/api/v1/check-jobs/{job['id']}")
+    _emit(job, json_out)
+
+
+@check_app.command("list")
+def check_list(
+    task: str = typer.Option(None, "--task"),
+    status: str = typer.Option(None, "--status"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """列出检查作业。"""
+    params = {k: v for k, v in {"task_id": task, "status": status}.items() if v}
+    _emit(_call("GET", "/api/v1/check-jobs", params=params), json_out)
+
+
+@check_app.command("show")
+def check_show(job: str = typer.Argument(...), json_out: bool = typer.Option(False, "--json")):
+    """查看检查作业详情（含结果/证据）。"""
+    _emit(_call("GET", f"/api/v1/check-jobs/{job}"), json_out)
+
+
+@check_app.command("result")
+def check_result(job: str = typer.Argument(...), json_out: bool = typer.Option(False, "--json")):
+    """查看检查运行结果（退出码/信号/超时/junit/收集数/env hash）。"""
+    _emit(_call("GET", f"/api/v1/check-jobs/{job}/result"), json_out)
+
+
+@check_app.command("logs")
+def check_logs(job: str = typer.Argument(...), json_out: bool = typer.Option(False, "--json")):
+    """查看检查作业容器日志。"""
+    data = _call("GET", f"/api/v1/check-jobs/{job}/log")
+    if json_out:
+        _emit(data, True)
+    else:
+        typer.echo(data.get("content") or "")
+
+
+@check_app.command("artifacts")
+def check_artifacts(job: str = typer.Argument(...), json_out: bool = typer.Option(False, "--json")):
+    """列出检查作业产物（含 junit）。"""
+    _emit(_call("GET", f"/api/v1/check-jobs/{job}/artifacts"), json_out)
+
+
+@check_app.command("cancel")
+def check_cancel(job: str = typer.Argument(...), json_out: bool = typer.Option(False, "--json")):
+    """取消排队或运行中的检查作业。"""
+    _emit(_call("POST", f"/api/v1/check-jobs/{job}/cancel", {}), json_out)
+
+
 # ---- sandbox（执行沙箱状态 / Windows WSL 准备）------------------------------
 
 
