@@ -475,6 +475,15 @@ def record_decision(conn: sqlite3.Connection, wf: dict, step: dict, *,
          override_reason, latency,
          verdicts_json if verdicts_json is not None else "[]", now),
     )
+    if verdicts is not None:
+        # 逐项 verdict 进入结构化检查台账，供 N_total / 有效红等指标复算。
+        try:
+            from . import check_ledger
+            check_ledger.record_verdicts(
+                conn, wf=wf, step=step, decision_id=decision_id,
+                verdicts=verdicts)
+        except Exception:  # noqa: BLE001 —— 台账失败不得影响决策记录
+            pass
     if closes_packet:
         conn.execute(
             "UPDATE gate_packets SET status='decided' WHERE id=?", (packet["id"],))

@@ -2461,6 +2461,52 @@ def workflow_revise(
         typer.echo("批准后原地应用，不重启当前执行。")
 
 
+@workflow_app.command("ledger", epilog="""\b
+示例:
+  anvil workflow ledger WF-1
+  anvil workflow ledger WF-1 --json
+
+输出检查台账与指标报告：N_total / N_qualified / 有效红占比 / harness 错误红占比 /
+可机械化占比（按 test、command、file_assert 分列）/ 假通过输入 / 人工返工 /
+human authority 片占比 / replan 与弱化计数。
+""")
+def workflow_ledger(
+    workflow_id: str = typer.Argument(..., help="工作流 ID"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """查看引擎检查台账与指标报告。"""
+    out = _call("GET", f"/api/v1/workflows/{workflow_id}/check-ledger")
+    if json_out:
+        _emit(out, True)
+        return
+    typer.echo(f"workflow {workflow_id}")
+    typer.echo(f"N_total={out.get('n_total')}  N_qualified={out.get('n_qualified')}")
+    valid = out.get("valid_red") or {}
+    typer.echo(f"有效红: {valid.get('count')}/{valid.get('qualified')} "
+               f"({valid.get('ratio')})")
+    harness = out.get("harness_error_red") or {}
+    typer.echo(f"harness 错误红: {harness.get('count')}/{harness.get('total')} "
+               f"({harness.get('ratio')})")
+    mech = out.get("mechanizable") or {}
+    parts = [f"{kind}={mech.get(kind, {}).get('count')}"
+             for kind in ("test", "command", "file_assert", "manual")]
+    typer.echo(f"可机械化: {mech.get('count')}/{out.get('n_total')} "
+               f"({mech.get('ratio')})  " + " ".join(parts))
+    false_pass = out.get("false_pass") or {}
+    typer.echo(f"假通过输入: decide 放行 {false_pass.get('decide_passed_slices')} 片, "
+               f"审计缺陷 {false_pass.get('audited_defect_slices')} 片, "
+               f"rate={false_pass.get('rate')}")
+    rework = out.get("human_rework") or {}
+    typer.echo(f"人工返工: {rework.get('count')} "
+               f"(reject {rework.get('human_rejects')} / retry {rework.get('retries')} "
+               f"/ reopen {rework.get('reopens')})")
+    authority = out.get("human_authority_slices") or {}
+    typer.echo(f"human authority 片: {authority.get('human')}/{authority.get('total')} "
+               f"({authority.get('ratio')})")
+    replan = out.get("replan") or {}
+    typer.echo(f"replan: {replan.get('count')}  弱化: {replan.get('weakening')}")
+
+
 step_app = typer.Typer(help="工作流步骤（show/plan/submit/decide/escalate）",
                        context_settings=HELP_CTX, epilog=STEP_EPILOG)
 app.add_typer(step_app, name="step")
