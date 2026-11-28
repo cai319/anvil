@@ -32,6 +32,7 @@ import { Icon } from "../components/Icon";
 import { confirmDialog, promptDialog } from "../components/dialogs";
 import { GateReviewDrawer } from "../components/GateReviewDrawer";
 import { TaskFindingBoard } from "./TaskFindingBoard";
+import { CheckJobsPanel } from "../components/CheckJobsPanel";
 
 const stepAuthority = (st: WorkflowStep): "ai" | "human" | "joint" =>
   st.decision_authority
@@ -2033,7 +2034,12 @@ export function TaskDetail({ id }: { id: string }) {
         <SubtasksPanel items={children} onChanged={() => { void refreshChildren(); }} />
       )}
 
-      {tab === "runtime" && <RoleSessions task={task} roles={roles} workflow={workflow} dispatches={dispatches} relatedTaskIds={relatedTaskIds} roleStates={roleStates} focus={runtimeFocus} />}
+      {tab === "runtime" && (
+        <div className="task-runtime-tab">
+          <RoleSessions task={task} roles={roles} workflow={workflow} dispatches={dispatches} relatedTaskIds={relatedTaskIds} roleStates={roleStates} focus={runtimeFocus} />
+          <CheckJobsPanel taskId={task.id} />
+        </div>
+      )}
       </div>
       {reviewStep && workflow && (
         <GateReviewDrawer

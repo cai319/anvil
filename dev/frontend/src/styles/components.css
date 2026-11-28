@@ -2701,6 +2701,11 @@ button.danger { color: var(--red-on-paper); border-color: var(--red-on-paper); }
   word-break: break-word;
 }
 .poc-artifacts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+/* v1.62 引擎执行的验收检查 */
+.task-runtime-tab { display: grid; gap: 16px; }
+.poc-status.check-passed { background: #dcf0e2; color: #166534; }
+.poc-status.check-failed, .poc-status.check-error { background: #f6dcdc; color: #b03030; }
+.poc-status.check-timeout, .poc-status.check-signal { background: #fbeccf; color: #92400e; }
 .finding-verification {
   display: inline-flex;
   padding: 0 6px;
