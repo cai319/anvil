@@ -267,6 +267,7 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     slice_key        TEXT,                           -- 动态切片：所属切片 id
     plan_json        TEXT,                           -- plan_slices：切片计划原文
     slice_spec_json  TEXT,                           -- scope：结构化切片 spec（验收项/seam/stub）
+    slice_lock_json  TEXT,                           -- scope：锁定集合（路径/配置/签名/基线）
     decision_authority TEXT NOT NULL DEFAULT '',     -- 空=派生；ai|human|joint
     risk_level       TEXT NOT NULL DEFAULT 'normal', -- normal|high|critical
     reversible       INTEGER NOT NULL DEFAULT 1,
@@ -1362,6 +1363,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_sandbox_v160(conn)
     _migrate_sandbox_jobs_v160(conn)
     _migrate_slice_spec_v1(conn)
+    _migrate_slice_lock_v1(conn)
     conn.commit()
 
 
@@ -3198,4 +3200,16 @@ def _migrate_slice_spec_v1(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
     _set_setting(conn, "schema.slice_spec_v1", "1")
+    conn.commit()
+
+
+def _migrate_slice_lock_v1(conn: sqlite3.Connection) -> None:
+    """v1.62：scope 步骤持久化锁定集合（路径/配置/签名/测试数基线）。幂等。"""
+    if _setting(conn, "schema.slice_lock_v1"):
+        return
+    try:
+        conn.execute("ALTER TABLE workflow_steps ADD COLUMN slice_lock_json TEXT")
+    except sqlite3.OperationalError:
+        pass
+    _set_setting(conn, "schema.slice_lock_v1", "1")
     conn.commit()

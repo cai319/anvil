@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatch
 
 from .. import config
-from ..util import ConflictError, jdumps, now_iso
+from ..util import ConflictError, jdumps, jloads, now_iso
 from . import leases, ledger, reviews
 from .workflow_common import (
     RUN_ACTIVE, STEP_DONE, _assert_current_run, _assert_delegations_done,
@@ -519,6 +519,43 @@ def renew_step_lease_for_run(conn: sqlite3.Connection, run_id: str | None,
     return True
 
 
+def _slice_execute_scope_paths(conn: sqlite3.Connection, wf: dict,
+                               step: dict) -> list[str]:
+    """本切片 execute 可修改的路径：运行期切片取 plan 的 scope_paths；静态切片取自身。"""
+    paths: list[str] = []
+    source = step.get("source_step_id")
+    slice_key = step.get("slice_key")
+    if source:
+        row = conn.execute(
+            "SELECT plan_json FROM workflow_steps WHERE workflow_id=? AND step_id=?",
+            (wf["id"], source)).fetchone()
+        if row is not None and row["plan_json"]:
+            plan = jloads(row["plan_json"], {})
+            for raw_slice in plan.get("slices") or []:
+                if (isinstance(raw_slice, dict)
+                        and str(raw_slice.get("id")) == str(slice_key)):
+                    paths.extend(str(p) for p in raw_slice.get("scope_paths") or [])
+                    break
+    paths.extend(str(p) for p in step.get("scope_paths") or [])
+    return paths
+
+
+def _slice_lock_for_step(conn: sqlite3.Connection, wid: str,
+                         step: dict) -> dict | None:
+    """同一 slice 的 scope 步骤持久化的锁定集合。"""
+    slice_key = str(step.get("slice_key") or "").strip()
+    if not slice_key:
+        return None
+    row = conn.execute(
+        "SELECT slice_lock_json FROM workflow_steps WHERE workflow_id=? "
+        "AND slice_key=? AND step_id LIKE '%.scope' "
+        "AND slice_lock_json IS NOT NULL ORDER BY rowid LIMIT 1",
+        (wid, slice_key)).fetchone()
+    if row is None or not row["slice_lock_json"]:
+        return None
+    return jloads(row["slice_lock_json"], {}) or None
+
+
 def submit_step(conn: sqlite3.Connection, wid: str, step_id: str, role: str,
                 summary: str | None, run_id: str | None = None,
                 evidence: list | None = None,
@@ -584,6 +621,18 @@ def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: 
         except slice_spec_service.SliceSpecError as exc:
             raise ConflictError(f"slice_spec_invalid: {exc}") from exc
         slice_spec_json = jdumps(parsed_spec)
+    # scope 锁定时固定锁定集合并校验与 execute scope_paths 不相交；冲突不落库。
+    slice_lock_json = None
+    if parsed_spec is not None:
+        from . import lock_set as lock_set_service
+        workspace = config.TASK_WORKSPACES_DIR / str(wf["task_id"])
+        execute_paths = _slice_execute_scope_paths(conn, wf, step)
+        try:
+            lock = lock_set_service.build(
+                workspace, parsed_spec, execute_paths=execute_paths)
+        except lock_set_service.LockConflict as exc:
+            raise ConflictError(f"lock_scope_conflict: {exc}") from exc
+        slice_lock_json = jdumps(lock)
     changed = [leases.normalize_path(p) for p in (changed_paths or [])]
     if changed:
         conflicts = leases.check_paths(conn, wf["task_id"], changed, holder=role)
@@ -594,15 +643,27 @@ def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: 
                    if scope and not any(fnmatch(p, pattern) for pattern in scope)]
         if outside:
             raise ConflictError(f"scope_violation: {outside[0]} is outside step scope")
+        # execute / fix 不得修改锁定集合：测试文件、运行器配置、stub 签名、
+        # 检查目录内新增文件。scope 自身正在写这些文件，跳过。
+        if not step_id.endswith(".scope"):
+            lock = _slice_lock_for_step(conn, wid, step)
+            if lock:
+                from . import lock_set as lock_set_service
+                workspace = config.TASK_WORKSPACES_DIR / str(wf["task_id"])
+                try:
+                    lock_set_service.enforce_changes(lock, workspace, changed)
+                except lock_set_service.LockConflict as exc:
+                    raise ConflictError(f"lock_violation: {exc}") from exc
     now = now_iso()
     # CAS：只有仍处于 running 的步骤才能提交，避免与 fail/terminate/rework 竞态
     # 把已结束步骤写回 submitted（形成 orphan run / 重复 packet）。
     cur = conn.execute(
         "UPDATE workflow_steps SET status='submitted', summary=?, evidence_json=?, "
-        "slice_spec_json=COALESCE(?, slice_spec_json), updated_at=? "
+        "slice_spec_json=COALESCE(?, slice_spec_json), "
+        "slice_lock_json=COALESCE(?, slice_lock_json), updated_at=? "
         "WHERE workflow_id=? AND step_id=? AND status='running'",
         (summary, jdumps(normalized or step.get("evidence") or []),
-         slice_spec_json, now, wid, step_id),
+         slice_spec_json, slice_lock_json, now, wid, step_id),
     )
     if cur.rowcount != 1:
         raise ConflictError(
@@ -632,7 +693,7 @@ def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: 
         sandbox_service.create_slice_checks(
             conn, task_id=wf["task_id"], step_id=step_id,
             slice_key=str(step.get("slice_key") or ""), spec=parsed_spec,
-            actor_role=role, actor_is_human=False)
+            workflow_id=wid, actor_role=role, actor_is_human=False)
     _finalize_if_done(conn, wid)
     return get_workflow(conn, wid)  # type: ignore[return-value]
 
