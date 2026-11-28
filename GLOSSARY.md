@@ -68,6 +68,56 @@ acceptance、base_branch），且任务尚未产生 workflow 时，`clarificatio
 是否切片；切片仍由 scope/审计启发式与简报的 `plan_shape` 决定，避免
 「为了严格而切片」。
 
+## 验收检查
+
+### 红校验（Red Check）
+
+在切片锁定时于 base 提交上执行检查，确认目标行为尚未满足。红校验只认断言失败；
+环境、导入/收集、runner 用法、超时或信号导致的失败不算红。
+
+### 合法红（Valid Red）
+
+检查因目标行为未满足而以断言失败告终。它是合格检查的判定条件；平凡的文件缺失红
+不计入合法红。
+
+### harness 错误（Harness Error）
+
+检查因环境、导入/收集、runner 用法、超时或信号而失败，不能证明目标行为未满足。
+harness 错误不计入合法红。
+
+### 合格检查（Qualified Check）
+
+在 base 上得到合法红的检查。它是有效红占比的分母；试点阶段一对它有最小样本要求。
+
+### 有效红
+
+合格检查在 final 上转为通过且签名匹配。有效红占比 = 有效红数 ÷ 合格检查数。
+接口不匹配与行为不符合分开统计。
+
+### 锁定集合（Lock Set）
+
+scope 锁定时固定、execute 与 fix 不得修改的检查文件、运行器配置、测试依赖组与
+stub 签名的集合。execute 的 `scope_paths` 必须与锁定集合不相交。
+
+### enabling 切片（Enabling Slice）
+
+不直接对应 Brief 验收、为后续切片铺路的切片（预重构、expand 步骤）。必须在 plan
+人工审批时声明，运行时不得追加；检查为现有测试保持通过 + 声明的下游切片存在；
+scope_paths 不得与 Brief 的 non-goals 冲突。
+
+### 弱化 replan（Weakening Replan）
+
+删除检查、把检查降为 manual、或修改断言但没有新的红证据的 replan。无论流程强度
+都需要人工批准。
+
+### 验收证据（Acceptance Evidence）
+
+引擎执行检查后记录的结构化运行结果。只有验收证据能作为 decide 判定验收项的依据；
+agent 提交的说明与 agent 上下文里的运行输出不算验收证据。它与
+`workflow_steps.evidence_json` 中 agent 提交的证据不是同一概念。
+
+避免说法：把 agent 自报的「已通过」、日志片段或上下文里的输出叫作验收证据。
+
 ## 运行与门禁
 
 ### 规划门禁（Clarification Gate）
