@@ -145,6 +145,8 @@ def packet_has_stale_evidence(packet: dict | None) -> bool:
 
 def escalation_triggers(step: dict, packet: dict | None) -> list[str]:
     """Triggers that must stop an AI approval and hand the decision to a human."""
+    from . import env_integrity
+
     triggers = set(str(x) for x in jloads(step.get("escalate_json") or "[]", []))
     if not step.get("reversible", True):
         triggers.add("irreversible_action")
@@ -158,7 +160,36 @@ def escalation_triggers(step: dict, packet: dict | None) -> list[str]:
         triggers.add("evidence_stale")
     if any(a.get("status") == "unmet" for a in (packet or {}).get("acceptance") or []):
         triggers.add("acceptance_unmet")
+    # 依赖完整性信号（测试闭包变化 / 反事实检查失效 / harness 错误）必须升级人工。
+    for risk in (packet or {}).get("risks") or []:
+        if isinstance(risk, str) and risk in env_integrity.ESCALATION_SIGNALS:
+            triggers.add(risk)
     return sorted(triggers)
+
+
+def _dependency_integrity(conn: sqlite3.Connection, wf: dict,
+                          step: dict) -> dict | None:
+    try:
+        from . import lock_set
+        return lock_set.dependency_integrity_for_slice(
+            conn, wf["id"], step.get("slice_key"))
+    except Exception:  # noqa: BLE001 —— 读取失败不阻塞评审包
+        return None
+
+
+def _dependency_evidence(report: dict) -> dict:
+    from . import env_integrity
+
+    label = env_integrity.describe(report)
+    return {
+        "id": "engine:dependency_integrity",
+        "kind": "note",
+        "ref": "slice_lock.dependency_integrity",
+        "label": label[:240],
+        "digest": hashlib.sha256(jdumps(report).encode("utf-8")).hexdigest(),
+        "captured_at": report.get("checked_at") or now_iso(),
+        "fresh": True,
+    }
 
 
 def authority_of(step: dict) -> str:
@@ -314,6 +345,16 @@ def ensure_packet(conn: sqlite3.Connection, wf: dict, step: dict,
     risks = jloads(step.get("escalate_json") or "[]", [])
     if not isinstance(risks, list):
         risks = []
+    # 依赖 delta 与反事实结论进入评审包，作为评审触发项。
+    integrity = _dependency_integrity(conn, wf, step)
+    if integrity and integrity.get("changed"):
+        for risk in ("dependency_delta", *(integrity.get("signals") or [])):
+            if risk not in risks:
+                risks.append(risk)
+        if integrity.get("pytest11") and "dependency_pytest11_plugin" not in risks:
+            risks.append("dependency_pytest11_plugin")
+        evidence.append(_dependency_evidence(integrity))
+        evidence = evidence[:MAX_EVIDENCE_ITEMS]
     packet_id = new_id()
     now = now_iso()
     previous_recommendation = {}

@@ -498,7 +498,10 @@ def _create_check_job(conn, *, spec_raw: dict, actor_role: str | None,
     now = now_iso()
     status = "queued"
     approval = "not_required"
-    if not actor_is_human and spec["profile"] != "safe":
+    install = (spec.get("check") or {}).get("install") or {}
+    # 安装生产依赖需要网络时按 ADR-0003 人工审批。
+    if not actor_is_human and (spec["profile"] != "safe"
+                               or install.get("network_required")):
         status = "waiting_approval"
         approval = "pending"
     conn.execute(
@@ -565,6 +568,102 @@ def create_slice_checks(conn, *, task_id: str, step_id: str, slice_key: str,
             conn, spec_raw=raw, actor_role=actor_role,
             actor_is_human=actor_is_human, kind="check"))
     return created
+
+
+def evaluate_dependencies(conn, *, task_id: str, workflow_id: str,
+                          slice_key: str, actor_role: str | None = None) -> dict | None:
+    """比较锁定依赖集与当前依赖集，记录 delta；测试闭包变化升级人工。
+
+    依赖可变化但必须记录；测试依赖闭包变化不自动拒绝，而是作为评审触发项。
+    """
+    from . import env_integrity, lock_set
+
+    found = lock_set.for_slice(conn, workflow_id, slice_key)
+    if found is None:
+        return None
+    lock, step_id = found
+    workspace = config.TASK_WORKSPACES_DIR / str(task_id)
+    current = env_integrity.snapshot(workspace)
+    delta = env_integrity.diff(lock.get("dependencies") or {}, current)
+    existing = lock.get("dependency_integrity") or {}
+    if not delta["changed"]:
+        return existing or None
+    if existing.get("current") == current:
+        return existing
+    signals: list[str] = []
+    if delta["test_closure_changed"]:
+        signals.append("dependency_test_closure_changed")
+    if delta["production_changed"]:
+        signals.append("dependency_production_changed")
+    added = [*delta["production"]["added"], *delta["test"]["added"]]
+    pytest11 = env_integrity.pytest11_signals(added)
+    if pytest11:
+        signals.append("dependency_pytest11_plugin")
+    report = {
+        "checked_at": now_iso(),
+        "changed": True,
+        "production_changed": delta["production_changed"],
+        "test_closure_changed": delta["test_closure_changed"],
+        "production": delta["production"],
+        "test": delta["test"],
+        "current": current,
+        "signals": signals,
+        "pytest11": pytest11,
+        "counterfactual": {},
+        "counterfactual_jobs": {},
+    }
+    if delta["production_changed"]:
+        _create_counterfactual_jobs(
+            conn, report=report, lock=lock, workflow_id=workflow_id,
+            step_id=step_id, slice_key=slice_key, task_id=task_id,
+            current=current, actor_role=actor_role)
+    lock_set.set_dependency_integrity(conn, workflow_id, step_id, report)
+    conn.commit()
+    return report
+
+
+def _create_counterfactual_jobs(conn, *, report: dict, lock: dict,
+                                workflow_id: str, step_id: str,
+                                slice_key: str, task_id: str,
+                                current: dict,
+                                actor_role: str | None) -> None:
+    """生产依赖变化：在 base 快照 + 新依赖集上重跑同一检查。"""
+    from .slice_spec import test_checks
+
+    snapshot = (lock.get("base_snapshot") or {}).get("path")
+    row = conn.execute(
+        "SELECT slice_spec_json FROM workflow_steps "
+        "WHERE workflow_id=? AND step_id=?", (workflow_id, step_id)).fetchone()
+    if not snapshot or row is None or not row["slice_spec_json"]:
+        return
+    try:
+        parsed = json.loads(row["slice_spec_json"])
+    except ValueError:
+        return
+    install = list(current.get("production") or [])
+    for item in test_checks(parsed):
+        check_id = f"{step_id}.{item['id']}"
+        check: dict[str, Any] = {
+            "id": f"{check_id}.counterfactual",
+            "kind": "test",
+            "pytest": item["pytest"],
+        }
+        if install:
+            check["install"] = {"requirements": install}
+        raw = {
+            "task_id": task_id,
+            "reason": f"counterfactual for {check_id} with new dependencies",
+            "check": check,
+            "base_snapshot": snapshot,
+            "counterfactual": {
+                "workflow_id": workflow_id,
+                "slice_key": slice_key,
+                "check_id": check_id,
+            },
+        }
+        job = create_job(conn, spec_raw=raw, actor_role=actor_role,
+                         actor_is_human=False, kind="check")
+        report["counterfactual_jobs"][check_id] = job["id"]
 
 
 def _check_quota(conn, *, task_id: str | None, actor_role: str | None) -> None:
@@ -737,6 +836,7 @@ def record_execution(conn, job_id: str, execution) -> bool:
     except Exception:  # noqa: BLE001
         pass
     _record_lock_baseline(conn, row, execution)
+    _record_counterfactual(conn, row, execution)
     conn.commit()
     return True
 
@@ -752,16 +852,62 @@ def _record_lock_baseline(conn, row, execution) -> None:
         return
     check = (execution.evidence or {}).get("check") or {}
     baseline = check.get("collected_baseline")
-    if baseline is None:
-        return
     try:
         from . import lock_set
         lock_set.update_check_baseline(
             conn, workflow_id=ref.get("workflow_id"),
             step_id=ref.get("step_id"), check_id=check.get("check_id"),
-            baseline=baseline)
+            baseline=baseline, env_hash=check.get("env_hash"),
+            dependency_digest=check.get("dependency_digest"))
     except Exception:  # noqa: BLE001 —— 基线回填失败不得影响取证
         pass
+
+
+def _record_counterfactual(conn, row, execution) -> None:
+    """反事实重跑结论：通过=检查失效；仍红=保留；harness=升级人工。"""
+    try:
+        spec = json.loads(row["spec_json"] or "{}")
+    except (TypeError, ValueError):
+        return
+    ref = spec.get("counterfactual")
+    if not isinstance(ref, dict):
+        return
+    check = (execution.evidence or {}).get("check") or {}
+    if check.get("status") == "passed":
+        outcome, signal = "check_invalid", "dependency_counterfactual_passed"
+    elif check.get("classification") == "valid_red":
+        outcome, signal = "still_red", None
+    else:
+        outcome, signal = ("harness_error",
+                            "dependency_counterfactual_harness_error")
+    try:
+        from . import lock_set
+        found = lock_set.for_slice(
+            conn, str(ref.get("workflow_id") or ""),
+            str(ref.get("slice_key") or ""))
+    except Exception:  # noqa: BLE001 —— 回填失败不得影响取证
+        return
+    if found is None:
+        return
+    lock, step_id = found
+    integrity = lock.get("dependency_integrity") or {}
+    entry = {
+        "outcome": outcome,
+        "check_id": ref.get("check_id"),
+        "run_id": check.get("run_id"),
+        "classification": check.get("classification"),
+        "cause": check.get("cause"),
+        "env_hash": check.get("env_hash"),
+        "finished_at": now_iso(),
+    }
+    integrity.setdefault("counterfactual", {})[
+        str(ref.get("check_id") or "")] = entry
+    signals = list(integrity.get("signals") or [])
+    if signal and signal not in signals:
+        signals.append(signal)
+    integrity["signals"] = signals
+    lock_set.set_dependency_integrity(
+        conn, str(ref.get("workflow_id")), step_id, integrity)
 
 
 def fail_job(conn, job_id: str, reason: str) -> None:
