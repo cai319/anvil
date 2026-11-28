@@ -529,7 +529,8 @@ def _create_check_job(conn, *, spec_raw: dict, actor_role: str | None,
 
 
 def create_slice_checks(conn, *, task_id: str, step_id: str, slice_key: str,
-                        spec: dict, actor_role: str | None = None,
+                        spec: dict, workflow_id: str | None = None,
+                        actor_role: str | None = None,
                         actor_is_human: bool = False) -> list[dict]:
     """为切片 spec 中可机械化的 test 类验收项创建引擎红跑作业。
 
@@ -549,6 +550,8 @@ def create_slice_checks(conn, *, task_id: str, step_id: str, slice_key: str,
                 "pytest": item["pytest"],
             },
         }
+        if workflow_id:
+            raw["lock_ref"] = {"workflow_id": workflow_id, "step_id": step_id}
         created.append(create_job(
             conn, spec_raw=raw, actor_role=actor_role,
             actor_is_human=actor_is_human, kind="check"))
@@ -680,7 +683,7 @@ def claim_next_job(conn, *, backend: str | None = None) -> dict | None:
 
 def record_execution(conn, job_id: str, execution) -> bool:
     row = conn.execute(
-        "SELECT status, task_id, created_by FROM sandbox_jobs WHERE id=?",
+        "SELECT status, task_id, created_by, spec_json FROM sandbox_jobs WHERE id=?",
         (job_id,)).fetchone()
     if row is None or row["status"] != "running":
         return False  # 已取消/被接管；不得覆盖
@@ -724,8 +727,32 @@ def record_execution(conn, job_id: str, execution) -> bool:
                      "signal": execution.signal})
     except Exception:  # noqa: BLE001
         pass
+    _record_lock_baseline(conn, row, execution)
     conn.commit()
     return True
+
+
+def _record_lock_baseline(conn, row, execution) -> None:
+    """红跑 collect 完成后把测试数基线回填到对应切片的锁定集合。"""
+    try:
+        spec = json.loads(row["spec_json"] or "{}")
+    except (TypeError, ValueError):
+        return
+    ref = spec.get("lock_ref")
+    if not isinstance(ref, dict):
+        return
+    check = (execution.evidence or {}).get("check") or {}
+    baseline = check.get("collected_baseline")
+    if baseline is None:
+        return
+    try:
+        from . import lock_set
+        lock_set.update_check_baseline(
+            conn, workflow_id=ref.get("workflow_id"),
+            step_id=ref.get("step_id"), check_id=check.get("check_id"),
+            baseline=baseline)
+    except Exception:  # noqa: BLE001 —— 基线回填失败不得影响取证
+        pass
 
 
 def fail_job(conn, job_id: str, reason: str) -> None:
