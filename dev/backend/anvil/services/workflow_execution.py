@@ -540,6 +540,11 @@ def _slice_execute_scope_paths(conn: sqlite3.Connection, wf: dict,
     return paths
 
 
+def _is_dependency_path(path: str) -> bool:
+    from . import env_integrity
+    return env_integrity.is_dependency_file(path)
+
+
 def _slice_lock_for_step(conn: sqlite3.Connection, wid: str,
                          step: dict) -> dict | None:
     """同一 slice 的 scope 步骤持久化的锁定集合。"""
@@ -627,9 +632,12 @@ def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: 
         from . import lock_set as lock_set_service
         workspace = config.TASK_WORKSPACES_DIR / str(wf["task_id"])
         execute_paths = _slice_execute_scope_paths(conn, wf, step)
+        base_snapshot = (workspace / ".anvil" / "slice-base"
+                         / str(step.get("slice_key") or ""))
         try:
             lock = lock_set_service.build(
-                workspace, parsed_spec, execute_paths=execute_paths)
+                workspace, parsed_spec, execute_paths=execute_paths,
+                base_snapshot=base_snapshot)
         except lock_set_service.LockConflict as exc:
             raise ConflictError(f"lock_scope_conflict: {exc}") from exc
         slice_lock_json = jdumps(lock)
@@ -694,6 +702,13 @@ def _submit_step_locked(conn: sqlite3.Connection, wid: str, step_id: str, role: 
             conn, task_id=wf["task_id"], step_id=step_id,
             slice_key=str(step.get("slice_key") or ""), spec=parsed_spec,
             workflow_id=wid, actor_role=role, actor_is_human=False)
+    elif (str(step.get("slice_key") or "").strip()
+          and any(_is_dependency_path(p) for p in changed)):
+        # 执行/修复改动了依赖声明：记录 delta；测试闭包变化升级人工。
+        from . import sandbox as sandbox_service
+        sandbox_service.evaluate_dependencies(
+            conn, task_id=wf["task_id"], workflow_id=wid,
+            slice_key=str(step.get("slice_key") or ""), actor_role=role)
     _finalize_if_done(conn, wid)
     return get_workflow(conn, wid)  # type: ignore[return-value]
 

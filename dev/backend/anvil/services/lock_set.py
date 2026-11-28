@@ -10,11 +10,13 @@ import ast
 import configparser
 import hashlib
 import json
+import shutil
 import tomllib
 from fnmatch import fnmatch
 from pathlib import Path
 
 from ..util import now_iso
+from . import env_integrity
 
 LOCK_VERSION = 1
 
@@ -238,6 +240,32 @@ def _ast_signature_hash(target: Path) -> str | None:
 
 # ---- build / enforce -------------------------------------------------------
 
+_SNAPSHOT_IGNORE = shutil.ignore_patterns(
+    ".git", ".anvil", "node_modules", ".venv", "__pycache__")
+
+
+def _tree_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(Path(root).rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        rel = str(path.relative_to(root)).replace("\\", "/")
+        digest.update(rel.encode("utf-8") + b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
+
+
+def snapshot_base(workspace: Path, dest: Path) -> dict:
+    """保存 base 代码快照供生产依赖变化的同检查反事实重跑使用。"""
+    workspace, dest = Path(workspace), Path(dest)
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(workspace, dest, symlinks=True, ignore=_SNAPSHOT_IGNORE)
+    return {"path": str(dest), "tree_hash": _tree_digest(dest)}
+
+
 def check_disjoint(lock: dict, execute_paths: list[str]) -> tuple[str, str] | None:
     """返回第一个与锁定路径相交的 (execute 路径, 锁定路径)，没有则 None。"""
     locked = set(lock.get("paths") or []) | set(lock.get("test_patterns") or [])
@@ -249,7 +277,8 @@ def check_disjoint(lock: dict, execute_paths: list[str]) -> tuple[str, str] | No
 
 
 def build(workspace: Path, spec: dict, *,
-          execute_paths: list[str] | None = None) -> dict:
+          execute_paths: list[str] | None = None,
+          base_snapshot: Path | None = None) -> dict:
     """计算并校验锁定集合；相交时抛 LockConflict。"""
     workspace = Path(workspace)
     test_patterns = sorted(set(_declared_test_paths(spec)))
@@ -281,6 +310,10 @@ def build(workspace: Path, spec: dict, *,
         "check_dirs": test_dirs,
         "runner_config": runner_config,
         "test_dependency_groups": _test_dependency_groups(workspace),
+        # 依赖集单独记录，不与基础环境哈希混在一起；锁定后只允许显式 delta。
+        "dependencies": env_integrity.snapshot(workspace),
+        "base_snapshot": (snapshot_base(workspace, base_snapshot)
+                          if base_snapshot is not None else None),
         "stubs": stubs,
         # 引擎在 base 上 collect 后回填；锁定阶段尚不可知。
         "checks": [],
@@ -333,10 +366,67 @@ def enforce_changes(lock: dict, workspace: Path, changed: list[str]) -> None:
             raise LockConflict(f"{path} is a new file in locked check directory")
 
 
+def for_slice(conn, workflow_id: str, slice_key: str | None
+              ) -> tuple[dict, str] | None:
+    """返回同一 slice scope 步骤持久化的 (lock, step_id)；没有则 None。"""
+    slice_key = str(slice_key or "").strip()
+    if not workflow_id or not slice_key:
+        return None
+    row = conn.execute(
+        "SELECT step_id, slice_lock_json FROM workflow_steps "
+        "WHERE workflow_id=? AND slice_key=? AND step_id LIKE '%.scope' "
+        "AND slice_lock_json IS NOT NULL ORDER BY rowid LIMIT 1",
+        (workflow_id, slice_key)).fetchone()
+    if row is None or not row["slice_lock_json"]:
+        return None
+    try:
+        lock = json.loads(row["slice_lock_json"])
+    except ValueError:
+        return None
+    return lock, str(row["step_id"])
+
+
+def _write_lock(conn, workflow_id: str, step_id: str, lock: dict) -> None:
+    conn.execute(
+        "UPDATE workflow_steps SET slice_lock_json=? "
+        "WHERE workflow_id=? AND step_id=?",
+        (json.dumps(lock, ensure_ascii=False), workflow_id, step_id))
+
+
+def set_dependency_integrity(conn, workflow_id: str, step_id: str,
+                             report: dict) -> None:
+    """把依赖 delta / 反事实结论写入锁定集合（评审包与运行详情可见）。"""
+    row = conn.execute(
+        "SELECT slice_lock_json FROM workflow_steps WHERE workflow_id=? AND step_id=?",
+        (workflow_id, step_id)).fetchone()
+    if row is None or not row["slice_lock_json"]:
+        return
+    try:
+        lock = json.loads(row["slice_lock_json"])
+    except ValueError:
+        return
+    lock["dependency_integrity"] = report
+    _write_lock(conn, workflow_id, step_id, lock)
+
+
+def dependency_integrity_for_slice(conn, workflow_id: str,
+                                   slice_key: str | None) -> dict | None:
+    found = for_slice(conn, workflow_id, slice_key)
+    if found is None:
+        return None
+    lock, _step_id = found
+    report = lock.get("dependency_integrity")
+    return report if isinstance(report, dict) else None
+
+
 def update_check_baseline(conn, *, workflow_id: str, step_id: str,
-                          check_id: str | None, baseline: int | None) -> None:
-    """引擎红跑 collect 完成后回填测试数基线；agent 不可调用。"""
-    if not workflow_id or not step_id or check_id is None or baseline is None:
+                          check_id: str | None, baseline: int | None,
+                          env_hash: str | None = None,
+                          dependency_digest: str | None = None) -> None:
+    """引擎红跑 collect 完成后回填测试数基线、基础环境哈希与依赖集哈希。"""
+    if not workflow_id or not step_id or check_id is None:
+        return
+    if baseline is None and env_hash is None and dependency_digest is None:
         return
     row = conn.execute(
         "SELECT slice_lock_json FROM workflow_steps WHERE workflow_id=? AND step_id=?",
@@ -350,9 +440,14 @@ def update_check_baseline(conn, *, workflow_id: str, step_id: str,
     checks = lock.setdefault("checks", [])
     entry = next((c for c in checks if c.get("id") == check_id), None)
     if entry is None:
-        checks.append({"id": check_id, "test_count_baseline": baseline})
-    else:
+        entry = {"id": check_id}
+        checks.append(entry)
+    if baseline is not None:
         entry["test_count_baseline"] = baseline
+    if env_hash is not None:
+        entry["env_hash"] = env_hash
+    if dependency_digest is not None:
+        entry["dependency_digest"] = dependency_digest
     known = [c["test_count_baseline"] for c in checks
              if c.get("test_count_baseline") is not None]
     lock["test_count_baseline"] = sum(known) if known else None

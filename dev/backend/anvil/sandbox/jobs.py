@@ -280,6 +280,41 @@ def _normalize_pytest_config(raw: Any) -> dict:
             "plugins": _strings(raw.get("plugins"), "check.pytest.plugins")}
 
 
+def _normalize_install(raw: Any) -> dict | None:
+    """校验生产依赖安装声明；依赖集单独记录，不进入基础环境哈希。"""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise JobSpecError("check.install must be an object")
+    unknown = set(raw) - {"requirements", "offline"}
+    if unknown:
+        raise JobSpecError(f"check.install has unknown key(s): {sorted(unknown)}")
+    requirements_raw = raw.get("requirements")
+    if not isinstance(requirements_raw, list) or not requirements_raw:
+        raise JobSpecError("check.install.requirements must be a non-empty list")
+    requirements: list[str] = []
+    for i, item in enumerate(requirements_raw):
+        if not isinstance(item, str) or not item.strip():
+            raise JobSpecError(
+                f"check.install.requirements[{i}] must be a non-empty string")
+        requirements.append(item.strip())
+    offline = bool(raw.get("offline", False))
+    return {
+        "requirements": sorted(set(requirements)),
+        "offline": offline,
+        # 默认需要网络；离线（本地 wheelhouse）安装无需人工审批。
+        "network_required": not offline,
+    }
+
+
+def _install_command(install: dict) -> str:
+    argv = ["python3", "-m", "pip", "install", "--disable-pip-version-check"]
+    if install.get("offline"):
+        argv.append("--no-index")
+    argv.extend(install["requirements"])
+    return " ".join(shlex.quote(str(a)) for a in argv)
+
+
 def parse_check_spec(raw: Any) -> dict:
     """校验一条检查 spec；检查作业必须绑定任务工作区，不要求 finding。"""
     if not isinstance(raw, dict):
@@ -312,6 +347,7 @@ def parse_check_spec(raw: Any) -> dict:
     }
     check_id = str(check_raw.get("id") or "check")
     junit = _normalize_junit_paths(check_raw.get("junit"))
+    install = _normalize_install(check_raw.get("install"))
     pytest_spec = None
     collect_cmd = None
     if check_raw.get("pytest") is not None:
@@ -376,6 +412,16 @@ def parse_check_spec(raw: Any) -> dict:
     if pytest_spec is not None:
         check_spec["pytest"] = pytest_spec
         check_spec["collect_cmd"] = collect_cmd
+    prepare = []
+    if install is not None:
+        check_spec["install"] = install
+        install_cmd = _install_command(install)
+        prepare.append(_normalize_command(
+            {"name": f"{check_id}.install", "cmd": install_cmd,
+             "timeout_seconds": check_raw.get("timeout_seconds"),
+             "env": dict(check_raw.get("env") or {})},
+            phase="prepare", index=0,
+            job_timeout=resources["timeout_seconds"]))
     spec: dict[str, Any] = {
         "kind": "check",
         "task_id": task_id,
@@ -387,7 +433,7 @@ def parse_check_spec(raw: Any) -> dict:
         "image": image,
         "resources": resources,
         "check": check_spec,
-        "phases": {"prepare": [], "build": [], "run": run_commands},
+        "phases": {"prepare": prepare, "build": [], "run": run_commands},
         "expect": {},
         "artifacts": artifacts,
         "reason": str(raw.get("reason") or "")[:2000],
@@ -399,6 +445,23 @@ def parse_check_spec(raw: Any) -> dict:
                if lock_ref.get(key)}
         if ref:
             spec["lock_ref"] = ref
+    # 反事实重跑：在保存的 base 代码快照上执行同一检查。
+    base_snapshot = raw.get("base_snapshot")
+    if base_snapshot is not None:
+        base_snapshot = str(base_snapshot)
+        if not base_snapshot.strip() or not Path(base_snapshot).is_absolute():
+            raise JobSpecError("base_snapshot must be an absolute path")
+        spec["base_snapshot"] = base_snapshot
+    counterfactual = raw.get("counterfactual")
+    if counterfactual is not None:
+        if not isinstance(counterfactual, dict):
+            raise JobSpecError("counterfactual must be an object")
+        spec["counterfactual"] = {
+            key: str(counterfactual[key])
+            for key in ("workflow_id", "slice_key", "check_id",
+                        "dependency_digest")
+            if counterfactual.get(key)
+        }
     spec["profile"] = "safe" if is_safe(spec) else "relaxed"
     requested = str(raw.get("profile") or "").strip().lower()
     if requested:
@@ -411,8 +474,12 @@ def parse_check_spec(raw: Any) -> dict:
     return spec
 
 
-def environment_hash(spec: dict) -> str:
-    """基础环境哈希：镜像、网络、tier、检查命令与环境变量。"""
+def environment_parts(spec: dict) -> dict:
+    """环境拆分：基础环境（镜像/网络/tier/runner 命令/环境变量）。
+
+    依赖集不属于基础环境，单独由 :func:`dependency_digest` 记录；红跑与绿跑必须
+    基础哈希一致，但允许依赖集变化（变化时走反事实重跑）。
+    """
     check = spec.get("check") or {}
     base = {
         "tier": spec.get("tier"),
@@ -424,8 +491,24 @@ def environment_hash(spec: dict) -> str:
         "pytest": check.get("pytest"),
         "env": check.get("env") or {},
     }
+    return {
+        "base": base,
+        "base_hash": "sha256:" + hashlib.sha256(
+            canonical(base).encode("utf-8")).hexdigest(),
+    }
+
+
+def environment_hash(spec: dict) -> str:
+    """基础环境哈希（不含依赖集）。"""
+    return environment_parts(spec)["base_hash"]
+
+
+def dependency_digest(spec: dict) -> str:
+    """依赖集哈希：安装声明（requirements）单独记录，不进基础环境哈希。"""
+    install = (spec.get("check") or {}).get("install") or {}
+    requirements = sorted(set(install.get("requirements") or []))
     return "sha256:" + hashlib.sha256(
-        canonical(base).encode("utf-8")).hexdigest()
+        canonical(requirements).encode("utf-8")).hexdigest()
 
 
 # ---- junit -----------------------------------------------------------------
@@ -827,6 +910,8 @@ def execute_job(spec: dict, job_id: str, runner: JobRunner, *,
     source = None
     if source_dir is not None:
         source = Path(source_dir)
+    elif spec.get("base_snapshot"):
+        source = Path(str(spec["base_snapshot"]))
     elif spec.get("task_id"):
         source = config.TASK_WORKSPACES_DIR / str(spec["task_id"])
     try:
@@ -933,6 +1018,7 @@ def execute_job(spec: dict, job_id: str, runner: JobRunner, *,
             "cause": result_info["cause"],
             "failure_types": result_info["failure_types"],
             "env_hash": environment_hash(spec),
+            "dependency_digest": dependency_digest(spec),
             "duration_ms": (run_phase or {}).get("duration_ms"),
             "status": check_status,
         }
